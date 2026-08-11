@@ -1,0 +1,10 @@
+Build a meeting prep and follow-up workflow.
+
+It should:
+1. Get upcoming meetings from calendar
+2. For each meeting, research all attendees in parallel
+3. Generate a preparation brief using AI and send it to Slack
+4. Wait for the meeting transcript to be uploaded (external event)
+5. Process the transcript to extract action items and decisions
+6. Create follow-up tasks in a project management tool
+7. Return summary of meetings processed and follow-ups created

@@ -1,0 +1,8 @@
+Build an inbox triage and smart routing workflow.
+
+It should:
+1. Fetch unread emails from a mailbox
+2. Classify each email in parallel using AI into categories: urgent, action_required, informational, spam
+3. Route non-spam emails to the appropriate Slack channel based on category
+4. Extract key dates from emails and create calendar events
+5. Return counts of processed, classified, routed emails and dates extracted

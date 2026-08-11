@@ -1,0 +1,10 @@
+Build an AI content generation pipeline.
+
+It should run on a schedule and:
+1. Research trending topics in a configurable niche
+2. Pick the top topic
+3. Generate platform-specific posts (LinkedIn + Twitter) and an image in parallel
+4. Publish to LinkedIn and Twitter in parallel
+5. Return a summary of what was published
+
+Use AI for topic research, post generation, and image generation.

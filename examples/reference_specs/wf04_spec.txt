@@ -1,0 +1,9 @@
+Build a CRM sync workflow from Airtable to HubSpot.
+
+It should:
+1. Fetch records marked "Ready to Sync" from an Airtable base
+2. For each record, upsert the contact to HubSpot CRM (with retry)
+3. Mark the record as synced in Airtable
+4. If any record fails, log the error and continue
+5. Send a Slack notification with the sync summary
+6. Return counts of synced and failed records

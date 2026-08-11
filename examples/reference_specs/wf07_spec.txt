@@ -1,0 +1,8 @@
+Build a sales battle card generator.
+
+It should:
+1. Research a prospect company using web search
+2. Analyze competitors against our product using AI
+3. Generate a battle card with competitor comparison, value propositions, and objection handlers
+4. Save the battle card to a document
+5. Return the complete battle card

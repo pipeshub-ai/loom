@@ -1,0 +1,11 @@
+Build a lead enrichment and cold outreach workflow.
+
+It should run on a schedule and:
+1. Scrape leads from a configurable source URL
+2. Enrich each lead in parallel by looking up company data
+3. Generate a personalized cold email for each lead using AI
+4. Send the emails, handling failures gracefully
+5. Log results to a tracking spreadsheet
+
+Use retry on the scrape and enrich steps. Return a summary with
+total leads, emails sent, and any errors.

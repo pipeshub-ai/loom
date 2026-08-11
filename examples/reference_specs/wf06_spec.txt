@@ -1,0 +1,8 @@
+Build a document extraction and summarization workflow.
+
+It should:
+1. Download a PDF attachment from email
+2. Extract text from the PDF
+3. In parallel: AI-parse structured fields AND generate a summary
+4. Store the extracted document in a database
+5. Return the extracted document with filename, text, summary, and key fields

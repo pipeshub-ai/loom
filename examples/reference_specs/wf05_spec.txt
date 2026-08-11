@@ -1,0 +1,7 @@
+Build a multi-platform social media publisher.
+
+It should:
+1. Generate multiple social media post variants about a topic using AI
+2. Check for duplicates against previously published content
+3. For each unique post, publish to all configured platforms in parallel
+4. Return counts of posts generated, unique posts, and publish results

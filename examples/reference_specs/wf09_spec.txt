@@ -1,0 +1,9 @@
+Build a Stripe to QuickBooks ETL workflow.
+
+It should:
+1. Receive a Stripe payment event
+2. Look up the customer in QuickBooks (with retry)
+3. If the customer doesn't exist, create them
+4. Create a sales receipt in QuickBooks
+5. Notify the finance team via Slack
+6. Return the customer ID, receipt, and amount

@@ -1,0 +1,10 @@
+Build a RAG chatbot that answers questions about uploaded PDFs.
+
+It should:
+1. Extract text from an uploaded PDF
+2. Chunk the text into overlapping segments
+3. Embed and index the chunks in a vector store
+4. Enter a chat loop that waits for user questions (external events)
+5. For each question: search relevant chunks, generate an answer with AI, send the response
+6. End the loop when user sends "end" command or max turns reached
+7. Return counts of chunks indexed and questions answered

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3:*)",
+      "Bash(ruff check:*)",
+      "Bash(python -m pytest tests/test_graph.py -v)",
+      "Bash(python -m pytest tests/test_phase7.py -v)",
+      "Bash(ls:*)"
+    ]
+  }
+}
