@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -58,21 +59,34 @@ async def main() -> None:
     log("setup", "Registering heartbeat workflow (cron: */1 * * * *)")
     await dispatcher.register_workflow_async(heartbeat)
 
-    log("setup", "Starting dispatcher (checking every 5s)")
-    log("setup", "Will run for 2.5 minutes to catch 2-3 cron fires")
-    await dispatcher.start(interval=5.0)
+    # `tick(now)` takes the time to evaluate against, so a schedule can be
+    # exercised without waiting for the wall clock. Real deployments call
+    # `dispatcher.start(interval=...)` and let it use the actual time; driving
+    # the clock is how you test a schedule in seconds instead of minutes.
+    header("FIRING THE SCHEDULE")
+    log("setup", "Advancing a synthetic clock a minute at a time")
 
-    # Let it run for 2.5 minutes (should fire 2-3 times)
-    await asyncio.sleep(150)
+    clock = datetime.now(UTC).replace(second=0, microsecond=0)
+    for minute in range(1, 4):
+        moment = clock + timedelta(minutes=minute)
+        fired = await dispatcher.tick(moment)
+        log("tick", f"{moment:%H:%M} -> fired {len(fired)} run(s)")
 
-    await dispatcher.stop()
+    # Give the spawned runs a moment to finish.
+    await asyncio.sleep(0.1)
 
-    # Show the runs
     runs = await rt.list_runs(workflow="heartbeat")
     header("RUNS")
     for run in runs:
-        log("run", f"{run.run_id}  status={run.status.value}")
-    log("total", f"{len(runs)} heartbeat run(s) completed")
+        log("run", f"{run.run_id[:16]}…  status={run.status.value}")
+    log("total", f"{len(runs)} heartbeat run(s)")
+
+    header("IN PRODUCTION")
+    log("note", "await dispatcher.start(interval=5.0)   # scans every 5s")
+    log("note", "The dispatcher is the only thing that needs to be running;")
+    log("note", "the workflow itself has no timer and costs nothing idle.")
+
+    await rt.shutdown()
 
 
 if __name__ == "__main__":

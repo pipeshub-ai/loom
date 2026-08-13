@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from pathlib import Path
 from typing import Any
 
 W = 70
@@ -42,12 +43,53 @@ def box(content: str, title: str = "") -> None:
     print(f"  +{'-' * (W - 4)}+")
 
 
+def load_dotenv() -> None:
+    """Load ``.env`` from the repository root into the environment.
+
+    Real environment variables win, so exporting a key for one run still
+    overrides the file. Called from :func:`require_env`, so an example picks up
+    credentials that are already sitting in the repo rather than telling you to
+    set something you have already set.
+    """
+    root = Path(__file__).resolve().parents[2] / ".env"
+    if not root.exists():
+        return
+
+    for raw in root.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        os.environ.setdefault(name.strip(), value.strip().strip("'\""))
+
+
 def require_env(*names: str) -> None:
-    """Exit if any env vars are missing."""
+    """Exit if any env vars are missing, after consulting ``.env``."""
+    load_dotenv()
     missing = [n for n in names if not os.environ.get(n)]
     if missing:
         print(f"Error: missing env vars: {', '.join(missing)}")
+        print("Set them in the environment or in .env at the repo root.")
         sys.exit(1)
+
+
+def require_any_env(*alternatives: tuple[str, ...]) -> None:
+    """Exit unless one whole group of env vars is present, after reading ``.env``.
+
+    For credentials that come in alternative shapes rather than a single fixed
+    set — an OAuth toolset takes a ready-made access token *or* a client id,
+    secret, and refresh token, and either is complete on its own. Listing them
+    as one flat requirement would demand all four.
+    """
+    load_dotenv()
+    if any(all(os.environ.get(name) for name in group) for group in alternatives):
+        return
+
+    print("Error: missing env vars. Set one of these groups:")
+    for group in alternatives:
+        print(f"  - {', '.join(group)}")
+    print("In the environment, or in .env at the repo root.")
+    sys.exit(1)
 
 
 def print_coding_result(result: Any) -> None:

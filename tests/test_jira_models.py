@@ -90,10 +90,12 @@ class TestComment:
     def test_fields(self) -> None:
         from workflow_builder.toolsets.jira.models import Comment
 
-        c = Comment(id="100", author="Alice", created="2024-01-01")
+        c = Comment(id="100", author="Alice", created="2024-01-01", body="Looks good")
         assert c.author == "Alice"
+        assert c.body == "Looks good"
         d = c.model_dump()
-        assert set(d.keys()) == {"id", "author", "created"}
+        # `body` carries the text when a comment is read back, not just written.
+        assert set(d.keys()) == {"id", "author", "created", "body"}
 
     def test_defaults(self) -> None:
         from workflow_builder.toolsets.jira.models import Comment
@@ -101,6 +103,7 @@ class TestComment:
         c = Comment(id="1")
         assert c.author == ""
         assert c.created == ""
+        assert c.body == ""
 
 
 class TestTransition:

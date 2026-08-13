@@ -24,6 +24,7 @@ from typing import Any, Generic, ParamSpec, TypeVar, overload
 from workflow_builder.core.exceptions import ConfigurationError
 from workflow_builder.core.ids import code_fingerprint, stable_hash
 from workflow_builder.core.retry import DEFAULT_RETRY, NO_RETRY, OnError, Retry
+from workflow_builder.core.serde import resolve_annotations
 from workflow_builder.core.types import Duration, to_seconds
 from workflow_builder.steps.context import StepContext
 
@@ -99,8 +100,7 @@ class StepDefinition(Generic[P, R]):
         self.closure_hash = self.code_hash  # alias — same value for now
         self.contract_hash = _compute_contract_hash(self.fn)
         if self.output_type is None:
-            hints = getattr(self.fn, "__annotations__", {})
-            self.output_type = hints.get("return")
+            self.output_type = resolve_annotations(self.fn).get("return")
         if not self.description:
             self.description = inspect.cleandoc(self.fn.__doc__ or "").split("\n\n")[0]
 

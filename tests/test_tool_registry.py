@@ -188,9 +188,18 @@ class TestToolsetRegistry:
 
     def test_resolve_one_unknown_toolset(self) -> None:
         from workflow_builder.agents.tool_registry import ToolsetRegistry
+        from workflow_builder.core.exceptions import RegistryError
 
-        with pytest.raises(KeyError):
+        with pytest.raises(RegistryError):
             ToolsetRegistry().resolve_one("nope", "op")
+
+    def test_resolve_tools_rejects_unknown_id(self) -> None:
+        """A typo'd toolset id must not silently yield fewer tools."""
+        from workflow_builder.agents.tool_registry import ToolsetRegistry
+        from workflow_builder.core.exceptions import RegistryError
+
+        with pytest.raises(RegistryError, match="jria"):
+            ToolsetRegistry().resolve_tools(["jria"])
 
 
 class TestRuntimeToolsetIntegration:
@@ -210,7 +219,8 @@ class TestRuntimeToolsetIntegration:
         received_tools: list = []
 
         class SpyBackend:
-            async def run(self, prompt, *, tools=None):
+            async def run(self, prompt, *, tools=None, history=None,
+                          agent_id="", max_turns=None):
                 received_tools.extend(tools or [])
                 return AgentResult(output="done", agent="spy")
 
@@ -241,7 +251,8 @@ class TestRuntimeToolsetIntegration:
         received_tools: list = []
 
         class SpyBackend:
-            async def run(self, prompt, *, tools=None):
+            async def run(self, prompt, *, tools=None, history=None,
+                          agent_id="", max_turns=None):
                 received_tools.clear()
                 received_tools.extend(tools or [])
                 return AgentResult(output="done", agent="spy")
@@ -295,4 +306,11 @@ class TestCodingAgentToolRegistry:
         prompt = agent.build_system_prompt()
         assert "demo" in prompt
         assert "my_search" in prompt
-        assert "query" in prompt
+        # Parameter detail is fetched on demand with show_toolset, so that the
+        # prompt grows with the number of integrations rather than with every
+        # operation in each of them.
+        # Parameter detail is fetched on demand with show_toolset, so the
+        # prompt grows with the number of integrations rather than with every
+        # operation in each of them.
+        assert "my_search(query" not in prompt, "signatures leaked into the prompt"
+        assert 'show_toolset("demo")' in prompt

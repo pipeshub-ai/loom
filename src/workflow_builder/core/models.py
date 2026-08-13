@@ -162,8 +162,17 @@ class ExecutionRecord(BaseModel):
     awaiting_event: str | None = None
 
     idempotency_key: str | None = None
+    code_hash: str = ""
+    """Fingerprint of the workflow body that started this run.
+
+    Recorded so a run can be traced back to the code that produced it — without
+    it, a run replayed after a refactor gives no way to tell which version of
+    the body its journal was written against."""
     lease_owner: str | None = None
+    """Node currently executing this run. Empty once the run goes terminal."""
     lease_expires_at: datetime | None = None
+    """When the lease goes stale. A RUNNING record past this is an orphan whose
+    worker died, and is eligible to be picked up by another node."""
 
     usage: Usage = Field(default_factory=Usage)
     tags: list[str] = Field(default_factory=list)

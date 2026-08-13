@@ -29,6 +29,11 @@ class AgnoBackend:
         An Agno model instance (e.g. ``Claude(id="claude-sonnet-4-6")``).
     """
 
+    supports_history = False
+    """This backend does not yet seed a run from prior turns. Passing a
+    session_id to ctx.agent() with it configured raises rather than silently
+    starting each call from a blank conversation."""
+
     def __init__(self, *, model: Any) -> None:
         self._model = model
 
@@ -37,6 +42,9 @@ class AgnoBackend:
         prompt: str,
         *,
         tools: list[Any] | None = None,
+        history: list[Any] | None = None,
+        agent_id: str = "",
+        max_turns: int | None = None,
     ) -> AgentResult[Any]:
         """Build an Agno Agent with the given tools and invoke it."""
         from agno.agent import Agent as AgnoAgent

@@ -8,7 +8,22 @@ bodies, nondeterministic API usage, and missing imports.
 from __future__ import annotations
 
 import ast
+import sys
+from collections.abc import Iterable
 from dataclasses import dataclass
+
+#: Always importable regardless of the configured allowlist.
+ALWAYS_ALLOWED: frozenset[str] = frozenset({"workflow_builder"})
+
+#: Store constructors. Generated workflow modules should not call these at
+#: import time — persistence belongs to whoever deploys the workflow.
+STORE_CONSTRUCTORS: frozenset[str] = frozenset(
+    {"MemoryStore", "SQLiteStore", "PostgresStore", "MongoStore"}
+)
+
+#: Modules safe to import while validating, for checking that a symbol exists.
+#: Deliberately narrow — importing an arbitrary package runs its side effects.
+RESOLVABLE_PREFIXES: frozenset[str] = frozenset({"workflow_builder"})
 
 BARE_IO_CALLS: set[str] = {
     "requests.get",
@@ -41,7 +56,71 @@ class CodeIssue:
 
 
 class CodeValidator:
-    """Validate model-generated workflow code via AST analysis."""
+    """Validate model-generated workflow code via AST analysis.
+
+    Parameters
+    ----------
+    allowed_packages:
+        Third-party distributions the generated code may import. The standard
+        library and ``workflow_builder`` are always permitted. Leave as ``None``
+        to skip the check entirely — pass a set when you know what is installed
+        in the environment the workflow will run in, so the agent finds out at
+        validation time rather than at import time on someone else's machine.
+    """
+
+    def __init__(
+        self,
+        allowed_packages: Iterable[str] | None = None,
+        *,
+        available_toolsets: Iterable[str] | None = None,
+    ) -> None:
+        self.allowed_packages = None if allowed_packages is None else set(allowed_packages)
+        self.available_toolsets = (
+            None if available_toolsets is None else set(available_toolsets)
+        )
+        """Toolsets this environment actually has. ``None`` disables the check.
+
+        A spec that needs Slack, generated against an environment with no Slack
+        toolset, produces code importing a module that is not installed — and
+        the model writes it confidently, because inventing an integration reads
+        like completing the task. Naming what is available turns that into a
+        refusal the caller can act on."""
+
+    def _check_toolsets(self, tree: ast.AST) -> list[CodeIssue]:
+        """Reject imports of toolsets this environment does not have."""
+        if self.available_toolsets is None:
+            return []
+
+        issues: list[CodeIssue] = []
+        seen: set[str] = set()
+        for node in ast.walk(tree):
+            module = ""
+            if isinstance(node, ast.ImportFrom) and node.module:
+                module = node.module
+            elif isinstance(node, ast.Import):
+                module = node.names[0].name if node.names else ""
+            if not module.startswith("workflow_builder.toolsets."):
+                continue
+
+            parts = module.split(".")
+            if len(parts) < 3:
+                continue
+            # google toolsets nest one deeper: ...toolsets.google.gmail.tools
+            toolset = parts[3] if parts[2] == "google" and len(parts) > 3 else parts[2]
+            if toolset in self.available_toolsets or toolset in seen:
+                continue
+            seen.add(toolset)
+            issues.append(
+                CodeIssue(
+                    "toolset",
+                    f"this environment has no {toolset!r} toolset "
+                    f"(available: {', '.join(sorted(self.available_toolsets)) or 'none'}). "
+                    "Do not write code against an integration that is not "
+                    "configured — say the task cannot be done here instead.",
+                    "error",
+                )
+            )
+        return issues
 
     def validate(self, code: str) -> list[CodeIssue]:
         """Run all checks and return discovered issues.
@@ -60,8 +139,13 @@ class CodeValidator:
             msg = f"Syntax error: {exc.msg} (line {exc.lineno})"
             return [CodeIssue("syntax", msg, "error")]
 
+        issues.extend(self._check_toolsets(tree))
+
         self._check_structure(tree, issues)
         self._check_imports(code, issues)
+        self._check_allowed_packages(tree, issues)
+        self._check_symbols(tree, issues)
+        self._check_no_store_choice(tree, issues)
         return issues
 
     # ------------------------------------------------------------------
@@ -94,7 +178,15 @@ class CodeValidator:
                     "error",
                 ),
             )
-        if not has_step:
+        # A workflow built entirely from toolset operations declares no step of
+        # its own — those are steps already, and the prompt says to call them
+        # directly. Warning about it would nag every integration workflow.
+        uses_toolset_steps = any(
+            isinstance(n, ast.ImportFrom)
+            and (n.module or "").startswith("workflow_builder.toolsets.")
+            for n in ast.walk(tree)
+        )
+        if not has_step and not uses_toolset_steps:
             issues.append(
                 CodeIssue(
                     "structure",
@@ -162,6 +254,95 @@ class CodeValidator:
                 ),
             )
 
+    def _check_allowed_packages(
+        self,
+        tree: ast.Module,
+        issues: list[CodeIssue],
+    ) -> None:
+        """Flag imports of packages the target environment does not have."""
+        if self.allowed_packages is None:
+            return
+
+        permitted = self.allowed_packages | ALWAYS_ALLOWED | sys.stdlib_module_names
+        for root in sorted(_imported_roots(tree)):
+            if root in permitted or root.startswith("_"):
+                continue
+            issues.append(
+                CodeIssue(
+                    "imports",
+                    f"Import of '{root}' is not available in the target "
+                    f"environment. Allowed third-party packages: "
+                    f"{', '.join(sorted(self.allowed_packages)) or 'none'}.",
+                    "error",
+                ),
+            )
+
+    def _check_no_store_choice(
+        self, tree: ast.Module, issues: list[CodeIssue]
+    ) -> None:
+        """Flag a workflow module that picks its persistence *at import time*.
+
+        Where the journal lives is a deployment decision, so a module that binds
+        one the moment it is imported cannot be pointed at Postgres without
+        editing it.
+
+        Only module-scope construction counts. Inside a function — a ``main()``,
+        a fixture, a factory — the choice is made by whoever calls it, which is
+        exactly the right place for it.
+        """
+        for node in _module_scope_calls(tree):
+            name = self._call_name(node).split(".")[-1]
+            if name in STORE_CONSTRUCTORS:
+                issues.append(
+                    CodeIssue(
+                        "structure",
+                        f"'{name}()' is constructed at import time. A workflow "
+                        "module should not bind its own store — take one from the "
+                        "caller, or use Runtime.from_env() inside a main().",
+                        "warning",
+                    ),
+                )
+
+    def _check_symbols(self, tree: ast.Module, issues: list[CodeIssue]) -> None:
+        """Verify ``from X import Y`` actually finds ``Y`` in ``X``.
+
+        The allowlist check above only sees package *names*, so a real package
+        with a misspelled symbol — ``from workflow_builder import Retryy`` — sails
+        through and fails at import time on the user's machine instead.
+
+        Only modules on :data:`RESOLVABLE_PREFIXES` are imported. Importing an
+        arbitrary third-party package to check a name would run its side effects
+        during what is supposed to be a static check.
+        """
+        import importlib
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or node.level != 0:
+                continue
+            module = node.module or ""
+            if not _is_resolvable(module):
+                continue
+            try:
+                imported = importlib.import_module(module)
+            except Exception:
+                continue
+
+            for alias in node.names:
+                if alias.name == "*" or hasattr(imported, alias.name):
+                    continue
+                # A submodule is importable without being an attribute yet.
+                try:
+                    importlib.import_module(f"{module}.{alias.name}")
+                except Exception:
+                    issues.append(
+                        CodeIssue(
+                            "imports",
+                            f"'{module}' has no attribute '{alias.name}'"
+                            + _suggest(imported, alias.name),
+                            "error",
+                        ),
+                    )
+
     # ------------------------------------------------------------------
     # AST helpers
     # ------------------------------------------------------------------
@@ -195,3 +376,75 @@ class CodeValidator:
                 parts.append(value.id)
             return ".".join(reversed(parts))
         return ""
+
+
+def _imported_roots(tree: ast.Module) -> set[str]:
+    """Every top-level package name imported anywhere in *tree*.
+
+    Walks the whole module, so an import tucked inside a step body counts too —
+    that is the usual place a model puts one.
+    """
+    roots: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots.update(alias.name.split(".")[0] for alias in node.names)
+        # `from . import x` is relative, so there is no package to attribute it to.
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            roots.add(node.module.split(".")[0])
+    return roots
+
+
+def _is_resolvable(module: str) -> bool:
+    """Whether importing *module* during validation is safe."""
+    root = module.split(".")[0]
+    return root in RESOLVABLE_PREFIXES or root in sys.stdlib_module_names
+
+
+def _suggest(module: object, wanted: str) -> str:
+    """Offer the closest public name, so the fix is obvious from the message."""
+    import difflib
+
+    candidates = [name for name in dir(module) if not name.startswith("_")]
+    close = difflib.get_close_matches(wanted, candidates, n=1, cutoff=0.7)
+    return f"; did you mean '{close[0]}'?" if close else ""
+
+
+def _is_main_guard(node: ast.stmt) -> bool:
+    """True for ``if __name__ == "__main__":`` — the one block import skips."""
+    return (
+        isinstance(node, ast.If)
+        and isinstance(node.test, ast.Compare)
+        and isinstance(node.test.left, ast.Name)
+        and node.test.left.id == "__name__"
+    )
+
+
+def _module_scope_calls(tree: ast.Module) -> list[ast.Call]:
+    """Calls that execute when the module is imported.
+
+    Descends into module-level control flow (``if``, ``try``, ``with``), since
+    that still runs on import. Stops at two places that do not: any function or
+    class body, and the ``__main__`` guard.
+    """
+    found: list[ast.Call] = []
+
+    def walk(nodes: list[ast.stmt]) -> None:
+        for node in nodes:
+            if isinstance(
+                node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
+            ) or _is_main_guard(node):
+                continue
+            found.extend(
+                child
+                for statement in ast.iter_child_nodes(node)
+                if not isinstance(statement, ast.stmt)
+                for child in ast.walk(statement)
+                if isinstance(child, ast.Call)
+            )
+            for attr in ("body", "orelse", "finalbody"):
+                walk([s for s in getattr(node, attr, []) if isinstance(s, ast.stmt)])
+            for handler in getattr(node, "handlers", []):
+                walk(handler.body)
+
+    walk(tree.body)
+    return found

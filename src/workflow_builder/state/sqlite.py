@@ -53,7 +53,7 @@ CREATE INDEX IF NOT EXISTS ix_events_target ON events(run_id, name);
 
 CREATE TABLE IF NOT EXISTS cache (
     key        TEXT PRIMARY KEY,
-    expires_at REAL NOT NULL,
+    expires_at REAL,          -- NULL means never expires
     value      TEXT NOT NULL
 );
 
@@ -183,6 +183,10 @@ class SQLiteStore:
         rows = await self._query("SELECT data FROM executions WHERE idempotency_key = ?", (key,))
         return ExecutionRecord.model_validate_json(rows[0]["data"]) if rows else None
 
+    async def delete_execution(self, run_id: str) -> None:
+        await self._execute("DELETE FROM journal WHERE run_id = ?", (run_id,))
+        await self._execute("DELETE FROM executions WHERE run_id = ?", (run_id,))
+
     # -- journals ---------------------------------------------------------------------
 
     async def save_journal(self, run_id: str, entries: list[JournalEntry]) -> None:
@@ -268,7 +272,9 @@ class SQLiteStore:
         rows = await self._query("SELECT expires_at, value FROM cache WHERE key = ?", (key,))
         if not rows:
             return None
-        if rows[0]["expires_at"] < time.time():
+        expires_at = rows[0]["expires_at"]
+        # NULL means the entry never goes stale — see CacheStore.set.
+        if expires_at is not None and expires_at < time.time():
             await self.delete(key)
             return None
         return json.loads(rows[0]["value"])
@@ -276,7 +282,11 @@ class SQLiteStore:
     async def set(self, key: str, value: Any, ttl_seconds: float) -> None:
         await self._execute(
             "INSERT OR REPLACE INTO cache (key, expires_at, value) VALUES (?,?,?)",
-            (key, time.time() + ttl_seconds, json.dumps(value)),
+            (
+                key,
+                time.time() + ttl_seconds if ttl_seconds > 0 else None,
+                json.dumps(value),
+            ),
         )
 
     async def delete(self, key: str) -> None:

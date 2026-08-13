@@ -1,0 +1,754 @@
+"""MCP server, at three levels.
+
+**Unit** — each capability function against a real ``LocalFacade``, with no
+``mcp`` import anywhere. This is the layer that would catch a logic bug.
+
+**Integration** — a real ``FastMCP`` instance driven in process: does it
+register everything, are the schemas derived from the signatures, does calling a
+tool reach the facade.
+
+**End to end** — a real subprocess speaking stdio, driven by the official MCP
+client, doing the full handshake. This is the only level that proves the thing a
+client actually connects to works.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+import pytest
+
+from workflow_builder import Context, Runtime, step, workflow
+from workflow_builder.facade import LocalFacade
+from workflow_builder.mcp_server import prompts, resources, tools
+from workflow_builder.state.memory import MemoryStore
+
+pytest.importorskip("mcp", reason="needs the mcp extra")
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@step
+async def double(n: int) -> int:
+    """Double a number."""
+    return n * 2
+
+
+@step(retry=1)
+async def boom() -> str:
+    """Always raises."""
+    raise RuntimeError("upstream is down")
+
+
+@workflow(name="doubler", description="Double the input")
+async def doubler(ctx: Context, n: int) -> int:
+    """Double it."""
+    return await ctx.step(double, n)
+
+
+@workflow(name="approver", description="Waits for a human")
+async def approver(ctx: Context, _input: str) -> str:
+    """Park on an approval."""
+    return "yes" if await ctx.wait_for_approval("release") else "no"
+
+
+@workflow(name="waiter", description="Waits for an event")
+async def waiter(ctx: Context, _input: str) -> str:
+    """Park on a named event."""
+    return str((await ctx.wait_for_event("go")).get("token", ""))
+
+
+@workflow(name="breaker", description="Always fails")
+async def breaker(ctx: Context, _input: str) -> str:
+    """Fail, for retry and journal tests."""
+    return await ctx.step(boom)
+
+
+@pytest.fixture
+def facade() -> LocalFacade:
+    runtime = Runtime(store=MemoryStore())
+    runtime.register_all([doubler, approver, waiter, breaker])
+    return LocalFacade(runtime)
+
+
+def parsed(raw: str) -> dict:
+    """Every tool returns JSON text; this asserts that and decodes it."""
+    return json.loads(raw)
+
+
+# ---------------------------------------------------------------------------
+# Unit — capabilities, no MCP
+# ---------------------------------------------------------------------------
+
+
+class TestToolsUnit:
+    async def test_list_workflows(self, facade: LocalFacade) -> None:
+        result = parsed(await tools.list_workflows(facade))
+        names = {w["name"] for w in result["workflows"]}
+        assert {"doubler", "approver", "waiter", "breaker"} <= names
+
+    async def test_empty_server_explains_itself(self) -> None:
+        """A client connecting to an empty server should learn why."""
+        empty = LocalFacade(Runtime(store=MemoryStore()))
+        result = parsed(await tools.list_workflows(empty))
+
+        assert result["workflows"] == []
+        assert "--module" in result["hint"]
+
+    async def test_run_workflow(self, facade: LocalFacade) -> None:
+        result = parsed(await tools.run_workflow(facade, "doubler", "21"))
+        assert result["status"] == "completed"
+        assert result["output"] == 42
+
+    async def test_run_unknown_workflow_lists_the_real_ones(
+        self, facade: LocalFacade
+    ) -> None:
+        result = parsed(await tools.run_workflow(facade, "nope"))
+        assert "error" in result
+        assert "doubler" in result["available"]
+
+    async def test_run_accepts_a_bare_string_input(self, facade: LocalFacade) -> None:
+        """Most workflows take a string; requiring '"text"' would be hostile."""
+        result = parsed(await tools.run_workflow(facade, "approver", "plain text"))
+        assert result["status"] == "suspended"
+
+    async def test_listing_advertises_the_input_shape(
+        self, facade: LocalFacade
+    ) -> None:
+        """Without this a caller guesses, and a guess costs a failed run."""
+        result = parsed(await tools.list_workflows(facade))
+        by_name = {w["name"]: w for w in result["workflows"]}
+
+        assert by_name["doubler"]["input_schema"]["type"] == "integer"
+        assert by_name["doubler"]["input_schema"]["title"] == "n"
+        assert by_name["approver"]["input_schema"]["type"] == "string"
+
+    async def test_wrong_input_shape_is_refused_before_running(
+        self, facade: LocalFacade
+    ) -> None:
+        """The mistake a model actually makes: wrapping a scalar in an object."""
+        result = parsed(await tools.run_workflow(facade, "doubler", '{"n": 21}'))
+
+        assert "takes integer" in result["error"]
+        assert "Nothing was run" in result["error"]
+        assert result["expected_schema"]["type"] == "integer"
+        assert result["example_input_json"] == "42"
+
+        # And it means it: no run was created.
+        assert parsed(await tools.list_runs(facade))["count"] == 0
+
+    async def test_a_valid_shape_still_runs(self, facade: LocalFacade) -> None:
+        assert parsed(await tools.run_workflow(facade, "doubler", "21"))["output"] == 42
+
+    async def test_unknown_shapes_are_left_alone(self, facade: LocalFacade) -> None:
+        """An undeclared input type is not evidence of a wrong input."""
+
+        @workflow(name="untyped", description="No annotation")
+        async def untyped(ctx: Context, anything) -> str:
+            return str(anything)
+
+        facade.runtime.register(untyped)
+        result = parsed(await tools.run_workflow(facade, "untyped", '{"a": 1}'))
+        assert result["status"] == "completed"
+
+    async def test_suspended_result_names_its_next_action(
+        self, facade: LocalFacade
+    ) -> None:
+        """The state a model most reliably misreads as failure."""
+        result = parsed(await tools.run_workflow(facade, "approver", '"x"'))
+
+        assert result["status"] == "suspended"
+        assert result["waiting_for"] == "human approval 'release'"
+        assert "approve_run" in result["next_action"]
+        assert "not failure" in result["note"]
+
+    async def test_event_wait_names_send_event(self, facade: LocalFacade) -> None:
+        result = parsed(await tools.run_workflow(facade, "waiter", '"x"'))
+        assert result["waiting_for"] == "event 'go'"
+        assert "send_event" in result["next_action"]
+
+    async def test_completed_runs_are_not_annotated(self, facade: LocalFacade) -> None:
+        result = parsed(await tools.run_workflow(facade, "doubler", "1"))
+        assert "next_action" not in result
+
+    async def test_get_run_status(self, facade: LocalFacade) -> None:
+        run = parsed(await tools.run_workflow(facade, "doubler", "5"))
+        status = parsed(await tools.get_run_status(facade, run["run_id"]))
+        assert status["output"] == 10
+
+    async def test_unknown_run_is_an_error_payload_not_a_raise(
+        self, facade: LocalFacade
+    ) -> None:
+        """A raise aborts the model's turn; an error payload it can act on."""
+        for call in (
+            tools.get_run_status(facade, "nope"),
+            tools.get_run_journal(facade, "nope"),
+            tools.cancel_run(facade, "nope"),
+            tools.retry_run(facade, "nope"),
+            tools.replay_run(facade, "nope"),
+            tools.approve_run(facade, "nope", "x"),
+            tools.send_event(facade, "nope", "x"),
+        ):
+            assert "error" in parsed(await call)
+
+    async def test_list_runs_filters(self, facade: LocalFacade) -> None:
+        await tools.run_workflow(facade, "doubler", "1")
+        await tools.run_workflow(facade, "breaker", '"x"')
+
+        failed = parsed(await tools.list_runs(facade, status="failed"))
+        assert [r["workflow"] for r in failed["runs"]] == ["breaker"]
+
+        by_flow = parsed(await tools.list_runs(facade, workflow="doubler"))
+        assert by_flow["count"] == 1
+
+    async def test_journal_reports_the_steps_that_ran(
+        self, facade: LocalFacade
+    ) -> None:
+        run = parsed(await tools.run_workflow(facade, "doubler", "3"))
+        journal = parsed(await tools.get_run_journal(facade, run["run_id"]))
+
+        assert [e["step_id"] for e in journal["journal"]] == ["double"]
+        assert journal["count"] == 1
+
+    async def test_approve_completes_a_parked_run(self, facade: LocalFacade) -> None:
+        run = parsed(await tools.run_workflow(facade, "approver", '"x"'))
+        result = parsed(await tools.approve_run(facade, run["run_id"], "release"))
+
+        assert result["status"] == "completed"
+        assert result["output"] == "yes"
+
+    async def test_reject_takes_the_other_branch(self, facade: LocalFacade) -> None:
+        run = parsed(await tools.run_workflow(facade, "approver", '"x"'))
+        result = parsed(
+            await tools.approve_run(facade, run["run_id"], "release", approved=False)
+        )
+        assert result["output"] == "no"
+
+    async def test_approving_the_wrong_subject_is_refused(
+        self, facade: LocalFacade
+    ) -> None:
+        """Guessing a subject would silently do nothing; saying so is better."""
+        run = parsed(await tools.run_workflow(facade, "approver", '"x"'))
+        result = parsed(await tools.approve_run(facade, run["run_id"], "wrong"))
+
+        assert "error" in result
+        assert result["awaiting"] == "approval:release"
+
+    async def test_send_event_resumes(self, facade: LocalFacade) -> None:
+        run = parsed(await tools.run_workflow(facade, "waiter", '"x"'))
+        result = parsed(
+            await tools.send_event(facade, run["run_id"], "go", '{"token": "abc"}')
+        )
+        assert result["output"] == "abc"
+
+    async def test_cancel(self, facade: LocalFacade) -> None:
+        run = parsed(await tools.run_workflow(facade, "approver", '"x"'))
+        assert parsed(await tools.cancel_run(facade, run["run_id"]))["status"] == (
+            "cancelled"
+        )
+
+    async def test_replay_reproduces_without_rerunning(
+        self, facade: LocalFacade
+    ) -> None:
+        run = parsed(await tools.run_workflow(facade, "doubler", "8"))
+        replayed = parsed(await tools.replay_run(facade, run["run_id"]))
+
+        assert replayed["status"] == "completed"
+        assert replayed["output"] == 16
+
+    async def test_retry_reruns_a_failure(self, facade: LocalFacade) -> None:
+        run = parsed(await tools.run_workflow(facade, "breaker", '"x"'))
+        assert run["status"] == "failed"
+
+        retried = parsed(await tools.retry_run(facade, run["run_id"]))
+        assert retried["run_id"] == run["run_id"]
+
+    async def test_idempotency_key_returns_the_same_run(
+        self, facade: LocalFacade
+    ) -> None:
+        first = parsed(
+            await tools.run_workflow(facade, "doubler", "2", idempotency_key="k")
+        )
+        second = parsed(
+            await tools.run_workflow(facade, "doubler", "2", idempotency_key="k")
+        )
+        assert first["run_id"] == second["run_id"]
+
+
+class TestResourcesUnit:
+    async def test_workflows_document(self, facade: LocalFacade) -> None:
+        result = parsed(await resources.read_workflows(facade))
+        assert {w["name"] for w in result["workflows"]} >= {"doubler"}
+
+    async def test_one_workflow(self, facade: LocalFacade) -> None:
+        result = parsed(await resources.read_workflow(facade, "doubler"))
+        assert result["description"] == "Double the input"
+
+    async def test_unknown_workflow(self, facade: LocalFacade) -> None:
+        assert "error" in parsed(await resources.read_workflow(facade, "nope"))
+
+    async def test_run_and_journal(self, facade: LocalFacade) -> None:
+        run = parsed(await tools.run_workflow(facade, "doubler", "4"))
+        assert parsed(await resources.read_run(facade, run["run_id"]))["output"] == 8
+
+        journal = parsed(await resources.read_run_journal(facade, run["run_id"]))
+        assert journal["journal"]
+
+    async def test_unknown_run(self, facade: LocalFacade) -> None:
+        assert "error" in parsed(await resources.read_run(facade, "nope"))
+        assert "error" in parsed(await resources.read_run_journal(facade, "nope"))
+
+    def test_every_declared_uri_has_a_reader(self) -> None:
+        """The RESOURCES table is documentation; keep it honest."""
+        assert set(resources.RESOURCES) == {
+            "loom://workflows",
+            "loom://workflows/{name}",
+            "loom://runs/{run_id}",
+            "loom://runs/{run_id}/journal",
+        }
+
+
+class TestPromptsUnit:
+    def test_create_workflow_mentions_the_decorators(self) -> None:
+        text = prompts.build_create_workflow_prompt("fetch and summarise")
+        assert "fetch and summarise" in text
+        assert "@workflow" in text and "@step" in text
+
+    def test_debug_prompt_carries_status_and_journal(self) -> None:
+        text = prompts.build_debug_run_prompt(
+            {"status": "failed", "error": "boom"}, [{"step_id": "a"}]
+        )
+        assert "boom" in text and "step_id" in text
+
+    def test_explain_handles_a_missing_workflow(self) -> None:
+        assert "Not found" in prompts.build_explain_workflow_prompt("x", None)
+
+
+# ---------------------------------------------------------------------------
+# Integration — a real FastMCP instance
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def server(facade: LocalFacade):
+    from workflow_builder.mcp_server import build_server
+
+    return build_server(facade, name="loom-test")
+
+
+class TestScheduler:
+    """A parked timer must wake without anything external ticking.
+
+    ``loom mcp`` is a long-running process; if it does not run the timer loop,
+    ``ctx.sleep()`` parks forever and the workflow looks broken when it is
+    merely unattended.
+    """
+
+    async def test_a_sleeping_run_resumes_under_the_server(self) -> None:
+        import asyncio
+
+        from workflow_builder.mcp_server import build_server
+
+        @workflow(name="napper", description="Sleep, then finish")
+        async def napper(ctx: Context, seconds: float) -> str:
+            await ctx.sleep(seconds)
+            return "woke"
+
+        # threshold 0 so even a tiny sleep genuinely parks — otherwise the
+        # engine holds a short wait in memory and the scheduler is never
+        # involved, which is the thing under test.
+        runtime = Runtime(store=MemoryStore(), inline_timer_threshold=0)
+        runtime.register(napper)
+        facade = LocalFacade(runtime)
+        server = build_server(facade)
+
+        async with server._mcp_server.lifespan(server._mcp_server):
+            started = parsed(await tools.run_workflow(facade, "napper", "0.5"))
+            assert started["status"] == "suspended"
+
+            for _ in range(60):
+                await asyncio.sleep(0.1)
+                now = parsed(await tools.get_run_status(facade, started["run_id"]))
+                if now["status"] != "suspended":
+                    break
+
+        assert now["status"] == "completed", "the timer never fired"
+        assert now["output"] == "woke"
+
+    async def test_it_can_be_turned_off(self, facade: LocalFacade) -> None:
+        """One process per store should schedule; the rest opt out."""
+        from workflow_builder.mcp_server import build_server
+
+        build_server(facade, scheduler=False)
+        assert facade.runtime._scheduler_task is None
+
+    def test_a_remote_facade_gets_no_scheduler(self) -> None:
+        """Its server schedules its own; this process has no Runtime to tick."""
+        from workflow_builder.mcp_server.server import _scheduler_lifespan
+
+        class Remote:
+            """Stands in for RemoteFacade — no .runtime attribute."""
+
+        assert _scheduler_lifespan(Remote()) is None
+
+
+class TestServerRegistration:
+    async def test_bind_address_reaches_fastmcp(self, facade: LocalFacade) -> None:
+        """The networked transports are unusable if these do not land."""
+        from workflow_builder.mcp_server import build_server
+
+        built = build_server(facade, host="0.0.0.0", port=8931)
+        assert (built.settings.host, built.settings.port) == ("0.0.0.0", 8931)
+
+    def test_the_cli_passes_host_and_port_through(self) -> None:
+        from workflow_builder.cli import build_parser
+
+        args = build_parser().parse_args(
+            ["mcp", "--transport", "http", "--host", "0.0.0.0", "--port", "9001"]
+        )
+        assert (args.host, args.port) == ("0.0.0.0", 9001)
+
+    async def test_all_tools_are_registered(self, server) -> None:
+        names = {tool.name for tool in await server.list_tools()}
+        assert names == {
+            "list_workflows",
+            "run_workflow",
+            "get_run_status",
+            "list_runs",
+            "get_run_journal",
+            "approve_run",
+            "send_event",
+            "cancel_run",
+            "retry_run",
+            "replay_run",
+        }
+
+    async def test_every_tool_is_described(self, server) -> None:
+        """The description is what a model chooses on."""
+        for tool in await server.list_tools():
+            assert tool.description, tool.name
+
+    async def test_schemas_come_from_the_signatures(self, server) -> None:
+        """Hand-written schemas drift from the code; derived ones cannot."""
+        by_name = {tool.name: tool for tool in await server.list_tools()}
+
+        run = by_name["run_workflow"].inputSchema
+        assert set(run["properties"]) == {
+            "workflow",
+            "input_json",
+            "idempotency_key",
+        }
+        assert run["required"] == ["workflow"]
+
+        approve = by_name["approve_run"].inputSchema
+        assert approve["properties"]["approved"]["type"] == "boolean"
+
+    async def test_resources_and_templates(self, server) -> None:
+        direct = {str(r.uri) for r in await server.list_resources()}
+        templates = {t.uriTemplate for t in await server.list_resource_templates()}
+
+        assert direct == {"loom://workflows"}
+        assert templates == {
+            "loom://workflows/{name}",
+            "loom://runs/{run_id}",
+            "loom://runs/{run_id}/journal",
+        }
+
+    async def test_prompts_are_registered(self, server) -> None:
+        names = {p.name for p in await server.list_prompts()}
+        assert names == {
+            "create_workflow",
+            "debug_run",
+            "explain_workflow",
+            "optimize_workflow",
+            "review_workflow",
+        }
+
+    async def test_instructions_warn_about_suspended(self, server) -> None:
+        assert "suspended" in (server.instructions or "")
+
+
+class TestServerCalls:
+    async def test_calling_a_tool_reaches_the_facade(self, server) -> None:
+        result = await server.call_tool("run_workflow", {"workflow": "doubler", "input_json": "6"})
+        payload = json.loads(_text_of(result))
+        assert payload["output"] == 12
+
+    async def test_full_approval_round_trip_through_the_protocol(self, server) -> None:
+        started = json.loads(
+            _text_of(
+                await server.call_tool(
+                    "run_workflow", {"workflow": "approver", "input_json": '"x"'}
+                )
+            )
+        )
+        assert started["status"] == "suspended"
+
+        approved = json.loads(
+            _text_of(
+                await server.call_tool(
+                    "approve_run",
+                    {"run_id": started["run_id"], "subject": "release"},
+                )
+            )
+        )
+        assert approved["status"] == "completed"
+
+    async def test_reading_a_resource(self, server) -> None:
+        contents = await server.read_resource("loom://workflows")
+        payload = json.loads(next(iter(contents)).content)
+        assert {w["name"] for w in payload["workflows"]} >= {"doubler"}
+
+    async def test_reading_a_templated_resource(self, server) -> None:
+        contents = await server.read_resource("loom://workflows/doubler")
+        payload = json.loads(next(iter(contents)).content)
+        assert payload["name"] == "doubler"
+
+    async def test_getting_a_prompt(self, server) -> None:
+        result = await server.get_prompt("create_workflow", {"description": "sync CRM"})
+        assert "sync CRM" in str(result.messages[0].content)
+
+    async def test_debug_prompt_fetches_the_run(self, server) -> None:
+        started = json.loads(
+            _text_of(
+                await server.call_tool(
+                    "run_workflow", {"workflow": "breaker", "input_json": '"x"'}
+                )
+            )
+        )
+        result = await server.get_prompt("debug_run", {"run_id": started["run_id"]})
+        assert "upstream is down" in str(result.messages[0].content)
+
+
+def _text_of(result) -> str:
+    """The text payload of a tool result, across SDK return shapes."""
+    blocks = result[0] if isinstance(result, tuple) else result
+    if isinstance(blocks, list | tuple):
+        return blocks[0].text
+    return str(blocks)
+
+
+# ---------------------------------------------------------------------------
+# End to end — a real subprocess over stdio
+# ---------------------------------------------------------------------------
+
+
+FLOWS = '''
+"""Workflows for the MCP end-to-end test."""
+
+from __future__ import annotations
+
+from workflow_builder import Context, step, workflow
+
+
+@step
+async def score(email: str) -> int:
+    """Score a lead."""
+    return 90 if email.endswith(".gov") else 50
+
+
+@workflow(name="onboard", description="Score a lead")
+async def onboard(ctx: Context, email: str) -> int:
+    """Score it."""
+    return await ctx.step(score, email)
+
+
+@workflow(name="refund", description="Refund pending approval")
+async def refund(ctx: Context, amount: float) -> str:
+    """Park on a human."""
+    return f"refunded {amount}" if await ctx.wait_for_approval("refund") else "denied"
+'''
+
+
+@pytest.fixture
+def project(tmp_path: Path) -> Path:
+    (tmp_path / "flows.py").write_text(FLOWS)
+    return tmp_path
+
+
+class TestStdioEndToEnd:
+    """Drives the shipped entry point exactly as Claude Code would."""
+
+    @staticmethod
+    def _params(project: Path):
+        from mcp import StdioServerParameters
+
+        return StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "workflow_builder.cli", "mcp", "--module", "flows.py"],
+            cwd=str(project),
+            env={
+                **os.environ,
+                "LOOM_STORE": f"sqlite://{project / 'runs.db'}",
+            },
+        )
+
+    async def test_handshake_and_tool_listing(self, project: Path) -> None:
+        from mcp import ClientSession
+        from mcp.client.stdio import stdio_client
+
+        async with (
+            stdio_client(self._params(project)) as (read, write),
+            ClientSession(read, write) as session,
+        ):
+            init = await session.initialize()
+            assert init.serverInfo.name == "loom"
+
+            names = {t.name for t in (await session.list_tools()).tools}
+            assert "run_workflow" in names
+            assert len(names) == 10
+
+    async def test_workflows_from_the_module_are_visible(self, project: Path) -> None:
+        """The gap that made the original server useless: an empty registry."""
+        from mcp import ClientSession
+        from mcp.client.stdio import stdio_client
+
+        async with (
+            stdio_client(self._params(project)) as (read, write),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            result = await session.call_tool("list_workflows", {})
+            payload = json.loads(result.content[0].text)
+
+        assert {w["name"] for w in payload["workflows"]} == {"onboard", "refund"}
+
+    async def test_run_and_inspect_over_the_wire(self, project: Path) -> None:
+        from mcp import ClientSession
+        from mcp.client.stdio import stdio_client
+
+        async with (
+            stdio_client(self._params(project)) as (read, write),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+
+            started = json.loads(
+                (
+                    await session.call_tool(
+                        "run_workflow",
+                        {"workflow": "onboard", "input_json": '"ada@nasa.gov"'},
+                    )
+                ).content[0].text
+            )
+            assert started["status"] == "completed"
+            assert started["output"] == 90
+
+            journal = json.loads(
+                (
+                    await session.call_tool(
+                        "get_run_journal", {"run_id": started["run_id"]}
+                    )
+                ).content[0].text
+            )
+            assert [e["step_id"] for e in journal["journal"]] == ["score"]
+
+    async def test_human_in_the_loop_over_the_wire(self, project: Path) -> None:
+        """Suspend, then resolve the approval — all through the protocol."""
+        from mcp import ClientSession
+        from mcp.client.stdio import stdio_client
+
+        async with (
+            stdio_client(self._params(project)) as (read, write),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+
+            started = json.loads(
+                (
+                    await session.call_tool(
+                        "run_workflow",
+                        {"workflow": "refund", "input_json": "42.5"},
+                    )
+                ).content[0].text
+            )
+            assert started["status"] == "suspended"
+            assert "approve_run" in started["next_action"]
+
+            approved = json.loads(
+                (
+                    await session.call_tool(
+                        "approve_run",
+                        {"run_id": started["run_id"], "subject": "refund"},
+                    )
+                ).content[0].text
+            )
+
+        assert approved["status"] == "completed"
+        assert approved["output"] == "refunded 42.5"
+
+    async def test_resources_and_prompts_over_the_wire(self, project: Path) -> None:
+        from mcp import ClientSession
+        from mcp.client.stdio import stdio_client
+
+        async with (
+            stdio_client(self._params(project)) as (read, write),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+
+            uris = {str(r.uri) for r in (await session.list_resources()).resources}
+            assert "loom://workflows" in uris
+
+            contents = await session.read_resource("loom://workflows")
+            payload = json.loads(contents.contents[0].text)
+            assert {w["name"] for w in payload["workflows"]} == {"onboard", "refund"}
+
+            names = {p.name for p in (await session.list_prompts()).prompts}
+            assert "debug_run" in names
+
+    async def test_stdout_is_not_polluted_by_status_output(
+        self, project: Path
+    ) -> None:
+        """stdio *is* the protocol channel — anything on stdout corrupts it.
+
+        The handshake succeeding at all is the proof; this asserts the status
+        line went to stderr where it belongs.
+        """
+        import subprocess
+
+        done = subprocess.run(
+            [sys.executable, "-m", "workflow_builder.cli", "mcp", "--module", "flows.py"],
+            cwd=project,
+            capture_output=True,
+            text=True,
+            input="",
+            timeout=30,
+            env={**os.environ, "LOOM_STORE": "memory://"},
+        )
+        assert "serving" in done.stderr
+        assert "serving" not in done.stdout
+
+
+# ---------------------------------------------------------------------------
+# The deprecated shim
+# ---------------------------------------------------------------------------
+
+
+class TestDeprecatedBridge:
+    def test_it_warns(self) -> None:
+        from workflow_builder.mcp_server.bridge import RuntimeBridge
+
+        with pytest.warns(DeprecationWarning, match="LocalFacade"):
+            RuntimeBridge()
+
+    async def test_it_delegates_to_the_shared_facade(self) -> None:
+        """One port underneath, so a fix in the facade reaches both callers."""
+        from workflow_builder.mcp_server.bridge import RuntimeBridge
+
+        with pytest.warns(DeprecationWarning):
+            bridge = RuntimeBridge()
+
+        assert isinstance(bridge.facade, LocalFacade)
+
+        bridge.register_workflow(doubler)
+        run = await bridge.run_workflow("doubler", 4)
+        assert run["status"] == "completed"
+        # The shim keeps its historical key name.
+        assert run["workflow_id"] == "doubler"

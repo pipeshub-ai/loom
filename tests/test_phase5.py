@@ -14,8 +14,9 @@ from pathlib import Path
 
 import pytest
 
-from workflow_builder import Runtime, step, workflow
+from workflow_builder import ExecutionStatus, Runtime, step, workflow
 from workflow_builder.core.exceptions import ContinueAsNew, ControlSignal
+from workflow_builder.core.serde import decode
 from workflow_builder.runtime.flowcontrol import (
     AdmissionController,
     AdmissionDecision,
@@ -429,9 +430,9 @@ class TestRetention:
         assert mgr.should_archive_journal(old)
         assert not mgr.should_archive_journal(recent)
 
-    async def test_compact_returns_empty(self) -> None:
+    async def test_compact_is_a_no_op_on_an_empty_store(self) -> None:
         mgr = RetentionManager(RetentionPolicy())
-        result = await mgr.compact(None)
+        result = await mgr.compact(MemoryStore())
         assert result.total == 0
 
 
@@ -587,11 +588,13 @@ class TestSagaIntegration:
         async def send_confirmation(ctx, order_id: str) -> str:
             raise RuntimeError("email service down")
 
+        unwound: list[str] = []
+
         async def reverse_charge(amount: int) -> None:
-            pass
+            unwound.append(f"reverse_charge:{amount}")
 
         async def release_inventory(item: str) -> None:
-            pass
+            unwound.append(f"release_inventory:{item}")
 
         @workflow
         async def order_flow(ctx, order_id: str) -> str:
@@ -617,27 +620,92 @@ class TestSagaIntegration:
         ]
         assert len(comp_entries) == 2
 
+        # The handlers actually ran, most-recently-registered first.
+        assert unwound == ["release_inventory:widget", "reverse_charge:100"]
+
+    async def test_failing_compensation_is_recorded_not_raised(self) -> None:
+        @step
+        async def book(ctx, what: str) -> str:
+            return f"booked-{what}"
+
+        @step
+        async def explode(ctx) -> str:
+            raise RuntimeError("downstream is down")
+
+        async def cancel_booking(what: str) -> None:
+            raise RuntimeError("cancellation endpoint is also down")
+
+        @workflow
+        async def trip_flow(ctx, _input: str) -> str:
+            await ctx.step(book, "flight")
+            await ctx.compensate(cancel_booking, "flight")
+            await ctx.step(explode)
+            return "done"
+
+        rt = Runtime(store=MemoryStore())
+        result = await rt.run(trip_flow, "go")
+
+        # A compensation that fails must not mask the original failure.
+        assert result.status.value == "failed"
+        assert "downstream is down" in result.error.message
+
+        record = await rt.get(result.run_id)
+        assert record.metadata["compensation_failures"] == ["cancel_booking"]
+
 
 class TestContinueAsNewIntegration:
-    async def test_continue_as_new_raises_signal(self) -> None:
+    async def test_no_rotation_returns_normally(self) -> None:
         @workflow
-        async def forever_flow(ctx, counter: int) -> int:
-            if counter >= 3:
-                await ctx.continue_as_new(seed=counter + 1)
+        async def rotating_flow(ctx, counter: int) -> int:
+            if counter < 3:
+                await ctx.continue_as_new(counter + 1)
             return counter
 
-        store = MemoryStore()
-        rt = Runtime(store=store)
+        rt = Runtime(store=MemoryStore())
+        result = await rt.run(rotating_flow, 3)
+        assert result.status is ExecutionStatus.COMPLETED
+        assert result.output == 3
 
-        result = await rt.run(forever_flow, 1)
-        assert result.output == 1
+    async def test_rotation_starts_a_successor_run(self) -> None:
+        @workflow
+        async def rotating_flow(ctx, counter: int) -> int:
+            if counter < 3:
+                await ctx.continue_as_new(counter + 1)
+            return counter
 
-        # With counter >= 3, ContinueAsNew signal fires.
-        # The engine doesn't handle ContinueAsNew specially yet —
-        # it propagates as a ControlSignal (BaseException).
-        with pytest.raises(ContinueAsNew) as exc_info:
-            await rt.run(forever_flow, 3)
-        assert exc_info.value.seed == 4
+        rt = Runtime(store=MemoryStore())
+        try:
+            first = await rt.run(rotating_flow, 1)
+
+            # The rotating run completes rather than failing — the signal is
+            # control flow, not an error.
+            assert first.status is ExecutionStatus.COMPLETED
+
+            chain = [first.run_id]
+            record = await rt.get(first.run_id)
+            while (successor := record.metadata.get("continued_as")) is not None:
+                chain.append(successor)
+                await rt.wait(successor, timeout=5)
+                record = await rt.get(successor)
+
+            # 1 -> 2 -> 3, so three runs, and only the last produces a value.
+            assert len(chain) == 3
+            assert record.status is ExecutionStatus.COMPLETED
+            assert decode(record.output) == 3
+
+            # Every run in the chain shares one root, so the whole forever-flow
+            # stays queryable as a single logical execution.
+            roots = {
+                (await rt.get(run_id)).root_run_id or run_id for run_id in chain
+            }
+            assert roots == {chain[0]}
+
+            # Journals do not accumulate across the chain — that is the point.
+            # Each rotating run holds only its own continue_as_new marker, and
+            # the run that finally returns holds nothing at all.
+            assert [len(await rt.history(run_id)) for run_id in chain] == [1, 1, 0]
+        finally:
+            await rt.shutdown()
 
 
 class TestVersionGate:

@@ -9,32 +9,49 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from workflow_builder.toolsets.catalog import ToolsetCatalog
 from workflow_builder.toolsets.manifest import ToolsetManifest
 
 if TYPE_CHECKING:
-    pass
+    from workflow_builder.agents.tool_registry import Toolset, ToolsetRegistry
 
 logger = logging.getLogger("workflow.toolsets")
 
-# Module-level singleton catalog
-_catalog = ToolsetCatalog()
+# Module-level singleton. A ToolsetRegistry rather than a bare catalog, so a
+# toolset registered here once is both discoverable by the coding agent and
+# callable by ctx.agent() — the two used to be separate stores, and a toolset
+# registered in one was invisible to the other.
+_catalog: ToolsetRegistry | None = None
 
 
-def get_catalog() -> ToolsetCatalog:
-    """Return the global toolset catalog."""
+def get_catalog() -> ToolsetRegistry:
+    """Return the process-global toolset registry."""
+    global _catalog
+    if _catalog is None:
+        from workflow_builder.agents.tool_registry import ToolsetRegistry
+
+        _catalog = ToolsetRegistry()
     return _catalog
 
 
-def register_toolset(manifest: ToolsetManifest) -> None:
-    """Register a toolset manifest with the global catalog."""
-    _catalog.register(manifest)
-    logger.info("Registered toolset: %s v%s", manifest.id, manifest.version)
+def register_toolset(manifest: ToolsetManifest | Toolset) -> None:
+    """Register a toolset (or a bare manifest) with the global registry.
+
+    Registering a :class:`Toolset` makes it both discoverable *and* callable.
+    Registering a bare :class:`ToolsetManifest` makes it discoverable only.
+    """
+    get_catalog().register(manifest)
+    resolved = manifest if isinstance(manifest, ToolsetManifest) else manifest.manifest
+    logger.info(
+        "Registered toolset: %s v%s (%s)",
+        resolved.id,
+        resolved.version,
+        resolved.qualified_id,
+    )
 
 
 def unregister_toolset(toolset_id: str) -> None:
-    """Remove a toolset from the global catalog."""
-    _catalog.unregister(toolset_id)
+    """Remove a toolset from the global registry."""
+    get_catalog().unregister(toolset_id)
 
 
 def discover_entry_points() -> int:

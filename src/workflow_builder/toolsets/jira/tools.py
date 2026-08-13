@@ -25,8 +25,11 @@ from workflow_builder.toolsets.jira.models import (
     CreatedIssue,
     JiraIssue,
     JiraProject,
+    JiraProjectDetail,
     JiraUser,
+    ProjectMetadata,
     Transition,
+    UserLookup,
 )
 
 
@@ -197,6 +200,31 @@ async def jira_list_projects() -> list[JiraProject]:
 
 
 @step(retry=Retry(max_attempts=3, initial_delay=1.0))
+async def jira_search_users(
+    query: str,
+    max_results: int = 10,
+) -> list[JiraUser]:
+    """Find Jira users by display name or email address.
+
+    Use this before writing a JQL clause about a person. JQL addresses people by
+    accountId; a display name works until two people share one or somebody is
+    renamed, and then it silently matches nothing rather than failing.
+
+    Args:
+        query: Part of a display name or email, e.g. ``"Vishwjeet"``.
+        max_results: Maximum users to return (default 10).
+
+    Returns:
+        List of JiraUser with account_id, display_name, email, active.
+        Empty when nobody matches — which is worth distinguishing from
+        "the person exists but has no matching issues".
+    """
+    from workflow_builder.toolsets.jira.client import get_default_client
+
+    return await get_default_client().search_users(query, max_results)
+
+
+@step(retry=Retry(max_attempts=3, initial_delay=1.0))
 async def jira_get_myself() -> JiraUser:
     """Get the authenticated Jira user's profile.
 
@@ -206,6 +234,112 @@ async def jira_get_myself() -> JiraUser:
     from workflow_builder.toolsets.jira.client import get_default_client
 
     return await get_default_client().get_myself()
+
+
+@step(retry=Retry(max_attempts=3, initial_delay=1.0))
+async def jira_resolve_user(name: str) -> UserLookup:
+    """Find a person by name, tolerating a misspelling.
+
+    Prefer this over jira_search_users when the name came from a human. Jira's
+    search is a substring match, so one wrong letter returns nothing at all and
+    an empty result reads as "no such person" instead of "check the spelling".
+
+    Args:
+        name: A display name or part of one, possibly misspelled.
+
+    Returns:
+        UserLookup with matches, exact (False when it is a near-miss guess),
+        and note. Check ``exact`` before acting on a write: resolving a typo to
+        the nearest human is fine for a read and reckless for an assignment.
+    """
+    from workflow_builder.toolsets.jira.client import get_default_client
+
+    return await get_default_client().resolve_user(name)
+
+
+@step(retry=Retry(max_attempts=3, initial_delay=1.0))
+async def jira_get_project_metadata(project_key: str) -> ProjectMetadata:
+    """List the status, priority, and issue-type names a project actually uses.
+
+    Call this before filtering a search on either. Status and priority names are
+    per-project configuration — "In Progress" and "High" are common defaults,
+    not guarantees — and a JQL filter naming one the board does not have returns
+    zero rows with no error, which reads as "no such work".
+
+    Args:
+        project_key: Project key, e.g. ``"QUES"``.
+
+    Returns:
+        ProjectMetadata with statuses, priorities, and issue_types.
+    """
+    from workflow_builder.toolsets.jira.client import get_default_client
+
+    return await get_default_client().get_metadata(project_key)
+
+
+@step(retry=Retry(max_attempts=3, initial_delay=1.0))
+async def jira_get_project(project_key: str) -> JiraProjectDetail:
+    """Get one project's details.
+
+    Args:
+        project_key: Project key, e.g. ``"QUES"``.
+
+    Returns:
+        JiraProjectDetail with key, name, id, description, lead.
+    """
+    from workflow_builder.toolsets.jira.client import get_default_client
+
+    return await get_default_client().get_project(project_key)
+
+
+@step(retry=Retry(max_attempts=3, initial_delay=1.0))
+async def jira_get_comments(issue_key: str, max_results: int = 20) -> list[Comment]:
+    """Read an issue's comments.
+
+    Args:
+        issue_key: Issue key, e.g. ``"PROJ-123"``.
+        max_results: Maximum comments to return (default 20).
+
+    Returns:
+        List of Comment with id, author, created, and body as plain text.
+    """
+    from workflow_builder.toolsets.jira.client import get_default_client
+
+    return await get_default_client().get_comments(issue_key, max_results)
+
+
+@step(retry=Retry(max_attempts=2, initial_delay=1.0))
+async def jira_assign_issue(issue_key: str, account_id: str | None) -> JiraIssue:
+    """Assign an issue, or unassign it.
+
+    Args:
+        issue_key: Issue key, e.g. ``"PROJ-123"``.
+        account_id: The assignee's accountId, from jira_resolve_user. Pass None
+            to unassign. A display name will not work here.
+
+    Returns:
+        The updated JiraIssue.
+    """
+    from workflow_builder.toolsets.jira.client import get_default_client
+
+    return await get_default_client().assign_issue(issue_key, account_id)
+
+
+@step(retry=Retry(max_attempts=1))
+async def jira_delete_issue(issue_key: str, delete_subtasks: bool = False) -> str:
+    """Permanently delete an issue. There is no undo, and no retry.
+
+    Args:
+        issue_key: Issue key, e.g. ``"PROJ-123"``.
+        delete_subtasks: Delete its subtasks too. Jira refuses otherwise when
+            the issue has any.
+
+    Returns:
+        The key that was deleted, so the journal records what went.
+    """
+    from workflow_builder.toolsets.jira.client import get_default_client
+
+    return await get_default_client().delete_issue(issue_key, delete_subtasks)
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +387,16 @@ Credentials are read automatically from env vars:
 
 All tools return typed Pydantic models (not plain dicts).
 Use attribute access: issue.key, issue.status, project.name, etc.
+
+Two things that make a JQL query return nothing rather than fail:
+
+  - Status and priority names differ per project. "In Progress" and "High"
+    are common defaults, not guarantees — a board may use "Blocked",
+    "Highest", or names in another language. When a filtered search comes
+    back empty, search without the filter and report the values that do
+    exist, so an empty result can be told apart from a wrong guess.
+  - People are addressed by accountId. Resolve a name with
+    jira_search_users first.
 
 ### Tools
 
@@ -305,6 +449,39 @@ jira_list_projects() -> list[JiraProject]
   JiraProject fields: {_fields(_JiraProject)}
     projects = await ctx.step(jira_list_projects)
     for p in projects: print(p.key, p.name)
+
+jira_resolve_user(name: str) -> UserLookup
+  Find a person by name, tolerating a misspelling. Prefer this when the
+  name came from a human — Jira's search is a substring match, so one
+  wrong letter returns nothing and reads as "no such person".
+    found = await ctx.step(jira_resolve_user, "Viswajeet")
+    if found.matches and found.exact:
+        aid = found.matches[0].account_id
+    elif found.matches:
+        # A guess. Fine to read with, confirm before writing.
+        aid = found.matches[0].account_id
+
+jira_get_project_metadata(project_key: str) -> ProjectMetadata
+  The status, priority, and issue-type names this project actually uses.
+  Call before filtering: a JQL filter naming a status the board does not
+  have returns zero rows with no error.
+    meta = await ctx.step(jira_get_project_metadata, "QUES")
+    print(meta.statuses, meta.priorities)
+
+jira_get_project(project_key: str) -> JiraProjectDetail
+jira_get_comments(issue_key: str, max_results: int = 20) -> list[Comment]
+jira_assign_issue(issue_key: str, account_id: str | None) -> JiraIssue
+  Takes an accountId, not a name. None unassigns.
+jira_delete_issue(issue_key: str, delete_subtasks: bool = False) -> str
+  Permanent. Not retried.
+
+jira_search_users(query: str, max_results: int = 10) -> list[JiraUser]
+  Resolve a person's name to an accountId before using them in JQL.
+  JiraUser fields: {_fields(_JiraUser)}
+    users = await ctx.step(jira_search_users, "Vishwjeet")
+    if users:
+        jql = f'assignee = "{{users[0].account_id}}" AND status = "In Progress"'
+        issues = await ctx.step(jira_search_issues, jql)
 
 jira_get_myself() -> JiraUser
   Get authenticated user.

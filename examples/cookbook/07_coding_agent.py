@@ -18,6 +18,10 @@ import asyncio
 import os
 import sys
 import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from utils import header, log, require_env
 
 from workflow_builder.agents.coding_agent import WorkflowCodingAgent
 from workflow_builder.agents.providers.anthropic_provider import AnthropicProvider
@@ -38,69 +42,75 @@ Include a runnable main() that uses keywords ["python", "AI", "workflow"].
 
 
 async def main() -> None:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        print("Error: ANTHROPIC_API_KEY not set.")
-        sys.exit(1)
+    require_env("ANTHROPIC_API_KEY")
 
-    model = AnthropicProvider(model_name="claude-sonnet-4-6", api_key=api_key)
-    agent = WorkflowCodingAgent(model=model, max_repair_attempts=2)
+    model = AnthropicProvider(
+        model_name="claude-sonnet-4-6", api_key=os.environ["ANTHROPIC_API_KEY"]
+    )
+    agent = WorkflowCodingAgent(
+        model=model,
+        max_repair_attempts=2,
+        # Tell the agent what the target environment actually has. Imports of
+        # anything else are rejected at validation time rather than failing on
+        # someone else's machine.
+        allowed_packages={"httpx"},
+    )
 
-    print("=" * 60)
-    print("Workflow Coding Agent")
-    print("=" * 60)
-    print(f"\nSpec:\n{SPEC}\n")
-    print("Generating workflow code…\n")
+    header("Workflow Coding Agent")
+    print(f"\nSpec:\n{SPEC}")
+    log("agent", "Generating, validating, and smoke-running the workflow…")
 
     coding_result = await agent.generate(SPEC)
 
-    print("=" * 60)
-    print(f"Model    : {coding_result.model_used}")
-    print(f"Tokens   : {coding_result.input_tokens} in / {coding_result.output_tokens} out")
-    print(f"Repairs  : {coding_result.repair_attempts}")
-    print(f"Clean    : {coding_result.is_clean}")
-    if coding_result.issues:
-        print("Issues   :")
-        for issue in coding_result.issues:
-            print(f"  [{issue.severity}] {issue.category}: {issue.message}")
-    print("=" * 60)
-    print("\n--- Generated Code ---\n")
+    header("RESULT")
+    log("agent", f"Model   : {coding_result.model_used}")
+    log("agent", f"Tokens  : {coding_result.input_tokens} in / "
+                 f"{coding_result.output_tokens} out")
+    log("agent", f"Repairs : {coding_result.repair_attempts}")
+    log("agent", f"Clean   : {coding_result.is_clean}")
+
+    # The agent does not just validate the code — it runs it once against a
+    # MemoryStore and a mocked model before handing it over.
+    if coding_result.smoke is not None:
+        smoke = coding_result.smoke
+        outcome = "passed" if smoke.ok else f"failed at {smoke.phase}"
+        log("smoke", f"Smoke run {outcome}")
+        if not smoke.ok:
+            log("smoke", smoke.error[:160])
+
+    for issue in coding_result.issues:
+        log("issue", f"[{issue.severity}] {issue.category}: {issue.message}")
+
+    header("GENERATED CODE")
     print(coding_result.code)
-    print("\n--- End Generated Code ---\n")
 
     if not coding_result.is_clean:
-        print("Generated code has errors — skipping execution.")
+        log("agent", "Generated code has errors — not running it.")
         return
 
-    # Write to a temp file and execute it
-    with tempfile.NamedTemporaryFile(
-        suffix=".py", mode="w", delete=False, dir="/tmp"
-    ) as f:
+    # Run it for real. The smoke run above used a MemoryStore and a mock model;
+    # this executes the file as a user would, against the live API.
+    header("EXECUTING THE GENERATED WORKFLOW")
+    with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as f:
         f.write(coding_result.code)
         tmp_path = f.name
 
-    print(f"Saved to {tmp_path}")
-    print("\n--- Executing generated workflow ---\n")
+    try:
+        import subprocess
 
-    import subprocess
-    proc = subprocess.run(
-        [sys.executable, tmp_path],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-
-    if proc.stdout:
-        print(proc.stdout)
-    if proc.stderr:
-        print("[stderr]", proc.stderr)
-
-    if proc.returncode != 0:
-        print(f"Workflow exited with code {proc.returncode}")
-    else:
-        print("--- Execution complete ---")
-
-    os.unlink(tmp_path)
+        proc = subprocess.run(
+            [sys.executable, tmp_path],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if proc.stdout:
+            print(proc.stdout)
+        if proc.stderr:
+            print("[stderr]", proc.stderr)
+        log("run", f"exit {proc.returncode}")
+    finally:
+        os.unlink(tmp_path)
 
 
 if __name__ == "__main__":

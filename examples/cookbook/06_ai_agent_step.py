@@ -18,13 +18,22 @@ from __future__ import annotations
 
 import os
 import re
+import sys
+from pathlib import Path
 
 import httpx
 
-from workflow_builder import Context, Retry, Runtime, step, workflow
-from workflow_builder.agents.agent import Agent, PersistenceClass
-from workflow_builder.agents.providers.anthropic_provider import AnthropicProvider
-from workflow_builder.state.memory import MemoryStore
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from utils import load_dotenv, require_env
+
+# The agent below is built at import time, so credentials must be present by
+# then — load .env before that rather than inside main().
+load_dotenv()
+
+from workflow_builder import Context, Retry, Runtime, step, workflow  # noqa: E402
+from workflow_builder.agents.agent import Agent, PersistenceClass  # noqa: E402
+from workflow_builder.agents.providers.anthropic_provider import AnthropicProvider  # noqa: E402
+from workflow_builder.state.memory import MemoryStore  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Define the summariser agent (created once, reused across runs)
@@ -101,10 +110,7 @@ async def ai_research(ctx: Context, query: str) -> dict:
 
 
 async def main() -> None:
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        print("Error: ANTHROPIC_API_KEY not set.")
-        print("Run: ANTHROPIC_API_KEY=sk-... python3 examples/cookbook/06_ai_agent_step.py")
-        return
+    require_env("ANTHROPIC_API_KEY")
 
     rt = Runtime(store=MemoryStore())
     query = "AI workflow automation"

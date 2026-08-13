@@ -54,8 +54,18 @@ pip install workflow-builder[langchain]    # LangChain / LangGraph
 pip install workflow-builder[agno]         # Agno
 pip install workflow-builder[pydantic-ai]  # Pydantic AI
 
+# Google Workspace service-account auth (Gmail/Calendar work without it)
+pip install workflow-builder[google]
+
 # With FastAPI webhook server
 pip install workflow-builder[api]
+
+# Command line and terminal UI
+pip install workflow-builder[cli]          # rich output
+pip install workflow-builder[tui]          # loom ui
+
+# MCP server — drive workflows from Claude Code, Claude Desktop, Cursor
+pip install workflow-builder[mcp]
 
 # Everything
 pip install workflow-builder[all]
@@ -73,7 +83,7 @@ pip install -e ".[dev]"
 | **Cron triggers** | `@workflow(triggers=[Schedule("0 9 * * *")])` — fires automatically via TriggerDispatcher. |
 | **Pluggable storage** | MemoryStore (tests) -> SQLite (dev) -> MongoDB/PostgreSQL (prod). Same code, different backend. |
 | **Coding agent** | Describe a workflow in English, get runnable Python. ReAct loop with tool discovery and validation. |
-| **Typed toolsets** | Jira, Confluence, web search — Pydantic models, lazy loading, auto-generated docs. |
+| **Typed toolsets** | Gmail, Google Calendar, Jira, Confluence, web search — Pydantic models, lazy loading, auto-generated docs. |
 | **Workflow manager** | Agent-facing tools to list, run, schedule, and cancel workflows via natural language. |
 
 ## Architecture
@@ -170,6 +180,10 @@ await dispatcher.start()  # Fires at 9am weekdays
 | 12 | [Pydantic AI backend](examples/cookbook/12_pydantic_ai_backend.py) | Pydantic AI via AgentBackend |
 | 13 | [Cron trigger](examples/cookbook/13_cron_trigger.py) | Schedule-based dispatch |
 | 14 | [Workflow manager](examples/cookbook/14_workflow_manager_cli.py) | Agent that manages workflows |
+| 15 | [Queue consumer](examples/cookbook/15_queue_consumer.py) | At-least-once ingress, exactly-once runs |
+| 16 | [HTTP server](examples/cookbook/16_http_server.py) | create_app() + LoomClient |
+| 17 | [Files and artifacts](examples/cookbook/17_files_and_artifacts.py) | Attachment, blobs, versioned artifacts |
+| 18 | [Gmail and Calendar](examples/cookbook/18_gmail_calendar.py) | Google toolsets, approval before send |
 
 ## Development
 

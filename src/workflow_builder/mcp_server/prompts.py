@@ -1,4 +1,8 @@
-"""MCP prompt templates for the LOOM server."""
+"""Prompt templates an MCP client can invoke.
+
+Pure string builders: they take already-fetched data and return the text to send
+to a model. Registration lives in :mod:`.server`.
+"""
 from __future__ import annotations
 
 import json
@@ -71,11 +75,3 @@ def build_review_prompt(workflow_code: str) -> str:
         f"Check: correctness, security, durability, "
         f"error handling, performance, best practices."
     )
-
-
-def register_prompts(server: Any, bridge: Any) -> None:
-    """Register prompts with an MCP Server instance.
-
-    Deferred: the actual ``mcp`` registration hooks will be
-    wired when the package is available.
-    """

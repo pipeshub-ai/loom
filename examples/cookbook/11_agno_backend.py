@@ -23,20 +23,43 @@ from workflow_builder.agents.tool_registry import Toolset
 from workflow_builder.state.memory import MemoryStore
 
 
+@step
+async def lookup_release_notes(product: str) -> str:
+    """Look up release notes for a product from a local table.
+
+    Args:
+        product: Product name to look up.
+    """
+    notes = {
+        "loom": "0.11.0 — unified toolset registry, saga compensation, blob offload.",
+        "python": "3.13 — free-threaded build, improved REPL, JIT groundwork.",
+    }
+    return notes.get(product.lower(), f"No release notes on file for {product!r}.")
+
+
 def _build_backend_and_tools():
-    """Build Agno backend with DuckDuckGo search."""
+    """Build the Agno backend and whichever web toolset is available.
+
+    DuckDuckGo needs the ``ddgs`` package, which Agno does not pull in. When it
+    is missing the example still runs — the point being demonstrated is the
+    backend and toolset registration, not the search provider.
+    """
     from agno.models.anthropic import Claude
-    from agno.tools.duckduckgo import DuckDuckGoTools
 
-    log("setup", "Creating Agno backend with Claude + DuckDuckGo")
-    model = Claude(id="claude-sonnet-4-6")
-    backend = AgnoBackend(model=model)
+    log("setup", "Creating Agno backend with Claude")
+    backend = AgnoBackend(model=Claude(id="claude-sonnet-4-6"))
 
-    # Register DuckDuckGo as a toolset via Agno's native tools
-    ddg = DuckDuckGoTools()
+    try:
+        from agno.tools.duckduckgo import DuckDuckGoTools
+    except ImportError:
+        log("setup", "ddgs not installed — using a local toolset instead")
+        log("setup", "For live web search: pip install ddgs")
+        return backend, Toolset.from_steps("notes", [lookup_release_notes])
+
+    log("setup", "Registering DuckDuckGo web search")
     toolset = Toolset.from_callables(
         "web",
-        [ddg],
+        [DuckDuckGoTools()],
         summary="Web search via DuckDuckGo (Agno)",
     )
     return backend, toolset
@@ -56,11 +79,15 @@ async def format_response(raw: str) -> str:
 
 @workflow(name="agno_research")
 async def agno_research(ctx: Context, query: str) -> str:
-    """Search for information using the Agno-powered agent."""
+    """Research a topic using the Agno-powered agent.
+
+    Note there is no Agno import anywhere in this workflow — swapping the
+    backend on the Runtime is the only change needed to run it on a different
+    framework.
+    """
     result = await ctx.agent(
-        f"Search for the latest news about: {query}. "
-        "Return a brief summary of the top 3 results "
-        "with their titles and key points."
+        f"Research this topic and summarise the top findings: {query}. "
+        "Use the tools available to you."
     )
     formatted = await ctx.step(format_response, result.output)
     return formatted
@@ -74,9 +101,9 @@ async def main() -> None:
 
     rt = Runtime(store=MemoryStore(), agent_backend=backend)
     rt.toolsets.register(toolset)
-    log("runtime", "Ready with Agno backend + web toolset")
+    log("runtime", f"Ready with Agno backend + '{toolset.manifest.id}' toolset")
 
-    query = "AI agent frameworks 2026"
+    query = "AI agent frameworks 2026" if toolset.manifest.id == "web" else "loom"
     log("runtime", f"Query: {query}")
 
     result = await rt.run(agno_research, query)

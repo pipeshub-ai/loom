@@ -73,7 +73,7 @@ class ToolsetCatalog:
     def __init__(self) -> None:
         self._manifests: dict[str, ToolsetManifest] = {}
 
-    def register(self, manifest: ToolsetManifest) -> None:
+    def register(self, manifest: ToolsetManifest, /) -> None:
         """Register a toolset manifest."""
         self._manifests[manifest.id] = manifest
 

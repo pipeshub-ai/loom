@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 class BlobNotFoundError(Exception):
@@ -77,6 +77,88 @@ class LocalBlobBackend:
         dest = self._path_for(ref)
         if dest.exists():
             dest.unlink()
+
+
+class S3BlobBackend:
+    """Blob storage on S3 or any S3-compatible service (MinIO, R2, Spaces).
+
+    Requires ``aioboto3``. The client is created lazily so importing this module
+    costs nothing when S3 is not in use.
+
+    Parameters
+    ----------
+    bucket:
+        Target bucket. It must already exist — creating buckets is a deployment
+        decision, not something a workflow engine should do implicitly.
+    prefix:
+        Key prefix, so one bucket can hold several environments.
+    session_kwargs:
+        Passed to ``aioboto3.Session``; ``client_kwargs`` to ``session.client``
+        (``endpoint_url`` for MinIO and friends).
+    """
+
+    def __init__(
+        self,
+        bucket: str,
+        *,
+        prefix: str = "loom/blobs",
+        session_kwargs: dict[str, Any] | None = None,
+        client_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        self._bucket = bucket
+        self._prefix = prefix.strip("/")
+        self._session_kwargs = session_kwargs or {}
+        self._client_kwargs = client_kwargs or {}
+
+    def _key_for(self, ref: str) -> str:
+        # Two-character fan-out, matching the local backend, so migrating
+        # between them is a copy rather than a re-layout.
+        return f"{self._prefix}/{ref[:2]}/{ref}"
+
+    def _client(self) -> Any:
+        import aioboto3
+
+        session = aioboto3.Session(**self._session_kwargs)
+        return session.client("s3", **self._client_kwargs)
+
+    async def put(self, ref: str, data: bytes, mime: str) -> None:
+        async with self._client() as s3:
+            await s3.put_object(
+                Bucket=self._bucket,
+                Key=self._key_for(ref),
+                Body=data,
+                ContentType=mime,
+            )
+
+    async def get(self, ref: str) -> bytes:
+        from botocore.exceptions import ClientError
+
+        try:
+            async with self._client() as s3:
+                response = await s3.get_object(
+                    Bucket=self._bucket, Key=self._key_for(ref)
+                )
+                return await response["Body"].read()
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
+                raise BlobNotFoundError(ref) from exc
+            raise
+
+    async def exists(self, ref: str) -> bool:
+        from botocore.exceptions import ClientError
+
+        try:
+            async with self._client() as s3:
+                await s3.head_object(Bucket=self._bucket, Key=self._key_for(ref))
+                return True
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
+                return False
+            raise
+
+    async def delete(self, ref: str) -> None:
+        async with self._client() as s3:
+            await s3.delete_object(Bucket=self._bucket, Key=self._key_for(ref))
 
 
 class BlobService:

@@ -45,6 +45,10 @@ class ExecutionStore(Protocol):
 
     async def find_by_idempotency_key(self, key: str) -> ExecutionRecord | None: ...
 
+    async def delete_execution(self, run_id: str) -> None:
+        """Remove an execution and its journal. Used by retention compaction."""
+        ...
+
     # -- journals ---------------------------------------------------------------------
 
     async def save_journal(self, run_id: str, entries: list[JournalEntry]) -> None:
@@ -53,8 +57,12 @@ class ExecutionStore(Protocol):
 
     async def load_journal(self, run_id: str) -> list[JournalEntry]: ...
 
-    async def truncate_journal(self, run_id: str, from_seq: int) -> None:
-        """Drop entries at or after ``from_seq``; used by retry-from-failure."""
+    async def truncate_journal(self, run_id: str, from_path: str) -> None:
+        """Drop entries at or after ``from_path``; used by retry-from-failure.
+
+        Paths sort lexicographically in journal order, so a string comparison is
+        the same cut a sequence number would make.
+        """
         ...
 
     # -- events -----------------------------------------------------------------------
@@ -78,11 +86,22 @@ class ExecutionStore(Protocol):
 
 @runtime_checkable
 class CacheStore(Protocol):
-    """Cross-run memoization for steps declaring a :class:`CachePolicy`."""
+    """Cross-run memoization for steps declaring a :class:`CachePolicy`.
+
+    Also the substrate for anything else keyed and durable — agent sessions and
+    the artifact index both live here rather than needing their own storage.
+    """
 
     async def get(self, key: str) -> Any | None: ...
 
-    async def set(self, key: str, value: Any, ttl_seconds: float) -> None: ...
+    async def set(self, key: str, value: Any, ttl_seconds: float) -> None:
+        """Store ``value`` under ``key``.
+
+        A ``ttl_seconds`` of zero or less means **no expiry**. Reading it as
+        "expires immediately" would make ``set(key, value, 0)`` a silent no-op,
+        which is never what a caller means.
+        """
+        ...
 
     async def delete(self, key: str) -> None: ...
 

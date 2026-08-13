@@ -135,7 +135,13 @@ class RegistryCollector:
 
 
 class ASTExtractor(ast.NodeVisitor):
-    """Extract control flow and ``ctx.*`` calls from workflow body source."""
+    """Extract control flow and ``ctx.*`` calls from workflow body source.
+
+    Extraction is scoped to workflow bodies. Walking a whole module instead
+    would pull in the ``if __name__ == "__main__"`` guard, helper functions, and
+    the insides of every ``@step`` — producing a skeleton with nodes the flow
+    does not have, which defeats the point of narrating a *verified* skeleton.
+    """
 
     def __init__(self, source_file: str = "") -> None:
         self.nodes: list[WGIRNode] = []
@@ -145,6 +151,36 @@ class ASTExtractor(ast.NodeVisitor):
         self._last_node_id: str | None = None
         # Track variable → defining node id for data edges
         self._var_defs: dict[str, str] = {}
+        self._depth = 0
+        """Nesting depth inside a flow body; 0 means we are not in one."""
+
+    # -- scoping -------------------------------------------------------------
+
+    def visit_Module(self, node: ast.Module) -> None:
+        """Descend only into the module's workflow functions."""
+        for fn in _flow_functions(node):
+            # Each flow starts its own control chain rather than continuing the
+            # previous one, so two workflows in a file do not appear connected.
+            self._last_node_id = None
+            self._depth = 1
+            for stmt in fn.body:
+                self.visit(stmt)
+            self._depth = 0
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_nested_def(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_nested_def(node)
+
+    def _visit_nested_def(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        """A function declared inside a flow body is a step, not flow structure.
+
+        Its internals belong to that step's node, not to the graph, so we stop
+        here. At module level this is unreachable — ``visit_Module`` selects the
+        flows directly.
+        """
+        return
 
     def _alloc_id(self, prefix: str) -> str:
         count = self._counter.get(prefix, 0)
@@ -171,34 +207,34 @@ class ASTExtractor(ast.NodeVisitor):
         self._last_node_id = node.id
         return node.id
 
-    def visit_If(self, node: ast.If) -> None:  # noqa: N802
+    def visit_If(self, node: ast.If) -> None:
         nid = self._alloc_id("switch")
         self._add_node(
             WGIRNode(id=nid, kind=NodeKind.SWITCH, label="if"), node
         )
         self.generic_visit(node)
 
-    def visit_For(self, node: ast.For) -> None:  # noqa: N802
+    def visit_For(self, node: ast.For) -> None:
         nid = self._alloc_id("loop")
         self._add_node(
             WGIRNode(id=nid, kind=NodeKind.LOOP, label="for"), node
         )
         self.generic_visit(node)
 
-    def visit_While(self, node: ast.While) -> None:  # noqa: N802
+    def visit_While(self, node: ast.While) -> None:
         nid = self._alloc_id("loop")
         self._add_node(
             WGIRNode(id=nid, kind=NodeKind.LOOP, label="while"), node
         )
         self.generic_visit(node)
 
-    def visit_Return(self, node: ast.Return) -> None:  # noqa: N802
+    def visit_Return(self, node: ast.Return) -> None:
         nid = self._alloc_id("return")
         self._add_node(
             WGIRNode(id=nid, kind=NodeKind.RETURN, label="return"), node
         )
 
-    def visit_Assign(self, node: ast.Assign) -> None:  # noqa: N802
+    def visit_Assign(self, node: ast.Assign) -> None:
         # Track which variable is assigned by which node
         self.generic_visit(node)
         # After visiting the value side, the last_node_id is the producer
@@ -207,7 +243,7 @@ class ASTExtractor(ast.NodeVisitor):
                 if isinstance(target, ast.Name):
                     self._var_defs[target.id] = self._last_node_id
 
-    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+    def visit_Call(self, node: ast.Call) -> None:
         call_name = self._resolve_call_name(node)
         if call_name and call_name.startswith("ctx."):
             method = call_name.split(".", 1)[1]
@@ -258,6 +294,52 @@ class ASTExtractor(ast.NodeVisitor):
         if method in ("sleep", "sleep_until"):
             return "sleep"
         return method
+
+
+_FLOW_DECORATORS = frozenset({"workflow", "flow"})
+
+FunctionNode = ast.FunctionDef | ast.AsyncFunctionDef
+
+
+def _decorator_name(decorator: ast.expr) -> str:
+    """Bare name of a decorator, whether or not it was called with arguments."""
+    if isinstance(decorator, ast.Name):
+        return decorator.id
+    if isinstance(decorator, ast.Call):
+        return _decorator_name(decorator.func)
+    if isinstance(decorator, ast.Attribute):
+        return decorator.attr
+    return ""
+
+
+def _is_flow(node: FunctionNode) -> bool:
+    return any(_decorator_name(d) in _FLOW_DECORATORS for d in node.decorator_list)
+
+
+def _takes_ctx(node: FunctionNode) -> bool:
+    args = node.args.args
+    return bool(args) and args[0].arg == "ctx"
+
+
+def _flow_functions(module: ast.Module) -> list[FunctionNode]:
+    """The functions whose bodies make up the graph.
+
+    Prefers ``@workflow``-decorated functions. Falls back to async functions
+    whose first parameter is ``ctx`` so a bare body — a snippet, or a generated
+    file inspected before its decorators are settled — still extracts.
+    """
+    decorated = [
+        node
+        for node in ast.walk(module)
+        if isinstance(node, FunctionNode) and _is_flow(node)
+    ]
+    if decorated:
+        return decorated
+    return [
+        node
+        for node in module.body
+        if isinstance(node, ast.AsyncFunctionDef) and _takes_ctx(node)
+    ]
 
 
 def extract_from_source(

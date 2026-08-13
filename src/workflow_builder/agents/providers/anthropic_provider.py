@@ -30,6 +30,22 @@ _STOP_REASON_MAP: dict[str, FinishReason] = {
     "max_tokens": FinishReason.LENGTH,
 }
 
+#: Models that reject sampling controls outright — a hard 400, not a warning:
+#: "`temperature` is deprecated for this model". Claude 4.x still accepts both.
+#: The list is deliberately narrow: dropping these silently everywhere would
+#: ignore a caller who set them on a model that honours them.
+_NO_SAMPLING_CONTROLS = ("claude-sonnet-5", "claude-opus-5", "claude-haiku-5")
+
+
+def _rejects_sampling_controls(model: str) -> bool:
+    """True when ``temperature``/``top_p`` must be omitted for *model*.
+
+    Worth handling here rather than at the call site: a coding agent lowers the
+    temperature for determinism, which turns every request into a 400 and takes
+    the whole agent down with it.
+    """
+    return model.startswith(_NO_SAMPLING_CONTROLS)
+
 
 class AnthropicProvider:
     """Wraps the ``anthropic`` SDK as a LOOM ``ModelProvider``.
@@ -50,11 +66,20 @@ class AnthropicProvider:
         *,
         api_key: str | None = None,
         max_tokens: int = 4096,
+        cache: bool = True,
     ) -> None:
         import anthropic
 
         self.model_name = model_name
         self._max_tokens = max_tokens
+        self._cache = cache
+        """Reuse the unchanged prefix of a conversation across turns.
+
+        An agent loop resends its whole context every turn, so the system
+        prompt and tool schemas — identical from the first turn to the last —
+        are paid for once per turn. Marking them cacheable makes that a read
+        against a cache instead. Set ``cache=False`` for a single-shot call,
+        where writing a cache costs more than it saves."""
         self._client = anthropic.AsyncAnthropic(
             api_key=api_key or os.environ.get("ANTHROPIC_API_KEY", ""),
         )
@@ -73,13 +98,16 @@ class AnthropicProvider:
             "messages": messages,
         }
         if system_prompt:
-            kwargs["system"] = system_prompt
+            kwargs["system"] = _cacheable_system(system_prompt, self._cache)
         if tools:
-            kwargs["tools"] = tools
-        if settings.temperature is not None:
-            kwargs["temperature"] = settings.temperature
-        if settings.top_p is not None:
-            kwargs["top_p"] = settings.top_p
+            kwargs["tools"] = _cacheable_tools(tools, self._cache)
+        if self._cache:
+            _mark_message_prefix(messages)
+        if not _rejects_sampling_controls(self.model_name):
+            if settings.temperature is not None:
+                kwargs["temperature"] = settings.temperature
+            if settings.top_p is not None:
+                kwargs["top_p"] = settings.top_p
         if settings.stop:
             kwargs["stop_sequences"] = settings.stop
 
@@ -90,6 +118,49 @@ class AnthropicProvider:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+#: Anthropic allows four cache breakpoints per request. Three are spent on the
+#: stable prefix — system, tools, and the conversation so far — leaving one
+#: spare rather than spreading them thin.
+_CACHE_CONTROL = {"type": "ephemeral"}
+
+
+def _cacheable_system(prompt: str, cache: bool) -> Any:
+    """The system prompt, marked cacheable when caching is on."""
+    if not cache:
+        return prompt
+    return [{"type": "text", "text": prompt, "cache_control": _CACHE_CONTROL}]
+
+
+def _cacheable_tools(tools: list[dict[str, Any]], cache: bool) -> list[dict[str, Any]]:
+    """Mark the last tool, which caches every tool definition before it."""
+    if not cache or not tools:
+        return tools
+    marked = [dict(tool) for tool in tools]
+    marked[-1]["cache_control"] = _CACHE_CONTROL
+    return marked
+
+
+def _mark_message_prefix(messages: list[dict[str, Any]]) -> None:
+    """Cache the conversation up to the last completed exchange.
+
+    An agent loop appends to its history and resends all of it, so everything
+    but the newest turn is unchanged from the previous request. Marking the
+    second-to-last message makes that prefix a cache read; the newest turn is
+    left out because it will not be reused.
+    """
+    if len(messages) < 3:
+        return
+    target = messages[-2]
+    content = target.get("content")
+    if isinstance(content, str):
+        target["content"] = [
+            {"type": "text", "text": content, "cache_control": _CACHE_CONTROL}
+        ]
+    elif isinstance(content, list) and content and isinstance(content[-1], dict):
+        content[-1] = {**content[-1], "cache_control": _CACHE_CONTROL}
+
 
 
 def _split_messages(
@@ -176,7 +247,10 @@ def _parse_response(raw: Any) -> ModelResponse:
         tool_calls=tool_calls,
     )
 
+    # Cache reads are billed at a fraction of the input rate, so reporting them
+    # separately is what makes the saving visible rather than assumed.
     usage = Usage(
+        cached_input_tokens=int(getattr(raw.usage, "cache_read_input_tokens", 0) or 0),
         input_tokens=raw.usage.input_tokens,
         output_tokens=raw.usage.output_tokens,
     )

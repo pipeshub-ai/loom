@@ -102,6 +102,10 @@ class MongoStore:
             {"_id": record.run_id}, doc, upsert=True
         )
 
+    async def delete_execution(self, run_id: str) -> None:
+        await self._db.journal.delete_many({"run_id": run_id})
+        await self._db.executions.delete_one({"_id": run_id})
+
     async def list_executions(
         self,
         *,

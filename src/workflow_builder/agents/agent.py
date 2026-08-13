@@ -19,6 +19,7 @@ from workflow_builder.agents.limits import DEFAULT_LIMITS, UsageLimits
 from workflow_builder.agents.models import ModelProvider, ModelSettings
 from workflow_builder.agents.result import AgentResult
 from workflow_builder.agents.tools import Tool
+from workflow_builder.core.exceptions import ConfigurationError
 
 OutputT = TypeVar("OutputT")
 
@@ -91,6 +92,36 @@ class Agent(Generic[OutputT]):
 
         return BuiltInAgentRuntime(agent=self)
 
+    def session(
+        self, key: str, *, store: Any | None = None
+    ) -> AgentSession[OutputT]:
+        """Open a multi-turn session against this agent.
+
+        Each call on the returned object sees every prior turn::
+
+            chat = support_agent.session(key=f"ticket-{ticket_id}")
+            await chat("My order hasn't arrived")
+            await chat("What was the tracking number again?")  # remembers
+
+        Parameters
+        ----------
+        key:
+            Conversation identifier. Reuse it to resume a conversation.
+        store:
+            A :class:`Session` implementation. Defaults to a process-local one,
+            which is fine for a single process and loses history on restart —
+            pass ``StoreBackedSession(runtime.store)`` to make it durable.
+        """
+        if self.persistence is PersistenceClass.EPHEMERAL:
+            raise ConfigurationError(
+                f"agent '{self.name}' is EPHEMERAL, so a session would not retain "
+                "anything between calls. Construct it with "
+                "persistence=PersistenceClass.SESSION."
+            )
+        from workflow_builder.agents.memory import InMemorySession
+
+        return AgentSession(agent=self, key=key, store=store or InMemorySession())
+
     def with_settings(self, **overrides: Any) -> Agent[OutputT]:
         """Return a copy with overridden settings."""
         import copy
@@ -103,3 +134,48 @@ class Agent(Generic[OutputT]):
 
     def __repr__(self) -> str:
         return f"<Agent {self.name} persistence={self.persistence.value}>"
+
+
+@dataclass
+class AgentSession(Generic[OutputT]):
+    """A conversation with one agent, carrying history across calls.
+
+    Returned by :meth:`Agent.session`. Callable like the agent itself; the
+    difference is that prior turns are replayed into each run and the result is
+    written back, so the agent actually remembers.
+    """
+
+    agent: Agent[OutputT]
+    key: str
+    store: Any
+
+    async def __call__(
+        self,
+        input: Any,
+        *,
+        settings: AgentSettings | None = None,
+    ) -> AgentResult[OutputT]:
+        from workflow_builder.agents.memory import replace_history
+
+        memory_key = f"{self.agent.name}:{self.key}"
+        history = await self.store.get(memory_key)
+        result = await self.agent(
+            input,
+            settings=settings,
+            context=AgentContext(
+                agent_id=self.agent.name,
+                session_id=self.key,
+                history=list(history),
+            ),
+        )
+        if result.messages:
+            await replace_history(self.store, memory_key, result.messages)
+        return result
+
+    async def history(self) -> list[Any]:
+        """Every turn recorded so far, oldest first."""
+        return await self.store.get(f"{self.agent.name}:{self.key}")
+
+    async def reset(self) -> None:
+        """Forget this conversation. The agent itself is unchanged."""
+        await self.store.clear(f"{self.agent.name}:{self.key}")

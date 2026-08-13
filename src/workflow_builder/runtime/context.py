@@ -9,17 +9,22 @@ crash, a deploy, or a three-week wait for a human to click "approve".
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random as _random
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Generic, NoReturn, TypeVar
 
+from workflow_builder.agents.memory import replace_history
+from workflow_builder.agents.result import AgentResult
 from workflow_builder.core.exceptions import (
+    BudgetExceeded,
     ConfigurationError,
     ContinueAsNew,
     ControlSignal,
     RetriesExhausted,
+    SerializationError,
     StepError,
     Suspend,
     TimeoutExceeded,
@@ -40,10 +45,11 @@ from workflow_builder.runtime.journal import (
 )
 from workflow_builder.steps.context import StepContext
 from workflow_builder.steps.definition import StepDefinition
+from workflow_builder.storage.artifact import ArtifactVersion
+from workflow_builder.storage.attachment import Attachment
 
 if TYPE_CHECKING:
     from workflow_builder.agents.agent import Agent
-    from workflow_builder.agents.result import AgentResult
     from workflow_builder.core.models import ExecutionRecord
     from workflow_builder.observability.tracing import Span
     from workflow_builder.runtime.engine import Runtime
@@ -123,7 +129,7 @@ class DurableCall(Generic[T]):
 
         recorded = journal.lookup(self.path, self.kind, self.name)
         if recorded is not None and recorded.status is EntryStatus.COMPLETED:
-            return decode(recorded.output, self._output_type)
+            return decode(await ctx._load_payload(recorded.output), self._output_type)
         if recorded is not None and recorded.status is EntryStatus.FAILED:
             # Replay must surface the failure the workflow originally saw. To re-run the
             # step against fixed code use runtime.retry(), which prunes failed entries.
@@ -141,7 +147,7 @@ class DurableCall(Generic[T]):
             kind=self.kind,
             name=self.name,
             fingerprint=self._fingerprint,
-            input=_safe_encode(self._input),
+            input=_encode_debug(self._input),
             status=EntryStatus.PENDING,
             started_at=_utcnow(),
             metadata={k: v for k, v in self._metadata.items() if v is not None},
@@ -189,7 +195,11 @@ class DurableCall(Generic[T]):
                     await asyncio.sleep(self._retry.delay_for(attempt, rng=ctx._backoff_rng))
                 else:
                     entry.status = EntryStatus.COMPLETED
-                    entry.output = _safe_encode(result)
+                    entry.output = await ctx._store_payload(
+                        _encode_durable(
+                            result, what=f"{self.kind.value} '{self.name}' returned a value"
+                        )
+                    )
                     entry.finished_at = _utcnow()
                     if isinstance(usage := getattr(result, "usage", None), Usage):
                         entry.usage = usage
@@ -263,11 +273,46 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def _safe_encode(value: Any) -> Any:
+def _encode_durable(value: Any, *, what: str) -> Any:
+    """Encode a value that will be **served back on replay**.
+
+    This must never degrade. A durable value that silently became a placeholder
+    would be handed to the workflow on the next attempt as if it were real, so a
+    value that cannot be journaled is an error, not a warning.
+    """
+    try:
+        return encode(value)
+    except SerializationError as exc:
+        raise SerializationError(f"{what}: {exc}") from exc
+
+
+def _encode_debug(value: Any) -> Any:
+    """Encode a value recorded only for observability.
+
+    Step inputs and signal payloads are written for humans reading a trace; they
+    are never replayed into the workflow. Degrading here loses a debugging aid,
+    not correctness, so a stubborn value is marked rather than fatal.
+    """
     try:
         return encode(value)
     except Exception:
         return {"__unserializable__": type(value).__name__}
+
+
+#: Marker wrapping a journal payload that was offloaded to blob storage.
+BLOB_KEY = "__blob__"
+
+
+def _is_blob_marker(value: Any) -> bool:
+    return isinstance(value, dict) and set(value) == {BLOB_KEY}
+
+
+def _json_bytes(encoded: Any) -> bytes | None:
+    """Serialize an already-encoded payload for sizing, or None if it will not."""
+    try:
+        return json.dumps(encoded).encode()
+    except (TypeError, ValueError):
+        return None
 
 
 class Context(Generic[DepsT]):
@@ -296,6 +341,7 @@ class Context(Generic[DepsT]):
         self._pending_flush = 0
         self._compensation_stack: list[tuple[Callable[..., Awaitable[Any]], tuple[Any, ...]]] = []
         self._active_patches: frozenset[str] = frozenset()
+        self._warned_journal_size = False
 
     def nested(self, path: str) -> Context[DepsT]:
         """A view of this context whose durable calls nest beneath ``path``.
@@ -446,7 +492,7 @@ class Context(Generic[DepsT]):
         if recorded is not None and recorded.status is EntryStatus.COMPLETED:
             return recorded.output
 
-        value = _safe_encode(produce())
+        value = _encode_durable(produce(), what=f"side effect '{name}'")
         self._journal.put(
             JournalEntry(
                 path=path,
@@ -487,6 +533,12 @@ class Context(Generic[DepsT]):
         await self.sleep_until(self.now() + timedelta(seconds=to_seconds(duration)), name=name)
 
     async def sleep_until(self, when: datetime, *, name: str = "sleep") -> None:
+        """Durably pause until a specific moment.
+
+        The absolute-time counterpart to :meth:`sleep`. Prefer it for "9am on the
+        first of the month" — a duration computed from ``now`` drifts every time
+        the run is re-entered, an absolute wake time does not.
+        """
         path = self._scope.allocate()
         recorded = self._journal.lookup(path, EntryKind.SLEEP, name)
         if recorded is not None and recorded.status is EntryStatus.COMPLETED:
@@ -550,7 +602,7 @@ class Context(Generic[DepsT]):
 
         delivered = await self._runtime.take_event(self.run_id, name)
         if delivered is not None:
-            payload = _safe_encode(delivered.payload)
+            payload = _encode_durable(delivered.payload, what=f"event '{name}' payload")
             self._journal.put(
                 JournalEntry(
                     path=path,
@@ -572,7 +624,7 @@ class Context(Generic[DepsT]):
                     kind=EntryKind.EVENT,
                     name=name,
                     status=EntryStatus.COMPLETED,
-                    output=_safe_encode(default),
+                    output=_encode_durable(default, what=f"event '{name}' timeout default"),
                     metadata={"timed_out": True},
                     started_at=_utcnow(),
                     finished_at=_utcnow(),
@@ -631,6 +683,29 @@ class Context(Generic[DepsT]):
             name=f"signal:{name}",
             perform=perform,
             input={"run_id": run_id, "payload": payload},
+        )
+
+    async def emit(self, name: str, payload: Any = None) -> None:
+        """Broadcast an event to whoever is waiting for it.
+
+        The counterpart to :meth:`signal`: that one names a target run, this one
+        does not, so any run parked on ``wait_for_event(name)`` may take it.
+        Journaled, so a replay does not emit a second time.
+
+        Use it for "this happened" — an order shipped, a document indexed — where
+        the emitter has no business knowing who cares.
+        """
+
+        async def perform(attempt: int, step_ctx: StepContext) -> Any:
+            await self._runtime.send_event(None, name, payload)
+            return True
+
+        await DurableCall(
+            self,
+            kind=EntryKind.SIGNAL,
+            name=f"emit:{name}",
+            perform=perform,
+            input={"payload": payload},
         )
 
     # -- composition ------------------------------------------------------------------
@@ -756,6 +831,7 @@ class Context(Generic[DepsT]):
         name: str | None = None,
         max_turns: int | None = None,
         session_id: str | None = None,
+        agent_id: str = "",
         toolsets: list[str] | None = None,
         **kwargs: Any,
     ) -> DurableCall[AgentResult[T]]:
@@ -775,10 +851,26 @@ class Context(Generic[DepsT]):
         toolsets:
             Optional list of toolset IDs to resolve from the registry.
             If None, all registered toolsets are used.
+        session_id:
+            Conversation to continue. Prior turns are replayed into the call and
+            the updated transcript is stored afterwards, so calling the same
+            agent twice in one workflow is a conversation rather than two
+            unrelated one-shots. Raises if the backend cannot honour it.
+        agent_id:
+            Stable identity for the agent. Memory is keyed by
+            ``agent_id:session_id``, so two agents sharing a session id keep
+            separate memories of it.
+        max_turns:
+            Per-call override of the backend's turn budget.
         """
         if isinstance(agent_or_prompt, str) and input is None:
             return self._agent_from_backend(
-                agent_or_prompt, name=name, toolsets=toolsets,
+                agent_or_prompt,
+                name=name,
+                toolsets=toolsets,
+                session_id=session_id,
+                max_turns=max_turns,
+                agent_id=agent_id,
             )
 
         # Backward-compatible path: Agent object
@@ -804,6 +896,10 @@ class Context(Generic[DepsT]):
             perform=perform,
             fingerprint=make_fingerprint(label, (input,)),
             input=input,
+            # Without this the journalled result decodes back as a plain dict on
+            # replay, and `result.output` raises AttributeError on the second
+            # attempt but not the first.
+            output_type=AgentResult,
             retry=Retry(max_attempts=1),
         )
 
@@ -813,6 +909,9 @@ class Context(Generic[DepsT]):
         *,
         name: str | None = None,
         toolsets: list[str] | None = None,
+        session_id: str | None = None,
+        max_turns: int | None = None,
+        agent_id: str = "",
     ) -> DurableCall[AgentResult[Any]]:
         """Route a prompt-only ctx.agent() call through the runtime's backend."""
         backend = self._runtime.agent_backend
@@ -823,12 +922,41 @@ class Context(Generic[DepsT]):
             )
             raise ConfigurationError(msg)
 
-        label = name or "agent:backend"
+        identity = agent_id or "backend"
+        label = name or f"agent:{identity}"
+
+        if session_id is not None and not getattr(backend, "supports_history", False):
+            raise ConfigurationError(
+                f"{type(backend).__name__} does not support conversation history, so "
+                f"session_id={session_id!r} would be ignored and every call would start "
+                "from a blank conversation. Use BuiltInBackend, or drop session_id."
+            )
+
+        # Sessions are keyed by agent as well as conversation, so two agents
+        # sharing a session id keep separate memories of it.
+        memory_key = f"{identity}:{session_id}" if session_id else None
 
         async def perform(attempt: int, step_ctx: StepContext) -> Any:
-            # Layer 3: resolve tools lazily from the registry
-            tools = self._runtime.toolsets.resolve_tools(toolsets)
-            return await backend.run(prompt, tools=tools)
+            # Layer 3: resolve tools lazily from the registry, narrowed to what
+            # this workflow declared it may use.
+            tools = self._runtime.toolsets.resolve_tools(
+                toolsets, grants=self._definition.grants
+            )
+            history = (
+                await self._runtime.sessions.get(memory_key) if memory_key else []
+            )
+            result = await backend.run(
+                prompt,
+                tools=tools,
+                history=history,
+                agent_id=identity,
+                max_turns=max_turns,
+            )
+            if memory_key and result.messages:
+                await replace_history(
+                    self._runtime.sessions, memory_key, result.messages
+                )
+            return result
 
         return DurableCall(
             self,
@@ -837,7 +965,91 @@ class Context(Generic[DepsT]):
             perform=perform,
             fingerprint=make_fingerprint(label, (prompt,)),
             input=prompt,
+            output_type=AgentResult,
             retry=Retry(max_attempts=1),
+            metadata={"agent_id": identity, "session_id": session_id},
+        )
+
+    # -- artifacts ----------------------------------------------------------------------
+
+    def put_artifact(
+        self,
+        name: str,
+        data: bytes | Attachment,
+        *,
+        mime: str = "application/octet-stream",
+        **metadata: Any,
+    ) -> DurableCall[ArtifactVersion]:
+        """Publish a named artifact, returning the version it became.
+
+        Journaled, so a replay returns the version the run originally produced
+        instead of publishing a second one. Publishing byte-identical content
+        twice is a no-op that resolves to the existing version.
+
+        ``ctx.put_artifact("report.pdf", pdf_bytes)`` → ``report.pdf@1``, then
+        ``@2`` when the bytes change.
+        """
+        payload = data
+        label = f"artifact:put:{name}"
+
+        async def perform(attempt: int, step_ctx: StepContext) -> Any:
+            service = self._runtime.require_artifacts()
+            raw = payload.data or b"" if isinstance(payload, Attachment) else payload
+            content_type = payload.mime if isinstance(payload, Attachment) else mime
+            return await service.put(
+                name, raw, mime=content_type, run_id=self.run_id, **metadata
+            )
+
+        return DurableCall(
+            self,
+            kind=EntryKind.STEP,
+            name=label,
+            perform=perform,
+            fingerprint=make_fingerprint(label, (name,)),
+            input={"name": name, "mime": mime},
+            output_type=ArtifactVersion,
+        )
+
+    def get_artifact(self, name: str, version: int | None = None) -> DurableCall[bytes]:
+        """Read a named artifact's content. ``version=None`` means latest.
+
+        The resolved version is journaled, so a replay reads exactly what the
+        original run read even if newer versions have been published since —
+        without that, a replay is not a rehearsal of what happened but of what
+        would happen now.
+        """
+        label = f"artifact:get:{name}"
+
+        async def perform(attempt: int, step_ctx: StepContext) -> Any:
+            service = self._runtime.require_artifacts()
+            resolved = await service.get(name, version)
+            return await service.read(resolved.name, resolved.version)
+
+        return DurableCall(
+            self,
+            kind=EntryKind.STEP,
+            name=label,
+            perform=perform,
+            fingerprint=make_fingerprint(label, (name, version)),
+            input={"name": name, "version": version},
+            output_type=bytes,
+        )
+
+    def artifact_versions(self, name: str) -> DurableCall[list[ArtifactVersion]]:
+        """List every published version of *name*, oldest first."""
+        label = f"artifact:history:{name}"
+
+        async def perform(attempt: int, step_ctx: StepContext) -> Any:
+            return await self._runtime.require_artifacts().history(name)
+
+        return DurableCall(
+            self,
+            kind=EntryKind.STEP,
+            name=label,
+            perform=perform,
+            fingerprint=make_fingerprint(label, (name,)),
+            input={"name": name},
+            output_type=list[ArtifactVersion],
         )
 
     # -- saga / compensation ------------------------------------------------------------
@@ -868,7 +1080,7 @@ class Context(Generic[DepsT]):
                 kind=EntryKind.STEP,
                 name=f"compensate:{fn.__name__}",
                 status=EntryStatus.COMPLETED,
-                output=_safe_encode({"fn": fn.__name__, "args": args}),
+                output=_encode_debug({"fn": fn.__name__, "args": args}),
                 started_at=_utcnow(),
                 finished_at=_utcnow(),
                 attempts=1,
@@ -918,7 +1130,7 @@ class Context(Generic[DepsT]):
                 kind=EntryKind.STEP,
                 name="continue_as_new",
                 status=EntryStatus.COMPLETED,
-                output=_safe_encode({"rotation_seed": seed}),
+                output=_encode_durable(seed, what="continue_as_new seed"),
                 started_at=_utcnow(),
                 finished_at=_utcnow(),
                 attempts=1,
@@ -934,11 +1146,23 @@ class Context(Generic[DepsT]):
         self._record.metadata.update(values)
 
     def tag(self, *tags: str) -> None:
+        """Label this run for later filtering, e.g. ``ctx.tag("priority", "eu")``.
+
+        Tags are queryable through ``runtime.list_runs(tags=[...])``. Use them for
+        categories you will search by; use :meth:`set_metadata` for values.
+        """
         for value in tags:
             if value not in self._record.tags:
                 self._record.tags.append(value)
 
     def span(self, name: str, **attributes: Any) -> Span:
+        """Open a tracing span around a region of orchestration code.
+
+        Durable operations already get their own spans; this is for grouping
+        several of them under one name in a trace viewer. Spans are observability
+        only — nothing about them is journaled, so opening one cannot affect
+        replay.
+        """
         return self._tracer.start_span(name, attributes=attributes)
 
     async def checkpoint(self) -> None:
@@ -946,13 +1170,80 @@ class Context(Generic[DepsT]):
         await self._flush()
 
     def raise_if_cancelled(self) -> None:
+        """Abort now if cancellation has been requested.
+
+        Cancellation is otherwise observed at the next durable operation. Call
+        this inside a long stretch of pure computation so a cancelled run stops
+        promptly rather than finishing work nobody wants.
+        """
         if self._runtime.is_cancellation_requested(self.run_id):
             raise WorkflowCancelled(f"run {self.run_id} was cancelled")
 
     # -- internals --------------------------------------------------------------------
 
+    async def _store_payload(self, encoded: Any) -> Any:
+        """Offload an oversized journal payload to blob storage.
+
+        Returns the value unchanged when no blob service is configured or the
+        payload is small, so the common case stays a plain inline journal row.
+        """
+        blobs = self._runtime.blobs
+        if blobs is None:
+            return encoded
+        raw = _json_bytes(encoded)
+        if raw is None or not blobs.should_offload(raw):
+            return encoded
+        ref = await blobs.store(raw, "application/json")
+        self.logger.debug("offloaded %d bytes to %s", len(raw), ref)
+        return {BLOB_KEY: ref}
+
+    async def _load_payload(self, stored: Any) -> Any:
+        """Rehydrate a journal payload, following a blob reference if present."""
+        if not _is_blob_marker(stored):
+            return stored
+        ref = stored[BLOB_KEY]
+        blobs = self._runtime.blobs
+        if blobs is None:
+            raise ConfigurationError(
+                f"journal entry references {ref} but this Runtime has no blob service. "
+                "Pass the same blobs=BlobService(...) used when the run was recorded."
+            )
+        return json.loads(await blobs.load(ref))
+
+    def _check_journal_size(self) -> None:
+        """Warn, then fail, as a run's journal grows without bound.
+
+        A forever-flow that never calls :meth:`continue_as_new` re-reads its whole
+        journal on every attempt, so it degrades quadratically and silently. The
+        warning fires once per run; the hard limit turns a slow death into a clear
+        failure that names the fix.
+        """
+        runtime = self._runtime
+        size = len(self._journal)
+
+        if runtime.journal_max_entries and size >= runtime.journal_max_entries:
+            raise BudgetExceeded(
+                f"run {self.run_id} journaled {size} operations, over the limit of "
+                f"{runtime.journal_max_entries}. A long-lived workflow should call "
+                "ctx.continue_as_new(seed) to rotate into a fresh run, or raise "
+                "journal_max_entries on the Runtime.",
+                budget_type="journal_entries",
+                limit=runtime.journal_max_entries,
+                actual=size,
+            )
+
+        if not self._warned_journal_size and size >= runtime.journal_warn_entries:
+            self._warned_journal_size = True
+            self.logger.warning(
+                "run %s has journaled %d operations; consider ctx.continue_as_new() "
+                "to keep the journal bounded",
+                self.run_id,
+                size,
+            )
+
     async def _maybe_flush(self, *, force: bool = False) -> None:
         self._pending_flush += 1
+        self._check_journal_size()
         if force or self._pending_flush >= self._runtime.flush_every:
             await self._flush()
 

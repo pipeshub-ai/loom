@@ -1,61 +1,67 @@
-"""MCP resource definitions for the LOOM server."""
+"""What an MCP client can *read* from a Runtime.
+
+Resources are the read-only half of MCP: addressable documents a client can pull
+into context without taking an action. Tools do; resources describe.
+
+The split matters for a workflow engine. ``loom://workflows`` is stable
+reference material a client can cache, while ``run_workflow`` has side effects
+and must not be something a client fetches speculatively.
+
+As with :mod:`.tools`, nothing here imports ``mcp``.
+"""
+
 from __future__ import annotations
 
 import json
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from workflow_builder.mcp_server.bridge import RuntimeBridge
+    from workflow_builder.facade import RuntimeFacade
 
-# -----------------------------------------------------------------
-# Resource handler functions -- testable without the ``mcp`` package.
-# -----------------------------------------------------------------
+__all__ = [
+    "RESOURCES",
+    "read_run",
+    "read_run_journal",
+    "read_workflow",
+    "read_workflows",
+]
+
+#: URI templates this server serves, for documentation and registration.
+RESOURCES: dict[str, str] = {
+    "loom://workflows": "Every workflow this server can run",
+    "loom://workflows/{name}": "One workflow's definition and input schema",
+    "loom://runs/{run_id}": "One run's status, input, output, and error",
+    "loom://runs/{run_id}/journal": "The durable operations a run recorded",
+}
 
 
-async def handle_workflow_list(bridge: RuntimeBridge) -> str:
-    """Return all workflows as JSON."""
-    workflows = await bridge.list_workflows()
-    return json.dumps(workflows, indent=2)
+def _json(payload: Any) -> str:
+    return json.dumps(payload, indent=2, default=str)
 
 
-async def handle_workflow_detail(
-    bridge: RuntimeBridge,
-    workflow_id: str,
-) -> str:
-    """Return details for a single workflow."""
-    workflows = await bridge.list_workflows()
-    wf = next(
-        (w for w in workflows if w["id"] == workflow_id),
-        None,
+async def read_workflows(facade: RuntimeFacade) -> str:
+    """``loom://workflows``"""
+    return _json({"workflows": await facade.workflows()})
+
+
+async def read_workflow(facade: RuntimeFacade, name: str) -> str:
+    """``loom://workflows/{name}``"""
+    match = next(
+        (entry for entry in await facade.workflows() if entry["name"] == name), None
     )
-    if not wf:
-        return json.dumps(
-            {"error": f"Workflow '{workflow_id}' not found"},
-        )
-    return json.dumps(wf, indent=2)
+    if match is None:
+        return _json({"error": f"No workflow named '{name}'."})
+    return _json(match)
 
 
-async def handle_run_detail(
-    bridge: RuntimeBridge,
-    run_id: str,
-) -> str:
-    """Return details for a single run."""
-    status = await bridge.get_run_status(run_id)
-    return json.dumps(status, indent=2)
+async def read_run(facade: RuntimeFacade, run_id: str) -> str:
+    """``loom://runs/{run_id}``"""
+    run = await facade.get(run_id)
+    return _json(run if run is not None else {"error": f"No run '{run_id}'."})
 
 
-async def handle_run_journal(
-    bridge: RuntimeBridge,
-    run_id: str,
-) -> str:
-    """Return journal entries for a run as JSON."""
-    journal = await bridge.get_run_journal(run_id)
-    return json.dumps(journal, indent=2)
-
-
-def register_resources(server: Any, bridge: Any) -> None:
-    """Register resources with an MCP Server instance.
-
-    Deferred: the actual ``mcp`` registration hooks will be
-    wired when the package is available.
-    """
+async def read_run_journal(facade: RuntimeFacade, run_id: str) -> str:
+    """``loom://runs/{run_id}/journal``"""
+    if await facade.get(run_id) is None:
+        return _json({"error": f"No run '{run_id}'."})
+    return _json({"run_id": run_id, "journal": await facade.journal(run_id)})

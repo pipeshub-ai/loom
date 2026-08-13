@@ -6,13 +6,52 @@ prompt builders, server factory.
 
 from __future__ import annotations
 
-import json
-
 import pytest
+
+from workflow_builder import Context, step, workflow
 
 # ---------------------------------------------------------------------------
 # RuntimeBridge
 # ---------------------------------------------------------------------------
+
+
+@step
+async def enrich(payload: dict) -> dict:
+    """Pretend to enrich a lead."""
+    return {"enriched": True, **payload}
+
+
+@workflow(name="lead_outreach")
+async def lead_outreach(ctx: Context, payload: dict) -> dict:
+    """Lead enrichment and outreach."""
+    return await ctx.step(enrich, payload or {})
+
+
+@workflow(name="other")
+async def other_workflow(ctx: Context, payload: dict) -> str:
+    """A second workflow, for filter tests."""
+    await ctx.step(enrich, payload or {})
+    return "ok"
+
+
+# Bound to a non-test_ name so pytest does not try to collect it as a test.
+@workflow(name="test_wf")
+async def sample_wf(ctx: Context, payload: dict) -> dict:
+    """A test workflow."""
+    return await ctx.step(enrich, payload or {})
+
+
+@workflow(name="wf1")
+async def wf1(ctx: Context, payload: dict) -> dict:
+    """Workflow 1."""
+    return await ctx.step(enrich, payload or {})
+
+
+@workflow(name="awaits_approval")
+async def awaits_approval(ctx: Context, payload: dict) -> str:
+    """Parks until someone approves, so there is a live run to act on."""
+    approved = await ctx.wait_for_approval("release")
+    return "approved" if approved else "rejected"
 
 
 class TestRuntimeBridge:
@@ -22,11 +61,23 @@ class TestRuntimeBridge:
 
         b = RuntimeBridge(store_url="memory://")
         b.register_workflow(
-            "lead_outreach",
+            lead_outreach,
             description="Lead enrichment and outreach",
             input_schema={"type": "object"},
         )
         return b
+
+    @pytest.mark.asyncio()
+    async def test_bridge_drives_the_real_runtime(self, bridge) -> None:
+        """The bridge reports what actually executed, not a canned shape."""
+        result = await bridge.run_workflow("lead_outreach", {"source": "test"})
+
+        # The output is what the step returned...
+        assert result["output"] == {"enriched": True, "source": "test"}
+        # ...and the same run is visible through the Runtime itself.
+        record = await bridge.runtime.get(result["run_id"])
+        assert record is not None
+        assert record.workflow == "lead_outreach"
 
     @pytest.mark.asyncio()
     async def test_list_workflows(self, bridge) -> None:
@@ -82,7 +133,7 @@ class TestRuntimeBridge:
     async def test_list_runs_filter_workflow(
         self, bridge
     ) -> None:
-        bridge.register_workflow("other", description="Other")
+        bridge.register_workflow(other_workflow, description="Other")
         await bridge.run_workflow("lead_outreach", {})
         await bridge.run_workflow("other", {})
         runs = await bridge.list_runs(
@@ -99,13 +150,35 @@ class TestRuntimeBridge:
 
     @pytest.mark.asyncio()
     async def test_cancel_run(self, bridge) -> None:
-        run = await bridge.run_workflow(
-            "lead_outreach", {}
-        )
+        # Cancel a run that is actually in flight — a suspended one waiting on
+        # an approval. Cancelling a finished run is a no-op by design.
+        bridge.register_workflow(awaits_approval)
+        run = await bridge.run_workflow("awaits_approval", {})
+        assert run["status"] == "suspended"
+
         result = await bridge.cancel_run(run["run_id"])
         assert result["status"] == "cancelled"
         status = await bridge.get_run_status(run["run_id"])
         assert status["status"] == "cancelled"
+
+    @pytest.mark.asyncio()
+    async def test_cancel_completed_run_leaves_it_completed(self, bridge) -> None:
+        run = await bridge.run_workflow("lead_outreach", {})
+        await bridge.cancel_run(run["run_id"])
+        status = await bridge.get_run_status(run["run_id"])
+        assert status["status"] == "completed"
+
+    @pytest.mark.asyncio()
+    async def test_send_event_resumes_a_parked_run(self, bridge) -> None:
+        bridge.register_workflow(awaits_approval)
+        run = await bridge.run_workflow("awaits_approval", {})
+        assert run["status"] == "suspended"
+
+        await bridge.send_event(
+            run["run_id"], "approval:release", {"approved": True}
+        )
+        resumed = await bridge.resume_run(run["run_id"])
+        assert resumed["status"] == "completed"
 
     @pytest.mark.asyncio()
     async def test_resume_run(self, bridge) -> None:
@@ -162,249 +235,10 @@ class TestRuntimeBridge:
 # ---------------------------------------------------------------------------
 
 
-class TestToolHandlers:
-    @pytest.fixture()
-    def bridge(self):
-        from workflow_builder.mcp_server.bridge import RuntimeBridge
-
-        b = RuntimeBridge()
-        b.register_workflow(
-            "test_wf", description="A test workflow"
-        )
-        return b
-
-    @pytest.mark.asyncio()
-    async def test_handle_list_workflows(self, bridge) -> None:
-        from workflow_builder.mcp_server.tools import (
-            handle_list_workflows,
-        )
-
-        result = await handle_list_workflows(bridge)
-        assert "test_wf" in result
-        assert "A test workflow" in result
-
-    @pytest.mark.asyncio()
-    async def test_handle_list_workflows_empty(self) -> None:
-        from workflow_builder.mcp_server.bridge import (
-            RuntimeBridge,
-        )
-        from workflow_builder.mcp_server.tools import (
-            handle_list_workflows,
-        )
-
-        b = RuntimeBridge()
-        result = await handle_list_workflows(b)
-        assert "No workflows" in result
-
-    @pytest.mark.asyncio()
-    async def test_handle_run_workflow(self, bridge) -> None:
-        from workflow_builder.mcp_server.tools import (
-            handle_run_workflow,
-        )
-
-        result = await handle_run_workflow(
-            bridge, "test_wf", '{"key": "val"}'
-        )
-        assert "completed" in result or "Run" in result
-
-    @pytest.mark.asyncio()
-    async def test_handle_run_invalid_json(
-        self, bridge
-    ) -> None:
-        from workflow_builder.mcp_server.tools import (
-            handle_run_workflow,
-        )
-
-        result = await handle_run_workflow(
-            bridge, "test_wf", "not json"
-        )
-        assert "Error" in result
-
-    @pytest.mark.asyncio()
-    async def test_handle_get_run_status(
-        self, bridge
-    ) -> None:
-        from workflow_builder.mcp_server.tools import (
-            handle_get_run_status,
-            handle_run_workflow,
-        )
-
-        await handle_run_workflow(
-            bridge, "test_wf", "{}"
-        )
-        # Extract run_id from bridge directly
-        runs = await bridge.list_runs()
-        run_id = runs[0]["run_id"]
-        status = await handle_get_run_status(bridge, run_id)
-        assert "test_wf" in status
-
-    @pytest.mark.asyncio()
-    async def test_handle_list_runs(self, bridge) -> None:
-        from workflow_builder.mcp_server.tools import (
-            handle_list_runs,
-            handle_run_workflow,
-        )
-
-        await handle_run_workflow(bridge, "test_wf", "{}")
-        result = await handle_list_runs(bridge)
-        assert "test_wf" in result
-
-    @pytest.mark.asyncio()
-    async def test_handle_list_runs_empty(self) -> None:
-        from workflow_builder.mcp_server.bridge import (
-            RuntimeBridge,
-        )
-        from workflow_builder.mcp_server.tools import (
-            handle_list_runs,
-        )
-
-        b = RuntimeBridge()
-        result = await handle_list_runs(b)
-        assert "No runs" in result
-
-    @pytest.mark.asyncio()
-    async def test_handle_cancel_run(self, bridge) -> None:
-        from workflow_builder.mcp_server.tools import (
-            handle_cancel_run,
-        )
-
-        run = await bridge.run_workflow("test_wf", {})
-        result = await handle_cancel_run(
-            bridge, run["run_id"]
-        )
-        assert "cancelled" in result
-
-    @pytest.mark.asyncio()
-    async def test_handle_send_event(self, bridge) -> None:
-        from workflow_builder.mcp_server.tools import (
-            handle_send_event,
-        )
-
-        run = await bridge.run_workflow("test_wf", {})
-        result = await handle_send_event(
-            bridge,
-            run["run_id"],
-            "approval",
-            '{"ok": true}',
-        )
-        assert "delivered" in result
-
-    @pytest.mark.asyncio()
-    async def test_handle_send_event_bad_json(
-        self, bridge
-    ) -> None:
-        from workflow_builder.mcp_server.tools import (
-            handle_send_event,
-        )
-
-        result = await handle_send_event(
-            bridge, "x", "ev", "bad"
-        )
-        assert "Error" in result
-
-    @pytest.mark.asyncio()
-    async def test_handle_get_run_logs(
-        self, bridge
-    ) -> None:
-        from workflow_builder.mcp_server.tools import (
-            handle_get_run_logs,
-        )
-
-        run = await bridge.run_workflow("test_wf", {})
-        result = await handle_get_run_logs(
-            bridge, run["run_id"]
-        )
-        assert "step" in result
-
-    @pytest.mark.asyncio()
-    async def test_handle_replay_run(self, bridge) -> None:
-        from workflow_builder.mcp_server.tools import (
-            handle_replay_run,
-        )
-
-        run = await bridge.run_workflow("test_wf", {})
-        result = await handle_replay_run(
-            bridge, run["run_id"]
-        )
-        assert "completed" in result
-
-
-# ---------------------------------------------------------------------------
-# Resource Handlers
-# ---------------------------------------------------------------------------
-
-
-class TestResourceHandlers:
-    @pytest.fixture()
-    def bridge(self):
-        from workflow_builder.mcp_server.bridge import RuntimeBridge
-
-        b = RuntimeBridge()
-        b.register_workflow("wf1", description="Workflow 1")
-        return b
-
-    @pytest.mark.asyncio()
-    async def test_workflow_list(self, bridge) -> None:
-        from workflow_builder.mcp_server.resources import (
-            handle_workflow_list,
-        )
-
-        result = await handle_workflow_list(bridge)
-        parsed = json.loads(result)
-        assert len(parsed) == 1
-        assert parsed[0]["id"] == "wf1"
-
-    @pytest.mark.asyncio()
-    async def test_workflow_detail(self, bridge) -> None:
-        from workflow_builder.mcp_server.resources import (
-            handle_workflow_detail,
-        )
-
-        result = await handle_workflow_detail(bridge, "wf1")
-        parsed = json.loads(result)
-        assert parsed["id"] == "wf1"
-
-    @pytest.mark.asyncio()
-    async def test_workflow_detail_not_found(
-        self, bridge
-    ) -> None:
-        from workflow_builder.mcp_server.resources import (
-            handle_workflow_detail,
-        )
-
-        result = await handle_workflow_detail(bridge, "nope")
-        assert "not found" in result.lower() or "error" in result.lower()
-
-    @pytest.mark.asyncio()
-    async def test_run_detail(self, bridge) -> None:
-        from workflow_builder.mcp_server.resources import (
-            handle_run_detail,
-        )
-
-        run = await bridge.run_workflow("wf1", {})
-        result = await handle_run_detail(
-            bridge, run["run_id"]
-        )
-        parsed = json.loads(result)
-        assert parsed["workflow_id"] == "wf1"
-
-    @pytest.mark.asyncio()
-    async def test_run_journal(self, bridge) -> None:
-        from workflow_builder.mcp_server.resources import (
-            handle_run_journal,
-        )
-
-        run = await bridge.run_workflow("wf1", {})
-        result = await handle_run_journal(
-            bridge, run["run_id"]
-        )
-        parsed = json.loads(result)
-        assert isinstance(parsed, list)
-
-
-# ---------------------------------------------------------------------------
-# Prompt Builders
-# ---------------------------------------------------------------------------
+# Tool and resource handler tests moved to tests/test_mcp_server.py when the
+# handlers were retargeted from RuntimeBridge onto the shared RuntimeFacade.
+# That file covers the same behaviour and more, against the real FastMCP server
+# and a live stdio subprocess.
 
 
 class TestPromptBuilders:

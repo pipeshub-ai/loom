@@ -44,6 +44,32 @@ class GrantSet(BaseModel):
             self.budget,
         ])
 
+    def allows_operation(self, toolset_id: str, op_id: str, effect: str) -> bool:
+        """Whether this grant set permits one operation on one toolset.
+
+        Entries are ``<toolset>[.<group>][:<effect>]``, matched most-specific
+        first::
+
+            "jira"                 every jira operation
+            "jira:read"            jira reads only
+            "jira.issues"          the issues group
+            "jira.issues:write"    writes within the issues group
+
+        An empty ``toolsets`` list grants nothing. That is deliberate: a grant
+        set is opt-in, and a caller that has declared *some* toolsets but not
+        this one should be denied rather than waved through.
+        """
+        group = op_id.split(".")[0] if "." in op_id else ""
+        for entry in self.toolsets:
+            scope, _, granted_effect = entry.partition(":")
+            if granted_effect and granted_effect != effect:
+                continue
+            if scope == toolset_id:
+                return True
+            if group and scope == f"{toolset_id}.{group}":
+                return True
+        return False
+
     def merge(self, other: GrantSet) -> GrantSet:
         """Merge two grant sets (union)."""
         return GrantSet(
@@ -95,7 +121,7 @@ class _GrantVisitor(ast.NodeVisitor):
     def __init__(self) -> None:
         self.grants = GrantSet()
 
-    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+    def visit_Call(self, node: ast.Call) -> None:
         # Detect ctx.agent(..., agent_name) or ctx.child(workflow_name, ...)
         if isinstance(node.func, ast.Attribute):
             attr = node.func.attr
@@ -109,14 +135,14 @@ class _GrantVisitor(ast.NodeVisitor):
                     self.grants.subflows.append(name)
         self.generic_visit(node)
 
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         # Detect toolset imports like: from loom_toolset_jira import ...
         if node.module and node.module.startswith("loom_toolset_"):
             toolset_id = node.module.replace("loom_toolset_", "", 1)
             self.grants.toolsets.append(toolset_id)
         self.generic_visit(node)
 
-    def visit_Import(self, node: ast.Import) -> None:  # noqa: N802
+    def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
             if alias.name.startswith("loom_toolset_"):
                 toolset_id = alias.name.replace("loom_toolset_", "", 1)

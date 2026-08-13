@@ -4,129 +4,86 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
+from workflow_builder.toolsets.registry import register_toolset
+
+
+@pytest.fixture
+def jira_registered() -> None:
+    """Register the Jira manifest for the duration of one test.
+
+    ``isolated_catalog`` (autouse, in conftest) restores the global catalog
+    afterwards, so no explicit unregister is needed.
+    """
+    register_toolset(JIRA_MANIFEST)
+
 
 class TestSearchToolsets:
-    def test_finds_registered_jira(self) -> None:
+    async def test_finds_registered_jira(self, jira_registered: None) -> None:
         from workflow_builder.agents.coding_tools import search_toolsets
-        from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
-        from workflow_builder.toolsets.registry import (
-            register_toolset,
-            unregister_toolset,
-        )
 
-        register_toolset(JIRA_MANIFEST)
-        try:
-            import asyncio
-            result = asyncio.get_event_loop().run_until_complete(
-                search_toolsets.fn("jira")
-            )
-            cards = json.loads(result)
-            assert len(cards) >= 1
-            assert cards[0]["toolset_id"] == "jira"
-        finally:
-            unregister_toolset("jira")
+        cards = json.loads(await search_toolsets.fn("jira"))
+        assert len(cards) >= 1
+        assert cards[0]["toolset_id"] == "jira"
 
-    def test_returns_empty_for_unknown(self) -> None:
-        import asyncio
-
+    async def test_returns_empty_for_unknown(self) -> None:
         from workflow_builder.agents.coding_tools import search_toolsets
-        result = asyncio.get_event_loop().run_until_complete(
-            search_toolsets.fn("nonexistent_xyz_toolset_99")
-        )
-        cards = json.loads(result)
+
+        cards = json.loads(await search_toolsets.fn("nonexistent_xyz_toolset_99"))
         assert cards == []
 
 
 class TestShowToolset:
-    def test_shows_jira_ops(self) -> None:
+    async def test_shows_jira_ops(self, jira_registered: None) -> None:
         from workflow_builder.agents.coding_tools import show_toolset
-        from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
-        from workflow_builder.toolsets.registry import (
-            register_toolset,
-            unregister_toolset,
-        )
 
-        register_toolset(JIRA_MANIFEST)
-        try:
-            import asyncio
-            result = asyncio.get_event_loop().run_until_complete(
-                show_toolset.fn("jira")
-            )
-            data = json.loads(result)
-            assert data["toolset_id"] == "jira"
-            assert len(data["ops"]) >= 7
-        finally:
-            unregister_toolset("jira")
+        data = json.loads(await show_toolset.fn("jira"))
+        assert data["toolset_id"] == "jira"
+        assert len(data["ops"]) >= 7
 
-    def test_error_for_unknown(self) -> None:
-        import asyncio
-
+    async def test_error_for_unknown(self) -> None:
         from workflow_builder.agents.coding_tools import show_toolset
-        result = asyncio.get_event_loop().run_until_complete(
-            show_toolset.fn("nonexistent")
-        )
-        data = json.loads(result)
+
+        data = json.loads(await show_toolset.fn("nonexistent"))
         assert "error" in data
 
 
 class TestGetToolContract:
-    def test_gets_jira_search_contract(self) -> None:
+    async def test_gets_jira_search_contract(self, jira_registered: None) -> None:
         from workflow_builder.agents.coding_tools import get_tool_contract
-        from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
-        from workflow_builder.toolsets.registry import (
-            register_toolset,
-            unregister_toolset,
-        )
 
-        register_toolset(JIRA_MANIFEST)
-        try:
-            import asyncio
-            result = asyncio.get_event_loop().run_until_complete(
-                get_tool_contract.fn("jira.issues.search")
-            )
-            data = json.loads(result)
-            assert data["op_id"] == "issues.search"
-            assert data["effect"] == "read"
-            assert "input_schema" in data
-        finally:
-            unregister_toolset("jira")
+        data = json.loads(await get_tool_contract.fn("jira.issues.search"))
+        assert data["op_id"] == "issues.search"
+        assert data["effect"] == "read"
+        assert "input_schema" in data
 
-    def test_error_for_invalid_path(self) -> None:
-        import asyncio
-
+    async def test_error_for_invalid_path(self) -> None:
         from workflow_builder.agents.coding_tools import get_tool_contract
-        result = asyncio.get_event_loop().run_until_complete(
-            get_tool_contract.fn("bad_path")
-        )
-        data = json.loads(result)
+
+        data = json.loads(await get_tool_contract.fn("bad_path"))
         assert "error" in data
 
 
 class TestGetToolDocs:
-    def test_returns_jira_docs(self) -> None:
-        import asyncio
-
+    async def test_returns_jira_docs(self) -> None:
         from workflow_builder.agents.coding_tools import get_tool_docs
-        result = asyncio.get_event_loop().run_until_complete(
-            get_tool_docs.fn("jira")
-        )
+
+        result = await get_tool_docs.fn("jira")
         assert "jira_search_issues" in result
         assert "jira_create_issue" in result
         assert "JiraIssue" in result
 
-    def test_error_for_unknown_toolset(self) -> None:
-        import asyncio
-
+    async def test_error_for_unknown_toolset(self) -> None:
         from workflow_builder.agents.coding_tools import get_tool_docs
-        result = asyncio.get_event_loop().run_until_complete(
-            get_tool_docs.fn("unknown_toolset")
-        )
-        data = json.loads(result)
+
+        data = json.loads(await get_tool_docs.fn("unknown_toolset"))
         assert "error" in data
 
 
 class TestValidateCode:
-    def test_valid_code(self) -> None:
+    async def test_valid_code(self) -> None:
         from workflow_builder.agents.coding_tools import validate_code
 
         code = '''\
@@ -140,25 +97,17 @@ async def greet(name: str) -> str:
 async def hello(ctx: Context, name: str) -> str:
     return await ctx.step(greet, name)
 '''
-        import asyncio
-        result = asyncio.get_event_loop().run_until_complete(
-            validate_code.fn(code)
-        )
-        assert "Valid" in result
+        assert "Valid" in await validate_code.fn(code)
 
-    def test_invalid_code_syntax(self) -> None:
-        import asyncio
-
+    async def test_invalid_code_syntax(self) -> None:
         from workflow_builder.agents.coding_tools import validate_code
-        result = asyncio.get_event_loop().run_until_complete(
-            validate_code.fn("def broken(")
-        )
-        issues = json.loads(result)
+
+        issues = json.loads(await validate_code.fn("def broken("))
         assert len(issues) > 0
         assert issues[0]["severity"] == "error"
         assert issues[0]["category"] == "syntax"
 
-    def test_missing_workflow(self) -> None:
+    async def test_missing_workflow(self) -> None:
         from workflow_builder.agents.coding_tools import validate_code
 
         code = '''\
@@ -168,20 +117,45 @@ from workflow_builder import step
 async def greet(name: str) -> str:
     return f"Hello, {name}!"
 '''
-        import asyncio
-        result = asyncio.get_event_loop().run_until_complete(
-            validate_code.fn(code)
-        )
-        issues = json.loads(result)
+        issues = json.loads(await validate_code.fn(code))
         assert any(i["category"] == "structure" for i in issues)
+
+    async def test_flags_disallowed_import(self) -> None:
+        from workflow_builder.agents.coding_tools import build_coding_tools
+        from workflow_builder.agents.validator import CodeValidator
+
+        code = '''\
+import json
+
+import pandas as pd
+
+from workflow_builder import Context, step, workflow
+
+@step
+async def load(path: str) -> int:
+    return len(pd.read_csv(path)) + len(json.dumps({}))
+
+@workflow(name="load")
+async def load_wf(ctx: Context, path: str) -> int:
+    return await ctx.step(load, path)
+'''
+        tools = build_coding_tools(validator=CodeValidator(allowed_packages={"httpx"}))
+        validate = next(t for t in tools if t.name == "validate_code")
+
+        issues = json.loads(await validate.fn(code))
+        flagged = [i for i in issues if i["category"] == "imports"]
+        assert any("pandas" in i["message"] for i in flagged)
+        # stdlib and the SDK itself are never flagged
+        assert not any("json" in i["message"] for i in flagged)
+        assert not any("workflow_builder" in i["message"] for i in flagged)
 
 
 class TestBuildCodingTools:
-    def test_returns_five_tools(self) -> None:
+    def test_returns_the_authoring_tools(self) -> None:
         from workflow_builder.agents.coding_tools import build_coding_tools
 
         tools = build_coding_tools()
-        assert len(tools) == 5
+        assert len(tools) == 6  # + call_read_operation
         names = {t.name for t in tools}
         assert "search_toolsets" in names
         assert "show_toolset" in names

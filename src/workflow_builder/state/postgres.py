@@ -170,6 +170,11 @@ class PostgresStore:
     async def update_execution(self, record: ExecutionRecord) -> None:
         await self.create_execution(record)
 
+    async def delete_execution(self, run_id: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute("DELETE FROM journal WHERE run_id = $1", run_id)
+            await conn.execute("DELETE FROM executions WHERE run_id = $1", run_id)
+
     async def list_executions(
         self,
         *,

@@ -91,17 +91,31 @@ class ModelProvider(Protocol):
     async def complete(self, request: ModelRequest) -> ModelResponse: ...
 
 
-#: USD per million tokens, as ``(input, output)``. Advisory only — override per provider.
+#: USD per million tokens, as ``(input, output)``. Advisory only — override per
+#: provider. Lookup is exact first, then longest-prefix, so a dated model id
+#: like ``gpt-4.1-2025-04-14`` resolves to its family.
 PRICING: dict[str, tuple[float, float]] = {
+    # OpenAI
     "gpt-4o": (2.50, 10.00),
     "gpt-4o-mini": (0.15, 0.60),
     "gpt-4.1": (2.00, 8.00),
     "gpt-4.1-mini": (0.40, 1.60),
+    "gpt-4.1-nano": (0.10, 0.40),
+    "gpt-5.6-luna": (0.20, 1.80),
+    "o1": (15.00, 60.00),
+    "o3": (2.00, 8.00),
     "o3-mini": (1.10, 4.40),
+    "o4-mini": (1.10, 4.40),
+    # Anthropic
     "claude-sonnet-4": (3.00, 15.00),
     "claude-opus-4": (15.00, 75.00),
     "claude-haiku-3.5": (0.80, 4.00),
+    "claude-haiku-4-5": (1.00, 5.00),
+    # Google
     "gemini-2.0-flash": (0.10, 0.40),
+    "gemini-2.0-flash-lite": (0.075, 0.30),
+    "gemini-2.5-flash": (0.30, 2.50),
+    "gemini-2.5-flash-lite": (0.10, 0.40),
     "gemini-2.5-pro": (1.25, 10.00),
 }
 
@@ -114,10 +128,13 @@ def estimate_cost(model: str, usage: Usage) -> float:
     """
     prices = PRICING.get(model)
     if prices is None:
-        prefix_match = next((v for k, v in PRICING.items() if model.startswith(k)), None)
-        if prefix_match is None:
+        # Longest prefix wins. Taking the first match in dict order would price
+        # "gpt-4.1-mini-2025-04-14" as "gpt-4.1" — five times too much — because
+        # the family entry is also a prefix of the mini one.
+        candidates = [key for key in PRICING if model.startswith(key)]
+        if not candidates:
             return 0.0
-        prices = prefix_match
+        prices = PRICING[max(candidates, key=len)]
     input_price, output_price = prices
     billable_input = max(0, usage.input_tokens - usage.cached_input_tokens)
     cached = usage.cached_input_tokens * input_price * 0.25

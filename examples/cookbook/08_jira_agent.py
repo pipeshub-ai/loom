@@ -13,7 +13,11 @@ Requires env vars (add to .env):
     JIRA_API_TOKEN      your Atlassian API token
 
 Run:
-    python3 examples/cookbook/08_jira_agent.py
+    python3 examples/cookbook/08_jira_agent.py              # includes a write
+    python3 examples/cookbook/08_jira_agent.py --read-only  # nothing is created
+
+Query 3 creates a task in your Jira. Use ``--read-only`` to skip it when you
+just want to see the agent work against a real instance.
 """
 
 from __future__ import annotations
@@ -23,6 +27,11 @@ import os
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
+from typing import NamedTuple
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from utils import require_env
 
 from workflow_builder.agents.coding_agent import WorkflowCodingAgent
 from workflow_builder.agents.providers.anthropic_provider import AnthropicProvider
@@ -34,18 +43,28 @@ from workflow_builder.toolsets.registry import register_toolset
 # Natural-language queries — each becomes a generated + executed workflow
 # ---------------------------------------------------------------------------
 
+class Query(NamedTuple):
+    """One demo query, and whether running it changes anything in Jira.
+
+    Marked by hand rather than inferred: every spec starts "Create a workflow",
+    so any keyword heuristic reads them all as writes — and guessing wrong about
+    someone's real Jira is not a mistake worth risking.
+    """
+
+    writes: bool
+    spec: str
+
+
 QUERIES = [
-    # Query 1 — Read: list projects
-    """\
+    Query(writes=False, spec="""\
 Create a workflow called "list_jira_projects" that:
 1. Fetches all accessible Jira projects
 2. Prints them as a numbered list: "1. KEY — Name"
 3. Returns the list of project dicts
 Include a runnable main() with no input arguments.
-""",
+"""),
 
-    # Query 2 — Read: search open high-priority bugs
-    """\
+    Query(writes=False, spec="""\
 Create a workflow called "open_high_priority_bugs" that:
 1. Accepts a project_key string (e.g. "MYPROJECT")
 2. Searches Jira for issues where: project = <project_key> AND issuetype = Bug
@@ -55,10 +74,10 @@ Create a workflow called "open_high_priority_bugs" that:
 4. Returns the list of issue dicts
 Include a runnable main() that uses the first available project's key,
 fetched via jira_list_projects().
-""",
+"""),
 
-    # Query 3 — Write: create a task
-    """\
+    # The only query that changes anything. --read-only skips it.
+    Query(writes=True, spec="""\
 Create a workflow called "create_sprint_task" that:
 1. Accepts a dict with keys: project_key, summary, description
 2. Creates a new Jira Task (issue_type="Task", priority="Medium")
@@ -67,10 +86,9 @@ Create a workflow called "create_sprint_task" that:
 Include a runnable main() that creates a task in the first available project
 with summary "Workflow coding agent test task" and description
 "Created automatically by the LOOM Workflow Coding Agent demo."
-""",
+"""),
 
-    # Query 4 — Read + aggregate: my open issues summary
-    """\
+    Query(writes=False, spec="""\
 Create a workflow called "my_open_issues_summary" that:
 1. Calls jira_get_myself() to find the current user's account_id and display_name
 2. Searches for open issues assigned to that user:
@@ -86,7 +104,7 @@ Create a workflow called "my_open_issues_summary" that:
       Total  : 12
 5. Returns a dict {user: display_name, total: N, by_type: {type: count}}
 Include a runnable main() with no input arguments.
-""",
+"""),
 ]
 
 # ---------------------------------------------------------------------------
@@ -97,12 +115,12 @@ DIVIDER = "=" * 65
 
 
 def check_env() -> bool:
-    missing = [v for v in ["ANTHROPIC_API_KEY", "JIRA_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"]
-               if not os.environ.get(v)]
-    if missing:
-        print(f"Error: missing env vars: {', '.join(missing)}")
-        print("Add them to your .env file and run: set -a && source .env && set +a")
-        return False
+    """Exit unless the Jira and Anthropic credentials are available.
+
+    ``require_env`` reads ``.env`` at the repo root, so keys already committed
+    there work without exporting anything.
+    """
+    require_env("ANTHROPIC_API_KEY", "JIRA_URL", "JIRA_EMAIL", "JIRA_API_TOKEN")
     return True
 
 
@@ -189,14 +207,20 @@ async def main() -> None:
         tool_docs=[JIRA_TOOL_DOCS],
     )
 
+    read_only = "--read-only" in sys.argv
+    queries = [q for q in QUERIES if not q.writes] if read_only else QUERIES
+
     print(DIVIDER)
     print("  Jira Workflow Coding Agent Demo")
     print(DIVIDER)
     print(f"  Jira: {os.environ['JIRA_URL']}")
-    print(f"  {len(QUERIES)} queries will be generated and executed")
+    print(f"  Mode: {'read-only' if read_only else 'read + write'}")
+    print(f"  {len(queries)} queries will be generated and executed")
+    if read_only and len(queries) < len(QUERIES):
+        print(f"  ({len(QUERIES) - len(queries)} write query skipped)")
 
-    for i, query in enumerate(QUERIES, 1):
-        await run_query(agent, query, i, len(QUERIES))
+    for i, query in enumerate(queries, 1):
+        await run_query(agent, query.spec, i, len(queries))
 
     print(f"\n{DIVIDER}")
     print("  All queries complete.")

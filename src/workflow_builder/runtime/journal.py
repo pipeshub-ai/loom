@@ -288,12 +288,29 @@ class Journal:
         return [entry.to_record(index) for index, entry in enumerate(self.entries())]
 
     def total_usage(self) -> Usage:
+        """Tokens and cost across the run.
+
+        An agent entry already aggregates its own turns, so counting it *and*
+        anything journalled beneath it would double-count. Nesting is visible in
+        the path — a child of ``0002`` is ``0002.0000`` — so an agent's total is
+        used only when it has no children of its own. Skipping agent entries
+        outright, as this once did, reported zero tokens for every agent run,
+        which is the main thing anyone wants the number for.
+        """
         total = Usage()
         for entry in self._entries.values():
-            # Composite entries aggregate their children, so counting both double-counts.
-            if entry.usage is not None and entry.kind is not EntryKind.AGENT:
-                total.add(entry.usage)
+            if entry.usage is None:
+                continue
+            # An agent with journalled children is a rollup of them; count the
+            # children instead. An agent with none is the only record there is.
+            if entry.kind is EntryKind.AGENT and self._has_children(entry.path):
+                continue
+            total.add(entry.usage)
         return total
+
+    def _has_children(self, path: str) -> bool:
+        prefix = f"{path}."
+        return any(other.startswith(prefix) for other in self._entries)
 
     def failed_entries(self) -> list[JournalEntry]:
         return [entry for entry in self.entries() if entry.status is EntryStatus.FAILED]

@@ -27,6 +27,9 @@ class UsageLimits:
     max_total_tokens: int | None = None
     max_cost_usd: float | None = None
     """Enforced from the running cost estimate; advisory, not a billing guarantee."""
+    max_history_messages: int = 40
+    """How many prior turns a session replays into a new run. Older turns are
+    dropped from the window, never from the stored session."""
 
     def check_turn(self, turn: int) -> None:
         if turn > self.max_turns:

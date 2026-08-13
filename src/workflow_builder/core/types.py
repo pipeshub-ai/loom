@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import timedelta
-from typing import Any, Generic, TypeAlias, TypeVar, overload
+from typing import Any, Generic, TypeAlias, TypeVar, get_args, overload
 
 JSONValue: TypeAlias = Any
 """Anything that survives a round trip through the configured serializer."""
@@ -236,3 +236,57 @@ class Page(Generic[T]):
         more = ", has_more" if self._has_more else ""
         total = f", total={self._total}" if self._total is not None else ""
         return f"<Page items={len(self._items)}{more}{total}>"
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source_type: Any, handler: Any) -> Any:
+        """Teach Pydantic to journal and rehydrate a page.
+
+        Without this a step returning ``Page`` cannot be serialized, so the
+        result never survives replay — the paginated-fetch pattern in this
+        class's own docstring only works because of this hook. The element
+        type from ``Page[T]`` is threaded through, so ``Page[Lead]`` comes back
+        holding ``Lead`` objects rather than bare dicts.
+        """
+        from pydantic_core import core_schema
+
+        args = get_args(source_type)
+        item_schema = handler.generate_schema(args[0]) if args else core_schema.any_schema()
+
+        payload = core_schema.typed_dict_schema(
+            {
+                "items": core_schema.typed_dict_field(core_schema.list_schema(item_schema)),
+                "cursor": core_schema.typed_dict_field(
+                    core_schema.nullable_schema(core_schema.str_schema()), required=False
+                ),
+                "has_more": core_schema.typed_dict_field(
+                    core_schema.bool_schema(), required=False
+                ),
+                "total": core_schema.typed_dict_field(
+                    core_schema.nullable_schema(core_schema.int_schema()), required=False
+                ),
+            }
+        )
+        from_payload = core_schema.no_info_after_validator_function(
+            lambda data: cls(
+                items=data["items"],
+                cursor=data.get("cursor"),
+                has_more=data.get("has_more", False),
+                total=data.get("total"),
+            ),
+            payload,
+        )
+        return core_schema.json_or_python_schema(
+            json_schema=from_payload,
+            python_schema=core_schema.union_schema(
+                [core_schema.is_instance_schema(cls), from_payload]
+            ),
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                lambda page: {
+                    "items": page.items,
+                    "cursor": page.cursor,
+                    "has_more": page.has_more,
+                    "total": page.total,
+                },
+                return_schema=payload,
+            ),
+        )

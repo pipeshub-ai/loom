@@ -81,6 +81,19 @@ class StoreBackedSession:
         await self._store.delete(self._key(session_id))
 
 
+async def replace_history(
+    session: Session, session_id: str, messages: list[Message]
+) -> None:
+    """Overwrite a session's stored history with *messages*.
+
+    The :class:`Session` protocol is append-only, which is the right shape for
+    a transcript but the wrong one for "this run produced the whole updated
+    conversation" — appending there would double every prior turn.
+    """
+    await session.clear(session_id)
+    await session.append(session_id, messages)
+
+
 def trim_history(
     messages: list[Message],
     *,

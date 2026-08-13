@@ -54,7 +54,10 @@ class TestCtxAgentPromptOnly:
         from workflow_builder.agents.result import AgentResult
 
         class FakeBackend:
-            async def run(self, prompt: str, *, tools=None) -> AgentResult:
+            supports_history = True
+
+            async def run(self, prompt: str, *, tools=None, history=None,
+                          agent_id="", max_turns=None) -> AgentResult:
                 return AgentResult(
                     output=f"Response to: {prompt}",
                     agent="fake",

@@ -10,12 +10,15 @@ resumes at turn 9 rather than re-paying for the first eight turns.
 
 from __future__ import annotations
 
+import json
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 from workflow_builder.agents.executor import AgentContext, AgentSettings
 from workflow_builder.agents.guardrails import GuardrailAction
 from workflow_builder.agents.limits import DEFAULT_LIMITS
+from workflow_builder.agents.memory import trim_history
 from workflow_builder.agents.messages import (
     Message,
     ToolCall,
@@ -47,6 +50,17 @@ if TYPE_CHECKING:
     from workflow_builder.runtime.context import Context
 
 logger = logging.getLogger("workflow.agent")
+
+#: Separate from the agent logger so tool traffic can be turned on without the
+#: rest, which is the thing anyone debugging a loop actually wants.
+tool_logger = logging.getLogger("workflow.agent.tools")
+
+
+def _brief(value: Any, limit: int = 120) -> str:
+    """Render a value for a log line: one line, bounded length."""
+    text = value if isinstance(value, str) else json.dumps(value, default=str)
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit] + f"…(+{len(text) - limit})"
 
 
 class BuiltInAgentRuntime:
@@ -125,6 +139,12 @@ class BuiltInAgentRuntime:
                 (messages[0].content or "")
                 + "\n\n"
                 + output_spec.prompt_instructions()
+            )
+        if context is not None and context.history:
+            # Prior turns sit between the system prompt and this turn's input, so
+            # the agent sees the conversation in the order it happened.
+            messages.extend(
+                trim_history(context.history, max_messages=limits.max_history_messages)
             )
         messages.append(user(str(input)))
 
@@ -246,6 +266,8 @@ class BuiltInAgentRuntime:
                         continue
 
                     # Execute tool
+                    started = time.monotonic()
+                    outcome = "ok"
                     try:
                         tool_ctx = ToolContext(
                             agent_name=agent.name,
@@ -255,8 +277,24 @@ class BuiltInAgentRuntime:
                         result_str = tool.render_result(result)
                     except ModelRetry as retry:
                         result_str = str(retry)
+                        outcome = "retry"
                     except Exception as exc:
                         result_str = f"Tool error: {type(exc).__name__}: {exc}"
+                        outcome = "error"
+
+                    # One line per call, at DEBUG: what was asked, what came
+                    # back, and how long it took. An agent that loops does so
+                    # invisibly otherwise — the turn count says it happened,
+                    # not what it was doing.
+                    tool_logger.debug(
+                        "turn=%d %s(%s) -> %s %s in %.0fms",
+                        turn,
+                        call.name,
+                        _brief(call.arguments),
+                        outcome,
+                        _brief(result_str, limit=160),
+                        (time.monotonic() - started) * 1000,
+                    )
 
                     messages.append(tool_result(call.id, result_str, name=call.name))
                     items.append(RunItem(

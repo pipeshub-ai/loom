@@ -92,6 +92,25 @@ class ConcurrencyLimitExceeded(WorkflowError):  # noqa: N818
     """A semaphore or queue admission limit rejected the work."""
 
 
+class AdmissionRejected(WorkflowError):  # noqa: N818
+    """A flow-control policy declined to start a run.
+
+    Carries the controller's decision so a caller can tell "come back in 200ms"
+    (``delay``, ``debounce``, ``batch``) apart from "this will never run"
+    (``skip``), which need different handling at the trigger.
+    """
+
+    def __init__(self, message: str, *, decision: str, delay_seconds: float = 0.0) -> None:
+        super().__init__(message)
+        self.decision = decision
+        self.delay_seconds = delay_seconds
+
+    @property
+    def retryable(self) -> bool:
+        """Whether resubmitting after ``delay_seconds`` could succeed."""
+        return self.decision != "skip"
+
+
 class DeterminismViolation(WorkflowError):  # noqa: N818
     """Orchestration code touched a non-deterministic API directly."""
 

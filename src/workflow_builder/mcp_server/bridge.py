@@ -1,73 +1,110 @@
-"""Runtime bridge between MCP server and LOOM runtime."""
+"""Deprecated. Use :class:`workflow_builder.facade.LocalFacade`.
+
+``RuntimeBridge`` predated the CLI and grew its own copy of the same ten
+operations the CLI needed, under different key names. Both are now
+:class:`RuntimeFacade`, so there is one port to fix bugs in rather than two.
+
+This module survives as a compatibility shim: it maps the old key names onto
+the shared facade and warns once per call site. It will be removed in a future
+release.
+"""
+
 from __future__ import annotations
 
-import uuid
-from typing import Any
+import warnings
+from typing import TYPE_CHECKING, Any
+
+from workflow_builder.facade import LocalFacade
+
+if TYPE_CHECKING:
+    from workflow_builder.runtime.engine import Runtime
+    from workflow_builder.runtime.workflow import WorkflowDefinition
+
+__all__ = ["RuntimeBridge"]
+
+_DEPRECATION = (
+    "RuntimeBridge is deprecated; use workflow_builder.facade.LocalFacade "
+    "(or RemoteFacade), which the CLI and MCP server both use."
+)
+
+
+def _store_from_url(url: str) -> Any:
+    from workflow_builder.state.factory import from_url
+
+    return from_url(url)
 
 
 class RuntimeBridge:
-    """Bridge between MCP server and LOOM runtime.
+    """Adapts a :class:`Runtime` to the flat dict shapes the old MCP handlers used.
 
-    Wraps the LOOM runtime and provides methods that MCP tools
-    call.  This module has **no** ``mcp`` imports so it can be
-    tested without the ``mcp`` package installed.
+    .. deprecated::
+        Use :class:`~workflow_builder.facade.LocalFacade`. The key names differ:
+        this class emits ``workflow_id`` and ``id`` where the facade emits
+        ``workflow`` and ``name``.
     """
 
-    def __init__(self, store_url: str = "memory://") -> None:
+    def __init__(
+        self,
+        store_url: str = "memory://",
+        *,
+        runtime: Runtime | None = None,
+    ) -> None:
+        warnings.warn(_DEPRECATION, DeprecationWarning, stacklevel=2)
+
+        if runtime is None:
+            from workflow_builder.runtime.engine import Runtime as _Runtime
+
+            runtime = _Runtime(store=_store_from_url(store_url))
+        self._facade = LocalFacade(runtime)
         self._store_url = store_url
-        self._workflows: dict[str, dict[str, Any]] = {}
-        self._runs: dict[str, dict[str, Any]] = {}
-        self._events: dict[str, dict[str, Any]] = {}
+        self._schemas: dict[str, dict[str, Any]] = {}
+
+    @property
+    def runtime(self) -> Runtime:
+        """The wrapped Runtime, for callers that need the full API."""
+        return self._facade.runtime
+
+    @property
+    def facade(self) -> LocalFacade:
+        """The replacement object, for callers migrating off this shim."""
+        return self._facade
 
     # -- workflow registry -------------------------------------------
 
     def register_workflow(
         self,
-        workflow_id: str,
+        workflow: WorkflowDefinition[Any, Any, Any],
         *,
         description: str = "",
         input_schema: dict[str, Any] | None = None,
     ) -> None:
-        """Register a workflow definition."""
-        self._workflows[workflow_id] = {
-            "id": workflow_id,
-            "description": description,
-            "input_schema": input_schema or {},
-        }
+        self._facade.runtime.register(workflow)
+        if description:
+            workflow.description = description
+        if input_schema is not None:
+            self._schemas[workflow.name] = input_schema
 
     async def list_workflows(self) -> list[dict[str, Any]]:
-        """Return all registered workflow definitions."""
-        return list(self._workflows.values())
+        return [
+            {
+                "id": entry["name"],
+                "description": entry.get("description", ""),
+                "version": entry.get("version", "1"),
+                "input_schema": self._schemas.get(entry["name"], {}),
+            }
+            for entry in await self._facade.workflows()
+        ]
 
     # -- run lifecycle -----------------------------------------------
 
-    async def run_workflow(
-        self,
-        workflow_id: str,
-        input_data: Any,
-    ) -> dict[str, Any]:
-        """Start a workflow run and return the result."""
-        if workflow_id not in self._workflows:
+    async def run_workflow(self, workflow_id: str, input_data: Any) -> dict[str, Any]:
+        if workflow_id not in self._facade.runtime.workflows:
             return {"error": f"Workflow '{workflow_id}' not found"}
-        run_id = str(uuid.uuid4())[:8]
-        self._runs[run_id] = {
-            "run_id": run_id,
-            "workflow_id": workflow_id,
-            "status": "completed",
-            "input": input_data,
-            "output": {"result": "ok"},
-            "error": None,
-        }
-        return self._runs[run_id]
+        return _rename(await self._facade.start(workflow_id, input_data))
 
-    async def get_run_status(
-        self,
-        run_id: str,
-    ) -> dict[str, Any]:
-        """Return current status of a run."""
-        if run_id not in self._runs:
-            return {"error": f"Run '{run_id}' not found"}
-        return self._runs[run_id]
+    async def get_run_status(self, run_id: str) -> dict[str, Any]:
+        run = await self._facade.get(run_id)
+        return _rename(run) if run else {"error": f"Run '{run_id}' not found"}
 
     async def list_runs(
         self,
@@ -76,70 +113,56 @@ class RuntimeBridge:
         status: str | None = None,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
-        """List runs, optionally filtered."""
-        runs = list(self._runs.values())
-        if workflow_id:
-            runs = [
-                r for r in runs if r["workflow_id"] == workflow_id
-            ]
-        if status:
-            runs = [r for r in runs if r["status"] == status]
-        return runs[:limit]
-
-    async def get_run_journal(
-        self,
-        run_id: str,
-    ) -> list[dict[str, Any]]:
-        """Return journal entries for a run."""
-        if run_id not in self._runs:
-            return []
         return [
-            {"kind": "step", "step_id": "s1", "status": "completed"},
+            _rename(run)
+            for run in await self._facade.list_runs(
+                workflow=workflow_id, status=status, limit=limit
+            )
         ]
 
-    async def resume_run(
-        self,
-        run_id: str,
-    ) -> dict[str, Any]:
-        """Resume a suspended run."""
-        if run_id not in self._runs:
-            return {"error": f"Run '{run_id}' not found"}
-        self._runs[run_id]["status"] = "completed"
-        return {"run_id": run_id, "status": "completed"}
+    async def get_run_journal(self, run_id: str) -> list[dict[str, Any]]:
+        if await self._facade.get(run_id) is None:
+            return []
+        return await self._facade.journal(run_id)
 
-    async def cancel_run(
-        self,
-        run_id: str,
-    ) -> dict[str, Any]:
-        """Cancel a running workflow."""
-        if run_id not in self._runs:
+    async def resume_run(self, run_id: str) -> dict[str, Any]:
+        if await self._facade.get(run_id) is None:
             return {"error": f"Run '{run_id}' not found"}
-        self._runs[run_id]["status"] = "cancelled"
-        return {"run_id": run_id, "status": "cancelled"}
+        await self._facade.runtime.resume(run_id)
+        run = await self._facade.get(run_id) or {}
+        return {"run_id": run_id, "status": run.get("status", "")}
+
+    async def cancel_run(self, run_id: str) -> dict[str, Any]:
+        if await self._facade.get(run_id) is None:
+            return {"error": f"Run '{run_id}' not found"}
+        run = await self._facade.cancel(run_id)
+        return {"run_id": run_id, "status": run.get("status", "")}
 
     # -- events ------------------------------------------------------
 
     async def send_event(
-        self,
-        run_id: str,
-        event_name: str,
-        payload: Any,
+        self, run_id: str, event_name: str, payload: Any
     ) -> dict[str, Any]:
-        """Deliver an event to a waiting run."""
-        self._events[f"{run_id}:{event_name}"] = payload
-        return {
-            "run_id": run_id,
-            "event": event_name,
-            "delivered": True,
-        }
+        if await self._facade.get(run_id) is None:
+            return {"error": f"Run '{run_id}' not found", "delivered": False}
+        await self._facade.send_event(run_id, event_name, payload)
+        return {"run_id": run_id, "event": event_name, "delivered": True}
 
     # -- replay ------------------------------------------------------
 
-    async def replay_run(
-        self,
-        run_id: str,
-    ) -> dict[str, Any]:
-        """Replay a completed/failed run through its journal."""
-        if run_id not in self._runs:
+    async def replay_run(self, run_id: str) -> dict[str, Any]:
+        if await self._facade.get(run_id) is None:
             return {"error": f"Run '{run_id}' not found"}
-        return {"run_id": run_id, "replay_status": "completed"}
+        result = await self._facade.replay(run_id)
+        return {
+            "run_id": run_id,
+            "replay_run_id": result["run_id"],
+            "replay_status": result["status"],
+        }
+
+
+def _rename(run: dict[str, Any]) -> dict[str, Any]:
+    """Translate facade keys to the names this shim has always emitted."""
+    renamed = dict(run)
+    renamed["workflow_id"] = renamed.pop("workflow", "")
+    return renamed

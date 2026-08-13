@@ -31,7 +31,11 @@ import subprocess
 import sys
 import tempfile
 import time
+from pathlib import Path
 from typing import ClassVar
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from utils import require_env
 
 from workflow_builder.agents.coding_agent import WorkflowCodingAgent
 from workflow_builder.agents.providers.anthropic_provider import AnthropicProvider
@@ -108,35 +112,37 @@ PRESETS: dict[int, tuple[str, str]] = {
 def _build_jira_toolset() -> Toolset:
     """Build a lazy Jira toolset from the manifest.
 
-    The manifest is metadata-only (imported cheaply).
-    The resolver imports actual @step functions only when called.
+    The operation-to-function mapping comes from the manifest rather than a
+    list written out here. A hand-kept copy goes stale the moment the toolset
+    grows an operation — this one had drifted to nine of sixteen — and the
+    symptom is an agent told a capability exists and then refused it.
     """
     from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
 
     def _resolver(op_id: str):
-        # This import happens ONLY when a tool is actually resolved
-        from workflow_builder.agents.tools import coerce_tool
-        from workflow_builder.toolsets.jira import tools as jira_tools
+        # Imports happen only when a tool is actually resolved.
+        import importlib
 
-        # Map operation IDs to @step functions
-        tool_map = {
-            "jira_search_issues": jira_tools.jira_search_issues,
-            "jira_get_issue": jira_tools.jira_get_issue,
-            "jira_create_issue": jira_tools.jira_create_issue,
-            "jira_update_issue": jira_tools.jira_update_issue,
-            "jira_add_comment": jira_tools.jira_add_comment,
-            "jira_get_transitions": jira_tools.jira_get_transitions,
-            "jira_transition_issue": jira_tools.jira_transition_issue,
-            "jira_list_projects": jira_tools.jira_list_projects,
-            "jira_get_myself": jira_tools.jira_get_myself,
-        }
-        fn = tool_map.get(op_id)
-        if fn is None:
-            msg = f"Unknown Jira operation: {op_id}"
+        from workflow_builder.agents.tools import coerce_tool
+
+        module = importlib.import_module(JIRA_MANIFEST.tools_module)
+        by_function = {op.function: op for op in JIRA_MANIFEST.all_operations()}
+        by_id = {op.id: op for op in JIRA_MANIFEST.all_operations()}
+
+        spec = by_function.get(op_id) or by_id.get(op_id)
+        if spec is None or not spec.function:
+            known = sorted(by_function)
+            msg = f"Unknown Jira operation: {op_id} (known: {known})"
             raise KeyError(msg)
-        return coerce_tool(fn)
+        return coerce_tool(getattr(module, spec.function))
 
     return Toolset(manifest=JIRA_MANIFEST, _resolver=_resolver)
+
+
+# ---------------------------------------------------------------------------
+# Pretty-print helpers (no external deps — pure ASCII)
+# ---------------------------------------------------------------------------
+
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +220,7 @@ async def run_query(
     agent: WorkflowCodingAgent,
     query: str,
     label: str,
+    show_tools: bool = False,
 ) -> None:
     steps = 5
     banner(f"Jira Workflow Coding Agent — {label}")
@@ -235,6 +242,15 @@ async def run_query(
     t0 = time.perf_counter()
     result = await agent.generate(query)
     elapsed = time.perf_counter() - t0
+
+    if show_tools:
+        # The record of what it actually did, next to the code it produced.
+        # The question this answers: did it look the entities up, or assume?
+        print(f"\n[ TOOL CALLS ]  {len(result.tool_calls)} total\n")
+        for index, (name, arguments) in enumerate(result.tool_calls, 1):
+            print(f"  {index:>2}. {name}({arguments})")
+        if not result.tool_calls:
+            print("  (none — nothing in the query was looked up before writing)")
 
     print()
     kv("Model", result.model_used)
@@ -310,6 +326,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--query", "-q", help="Natural-language workflow query")
     p.add_argument(
+        "--debug",
+        action="store_true",
+        help="Log every tool call the agent makes, with arguments and results. "
+        "Use this to see whether it resolved the entities in your query before "
+        "writing code, or guessed at them.",
+    )
+    p.add_argument(
         "--example", "-e",
         type=int,
         choices=list(PRESETS),
@@ -342,19 +365,13 @@ def choose_interactively() -> tuple[str, str]:
         print("  Please enter 0-4.")
 
 
-def check_env() -> bool:
-    required = ["ANTHROPIC_API_KEY", "JIRA_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"]
-    missing = [v for v in required if not os.environ.get(v)]
-    if missing:
-        print(f"Error: missing env vars: {', '.join(missing)}")
-        print("Add them to .env and run: set -a && source .env && set +a")
-        return False
-    return True
-
-
 async def main() -> None:
-    if not check_env():
-        sys.exit(1)
+    # Parse first, so --help works without credentials.
+    args = build_parser().parse_args()
+
+    # require_env reads .env at the repo root, so keys already committed there
+    # work without exporting anything.
+    require_env("ANTHROPIC_API_KEY", "JIRA_URL", "JIRA_EMAIL", "JIRA_API_TOKEN")
 
     # Configure the coding agent logger to emit pretty lines
     agent_logger = logging.getLogger("workflow.coding_agent")
@@ -365,7 +382,12 @@ async def main() -> None:
     # Silence everything else
     logging.getLogger().setLevel(logging.ERROR)
 
-    args = build_parser().parse_args()
+    if args.debug:
+        # Tool traffic on its own logger, so it can be turned on without the
+        # rest of the agent's chatter.
+        from workflow_builder.agents.coding_agent import trace_tool_calls
+
+        trace_tool_calls()
 
     if args.query:
         query, label = args.query, "Custom query"
@@ -389,7 +411,7 @@ async def main() -> None:
         tool_registry=registry,
     )
 
-    await run_query(agent, query, label)
+    await run_query(agent, query, label, show_tools=args.debug)
 
     print(f"\n{'═' * W}\n")
 

@@ -16,9 +16,12 @@ from typing import Any, Generic, TypeVar, overload
 from workflow_builder.core.exceptions import ConfigurationError
 from workflow_builder.core.ids import code_fingerprint
 from workflow_builder.core.retry import NO_RETRY, Retry
+from workflow_builder.core.serde import resolve_annotations
 from workflow_builder.core.types import Duration
 from workflow_builder.runtime.context import Context
 from workflow_builder.runtime.determinism import Diagnostic, warn_if_nondeterministic
+from workflow_builder.runtime.flowcontrol import FlowControlPolicy
+from workflow_builder.security.grants import GrantSet
 from workflow_builder.triggers.base import TriggerSpec
 
 InputT = TypeVar("InputT")
@@ -47,6 +50,17 @@ class WorkflowDefinition(Generic[InputT, OutputT, DepsT]):
     max_concurrent_runs: int | None = None
     on_failure: str | None = None
     """Name of a workflow to invoke when this one fails."""
+    grants: GrantSet | None = None
+    """Permissions this workflow may exercise.
+
+    When set, ``ctx.agent()`` resolves only tools the grant set allows, and
+    naming a denied toolset raises :class:`GrantDenied`. Leave ``None`` to
+    impose no restriction — grants are opt-in, because an empty grant set
+    means "nothing allowed", not "everything allowed".
+    """
+    flow_control: FlowControlPolicy | None = None
+    """Admission policy evaluated before a run is created. Requires an
+    ``AdmissionController`` on the Runtime."""
 
     tags: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -70,11 +84,12 @@ class WorkflowDefinition(Generic[InputT, OutputT, DepsT]):
             )
 
         self.takes_input = len(params) > 1
+        hints = resolve_annotations(self.fn)
         if self.input_type is None and self.takes_input:
-            annotation = params[1].annotation
+            annotation = hints.get(params[1].name, params[1].annotation)
             self.input_type = None if annotation is inspect.Parameter.empty else annotation
         if self.output_type is None:
-            annotation = signature.return_annotation
+            annotation = hints.get("return", signature.return_annotation)
             self.output_type = None if annotation is inspect.Signature.empty else annotation
         if not self.description:
             self.description = inspect.cleandoc(self.fn.__doc__ or "").split("\n\n")[0]
@@ -96,6 +111,36 @@ class WorkflowDefinition(Generic[InputT, OutputT, DepsT]):
     def triggers_of(self, kind: type[TriggerSpec]) -> list[TriggerSpec]:
         return [spec for spec in self.triggers if isinstance(spec, kind)]
 
+    def input_schema(self) -> dict[str, Any] | None:
+        """JSON Schema for the run input, or ``None`` if it cannot be derived.
+
+        A caller that has to guess the shape wastes a run: handing
+        ``{"email": "a@b.c"}`` to a body annotated ``email: str`` does not fail
+        at the boundary, it fails several steps in with an AttributeError.
+        Publishing the annotation is what lets the caller get it right first
+        time, so this is worth surfacing wherever workflows are listed.
+        """
+        if not self.takes_input or self.input_type is None:
+            return None
+
+        from pydantic import TypeAdapter
+
+        try:
+            schema = dict(TypeAdapter(self.input_type).json_schema())
+        except Exception:  # unrepresentable annotation — better silent than loud
+            return None
+
+        if not schema:  # bare `Any` says nothing a caller can use
+            return None
+        schema.setdefault("title", self.input_name)
+        return schema
+
+    @property
+    def input_name(self) -> str:
+        """Name of the input parameter, for error messages and schema titles."""
+        params = list(inspect.signature(self.fn).parameters)
+        return params[1] if len(params) > 1 else "input"
+
     def describe(self) -> dict[str, Any]:
         """Serializable manifest, used by the CLI, deploy tooling, and the dev UI."""
         return {
@@ -107,6 +152,7 @@ class WorkflowDefinition(Generic[InputT, OutputT, DepsT]):
             "triggers": [spec.describe() for spec in self.triggers],
             "timeout": self.timeout,
             "on_failure": self.on_failure,
+            "input_schema": self.input_schema(),
         }
 
     def __repr__(self) -> str:
@@ -127,6 +173,8 @@ def workflow(
     retry: Retry = ...,
     max_concurrent_runs: int | None = ...,
     on_failure: str | None = ...,
+    grants: GrantSet | None = ...,
+    flow_control: FlowControlPolicy | None = ...,
     tags: tuple[str, ...] = ...,
     description: str = ...,
 ) -> Callable[[WorkflowFn], WorkflowDefinition[Any, Any, Any]]: ...
@@ -143,6 +191,8 @@ def workflow(
     retry: Retry = NO_RETRY,
     max_concurrent_runs: int | None = None,
     on_failure: str | None = None,
+    grants: GrantSet | None = None,
+    flow_control: FlowControlPolicy | None = None,
     tags: tuple[str, ...] = (),
     description: str = "",
 ) -> Any:
@@ -171,6 +221,8 @@ def workflow(
             retry=retry,
             max_concurrent_runs=max_concurrent_runs,
             on_failure=on_failure,
+            grants=grants,
+            flow_control=flow_control,
             tags=tags,
         )
 

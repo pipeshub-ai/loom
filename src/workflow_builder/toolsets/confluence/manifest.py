@@ -47,11 +47,13 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
             "CONFLUENCE_API_TOKEN",
         ],
     },
+    tools_module="workflow_builder.toolsets.confluence.tools",
     egress_hosts=["*.atlassian.net"],
     groups={
         "pages": [
             OperationSpec(
                 id="pages.search",
+                function="confluence_search_pages",
                 summary="Search content with a CQL query.",
                 effect=EffectClass.READ,
                 input_schema={
@@ -68,6 +70,7 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="pages.get",
+                function="confluence_get_page",
                 summary="Fetch a page by ID.",
                 effect=EffectClass.READ,
                 input_schema={
@@ -82,6 +85,7 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="pages.create",
+                function="confluence_create_page",
                 summary="Create a new page.",
                 effect=EffectClass.WRITE,
                 input_schema={
@@ -99,6 +103,7 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="pages.update",
+                function="confluence_update_page",
                 summary="Update an existing page.",
                 effect=EffectClass.WRITE,
                 input_schema={
@@ -116,6 +121,7 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="pages.delete",
+                function="confluence_delete_page",
                 summary="Delete a page.",
                 effect=EffectClass.DESTRUCTIVE,
                 input_schema={
@@ -129,6 +135,7 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="pages.get_body",
+                function="confluence_get_page_body",
                 summary="Fetch the body content of a page.",
                 effect=EffectClass.READ,
                 input_schema={
@@ -143,6 +150,7 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="pages.get_comments",
+                function="confluence_get_page_comments",
                 summary="Fetch comments on a page.",
                 effect=EffectClass.READ,
                 input_schema={
@@ -161,6 +169,7 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="pages.add_comment",
+                function="confluence_add_comment",
                 summary="Add a comment to a page.",
                 effect=EffectClass.WRITE,
                 input_schema={
@@ -178,6 +187,7 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
         "spaces": [
             OperationSpec(
                 id="spaces.list",
+                function="confluence_list_spaces",
                 summary="List all accessible spaces.",
                 effect=EffectClass.READ,
                 output_schema={
@@ -188,6 +198,7 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="spaces.get",
+                function="confluence_get_space",
                 summary="Get a space by ID.",
                 effect=EffectClass.READ,
                 input_schema={
@@ -204,6 +215,7 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
         "users": [
             OperationSpec(
                 id="users.myself",
+                function="confluence_get_myself",
                 summary="Get the authenticated user's profile.",
                 effect=EffectClass.READ,
                 output_schema=ConfluenceUser.model_json_schema(),

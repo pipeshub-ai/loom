@@ -17,7 +17,9 @@
 - [Storage Backends](guides/storage.md) -- MemoryStore, SQLite, MongoDB, PostgreSQL
 - [Triggers](guides/triggers.md) -- Cron, webhook, polling, events
 - [Toolsets](guides/toolsets.md) -- Create and register integration toolsets
+- [Gmail and Calendar](guides/google.md) -- Read and send mail, read and write events
 - [Coding Agent](guides/coding-agent.md) -- Generate workflows from natural language
+- [MCP Server](guides/mcp.md) -- Drive workflows from Claude Code, Claude Desktop, or Cursor
 
 ## Examples
 

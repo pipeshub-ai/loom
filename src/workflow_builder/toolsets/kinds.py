@@ -20,6 +20,7 @@ class ToolsetKind(StrEnum):
 
 
 RESERVED_PREFIXES: dict[str, ToolsetKind] = {
+    "mcp": ToolsetKind.MCP,
     "knowledge": ToolsetKind.KNOWLEDGE,
     "memory": ToolsetKind.MEMORY,
     "skill": ToolsetKind.SKILL,

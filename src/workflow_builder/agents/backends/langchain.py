@@ -27,6 +27,11 @@ class LangChainBackend:
         A LangChain chat model (e.g. ``ChatAnthropic``, ``ChatOpenAI``).
     """
 
+    supports_history = False
+    """This backend does not yet seed a run from prior turns. Passing a
+    session_id to ctx.agent() with it configured raises rather than silently
+    starting each call from a blank conversation."""
+
     def __init__(self, *, llm: Any) -> None:
         self._llm = llm
 
@@ -35,6 +40,9 @@ class LangChainBackend:
         prompt: str,
         *,
         tools: list[Any] | None = None,
+        history: list[Any] | None = None,
+        agent_id: str = "",
+        max_turns: int | None = None,
     ) -> AgentResult[Any]:
         """Build a ReAct agent with the given tools and invoke it."""
         from langchain_core.messages import HumanMessage

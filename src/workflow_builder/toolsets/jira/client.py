@@ -26,7 +26,9 @@ from workflow_builder.toolsets.jira.models import (
     JiraProject,
     JiraProjectDetail,
     JiraUser,
+    ProjectMetadata,
     Transition,
+    UserLookup,
 )
 
 
@@ -100,6 +102,14 @@ class JiraClient:
             resp = await client.put(url, headers=self._headers, json=json)
             resp.raise_for_status()
             return resp.json() if resp.content else {}
+
+    async def _delete(self, path: str, **params: Any) -> None:
+        import httpx
+
+        url = f"{self._base_url}/rest/api/3/{path.lstrip('/')}"
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.delete(url, headers=self._headers, params=params)
+            resp.raise_for_status()
 
     # ------------------------------------------------------------------
     # Issues
@@ -230,6 +240,27 @@ class JiraClient:
         )
         return await self.get_issue(issue_key)
 
+    async def delete_issue(self, issue_key: str, delete_subtasks: bool = False) -> str:
+        """Permanently delete an issue. Returns the key that was deleted."""
+        await self._delete(
+            f"issue/{issue_key}",
+            deleteSubtasks="true" if delete_subtasks else "false",
+        )
+        return issue_key
+
+    async def get_comments(self, issue_key: str, max_results: int = 20) -> list[Comment]:
+        """Read an issue's comments, flattened out of Atlassian Document Format."""
+        data = await self._get(f"issue/{issue_key}/comment", maxResults=max_results)
+        return [
+            Comment(
+                id=item.get("id", ""),
+                author=(item.get("author") or {}).get("displayName", ""),
+                created=item.get("created", ""),
+                body=_flatten_adf(item.get("body")),
+            )
+            for item in data.get("comments", [])
+        ]
+
     # ------------------------------------------------------------------
     # Projects
     # ------------------------------------------------------------------
@@ -253,6 +284,24 @@ class JiraClient:
             lead=data.get("lead", {}).get("displayName", ""),
         )
 
+    async def get_metadata(self, project_key: str) -> ProjectMetadata:
+        """The status, priority, and issue-type names this project actually uses.
+
+        Worth a call before filtering. These are per-project configuration, and
+        a JQL filter naming a status the board does not have returns zero rows
+        without an error — indistinguishable from "there is no such work".
+        """
+        statuses = await self._get(f"project/{project_key}/statuses")
+        priorities = await self._get("priority")
+        return ProjectMetadata(
+            project_key=project_key,
+            statuses=sorted(
+                {s.get("name", "") for t in statuses for s in t.get("statuses", [])}
+            ),
+            priorities=[p.get("name", "") for p in priorities],
+            issue_types=sorted({t.get("name", "") for t in statuses}),
+        )
+
     # ------------------------------------------------------------------
     # Current user
     # ------------------------------------------------------------------
@@ -264,12 +313,105 @@ class JiraClient:
             account_id=data["accountId"],
             display_name=data["displayName"],
             email=data.get("emailAddress", ""),
+            active=bool(data.get("active", True)),
+        )
+
+    async def search_users(self, query: str, max_results: int = 10) -> list[JiraUser]:
+        """Find users by display name or email.
+
+        The bridge between a human saying "Vishwjeet" and JQL, which addresses
+        people by ``accountId``. Matching on a display name inside JQL works
+        until two people share one, or somebody is renamed; an accountId does
+        not move.
+        """
+        data = await self._get("user/search", query=query, maxResults=max_results)
+        return [
+            JiraUser(
+                account_id=item.get("accountId", ""),
+                display_name=item.get("displayName", ""),
+                email=item.get("emailAddress", ""),
+                active=bool(item.get("active", True)),
+            )
+            for item in data
+        ]
+
+
+    async def resolve_user(self, name: str, cutoff: float = 0.6) -> UserLookup:
+        """Find a person by name, tolerating a misspelling.
+
+        Jira's user search is a substring match, not a fuzzy one, so a single
+        wrong letter returns nothing at all — and an empty list reads as "no
+        such person" rather than "try again". This retries with progressively
+        shorter prefixes and ranks what comes back by similarity, so a typo
+        produces a suggestion instead of a dead end.
+
+        ``exact`` distinguishes a literal hit from a guess. Resolving a
+        misspelling to the nearest human is reasonable for a read and reckless
+        for a write, and that is the caller's decision, not this function's.
+        """
+        import difflib
+
+        direct = await self.search_users(name, 20)
+        if direct:
+            return UserLookup(query=name, matches=direct, exact=True)
+
+        # Shrink the query until Jira's substring match finds anything. Below
+        # three characters the candidate set stops being about this person.
+        candidates: list[JiraUser] = []
+        for length in range(min(len(name), 5), 2, -1):
+            candidates = await self.search_users(name[:length], 50)
+            if candidates:
+                break
+
+        if not candidates:
+            return UserLookup(
+                query=name,
+                note=f"No Jira user matches {name!r}, and no near match either.",
+            )
+
+        scored = sorted(
+            (
+                (difflib.SequenceMatcher(None, name.lower(), u.display_name.lower()).ratio(), u)
+                for u in candidates
+            ),
+            key=lambda pair: -pair[0],
+        )
+        close = [u for score, u in scored if score >= cutoff]
+        if not close:
+            return UserLookup(
+                query=name,
+                matches=[u for _, u in scored[:3]],
+                note=(
+                    f"No user matches {name!r}. The closest names found were "
+                    f"{[u.display_name for _, u in scored[:3]]} — none close enough "
+                    "to assume. Confirm before using one."
+                ),
+            )
+
+        return UserLookup(
+            query=name,
+            matches=close,
+            note=(
+                f"No exact match for {name!r}; {close[0].display_name!r} is the "
+                "closest. Treat as a suggestion, not a fact, before writing."
+            ),
         )
 
 
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+
+def _flatten_adf(node: Any) -> str:
+    """Pull the text out of an Atlassian Document Format tree."""
+    if not isinstance(node, dict):
+        return ""
+    if node.get("type") == "text":
+        return str(node.get("text", ""))
+    parts = [_flatten_adf(child) for child in node.get("content") or []]
+    joined = "".join(parts)
+    return joined + "\n" if node.get("type") == "paragraph" else joined
 
 
 def _flatten_issue(raw: dict[str, Any]) -> JiraIssue:

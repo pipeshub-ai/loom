@@ -12,7 +12,9 @@ conversation as text, consumed by the LLM on the next turn.
 
 from __future__ import annotations
 
+import importlib
 import json
+from dataclasses import replace
 from typing import Any
 
 from workflow_builder.agents.tools import Tool, tool
@@ -71,6 +73,15 @@ def _ensure_builtin_docs() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _registry(override: Any | None = None) -> Any:
+    """The registry these tools browse — an explicit one, else the global."""
+    if override is not None:
+        return override
+    from workflow_builder.toolsets.registry import get_catalog
+
+    return get_catalog()
+
+
 @tool
 async def search_toolsets(query: str) -> str:
     """Search registered toolsets by keyword.
@@ -80,9 +91,7 @@ async def search_toolsets(query: str) -> str:
 
     Returns JSON array of matching toolsets with id, summary, and groups.
     """
-    from workflow_builder.toolsets.registry import get_catalog
-
-    cards = get_catalog().search(query)
+    cards = _registry().search(query)
     return json.dumps(
         [c.model_dump() for c in cards],
         indent=2,
@@ -102,10 +111,8 @@ async def show_toolset(
 
     Returns JSON table of operations with id, summary, and effect.
     """
-    from workflow_builder.toolsets.registry import get_catalog
-
     try:
-        table = get_catalog().show(toolset_id, group)
+        table = _registry().show(toolset_id, group)
         return json.dumps(table.model_dump(), indent=2)
     except KeyError as exc:
         return json.dumps({"error": str(exc)})
@@ -120,10 +127,8 @@ async def get_tool_contract(op_path: str) -> str:
 
     Returns JSON with input_schema, output_schema, effect, scopes, etc.
     """
-    from workflow_builder.toolsets.registry import get_catalog
-
     try:
-        contract = get_catalog().stub(op_path)
+        contract = _registry().stub(op_path)
         return json.dumps(contract.model_dump(), indent=2)
     except (KeyError, ValueError) as exc:
         return json.dumps({"error": str(exc)})
@@ -151,22 +156,13 @@ async def get_tool_docs(toolset_id: str) -> str:
     return docs
 
 
-@tool
-async def validate_code(code: str) -> str:
-    """Validate generated workflow code via AST analysis.
-
-    Checks for syntax errors, missing @workflow/@step decorators,
-    bare I/O in workflow bodies, nondeterministic calls, and
-    missing workflow_builder imports.
-
-    Args:
-        code: Python source code to validate.
-
-    Returns "Valid: no issues found." or JSON array of issues.
-    """
+def _default_validator() -> Any:
     from workflow_builder.agents.validator import CodeValidator
 
-    issues = CodeValidator().validate(code)
+    return CodeValidator()
+
+
+def _format_issues(issues: list[Any]) -> str:
     if not issues:
         return "Valid: no issues found."
     return json.dumps(
@@ -182,17 +178,244 @@ async def validate_code(code: str) -> str:
     )
 
 
+@tool
+async def validate_code(code: str) -> str:
+    """Validate generated workflow code via AST analysis.
+
+    Checks for syntax errors, missing @workflow/@step decorators,
+    bare I/O in workflow bodies, nondeterministic calls, disallowed
+    third-party imports, and missing workflow_builder imports.
+
+    Args:
+        code: Python source code to validate.
+
+    Returns "Valid: no issues found." or JSON array of issues.
+    """
+    return _format_issues(_default_validator().validate(code))
+
+
 # ---------------------------------------------------------------------------
 # Builder — returns the complete tool list for the coding agent
 # ---------------------------------------------------------------------------
 
 
-def build_coding_tools() -> list[Tool]:
-    """Return the five ReAct tools for the workflow coding agent."""
+
+
+@tool
+async def call_read_operation(
+    op_path: str, arguments: dict[str, Any] | str | None = None
+) -> str:
+    """Execute a **read-only** toolset operation while authoring, and return its result.
+
+    For resolving what a spec refers to before writing code that depends on it:
+    which account id is "Vishwjeet", which statuses this board actually uses,
+    whether project "PA" exists. Guessing those produces code that runs
+    perfectly and returns nothing.
+
+    Only operations declared ``read`` can be called. A write or destructive
+    operation is refused — authoring must never change the system it is writing
+    code about, and a model exploring an API should not be able to send mail or
+    delete an issue by way of research.
+
+    Args:
+        op_path: Fully qualified operation, e.g. ``"jira.users.resolve"``.
+        arguments: The operation's arguments, e.g. ``{"name": "Vishwjeet"}``.
+
+    Returns:
+        JSON with the result, or an error explaining what to do instead.
+    """
+    return await _call_read_operation(op_path, arguments, registry=None)
+
+
+#: How many times one lookup may be repeated before the tool stops pretending
+#: a fresh answer is coming. Two is enough to recover from a malformed first
+#: attempt; beyond that the call is not being retried, it is being re-asked.
+_REPEAT_LIMIT = 2
+
+
+async def _call_read_operation(
+    op_path: str,
+    arguments: dict[str, Any] | str | None,
+    *,
+    registry: Any | None,
+    seen: dict[str, int] | None = None,
+) -> str:
+    from workflow_builder.toolsets.manifest import EffectClass
+
+    toolset_id, _, operation_id = op_path.partition(".")
+    if not operation_id:
+        return json.dumps(
+            {"error": f"expected '<toolset>.<operation>', got {op_path!r}"}
+        )
+
+    catalog = _registry(registry)
+    manifest = catalog.get(toolset_id)
+    if manifest is None:
+        return json.dumps(
+            {"error": f"no toolset {toolset_id!r}", "available": catalog.list_toolsets()}
+        )
+
+    spec = manifest.find_operation(operation_id)
+    if spec is None:
+        return json.dumps(
+            {
+                "error": f"no operation {operation_id!r} on {toolset_id!r}",
+                "available": [op.id for op in manifest.all_operations()],
+            }
+        )
+
+    if spec.effect is not EffectClass.READ:
+        return json.dumps(
+            {
+                "error": (
+                    f"{op_path} is {spec.effect.value}, and authoring may only "
+                    "read. Write the call into the generated workflow instead of "
+                    "performing it here."
+                )
+            }
+        )
+
+    if not spec.function or not manifest.tools_module:
+        return json.dumps(
+            {"error": f"{op_path} declares no callable function to invoke"}
+        )
+
+    # Accept the object a model naturally emits, and the JSON string it
+    # sometimes sends instead. Rejecting either shape turns one mistake into a
+    # retry loop that burns the whole turn budget without executing anything.
+    if arguments is None:
+        arguments = {}
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments or "{}")
+        except json.JSONDecodeError as exc:
+            return json.dumps({"error": f"arguments is not valid JSON: {exc}"})
+    if not isinstance(arguments, dict):
+        return json.dumps(
+            {"error": f"arguments must be an object, got {type(arguments).__name__}"}
+        )
+
+    # A repeated identical lookup cannot produce a different answer, and a model
+    # that keeps asking is not converging — it is stuck on an entity the data
+    # does not resolve. Signature taken after normalising, because the encoding
+    # varies ({}, null, "{}", omitted) while the call does not.
+    if seen is not None:
+        signature = f"{op_path}:{json.dumps(arguments, sort_keys=True, default=str)}"
+        seen[signature] = seen.get(signature, 0) + 1
+        if seen[signature] > _REPEAT_LIMIT:
+            return json.dumps(
+                {
+                    "error": (
+                        f"You have already called {op_path} with these arguments "
+                        f"{seen[signature] - 1} times and the answer has not "
+                        "changed. It will not. If the entity is still ambiguous, "
+                        "stop looking and resolve it at run time: emit a "
+                        "ctx.agent() step that picks between the candidates you "
+                        "have, then return the workflow."
+                    )
+                }
+            )
+
+    try:
+        module = importlib.import_module(manifest.tools_module)
+        fn = getattr(module, spec.function)
+        # A @step is callable directly; this is deliberately outside a Runtime,
+        # since authoring is not a durable execution.
+        result = await fn(**arguments)
+    except Exception as exc:
+        # Credentials missing at authoring time is normal and not a code
+        # problem: say so plainly rather than looking like a broken operation.
+        return json.dumps(
+            {
+                "error": f"{type(exc).__name__}: {exc}",
+                "note": (
+                    "If this is a credentials or network failure, the operation "
+                    "is fine — you simply cannot resolve it here. Generate code "
+                    "that resolves it at runtime instead."
+                ),
+            }
+        )
+
+    return json.dumps({"result": _plain(result)}, indent=2, default=str)[:8000]
+
+
+def _plain(value: Any) -> Any:
+    """Render a result as JSON-friendly data, models included."""
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if isinstance(value, list):
+        return [_plain(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    return value
+
+
+def build_coding_tools(
+    *,
+    registry: Any | None = None,
+    validator: Any | None = None,
+) -> list[Tool]:
+    """Return the ReAct tools for the workflow coding agent.
+
+    Parameters
+    ----------
+    registry:
+        The :class:`ToolsetRegistry` the discovery tools browse. Pass the
+        Runtime's own (``rt.toolsets``) so the agent discovers exactly the
+        toolsets the generated workflow will be able to call — the default
+        global registry can be a superset.
+    validator:
+        A configured :class:`CodeValidator`, typically carrying an
+        ``allowed_packages`` allowlist. Defaults to an unrestricted one.
+
+    The returned tools keep the schemas of the module-level originals; only the
+    bound behaviour changes, so the model sees an identical interface.
+    """
+    if registry is None and validator is None:
+        return [
+            search_toolsets,
+            show_toolset,
+            get_tool_contract,
+            get_tool_docs,
+            call_read_operation,
+            validate_code,
+        ]
+
+    # Per-instance ledger: the count spans one generation and resets with the
+    # next, so a repeated lookup is detected within a run and not across runs.
+    seen_lookups: dict[str, int] = {}
+
+    async def bound_call(
+        op_path: str, arguments: dict[str, Any] | str | None = None
+    ) -> str:
+        return await _call_read_operation(
+            op_path, arguments, registry=registry, seen=seen_lookups
+        )
+
+    async def bound_search(query: str) -> str:
+        cards = _registry(registry).search(query)
+        return json.dumps([c.model_dump() for c in cards], indent=2)
+
+    async def bound_show(toolset_id: str, group: str | None = None) -> str:
+        try:
+            return json.dumps(_registry(registry).show(toolset_id, group).model_dump(), indent=2)
+        except KeyError as exc:
+            return json.dumps({"error": str(exc)})
+
+    async def bound_contract(op_path: str) -> str:
+        try:
+            return json.dumps(_registry(registry).stub(op_path).model_dump(), indent=2)
+        except (KeyError, ValueError) as exc:
+            return json.dumps({"error": str(exc)})
+
+    async def bound_validate(code: str) -> str:
+        return _format_issues((validator or _default_validator()).validate(code))
+
     return [
-        search_toolsets,
-        show_toolset,
-        get_tool_contract,
+        replace(search_toolsets, fn=bound_search),
+        replace(show_toolset, fn=bound_show),
+        replace(get_tool_contract, fn=bound_contract),
         get_tool_docs,
-        validate_code,
+        replace(call_read_operation, fn=bound_call),
+        replace(validate_code, fn=bound_validate),
     ]

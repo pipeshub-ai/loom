@@ -181,10 +181,7 @@ class TestLangChainToolDocs:
         assert "web" in LANGCHAIN_TOOL_DOCS.lower()
         assert "result.output" in LANGCHAIN_TOOL_DOCS
 
-    def test_registered_in_coding_tools(self) -> None:
+    async def test_registered_in_coding_tools(self) -> None:
         from workflow_builder.agents.coding_tools import get_tool_docs
 
-        result = asyncio.get_event_loop().run_until_complete(
-            get_tool_docs.fn("langchain")
-        )
-        assert "ctx.agent" in result
+        assert "ctx.agent" in await get_tool_docs.fn("langchain")

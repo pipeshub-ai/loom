@@ -29,7 +29,7 @@ class MemoryStore:
         self._executions: dict[str, ExecutionRecord] = {}
         self._journals: dict[str, dict[str, JournalEntry]] = defaultdict(dict)
         self._events: dict[tuple[str, str], deque[Event]] = defaultdict(deque)
-        self._cache: dict[str, tuple[float, Any]] = {}
+        self._cache: dict[str, tuple[float | None, Any]] = {}
         self._locks: dict[str, tuple[str, float]] = {}
         self._idempotency: dict[str, str] = {}
         self._triggers: dict[str, TriggerRecord] = {}
@@ -51,6 +51,14 @@ class MemoryStore:
     async def update_execution(self, record: ExecutionRecord) -> None:
         async with self._mutex:
             self._executions[record.run_id] = record.model_copy(deep=True)
+
+    async def delete_execution(self, run_id: str) -> None:
+        async with self._mutex:
+            record = self._executions.pop(run_id, None)
+            self._journals.pop(run_id, None)
+            if record is not None and record.idempotency_key:
+                # Otherwise the key would keep resolving to a run that is gone.
+                self._idempotency.pop(record.idempotency_key, None)
 
     async def list_executions(
         self,
@@ -153,13 +161,15 @@ class MemoryStore:
         if entry is None:
             return None
         expires_at, value = entry
-        if expires_at < time.time():
+        # A None expiry means the entry never goes stale — see CacheStore.set.
+        if expires_at is not None and expires_at < time.time():
             self._cache.pop(key, None)
             return None
         return value
 
     async def set(self, key: str, value: Any, ttl_seconds: float) -> None:
-        self._cache[key] = (time.time() + ttl_seconds, value)
+        expires_at = time.time() + ttl_seconds if ttl_seconds > 0 else None
+        self._cache[key] = (expires_at, value)
 
     async def delete(self, key: str) -> None:
         self._cache.pop(key, None)

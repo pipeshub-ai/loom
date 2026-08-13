@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
+from workflow_builder.agents.messages import Message
 from workflow_builder.agents.result import AgentResult
 
 
@@ -26,11 +27,22 @@ class AgentBackend(Protocol):
     format (one adapter function per framework).
     """
 
+    supports_history: bool
+    """Whether this backend seeds a run from prior turns.
+
+    Declared rather than assumed: a backend that quietly ignores ``history``
+    would turn a multi-turn conversation into a series of amnesiac one-shots
+    that still *look* like a conversation from the caller's side.
+    """
+
     async def run(
         self,
         prompt: str,
         *,
         tools: list[Any] | None = None,
+        history: list[Message] | None = None,
+        agent_id: str = "",
+        max_turns: int | None = None,
     ) -> AgentResult[Any]:
         """Execute the agent with the given prompt and tools.
 
@@ -41,6 +53,20 @@ class AgentBackend(Protocol):
         tools:
             LOOM ``Tool`` objects from the registry. The backend
             converts these to framework-native tools internally.
+        history:
+            Prior turns of this conversation, oldest first. Only meaningful
+            when ``supports_history`` is ``True``.
+        agent_id:
+            Stable identity of the agent being invoked. Backends may use it to
+            name the run; the runtime uses it to key stored memory.
+        max_turns:
+            Per-call override of the backend's turn budget.
+
+        Returns
+        -------
+        AgentResult
+            ``messages`` should hold the full conversation — history included —
+            so the runtime can persist it as the session's new state.
         """
         ...
 
@@ -56,6 +82,8 @@ class BuiltInBackend:
         Optional system prompt prepended to every agent call.
     """
 
+    supports_history = True
+
     def __init__(
         self,
         model: Any,
@@ -70,14 +98,22 @@ class BuiltInBackend:
         prompt: str,
         *,
         tools: list[Any] | None = None,
+        history: list[Message] | None = None,
+        agent_id: str = "",
+        max_turns: int | None = None,
     ) -> AgentResult[Any]:
         """Run the built-in agent turn loop with the given tools."""
         from workflow_builder.agents.agent import Agent
+        from workflow_builder.agents.executor import AgentContext, AgentSettings
 
         agent = Agent(
-            name="builtin",
+            name=agent_id or "builtin",
             instructions=self._instructions,
             model=self._model,
             tools=tools or [],
         )
-        return await agent(prompt)
+        return await agent(
+            prompt,
+            settings=AgentSettings(max_turns=max_turns) if max_turns else None,
+            context=AgentContext(agent_id=agent_id, history=list(history or [])),
+        )

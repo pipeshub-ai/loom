@@ -13,6 +13,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from workflow_builder.agents.messages import Message
 from workflow_builder.agents.result import AgentResult
 from workflow_builder.agents.tools import Tool
 
@@ -37,7 +38,12 @@ class AgentContext(BaseModel):
     run_id: str = ""
     workflow: str = ""
     path: str = ""
+    agent_id: str = ""
+    """Stable identity of the agent being invoked, used to key its memory."""
     session_id: str | None = None
+    """Conversation this call belongs to. ``None`` means a one-shot call."""
+    history: list[Message] = Field(default_factory=list)
+    """Prior turns to seed the conversation with, oldest first."""
     deps: Any = None
 
 
