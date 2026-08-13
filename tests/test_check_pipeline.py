@@ -165,6 +165,30 @@ class TestConcreteStages:
             pytest.skip(result.reason)
         assert result.ok
 
+    async def test_clean_code_produces_no_type_noise(self) -> None:
+        """It reported 41 warnings on a correct workflow — all of them from
+        inside workflow_builder, followed through its imports. Noise at that
+        volume is worse than no type checking, because it buries the real ones."""
+        result = await TypeStage().run(GOOD, CheckContext())
+        if result.skipped:
+            pytest.skip(result.reason)
+        assert result.issues == [], [i.message for i in result.issues]
+
+    async def test_it_catches_a_wrong_arity_call(self) -> None:
+        """The defect that compiles, lints clean, and fails at run time."""
+        code = GOOD + "\n\ndef helper(a: int, b: int) -> int:\n    return a + b\n\n_ = helper(1)\n"
+        result = await TypeStage().run(code, CheckContext())
+        if result.skipped:
+            pytest.skip(result.reason)
+        assert any("Missing positional argument" in i.message for i in result.issues)
+
+    async def test_it_catches_a_wrong_return_type(self) -> None:
+        code = GOOD.replace("return n * 2", "return 'not an int'")
+        result = await TypeStage().run(code, CheckContext())
+        if result.skipped:
+            pytest.skip(result.reason)
+        assert any("Incompatible return value" in i.message for i in result.issues)
+
     async def test_types_are_reported_as_warnings(self) -> None:
         """Advisory: generated code is not annotated to a strict standard."""
         result = await TypeStage().run(

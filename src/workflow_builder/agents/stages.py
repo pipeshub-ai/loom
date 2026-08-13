@@ -157,11 +157,21 @@ class TypeStage:
                         "--no-error-summary",
                         "--no-color-output",
                         "--ignore-missing-imports",
+                        # Check this file, not the library it imports. Without
+                        # this, mypy follows into workflow_builder itself and
+                        # reports its internals as defects in the generated
+                        # code — dozens of warnings about lines the model never
+                        # wrote, which is worse than no type checking at all.
+                        "--follow-imports=silent",
                         # The file is generated, not authored: annotations are a
                         # nice-to-have, and demanding them would bury the real
                         # findings under noise the model cannot act on usefully.
                         "--disable-error-code", "no-untyped-def",
                         "--disable-error-code", "annotation-unchecked",
+                        # `ctx: Context` is the documented form; demanding
+                        # `Context[Any, Any]` would flag every workflow written
+                        # exactly as instructed.
+                        "--disable-error-code", "type-arg",
                         str(path),
                     ],
                     capture_output=True,

@@ -2,11 +2,16 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-750%20passed-brightgreen.svg)](.github/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-1544%20passed-brightgreen.svg)](.github/workflows/ci.yml)
 
 **Library-first durable execution SDK for AI-powered workflows.**
 
-Build workflows that survive crashes, schedule on cron, call any AI agent framework, and manage everything through natural language. Just `pip install` and go — no infrastructure required.
+Describe a workflow in English and get runnable Python back — compiled, linted,
+type-checked, executed against fakes, and checked for determinism before you see
+it. Or write it yourself: either way it survives crashes, resumes where it
+stopped, and runs on a laptop or Postgres without a code change.
+
+`pip install` and go — no infrastructure required.
 
 ## Quick Start
 
@@ -82,9 +87,11 @@ pip install -e ".[dev]"
 | **Agent-native** | `ctx.agent("prompt")` calls any AI agent. LangChain, Agno, Pydantic AI — swap the backend, keep the code. |
 | **Cron triggers** | `@workflow(triggers=[Schedule("0 9 * * *")])` — fires automatically via TriggerDispatcher. |
 | **Pluggable storage** | MemoryStore (tests) -> SQLite (dev) -> MongoDB/PostgreSQL (prod). Same code, different backend. |
-| **Coding agent** | Describe a workflow in English, get runnable Python. ReAct loop with tool discovery and validation. |
+| **[Coding agent](#workflow-coding-agent)** | Describe a workflow in English, get runnable Python — verified by a seven-stage pipeline before you see it. |
 | **Typed toolsets** | Gmail, Google Calendar, Jira, Confluence, web search — Pydantic models, lazy loading, auto-generated docs. |
 | **Workflow manager** | Agent-facing tools to list, run, schedule, and cancel workflows via natural language. |
+| **[CLI + TUI](#command-line)** | `loom run`, `loom runs`, `loom approve`, `loom ui`. Exit codes distinguish suspended from failed. |
+| **[MCP server](#mcp-server)** | `loom mcp` — drive workflows from Claude Code, Claude Desktop, or Cursor. |
 
 ## Architecture
 
@@ -98,6 +105,118 @@ pip install -e ".[dev]"
 ```
 
 **Core loop**: Load execution record -> re-enter workflow body -> journal short-circuits completed work -> new work is executed and journaled -> if body completes: COMPLETED; if raises Suspend: SUSPENDED (scheduler resumes later).
+
+## Workflow Coding Agent
+
+Describe the workflow in English; get a runnable file back.
+
+```python
+from workflow_builder.agents.coding_agent import WorkflowCodingAgent
+from workflow_builder.agents.providers import AnthropicProvider
+
+agent = WorkflowCodingAgent(AnthropicProvider())
+result = await agent.generate(
+    "Fetch a URL, count the words in the response, and report the count."
+)
+
+print(result.is_clean)   # True — it validates, runs, and reproduces
+print(result.code)       # the complete file, ready to run
+```
+
+The interesting part is not that a model writes Python. It is what happens
+before you see it: **every generation is verified, and a failure is fed back for
+repair.** Seven stages run cheapest-first and stop at the first blocking error.
+
+| Stage | Catches |
+|---|---|
+| `compile` | Syntax |
+| `static` | Missing `@workflow`, I/O in the body, `datetime.now()`, a store chosen in code, an integration you don't have |
+| `lint` | Undefined names, unreachable code (ruff, skipped if absent) |
+| `types` | A step called with the wrong arity, a wrong return type (mypy, skipped if absent) |
+| `smoke` | Actually runs it — against generated fakes and a faked clock, so a four-minute `ctx.sleep` costs nothing and no credentials are needed |
+| `replay` | Runs it twice and compares. Non-determinism the static rules cannot see |
+| `critique` | A second model reviews durability and spec fidelity (opt-in) |
+
+`result.is_clean` means it compiled, validated, **ran**, and reproduced — not
+that it parsed. Anything a stage finds is handed back as a repair instruction
+carrying both the error and the spec, and a repair that doesn't reduce the error
+count is discarded rather than accepted.
+
+**It resolves what your words refer to before writing code.** You name a person
+and a status the way people do; the API matches account ids and its own
+per-project vocabulary. A query built from your words returns zero rows *and no
+error* — which reads as "nothing to do" when it means "no such name". So the
+agent looks entities up while authoring, bakes the resolved id into the code
+with the name beside it in a comment, and where a name is genuinely ambiguous
+emits a `ctx.agent()` node to decide at run time rather than guessing.
+
+```python
+agent = WorkflowCodingAgent(
+    AnthropicProvider(),
+    tool_registry=rt.toolsets,      # what it may discover and call
+    allowed_packages={"httpx"},     # what the target environment has
+    supervisor=CodeSupervisor(other_model),   # optional second opinion
+)
+```
+
+Toolsets load on demand: the prompt carries an index card per integration, and
+operations, schemas, and examples are fetched only for the ones a task needs —
+so adding integrations does not tax unrelated generations.
+
+> **Maturity.** Generation quality varies with the spec. Simple, well-scoped
+> workflows come back clean; an ambiguous entity reference may still take
+> several attempts or resolve to the wrong candidate. The verification pipeline
+> is what makes that safe to iterate on — you find out before the code runs.
+
+See `examples/cookbook/07_coding_agent.py`, and `09_jira_cli.py --debug` to
+watch every tool call it makes while resolving.
+
+## Command Line
+
+```bash
+pip install "workflow-builder[cli]"
+```
+
+```bash
+loom run onboard --input '{"email": "a@b.com"}'   # or -i @payload.json
+loom run onboard --follow                          # stream steps as they finish
+loom runs --status failed
+loom show <run> / loom watch <run>
+
+loom approve <run> refund [--reject]               # unpark a human-gated run
+loom send <run> <event> '{"token": "x"}'
+loom cancel / retry / replay <run>
+
+loom check flows/order.py       # write order.graph.json + order.description.md
+loom serve --port 8000          # HTTP API
+loom ui                         # terminal UI, needs [tui]
+```
+
+**Exit codes are the contract:** `0` completed, `1` failed, `2` usage,
+**`3` suspended**, `4` cancelled. A run parked on a human has neither succeeded
+nor failed, and collapsing it into either makes calling scripts do the wrong
+thing. `--json` on every command; `--server URL` runs any of them against a
+remote LOOM instead of importing locally.
+
+## MCP Server
+
+Drive workflows from Claude Code, Claude Desktop, or Cursor.
+
+```bash
+pip install "workflow-builder[mcp]"
+claude mcp add loom -- loom mcp --module flows.py
+```
+
+Ten tools — list, run, inspect a journal, approve, send an event, cancel, retry,
+replay — plus resources and prompts. `--transport http` for networked clients.
+
+Two things it does that a thin wrapper would not: a **suspended** run comes back
+with what it is waiting for and the exact call that unparks it, plus a note that
+suspended is not failure; and the difference between `retry_run` (from the
+failure, current code) and `replay_run` (from the journal, no side effect
+repeated) is spelled out, because a model reliably guesses wrong.
+
+See [docs/guides/mcp.md](docs/guides/mcp.md).
 
 ## Agent Backends
 
@@ -172,9 +291,9 @@ await dispatcher.start()  # Fires at 9am weekdays
 | 04 | [Error handling](examples/cookbook/04_error_handling.py) | Retry, OnError.ROUTE, Failure |
 | 05 | [Human-in-the-loop](examples/cookbook/05_human_in_the_loop.py) | ctx.wait_for_event(), send_event |
 | 06 | [AI agent step](examples/cookbook/06_ai_agent_step.py) | ctx.agent() with Claude |
-| 07 | [Coding agent](examples/cookbook/07_coding_agent.py) | NL spec -> generated workflow |
+| 07 | [Coding agent](examples/cookbook/07_coding_agent.py) | NL spec -> generated, verified workflow |
 | 08 | [Jira agent](examples/cookbook/08_jira_agent.py) | Jira toolset + coding agent |
-| 09 | [Jira CLI](examples/cookbook/09_jira_cli.py) | Interactive Jira management |
+| 09 | [Jira CLI](examples/cookbook/09_jira_cli.py) | Coding agent end to end; `--debug` shows every tool call |
 | 10 | [LangChain backend](examples/cookbook/10_langchain_react_agent.py) | LangChain ReAct via AgentBackend |
 | 11 | [Agno backend](examples/cookbook/11_agno_backend.py) | Agno agent via AgentBackend |
 | 12 | [Pydantic AI backend](examples/cookbook/12_pydantic_ai_backend.py) | Pydantic AI via AgentBackend |
