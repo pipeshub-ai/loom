@@ -240,6 +240,9 @@ agent = WorkflowCodingAgent(
     # mostly agrees with itself.
     supervisor=CodeSupervisor(OpenAIProvider()),
 )
+
+print(agent.build_system_prompt().count("Available toolsets"))   # 1 — toolsets injected
+print([stage.name for stage in agent._stages or []] or "default pipeline")
 ```
 
 Toolsets load on demand: the prompt carries an index card per integration, and
@@ -306,6 +309,8 @@ See [docs/guides/mcp.md](docs/guides/mcp.md).
 The workflow code is framework-agnostic. The agent framework is configured on the Runtime:
 
 ```python
+import asyncio
+
 from langchain_anthropic import ChatAnthropic
 
 from workflow_builder import Context, Runtime, workflow
@@ -317,12 +322,29 @@ rt = Runtime(
     agent_backend=LangChainBackend(llm=ChatAnthropic(model="claude-sonnet-4-6")),
 )
 
+
 # Workflow code — no LangChain imports
 @workflow(name="research")
 async def research(ctx: Context, query: str) -> str:
-    result = await ctx.agent(f"Search for articles about {query}")
+    result = await ctx.agent(f"In one sentence, what is {query}?")
     return result.output
+
+
+async def main():
+    rt.register(research)
+    print(await rt.run("research", "durable execution"))
+
+
+asyncio.run(main())
 ```
+
+```
+<ExecutionResult run=run_01K… workflow='research' completed
+ output='Durable execution is a programming model that persists a workflow…' 1 step 61 tokens>
+```
+
+Swap `LangChainBackend` for `AgnoBackend` or `PydanticAIBackend` and the
+workflow above does not change — that is the point of the layer.
 
 Available backends: `LangChainBackend`, `AgnoBackend`, `PydanticAIBackend`, `BuiltInBackend`, or implement your own `AgentBackend` protocol.
 
@@ -354,6 +376,16 @@ async def postgres_runtime() -> Runtime:
     store = PostgresStore("postgresql://user:pass@localhost/workflows")
     await store.connect()
     return Runtime(store=store)
+
+
+# The workflow never knows which of these it is running on.
+for runtime in (Runtime(store=MemoryStore()), Runtime(store=SQLiteStore("workflows.db"))):
+    print(type(runtime.store).__name__)
+```
+
+```
+MemoryStore
+SQLiteStore
 ```
 
 

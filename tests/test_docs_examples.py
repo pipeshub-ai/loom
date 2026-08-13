@@ -174,3 +174,47 @@ class TestExampleRunner:
         outcome, detail = run(example, timeout=2)
         assert outcome == "failed"
         assert "did not finish" in detail
+
+
+class TestReadmeExamplesDemonstrate:
+    """A README block that runs silently teaches nothing.
+
+    Three shipped that way: they built a Runtime, defined a workflow, and
+    exited — so the reader saw no output and reasonably concluded it was
+    broken. The check is deliberately limited to the README. A guide showing
+    how a trigger is *declared* has nothing to print, and demanding output
+    there would make reference material worse.
+    """
+
+    def test_every_readme_block_prints_something(self) -> None:
+        import subprocess
+        import sys
+        import tempfile
+
+        from docs_examples import examples, is_environmental
+
+        silent = []
+        for example in examples([ROOT / "README.md"]):
+            with tempfile.TemporaryDirectory() as tmp:
+                script = Path(tmp) / "example.py"
+                script.write_text(example.code, encoding="utf-8")
+                try:
+                    done = subprocess.run(
+                        [sys.executable, str(script)],
+                        capture_output=True, text=True, timeout=240, cwd=tmp,
+                        stdin=subprocess.DEVNULL,
+                    )
+                except subprocess.TimeoutExpired:
+                    continue
+            if done.returncode != 0:
+                # Needs a key or an optional extra here; the CI job covers it.
+                if is_environmental(done.stderr):
+                    continue
+                pytest.fail(f"{example.label} failed: {done.stderr.strip()[-200:]}")
+            if not done.stdout.strip():
+                silent.append(example.label)
+
+        assert not silent, (
+            f"README blocks that run but print nothing: {silent}. "
+            "A reader runs these first; one that outputs nothing reads as broken."
+        )

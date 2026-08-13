@@ -384,3 +384,79 @@ class TestIdempotency:
         r2 = await rt.run(wf, None, idempotency_key="unique-key-1")
         assert r1.run_id == r2.run_id
         assert run_count == 1  # only ran once
+
+
+class TestExecutionResultReads:
+    """``print(result)`` is the first thing anyone does with a run.
+
+    The generated repr answered it with every step record, every timestamp, and
+    the full usage breakdown — hundreds of characters in which the two facts
+    that matter, did it work and what came back, were buried.
+    """
+
+    def test_a_completed_run_leads_with_the_output(self) -> None:
+        from workflow_builder.core.models import ExecutionResult, ExecutionStatus
+
+        text = repr(
+            ExecutionResult(
+                run_id="run_1",
+                workflow="doubler",
+                status=ExecutionStatus.COMPLETED,
+                output="the answer is 42",
+            )
+        )
+        assert "doubler" in text
+        assert "completed" in text
+        assert "the answer is 42" in text
+        assert len(text) < 200, "a summary should not scroll"
+
+    def test_a_failed_run_leads_with_the_error(self) -> None:
+        from workflow_builder.core.models import (
+            ErrorInfo,
+            ExecutionResult,
+            ExecutionStatus,
+        )
+
+        text = repr(
+            ExecutionResult(
+                run_id="run_1",
+                workflow="breaks",
+                status=ExecutionStatus.FAILED,
+                error=ErrorInfo(type="RuntimeError", message="upstream is down"),
+            )
+        )
+        assert "failed" in text
+        assert "upstream is down" in text
+
+    def test_a_long_output_is_clipped(self) -> None:
+        from workflow_builder.core.models import ExecutionResult, ExecutionStatus
+
+        text = repr(
+            ExecutionResult(
+                run_id="run_1",
+                workflow="chatty",
+                status=ExecutionStatus.COMPLETED,
+                output="x" * 5_000,
+            )
+        )
+        assert len(text) < 250
+        assert "…" in text
+
+    def test_str_and_repr_agree(self) -> None:
+        from workflow_builder.core.models import ExecutionResult, ExecutionStatus
+
+        result = ExecutionResult(
+            run_id="r", workflow="w", status=ExecutionStatus.COMPLETED, output=1
+        )
+        assert str(result) == repr(result)
+
+    def test_every_field_is_still_there(self) -> None:
+        """Presentation only — nothing is hidden from a caller that asks."""
+        from workflow_builder.core.models import ExecutionResult, ExecutionStatus
+
+        result = ExecutionResult(
+            run_id="r", workflow="w", status=ExecutionStatus.COMPLETED, output=42
+        )
+        assert result.output == 42
+        assert result.run_id == "r"
+        assert result.model_dump()["workflow"] == "w"

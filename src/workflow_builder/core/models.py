@@ -205,6 +205,12 @@ class TriggerRecord(BaseModel):
     timezone: str = "UTC"
 
 
+def _clip(value: Any, limit: int = 80) -> str:
+    """One line, bounded — a summary should not scroll."""
+    text = " ".join(str(value).split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 class ExecutionResult(BaseModel):
     """What a caller gets back from ``runtime.run(...)``."""
 
@@ -219,6 +225,28 @@ class ExecutionResult(BaseModel):
     usage: Usage = Field(default_factory=Usage)
     started_at: datetime | None = None
     finished_at: datetime | None = None
+
+    def __repr__(self) -> str:
+        """A line a person can read.
+
+        ``print(result)`` is the first thing anyone does with a run, and the
+        generated repr answers it with every step record, every timestamp, and
+        the full usage breakdown — hundreds of characters in which the two
+        facts that matter, did it work and what came back, are buried. Every
+        field is still there to inspect; this is only how it presents itself.
+        """
+        parts = [f"run={self.run_id}", f"workflow={self.workflow!r}", self.status.value]
+        if self.error is not None:
+            parts.append(f"error={_clip(self.error.message)!r}")
+        elif self.output is not None:
+            parts.append(f"output={_clip(self.output)!r}")
+        if self.steps:
+            parts.append(f"{len(self.steps)} step{'s' if len(self.steps) > 1 else ''}")
+        if self.usage.total_tokens:
+            parts.append(f"{self.usage.total_tokens} tokens")
+        return f"<ExecutionResult {' '.join(parts)}>"
+
+    __str__ = __repr__
 
     @property
     def ok(self) -> bool:
