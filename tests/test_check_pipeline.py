@@ -468,3 +468,51 @@ class TestRuntimeFromEnvCanRunAgentNodes:
 
         assert "if result.error:" in DEFAULT_SYSTEM_PROMPT
         assert "result.error.message" in DEFAULT_SYSTEM_PROMPT
+
+
+class TestCodingResultLoad:
+    """Generating a file is only useful if you can run it.
+
+    Every caller that wanted to otherwise wrote the same importlib boilerplate —
+    the cookbook carried its own copy before this existed.
+    """
+
+    def test_it_returns_the_workflow(self) -> None:
+        from workflow_builder.agents.coding_agent import CodingResult
+        from workflow_builder.runtime.workflow import WorkflowDefinition
+
+        definition = CodingResult(code=GOOD).load()
+
+        assert isinstance(definition, WorkflowDefinition)
+        assert definition.name == "doubler"
+
+    async def test_the_loaded_workflow_actually_runs(self) -> None:
+        from workflow_builder import Runtime
+        from workflow_builder.agents.coding_agent import CodingResult
+        from workflow_builder.state.memory import MemoryStore
+
+        definition = CodingResult(code=GOOD).load()
+        runtime = Runtime(store=MemoryStore())
+        runtime.register(definition)
+
+        result = await runtime.run(definition.name, 21)
+        assert result.status.value == "completed"
+        assert "42" in str(result.output)
+
+    def test_no_code_raises_with_the_reason(self) -> None:
+        """A refusal carries why; loading it should repeat that, not say None."""
+        from workflow_builder.agents.coding_agent import CodingResult
+        from workflow_builder.agents.validator import CodeIssue
+
+        result = CodingResult(
+            code="",
+            issues=[CodeIssue("unsupported", "no Slack toolset here", "error")],
+        )
+        with pytest.raises(ValueError, match="no Slack toolset here"):
+            result.load()
+
+    def test_code_without_a_workflow_raises(self) -> None:
+        from workflow_builder.agents.coding_agent import CodingResult
+
+        with pytest.raises(ValueError, match="declares no @workflow"):
+            CodingResult(code="x = 1\n").load()

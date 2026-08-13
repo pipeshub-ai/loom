@@ -2,6 +2,25 @@
 
 Agent backends are the pluggable execution layer for `ctx.agent()`. The workflow code never imports or references any agent framework directly -- the backend handles the turn loop, tool dispatch, and model calls.
 
+<!-- docs-preamble -->
+
+Every example on this page assumes:
+
+```python
+from typing import Any, Protocol
+
+from workflow_builder import Context, Runtime, workflow
+from workflow_builder.state.memory import MemoryStore
+
+# Stand-ins for the framework you are wrapping.
+my_agent_framework: Any = None
+
+
+def convert_tool(tool: Any) -> Any:
+    """Map a LOOM Tool to your framework's own tool type."""
+    return tool
+```
+
 ## AgentBackend Protocol
 
 ```python
@@ -27,7 +46,7 @@ The default. Uses the LOOM `BuiltInAgentRuntime` with Anthropic models.
 from workflow_builder import Runtime
 from workflow_builder.state.memory import MemoryStore
 from workflow_builder.agents.backend import BuiltInBackend
-from workflow_builder.agents.models import AnthropicProvider
+from workflow_builder.agents.providers.anthropic_provider import AnthropicProvider
 
 runtime = Runtime(
     store=MemoryStore(),
@@ -45,13 +64,14 @@ Requires: `ANTHROPIC_API_KEY` environment variable.
 Runs agents via LangChain/LangGraph. LOOM tools are converted to LangChain tools automatically.
 
 ```python
+from langchain_anthropic import ChatAnthropic
+
 from workflow_builder.agents.backends.langchain import LangChainBackend
 
 runtime = Runtime(
     store=MemoryStore(),
-    agent_backend=LangChainBackend(
-        model_name="claude-sonnet-4-20250514",
-    ),
+    # Takes a LangChain model object, not a model name.
+    agent_backend=LangChainBackend(llm=ChatAnthropic(model="claude-sonnet-4-6")),
 )
 ```
 
@@ -64,13 +84,14 @@ Requires: `ANTHROPIC_API_KEY` (or the relevant provider key).
 Runs agents via the Agno framework.
 
 ```python
+from agno.models.anthropic import Claude
+
 from workflow_builder.agents.backends.agno import AgnoBackend
 
 runtime = Runtime(
     store=MemoryStore(),
-    agent_backend=AgnoBackend(
-        model_id="claude-sonnet-4-20250514",
-    ),
+    # Takes an Agno model object.
+    agent_backend=AgnoBackend(model=Claude(id="claude-sonnet-4-6")),
 )
 ```
 
@@ -85,9 +106,8 @@ from workflow_builder.agents.backends.pydantic_ai import PydanticAIBackend
 
 runtime = Runtime(
     store=MemoryStore(),
-    agent_backend=PydanticAIBackend(
-        model_name="claude-sonnet-4-20250514",
-    ),
+    # Takes a Pydantic AI model, or its string form.
+    agent_backend=PydanticAIBackend(model="anthropic:claude-sonnet-4-6"),
 )
 ```
 
@@ -130,9 +150,20 @@ class MyCustomBackend:
         )
 ```
 
-Then pass it to the runtime:
+Then pass it to the runtime — `agent_backend=` is the only line that changes:
 
 ```python
+from workflow_builder.agents.result import AgentResult
+
+
+class MyCustomBackend:            # the class defined above
+    def __init__(self, api_key: str) -> None:
+        self._api_key = api_key
+
+    async def run(self, prompt: str, **kwargs: Any) -> AgentResult[Any]:
+        ...
+
+
 runtime = Runtime(
     store=MemoryStore(),
     agent_backend=MyCustomBackend(api_key="..."),

@@ -50,6 +50,21 @@ User Code          SDK Core               Storage
 Workflows park themselves by raising `Suspend`:
 
 ```python
+from workflow_builder import Context, step, workflow
+
+
+@step
+async def send_request(message: str) -> str:
+    """Stand-in for the real work."""
+    return message
+
+
+@step
+async def notify(message: str) -> str:
+    """Stand-in for the real work."""
+    return message
+
+
 @workflow(name="approval_flow")
 async def approval_flow(ctx: Context) -> str:
     await ctx.step(send_request, "Please approve")

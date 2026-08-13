@@ -52,7 +52,14 @@
       "WebFetch(domain:developer.atlassian.com)",
       "Bash(.venv/bin/ruff --version)",
       "Bash(echo \" ruff: CLI only \\($\\(.venv/bin/ruff --version || echo absent\\)\\)\")",
-      "Bash(.venv/bin/mypy --version)"
+      "Bash(.venv/bin/mypy --version)",
+      "Bash(/Users/abhishek/opensource/loom/.venv/bin/python readme_agent.py)",
+      "Bash(rm -f quickstart.db)",
+      "Bash(/Users/abhishek/opensource/loom/.venv/bin/python quickstart.py)",
+      "Bash(/Users/abhishek/opensource/loom/.venv/bin/python trig.py)",
+      "Bash(.venv_x)",
+      "Bash(sed -i '' 's| for run_id in await dispatcher.tick\\(now=monday_9am\\):\\\\n|XX|' trig.py)",
+      "Bash(grep -c '```python' docs/guides/triggers.md)"
     ]
   }
 }

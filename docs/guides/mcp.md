@@ -93,8 +93,11 @@ capability by writing the coroutine and registering it; it is then testable
 without a protocol in the picture.
 
 ```python
+from workflow_builder import Runtime
 from workflow_builder.facade import LocalFacade
 from workflow_builder.mcp_server import build_server, serve
+
+runtime = Runtime()
 
 server = build_server(LocalFacade(runtime), name="my-flows")
 serve(LocalFacade(runtime), transport="stdio")

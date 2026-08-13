@@ -26,6 +26,15 @@ pip install workflow-builder[all]
 
 Create a file `hello.py`:
 
+<!-- docs-preamble -->
+
+Every example on this page assumes:
+
+```python
+from workflow_builder import Context, Runtime, step, workflow
+from workflow_builder.state.memory import MemoryStore
+```
+
 ```python
 import asyncio
 from workflow_builder import Context, Runtime, step, workflow
@@ -79,7 +88,7 @@ python hello.py
 ```python
 from workflow_builder import Retry
 
-@step(retry=Retry(max_attempts=3, backoff=2.0))
+@step(retry=Retry(max_attempts=3, initial_delay=1.0, multiplier=2.0))
 async def call_api(url: str) -> dict:
     import httpx
     async with httpx.AsyncClient() as client:
@@ -101,7 +110,7 @@ Configure the agent backend on the runtime:
 
 ```python
 from workflow_builder.agents.backend import BuiltInBackend
-from workflow_builder.agents.models import AnthropicProvider
+from workflow_builder.agents.providers.anthropic_provider import AnthropicProvider
 
 runtime = Runtime(
     store=MemoryStore(),

@@ -10,6 +10,32 @@ It is also **agent-native**: `ctx.agent()` is a first-class durable operation. A
 
 Yes. Implement the `ModelProvider` protocol from `workflow_builder.agents.models`:
 
+<!-- docs-preamble -->
+
+Every example on this page assumes:
+
+```python
+from workflow_builder import Context, Runtime, step, workflow
+from workflow_builder.state.memory import MemoryStore
+
+
+@step
+async def request_approval(item: str) -> str:
+    """Stand-in for the real work."""
+    return item
+
+
+@step
+async def proceed(item: str) -> str:
+    """Stand-in for the real work."""
+    return item
+
+
+@workflow(name="my_workflow")
+async def my_workflow(ctx: Context, data: str) -> str:
+    return data
+```
+
 ```python
 class MyProvider:
     async def chat(self, messages, tools=None, **kwargs):
@@ -94,7 +120,7 @@ If an unhandled exception propagates from the workflow body, the run is marked `
 ```python
 from workflow_builder import Retry
 
-@step(retry=Retry(max_attempts=3, backoff=2.0))
+@step(retry=Retry(max_attempts=3, initial_delay=1.0, multiplier=2.0))
 async def flaky_api_call(url: str) -> dict:
     ...
 ```
@@ -132,5 +158,6 @@ async def approval(ctx: Context) -> str:
 Resume it externally:
 
 ```python
-await runtime.resume(run_id, event={"approved": True})
+async def approve(runtime, run_id):
+    await runtime.resume(run_id, event={"approved": True})
 ```

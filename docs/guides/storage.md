@@ -2,14 +2,26 @@
 
 Storage backends persist execution records, journals, and trigger state. Switch backends by changing the `store` argument to `Runtime()` -- no workflow code changes required.
 
+<!-- docs-preamble -->
+
+Every example on this page assumes:
+
+```python
+import os
+
+from workflow_builder import Runtime
+from workflow_builder.runtime.journal import Journal
+from workflow_builder.state.memory import MemoryStore
+from workflow_builder.state.mongo import MongoStore
+from workflow_builder.state.postgres import PostgresStore
+from workflow_builder.state.sqlite import SQLiteStore
+```
+
 ## MemoryStore
 
 In-memory, non-durable. Use for tests and prototyping.
 
 ```python
-from workflow_builder import Runtime
-from workflow_builder.state.memory import MemoryStore
-
 runtime = Runtime(store=MemoryStore())
 ```
 
@@ -49,7 +61,7 @@ Requires a MongoDB 5.0+ instance. Supports:
 ```python
 store = MongoStore(
     uri="mongodb://user:pass@host:27017/dbname",
-    collection_prefix="wf_",  # optional prefix for collections
+    database="workflows",
 )
 ```
 
@@ -103,7 +115,7 @@ runtime = Runtime(store=MemoryStore())
 runtime = Runtime(store=SQLiteStore("dev.db"))
 
 # Production
-runtime = Runtime(store=MongoStore(os.environ["MONGO_URI"]))
+runtime = Runtime(store=MongoStore(os.environ.get("MONGO_URI", "mongodb://localhost:27017")))
 ```
 
 All `ExecutionStore` implementations share the same interface, so workflows, steps, and triggers work identically regardless of the backend.

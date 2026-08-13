@@ -3,6 +3,21 @@
 Two toolsets over one OAuth layer. Pure REST via httpx — no
 `google-api-python-client`, and the common auth paths need no extra at all.
 
+<!-- docs-preamble -->
+
+Every example on this page assumes:
+
+```python
+from workflow_builder import Context, Runtime, workflow
+from workflow_builder.security.grants import GrantSet
+from workflow_builder.toolsets.google.calendar.tools import calendar_list_events
+from workflow_builder.toolsets.google.gmail.tools import (
+    gmail_modify_labels,
+    gmail_search_messages,
+    gmail_send_message,
+)
+```
+
 ```python
 from workflow_builder.toolsets.google.gmail.tools import (
     gmail_search_messages, gmail_send_message,
@@ -113,8 +128,14 @@ attempt within a single run. A failed send surfaces to the workflow, which can
 park on a human:
 
 ```python
-if await ctx.wait_for_approval("send"):
-    await ctx.step(gmail_send_message, to, subject, body)
+@workflow(name="send_with_approval")
+async def send_with_approval(ctx: Context, message: dict) -> str:
+    if await ctx.wait_for_approval("send"):
+        await ctx.step(
+            gmail_send_message, message["to"], message["subject"], message["body"]
+        )
+        return "sent"
+    return "not sent"
 ```
 
 Calendar writes do retry once: a duplicate event is visible and deletable, which

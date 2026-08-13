@@ -73,11 +73,19 @@ class CodeValidator:
         allowed_packages: Iterable[str] | None = None,
         *,
         available_toolsets: Iterable[str] | None = None,
+        toolset_modules: dict[str, str] | None = None,
     ) -> None:
         self.allowed_packages = None if allowed_packages is None else set(allowed_packages)
         self.available_toolsets = (
             None if available_toolsets is None else set(available_toolsets)
         )
+        self.toolset_modules = toolset_modules or {}
+        """Toolset id to its real importable module.
+
+        A toolset's id and its module are not the same string — ``google_calendar``
+        lives at ``workflow_builder.toolsets.google.calendar`` — and a model that
+        knows only the id builds the import from it. That resolves as a plausible
+        path, passes an id-based check, and fails at import."""
         """Toolsets this environment actually has. ``None`` disables the check.
 
         A spec that needs Slack, generated against an environment with no Slack
@@ -88,7 +96,7 @@ class CodeValidator:
 
     def _check_toolsets(self, tree: ast.AST) -> list[CodeIssue]:
         """Reject imports of toolsets this environment does not have."""
-        if self.available_toolsets is None:
+        if self.available_toolsets is None and not self.toolset_modules:
             return []
 
         issues: list[CodeIssue] = []
@@ -100,6 +108,30 @@ class CodeValidator:
             elif isinstance(node, ast.Import):
                 module = node.names[0].name if node.names else ""
             if not module.startswith("workflow_builder.toolsets."):
+                continue
+
+            # Compare against the real module paths where they are known: a
+            # toolset id is not a module name, and checking the id lets an
+            # invented path through.
+            if self.toolset_modules:
+                if any(
+                    module == known or module.startswith(known + ".")
+                    for known in self.toolset_modules.values()
+                ):
+                    continue
+                if module in seen:
+                    continue
+                seen.add(module)
+                issues.append(
+                    CodeIssue(
+                        "toolset",
+                        f"no module {module!r}. Import a toolset by the exact "
+                        "path its documentation gives, not one built from its "
+                        "id. Available: "
+                        + ", ".join(sorted(self.toolset_modules.values())),
+                        "error",
+                    )
+                )
                 continue
 
             parts = module.split(".")

@@ -241,6 +241,48 @@ class CodingResult:
     review: SupervisorVerdict | None = None
     """A second model's verdict, when a supervisor was configured."""
 
+    def load(self) -> Any:
+        """Import the generated code and return its ``WorkflowDefinition``.
+
+        The point of generating a file is running it, and every caller that
+        wants to otherwise writes the same importlib boilerplate — the cookbook
+        had its own copy before this existed.
+
+        Raises ``ValueError`` when there is no code, or none that declares a
+        workflow, rather than returning ``None`` for the caller to trip over.
+        """
+        import importlib.util
+        import tempfile
+        from pathlib import Path
+
+        from workflow_builder.runtime.workflow import WorkflowDefinition
+
+        if not self.code.strip():
+            raise ValueError(
+                "no code to load"
+                + (f": {self.issues[0].message}" if self.issues else "")
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "generated_workflow.py"
+            path.write_text(self.code, encoding="utf-8")
+            spec = importlib.util.spec_from_file_location(
+                "loom_generated_workflow", path
+            )
+            if spec is None or spec.loader is None:
+                raise ValueError("generated code could not be imported")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+
+        found = [
+            value
+            for value in vars(module).values()
+            if isinstance(value, WorkflowDefinition)
+        ]
+        if not found:
+            raise ValueError("the generated file declares no @workflow")
+        return found[0]
+
     @property
     def is_clean(self) -> bool:
         """True when the code validates, runs, and passes review.
@@ -324,6 +366,7 @@ class WorkflowCodingAgent:
         self._validator = CodeValidator(
             allowed_packages=self._allowed_packages,
             available_toolsets=available,
+            toolset_modules=_toolset_modules(tool_registry),
         )
         self._tool_docs = tool_docs or []
         self._tool_registry = tool_registry
@@ -503,6 +546,7 @@ class WorkflowCodingAgent:
             workflow_input=self._smoke_input,
             allowed_packages=self._allowed_packages,
             available_toolsets=toolsets,
+            toolset_modules=_toolset_modules(self._tool_registry),
             fakes=[f for f in fakes if f[1]],
             spec=spec,
         )
@@ -709,6 +753,22 @@ class WorkflowCodingAgent:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _toolset_modules(registry: Any | None) -> dict[str, str]:
+    """Toolset id to the module it is really imported from."""
+    if registry is None:
+        return {}
+    try:
+        modules = {}
+        for toolset_id in registry.list_toolsets():
+            manifest = registry.get(toolset_id)
+            module = getattr(manifest, "tools_module", "")
+            if module:
+                modules[toolset_id] = module
+        return modules
+    except Exception:  # a fake registry in a test need not support it
+        return {}
 
 
 def _brief_args(arguments: Any) -> str:

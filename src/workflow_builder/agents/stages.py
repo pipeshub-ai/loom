@@ -66,6 +66,7 @@ class StaticStage:
         validator = CodeValidator(
             allowed_packages=context.allowed_packages,
             available_toolsets=context.available_toolsets,
+            toolset_modules=context.toolset_modules,
         )
         return CheckResult(self.name, issues=validator.validate(code))
 
@@ -172,6 +173,9 @@ class TypeStage:
                         # `Context[Any, Any]` would flag every workflow written
                         # exactly as instructed.
                         "--disable-error-code", "type-arg",
+                        # The demo block the prompt asks for calls an unannotated
+                        # main(); flagging it nags about boilerplate we specified.
+                        "--disable-error-code", "no-untyped-call",
                         str(path),
                     ],
                     capture_output=True,

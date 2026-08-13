@@ -2,6 +2,41 @@
 
 Triggers define how workflows are started. A workflow can have multiple triggers, and they are declared as part of the `@workflow` decorator.
 
+<!-- docs-preamble -->
+
+Every example on this page assumes these imports, and two steps standing in for
+whatever real work a workflow does:
+
+```python
+from workflow_builder import Context, Runtime, step, workflow
+from workflow_builder.state.memory import MemoryStore
+from workflow_builder.triggers.specs import (
+    Chat,
+    EmailInbox,
+    Form,
+    Interval,
+    Manual,
+    OnEvent,
+    OnFailure,
+    Poll,
+    Schedule,
+    Webhook,
+)
+
+
+@step
+async def fetch_metrics() -> dict:
+    """Stand-in for the real work."""
+    return {"visits": 1}
+
+
+@step
+async def format_report(data: dict) -> str:
+    """Stand-in for the real work."""
+    return str(data)
+```
+
+
 ## Trigger Types
 
 ### Schedule (Cron)
@@ -9,9 +44,6 @@ Triggers define how workflows are started. A workflow can have multiple triggers
 Run on a cron schedule:
 
 ```python
-from workflow_builder import Context, workflow
-from workflow_builder.triggers.specs import Schedule
-
 @workflow(name="daily_report", triggers=[Schedule(cron="0 9 * * *")])
 async def daily_report(ctx: Context) -> str:
     data = await ctx.step(fetch_metrics)

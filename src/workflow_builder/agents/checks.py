@@ -42,6 +42,9 @@ class CheckContext:
     """Input the smoke run passes to the generated workflow."""
     allowed_packages: set[str] | None = None
     available_toolsets: set[str] | None = None
+    toolset_modules: dict[str, str] = field(default_factory=dict)
+    """Toolset id to its real module, so an invented import path is caught
+    statically rather than at import time inside the smoke run."""
     fakes: list[tuple[str, str]] = field(default_factory=list)
     """``(tools_module, fakes_module)`` pairs to substitute during execution."""
     timeout: float = 30.0

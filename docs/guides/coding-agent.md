@@ -14,18 +14,41 @@ The `WorkflowCodingAgent` generates runnable Python workflows from natural langu
 
 ## Usage
 
+<!-- docs-preamble -->
+
+Every example on this page assumes:
+
 ```python
+from workflow_builder import Runtime
+from workflow_builder.agents.coding_agent import WorkflowCodingAgent
+from workflow_builder.agents.providers.anthropic_provider import AnthropicProvider
+from workflow_builder.toolsets.jira.tools import jira_search_issues
+
+rt = Runtime()
+model = AnthropicProvider()
+```
+
+```python
+import asyncio
+
 from workflow_builder.agents.coding_agent import WorkflowCodingAgent
 from workflow_builder.agents.providers.anthropic_provider import AnthropicProvider
 
-agent = WorkflowCodingAgent(
-    model=AnthropicProvider(model_name="claude-sonnet-4-6"),
-    tool_registry=rt.toolsets,  # auto-generates docs from manifests
-)
 
-result = await agent.generate("Create a workflow that searches Jira for open bugs")
-print(result.code)      # complete, runnable Python
-print(result.is_clean)  # True if no validation errors
+async def main(rt):
+    agent = WorkflowCodingAgent(
+        model=AnthropicProvider(model_name="claude-sonnet-4-6"),
+        tool_registry=rt.toolsets,  # auto-generates docs from manifests
+    )
+
+    result = await agent.generate(
+        "Create a workflow that searches Jira for open bugs"
+    )
+    print(result.code)      # complete, runnable Python
+    print(result.is_clean)  # True if it validates, runs, and reproduces
+
+
+asyncio.run(main(rt))
 ```
 
 ## With ToolsetRegistry (auto-generated docs)

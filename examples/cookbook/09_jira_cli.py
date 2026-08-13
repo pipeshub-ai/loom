@@ -351,7 +351,13 @@ def choose_interactively() -> tuple[str, str]:
     print()
 
     while True:
-        raw = input("Your choice [0-4]: ").strip()
+        try:
+            raw = input("Your choice [0-4]: ").strip()
+        except EOFError:
+            # Piped or redirected input, with nothing to read. A traceback here
+            # reads as a broken example rather than a missing choice.
+            print("\nNo input available. Pass --query or --example instead.")
+            raise SystemExit(2) from None
         if raw == "0":
             query = input("Enter your query:\n> ").strip()
             return query, "Custom query"

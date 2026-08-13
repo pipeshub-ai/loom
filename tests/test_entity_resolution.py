@@ -612,3 +612,64 @@ class TestBoundAndUnboundToolsAgree:
             await tool.fn(op_path="jira.users.myself", arguments={})
         )
         assert "unexpected keyword" not in str(result)
+
+
+class TestInventedModulePaths:
+    """A toolset's id is not its module name.
+
+    ``google_calendar`` lives at ``workflow_builder.toolsets.google.calendar``.
+    A model that knows only the id builds the import from it, which resolves as
+    a plausible path and passes an id-based check — then fails at import, deep
+    inside the smoke run, long after the cheap stage that should have caught it.
+    """
+
+    MODULES = {  # noqa: RUF012 - test data
+        "gmail": "workflow_builder.toolsets.google.gmail.tools",
+        "google_calendar": "workflow_builder.toolsets.google.calendar.tools",
+    }
+
+    def test_a_path_built_from_the_id_is_rejected(self) -> None:
+        from workflow_builder.agents.validator import CodeValidator
+
+        issues = CodeValidator(toolset_modules=self.MODULES).validate(
+            "from workflow_builder.toolsets.google_calendar import x\n"
+        )
+        errors = [i for i in issues if i.category == "toolset"]
+
+        assert errors
+        assert "no module" in errors[0].message
+        assert "google.calendar.tools" in errors[0].message, "must name the real one"
+
+    def test_the_real_path_is_accepted(self) -> None:
+        from workflow_builder.agents.validator import CodeValidator
+
+        issues = CodeValidator(toolset_modules=self.MODULES).validate(
+            "from workflow_builder.toolsets.google.calendar.tools import x\n"
+        )
+        assert not [i for i in issues if i.category == "toolset"]
+
+    def test_a_submodule_of_a_known_module_is_accepted(self) -> None:
+        from workflow_builder.agents.validator import CodeValidator
+
+        issues = CodeValidator(toolset_modules=self.MODULES).validate(
+            "from workflow_builder.toolsets.google.gmail.tools.extra import x\n"
+        )
+        assert not [i for i in issues if i.category == "toolset"]
+
+    def test_the_agent_supplies_the_real_paths(self) -> None:
+        from workflow_builder.agents.coding_agent import WorkflowCodingAgent
+        from workflow_builder.toolsets.google import (
+            GMAIL_MANIFEST,
+            GOOGLE_CALENDAR_MANIFEST,
+        )
+
+        class FakeModel:
+            model_name = "fake"
+
+        registry = ToolsetRegistry()
+        registry.register(GMAIL_MANIFEST)
+        registry.register(GOOGLE_CALENDAR_MANIFEST)
+        agent = WorkflowCodingAgent(FakeModel(), tool_registry=registry)
+
+        assert agent._validator.toolset_modules == self.MODULES
+        assert agent._check_context("spec").toolset_modules == self.MODULES
