@@ -19,58 +19,19 @@ the block people paste; the rest say to save the file and run it.
 
 from __future__ import annotations
 
-import re
+import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-BLOCK = re.compile(r"```python\n(.*?)```", re.S)
+sys.path.insert(0, str(ROOT / "scripts"))
 
-#: A page may declare imports its examples share, so a guide with ten short
-#: blocks does not repeat four import lines ten times. The preamble is checked
-#: as a block itself and prepended to every later block on that page.
-PREAMBLE = "<!-- docs-preamble -->"
-
-
-def preamble_of(text: str) -> str:
-    """The shared imports a page declares, or ``""``."""
-    marker = text.find(PREAMBLE)
-    if marker == -1:
-        return ""
-    match = BLOCK.search(text, marker)
-    return match.group(1) if match else ""
-
-
-def markdown_files() -> list[Path]:
-    """The docs a reader is most likely to copy from."""
-    files = [ROOT / "README.md", *sorted((ROOT / "docs").rglob("*.md"))]
-    return [path for path in files if path.exists()]
-
-
-def blocks(path: Path) -> list[tuple[int, str]]:
-    """Every Python block in *path*, with the line it starts on.
-
-    Each carries its page's preamble, so what is checked is what a reader ends
-    up with after copying the shared imports and the block they want.
-    """
-    text = path.read_text(encoding="utf-8")
-    shared = preamble_of(text)
-    return [
-        (
-            text[: match.start()].count("\n") + 1,
-            match.group(1)
-            if match.group(1) == shared
-            else f"{shared}\n{match.group(1)}",
-        )
-        for match in BLOCK.finditer(text)
-    ]
-
+from docs_examples import examples  # noqa: E402 - needs the path above
 
 CASES = [
-    pytest.param(path, line, code, id=f"{path.name}:{line}")
-    for path in markdown_files()
-    for line, code in blocks(path)
+    pytest.param(e.path, e.line, e.code, id=f"{e.path.name}:{e.line}")
+    for e in examples()
 ]
 
 
@@ -127,3 +88,89 @@ def test_every_documented_example_resolves_its_names(
 def test_there_are_examples_to_check() -> None:
     """A regex that silently matches nothing would make this suite vacuous."""
     assert len(CASES) >= 6
+
+
+class TestExampleRunner:
+    """The script the CI job runs.
+
+    Its judgement call is which failures count. A missing database is about the
+    machine; a wrong keyword argument is about the documentation. Getting that
+    backwards gives either a red build nobody trusts or a green one that means
+    nothing.
+    """
+
+    def test_a_missing_dependency_is_environmental(self) -> None:
+        from docs_examples import is_environmental
+
+        assert is_environmental("ModuleNotFoundError: No module named 'motor'")
+        assert is_environmental("ModuleNotFoundError: No module named 'asyncpg'")
+        assert is_environmental("ModuleNotFoundError: No module named 'langchain_anthropic'")
+
+    def test_a_missing_credential_is_environmental(self) -> None:
+        from docs_examples import is_environmental
+
+        assert is_environmental("anthropic.AuthenticationError: API key is invalid")
+        assert is_environmental("KeyError: 'ANTHROPIC_API_KEY'")
+
+    def test_an_unreachable_service_is_environmental(self) -> None:
+        from docs_examples import is_environmental
+
+        assert is_environmental("ServerSelectionTimeoutError: localhost:27017")
+        assert is_environmental("ConnectionRefusedError: [Errno 61] Connection refused")
+
+    def test_a_wrong_api_is_not_environmental(self) -> None:
+        """The failure this whole job exists to catch."""
+        from docs_examples import is_environmental
+
+        assert not is_environmental(
+            "TypeError: Retry.__init__() got an unexpected keyword argument 'backoff'"
+        )
+        assert not is_environmental(
+            "ImportError: cannot import name 'AnthropicProvider' "
+            "from 'workflow_builder.agents.models'"
+        )
+        assert not is_environmental("AttributeError: 'CodingResult' object has no attribute 'load'")
+
+    def test_it_finds_the_documented_examples(self) -> None:
+        from docs_examples import examples
+
+        found = examples()
+        assert len(found) >= 55
+        assert any(e.path.name == "README.md" for e in found)
+
+    def test_a_page_preamble_is_prepended(self) -> None:
+        """A guide declares shared imports once; every block is checked with them."""
+        from docs_examples import examples
+
+        triggers = [e for e in examples() if e.path.name == "triggers.md"]
+        assert triggers
+        assert all("from workflow_builder import" in e.code for e in triggers)
+
+    def test_running_a_good_example_reports_ok(self, tmp_path: Path) -> None:
+        from docs_examples import Example, run
+
+        example = Example(tmp_path / "x.md", 1, "print('hello')\n")
+        assert run(example, timeout=30)[0] == "ok"
+
+    def test_running_a_broken_example_reports_failed(self, tmp_path: Path) -> None:
+        from docs_examples import Example, run
+
+        example = Example(tmp_path / "x.md", 1, "raise TypeError('bad keyword')\n")
+        outcome, detail = run(example, timeout=30)
+        assert outcome == "failed"
+        assert "bad keyword" in detail
+
+    def test_a_missing_import_is_skipped_not_failed(self, tmp_path: Path) -> None:
+        from docs_examples import Example, run
+
+        example = Example(tmp_path / "x.md", 1, "import motor\n")
+        assert run(example, timeout=30)[0] == "skipped"
+
+    def test_a_hanging_example_is_a_failure(self, tmp_path: Path) -> None:
+        """An example that never returns is a defect, not a slow machine."""
+        from docs_examples import Example, run
+
+        example = Example(tmp_path / "x.md", 1, "import time; time.sleep(30)\n")
+        outcome, detail = run(example, timeout=2)
+        assert outcome == "failed"
+        assert "did not finish" in detail
