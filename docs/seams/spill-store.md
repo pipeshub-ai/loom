@@ -2,7 +2,7 @@
 
 *Where an oversized tool result is kept.*
 
-Defined in `workflow_builder/agents/bounds.py`.
+Defined in `loom/agents/bounds.py`.
 
 <!-- BEGIN GENERATED — do not edit below this line -->
 

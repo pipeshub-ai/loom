@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from workflow_builder.core.types import Batch, Result
+from loom.core.types import Batch, Result
 
 # ---------------------------------------------------------------------------
 # Result[T]

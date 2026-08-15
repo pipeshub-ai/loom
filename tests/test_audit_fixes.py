@@ -13,10 +13,10 @@ from pathlib import Path
 
 import pytest
 
-from workflow_builder import Context, ExecutionStatus, Runtime, step, workflow
-from workflow_builder.agents.result import AgentResult
-from workflow_builder.core.exceptions import ConfigurationError, SerializationError
-from workflow_builder.state.memory import MemoryStore
+from loom import Context, ExecutionStatus, Runtime, step, workflow
+from loom.agents.result import AgentResult
+from loom.core.exceptions import ConfigurationError, SerializationError
+from loom.stores.memory import MemoryStore
 
 # ---------------------------------------------------------------------------
 # Journal payloads: no silent data loss, blob offload, binary round-trip
@@ -71,7 +71,7 @@ class TestDurablePayloads:
         assert replayed.status is ExecutionStatus.COMPLETED
 
     async def test_large_payloads_offload_to_blob_storage(self, tmp_path: Path) -> None:
-        from workflow_builder.storage.blob import BlobService, LocalBlobBackend
+        from loom.blobs.blob import BlobService, LocalBlobBackend
 
         big = "x" * (400 * 1024)
 
@@ -101,7 +101,7 @@ class TestDurablePayloads:
         self, tmp_path: Path
     ) -> None:
         """Losing the blob service must not silently hand back the marker dict."""
-        from workflow_builder.storage.blob import BlobService, LocalBlobBackend
+        from loom.blobs.blob import BlobService, LocalBlobBackend
 
         @step
         async def produce() -> str:
@@ -139,14 +139,14 @@ class TestDurablePayloads:
 
 class TestSerdeDirect:
     def test_encode_raises_for_unserializable(self) -> None:
-        from workflow_builder.core.serde import encode
+        from loom.core.serde import encode
 
         with pytest.raises(SerializationError):
             encode(Unserializable())
 
     def test_page_round_trips(self) -> None:
-        from workflow_builder.core.serde import decode, encode
-        from workflow_builder.core.types import Page
+        from loom.core.serde import decode, encode
+        from loom.core.types import Page
 
         page = Page(items=["a", "b"], cursor="2", has_more=True, total=7)
         restored = decode(encode(page), Page[str])
@@ -178,8 +178,8 @@ async def delete_ticket(key: str) -> bool:
 class TestUnifiedRegistry:
     def test_globally_registered_toolset_is_callable_from_a_runtime(self) -> None:
         """The split-brain bug: discoverable in one store, callable from another."""
-        from workflow_builder.agents.tool_registry import Toolset
-        from workflow_builder.toolsets.registry import register_toolset
+        from loom.agents.tool_registry import Toolset
+        from loom.toolsets.registry import register_toolset
 
         register_toolset(Toolset.from_steps("tickets", [search_tickets]))
 
@@ -188,7 +188,7 @@ class TestUnifiedRegistry:
         assert [t.name for t in rt.toolsets.resolve_tools(["tickets"])] == ["search_tickets"]
 
     def test_runtime_registrations_stay_local(self) -> None:
-        from workflow_builder.agents.tool_registry import Toolset
+        from loom.agents.tool_registry import Toolset
 
         first = Runtime(store=MemoryStore())
         first.toolsets.register(Toolset.from_steps("local", [search_tickets]))
@@ -197,7 +197,7 @@ class TestUnifiedRegistry:
         assert "local" not in Runtime(store=MemoryStore()).toolsets.list_toolsets()
 
     def test_coding_agent_search_sees_the_runtime_registry(self) -> None:
-        from workflow_builder.agents.tool_registry import Toolset
+        from loom.agents.tool_registry import Toolset
 
         rt = Runtime(store=MemoryStore())
         rt.toolsets.register(Toolset.from_steps("tickets", [search_tickets]))
@@ -206,8 +206,8 @@ class TestUnifiedRegistry:
         assert [c.toolset_id for c in cards] == ["tickets"]
 
     def test_effect_filter_can_withhold_destructive_tools(self) -> None:
-        from workflow_builder.agents.tool_registry import Toolset
-        from workflow_builder.toolsets.manifest import EffectClass
+        from loom.agents.tool_registry import Toolset
+        from loom.toolsets.manifest import EffectClass
 
         rt = Runtime(store=MemoryStore())
         rt.toolsets.register(Toolset.from_steps("tickets", [search_tickets, delete_ticket]))
@@ -216,8 +216,8 @@ class TestUnifiedRegistry:
         assert [t.name for t in read_only] == ["search_tickets"]
 
     def test_explicit_effect_beats_the_name_heuristic(self) -> None:
-        from workflow_builder.agents.tool_registry import Toolset
-        from workflow_builder.toolsets.manifest import EffectClass
+        from loom.agents.tool_registry import Toolset
+        from loom.toolsets.manifest import EffectClass
 
         # "search" reads as READ, but a billed scrape is not free to retry.
         ts = Toolset.from_steps(
@@ -230,8 +230,8 @@ class TestUnifiedRegistry:
         assert op.idempotent is False
 
     def test_two_toolsets_for_one_service_do_not_silently_collide(self) -> None:
-        from workflow_builder.agents.tool_registry import Toolset, ToolsetRegistry
-        from workflow_builder.toolsets.kinds import ToolsetKind
+        from loom.agents.tool_registry import Toolset, ToolsetRegistry
+        from loom.toolsets.kinds import ToolsetKind
 
         registry = ToolsetRegistry()
         registry.register(
@@ -245,8 +245,8 @@ class TestUnifiedRegistry:
             )
 
     def test_qualified_id_distinguishes_kinds(self) -> None:
-        from workflow_builder.agents.tool_registry import Toolset, ToolsetRegistry
-        from workflow_builder.toolsets.kinds import ToolsetKind
+        from loom.agents.tool_registry import Toolset, ToolsetRegistry
+        from loom.toolsets.kinds import ToolsetKind
 
         registry = ToolsetRegistry()
         registry.register(Toolset.from_steps("jira", [search_tickets], provider="loom"))
@@ -261,7 +261,7 @@ class TestUnifiedRegistry:
         assert "mcp:atlassian:mcp.jira" in described
 
     def test_mcp_prefix_classifies(self) -> None:
-        from workflow_builder.toolsets.kinds import ToolsetKind, classify_toolset
+        from loom.toolsets.kinds import ToolsetKind, classify_toolset
 
         assert classify_toolset("mcp.jira") is ToolsetKind.MCP
         assert classify_toolset("jira") is ToolsetKind.APP
@@ -284,7 +284,7 @@ class EchoBackend:
     async def run(
         self, prompt, *, tools=None, history=None, agent_id="", max_turns=None
     ) -> AgentResult:
-        from workflow_builder.agents.messages import assistant, user
+        from loom.agents.messages import assistant, user
 
         self.seen_history.append(list(history or []))
         self.seen_agent_ids.append(agent_id)
@@ -388,9 +388,9 @@ class TestAgentContinuity:
 
 class TestAgentSession:
     async def test_session_replays_prior_turns(self) -> None:
-        from workflow_builder.agents.agent import Agent, PersistenceClass
-        from workflow_builder.agents.executor import AgentContext
-        from workflow_builder.agents.messages import assistant, user
+        from loom.agents.agent import Agent, PersistenceClass
+        from loom.agents.executor import AgentContext
+        from loom.agents.messages import assistant, user
 
         class Executor:
             agent_id = "recorder"
@@ -429,7 +429,7 @@ class TestAgentSession:
         assert await chat.history() == []
 
     def test_ephemeral_agent_refuses_a_session(self) -> None:
-        from workflow_builder.agents.agent import Agent
+        from loom.agents.agent import Agent
 
         with pytest.raises(ConfigurationError, match="EPHEMERAL"):
             Agent(name="oneshot").session(key="k")
@@ -478,7 +478,7 @@ class TestSagaAndRotation:
 
         @workflow(name="saga_cancel")
         async def saga_cancel(ctx: Context, _input: str) -> str:
-            from workflow_builder.core.exceptions import WorkflowCancelled
+            from loom.core.exceptions import WorkflowCancelled
 
             await ctx.step(reserve, "seat-2")
             await ctx.compensate(release, "seat-2")
@@ -496,7 +496,7 @@ class TestSagaAndRotation:
 
 class TestCodingAgentConfig:
     def test_instructions_can_be_replaced(self) -> None:
-        from workflow_builder.agents.coding_agent import (
+        from loom.agents.coding_agent import (
             DEFAULT_SYSTEM_PROMPT,
             WorkflowCodingAgent,
         )
@@ -508,7 +508,7 @@ class TestCodingAgentConfig:
         assert DEFAULT_SYSTEM_PROMPT not in prompt
 
     def test_extra_instructions_append(self) -> None:
-        from workflow_builder.agents.coding_agent import WorkflowCodingAgent
+        from loom.agents.coding_agent import WorkflowCodingAgent
 
         agent = WorkflowCodingAgent(
             model=object(), extra_instructions="House rule: always use SQLiteStore."
@@ -516,7 +516,7 @@ class TestCodingAgentConfig:
         assert agent.build_system_prompt().endswith("House rule: always use SQLiteStore.")
 
     def test_allowed_packages_appear_in_the_prompt(self) -> None:
-        from workflow_builder.agents.coding_agent import WorkflowCodingAgent
+        from loom.agents.coding_agent import WorkflowCodingAgent
 
         agent = WorkflowCodingAgent(model=object(), allowed_packages={"httpx", "pydantic"})
         prompt = agent.build_system_prompt()
@@ -525,12 +525,12 @@ class TestCodingAgentConfig:
         assert "Available packages" in prompt
 
     def test_allowed_packages_are_enforced_by_the_validator(self) -> None:
-        from workflow_builder.agents.validator import CodeValidator
+        from loom.agents.validator import CodeValidator
 
         code = (
             "import httpx\n"
             "import pandas\n"
-            "from workflow_builder import workflow\n"
+            "from loom import workflow\n"
             "@workflow\n"
             "async def wf(ctx, x):\n"
             "    return x\n"
@@ -542,11 +542,11 @@ class TestCodingAgentConfig:
         assert not any("Import of 'httpx'" in m for m in messages)
 
     def test_no_allowlist_means_no_import_restriction(self) -> None:
-        from workflow_builder.agents.validator import CodeValidator
+        from loom.agents.validator import CodeValidator
 
         code = (
             "import anything_at_all\n"
-            "from workflow_builder import workflow\n"
+            "from loom import workflow\n"
             "@workflow\n"
             "async def wf(ctx, x):\n"
             "    return x\n"

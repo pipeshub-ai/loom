@@ -28,12 +28,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils import box, header, load_workflow, log, print_coding_result, require_env
 
-from workflow_builder.agents.backends.langchain import LangChainBackend
-from workflow_builder.agents.coding_agent import WorkflowCodingAgent
-from workflow_builder.agents.providers.anthropic_provider import AnthropicProvider
-from workflow_builder.agents.tool_registry import Toolset
-from workflow_builder.runtime.engine import Runtime
-from workflow_builder.state.memory import MemoryStore
+from loom.agents.backends.langchain import LangChainBackend
+from loom.agents.coding_agent import WorkflowCodingAgent
+from loom.agents.providers.anthropic_provider import AnthropicProvider
+from loom.agents.tool_registry import Toolset
+from loom.runtime.engine import Runtime
+from loom.stores.memory import MemoryStore
 
 SPEC = """\
 Create a workflow called "ai_article_digest" that:
@@ -93,7 +93,7 @@ async def main() -> None:
     box(SPEC.strip(), "SPEC")
 
     # Coding agent auto-generates tool docs from the registry
-    from workflow_builder.agents.tool_registry import ToolsetRegistry
+    from loom.agents.tool_registry import ToolsetRegistry
 
     registry = ToolsetRegistry()
     registry.register(web_toolset)

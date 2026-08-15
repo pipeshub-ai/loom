@@ -21,11 +21,11 @@ from __future__ import annotations
 
 import asyncio
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.core.exceptions import GuardrailTripwire
-from workflow_builder.nodes import GuardrailRejected
-from workflow_builder.nodes.guard import PiiIn, PolicyIn
-from workflow_builder.state.memory import MemoryStore
+from loom import Context, Runtime, step, workflow
+from loom.core.exceptions import GuardrailTripwire
+from loom.nodes import GuardrailRejected
+from loom.nodes.guard import PiiIn, PolicyIn
+from loom.stores.memory import MemoryStore
 
 
 @step
@@ -100,7 +100,7 @@ async def main() -> None:
     print(f"  {result.status.value}: {result.output} batches\n")
 
     print("TRIPWIRE aborts the run outright — reserve it for policy violations:")
-    from workflow_builder.nodes.guard import GuardVerdict, enforce
+    from loom.nodes.guard import GuardVerdict, enforce
 
     try:
         enforce(GuardVerdict.tripwire("exfiltration attempt"), guard="demo", value=1)

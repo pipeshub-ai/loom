@@ -101,12 +101,12 @@ class TestWorkflowStructure:
         WORKFLOW_FILES,
         ids=[f.stem for f in WORKFLOW_FILES],
     )
-    def test_imports_workflow_builder(
+    def test_imports_loom(
         self, wf_file: Path
     ) -> None:
         source = wf_file.read_text()
-        assert "workflow_builder" in source, (
-            f"{wf_file.name} missing workflow_builder import"
+        assert "loom" in source, (
+            f"{wf_file.name} missing loom import"
         )
 
     @pytest.mark.parametrize(

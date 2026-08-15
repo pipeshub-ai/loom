@@ -43,10 +43,10 @@ same regardless of which backend the `Runtime` is configured with. See
 Every example on this page assumes:
 
 ```python
-from workflow_builder import Runtime
-from workflow_builder.agents.coding_agent import WorkflowCodingAgent
-from workflow_builder.agents.providers.anthropic_provider import AnthropicProvider
-from workflow_builder.toolsets.jira.tools import jira_search_issues
+from loom import Runtime
+from loom.agents.coding_agent import WorkflowCodingAgent
+from loom.agents.providers.anthropic_provider import AnthropicProvider
+from loom.toolsets.jira.tools import jira_search_issues
 
 rt = Runtime()
 model = AnthropicProvider()
@@ -55,8 +55,8 @@ model = AnthropicProvider()
 ```python
 import asyncio
 
-from workflow_builder.agents.coding_agent import WorkflowCodingAgent
-from workflow_builder.agents.providers.anthropic_provider import AnthropicProvider
+from loom.agents.coding_agent import WorkflowCodingAgent
+from loom.agents.providers.anthropic_provider import AnthropicProvider
 
 
 async def main(rt):
@@ -78,7 +78,7 @@ asyncio.run(main(rt))
 ## With ToolsetRegistry (auto-generated docs)
 
 ```python
-from workflow_builder.agents.tool_registry import Toolset, ToolsetRegistry
+from loom.agents.tool_registry import Toolset, ToolsetRegistry
 
 registry = ToolsetRegistry()
 registry.register(Toolset.from_steps("jira", [jira_search_issues]))

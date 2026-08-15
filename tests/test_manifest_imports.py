@@ -13,9 +13,9 @@ from typing import ClassVar
 
 import pytest
 
-from workflow_builder.toolsets.confluence.manifest import CONFLUENCE_MANIFEST
-from workflow_builder.toolsets.google import GMAIL_MANIFEST, GOOGLE_CALENDAR_MANIFEST
-from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
+from loom.toolsets.confluence.manifest import CONFLUENCE_MANIFEST
+from loom.toolsets.google import GMAIL_MANIFEST, GOOGLE_CALENDAR_MANIFEST
+from loom.toolsets.jira.manifest import JIRA_MANIFEST
 
 FIRST_PARTY = [
     GMAIL_MANIFEST,
@@ -53,7 +53,7 @@ class TestDeclaredImportsResolve:
 class TestImportLineIsHonest:
     def test_no_module_means_no_import_line(self) -> None:
         """Half an import is worse than none — it would be guessed at."""
-        from workflow_builder.toolsets.manifest import OperationSpec, ToolsetManifest
+        from loom.toolsets.manifest import OperationSpec, ToolsetManifest
 
         manifest = ToolsetManifest(
             id="x",
@@ -64,7 +64,7 @@ class TestImportLineIsHonest:
         assert manifest.import_line() == ""
 
     def test_no_functions_means_no_import_line(self) -> None:
-        from workflow_builder.toolsets.manifest import OperationSpec, ToolsetManifest
+        from loom.toolsets.manifest import OperationSpec, ToolsetManifest
 
         manifest = ToolsetManifest(
             id="x",
@@ -76,7 +76,7 @@ class TestImportLineIsHonest:
         assert manifest.import_line() == ""
 
     def test_names_are_sorted_and_deduplicated(self) -> None:
-        from workflow_builder.toolsets.manifest import OperationSpec, ToolsetManifest
+        from loom.toolsets.manifest import OperationSpec, ToolsetManifest
 
         manifest = ToolsetManifest(
             id="x",
@@ -97,21 +97,21 @@ class TestImportLineIsHonest:
 class TestGeneratedDocs:
     def test_docs_show_the_import_and_the_function_names(self) -> None:
         """What the coding agent reads must contain code it can write."""
-        from workflow_builder.agents.tool_registry import ToolsetRegistry
+        from loom.agents.tool_registry import ToolsetRegistry
 
         registry = ToolsetRegistry()
         registry.register(GMAIL_MANIFEST)
         docs = registry.describe()
 
         assert (
-            "from workflow_builder.toolsets.google.gmail.tools import" in docs
+            "from loom.toolsets.google.gmail.tools import" in docs
         ), "the docs never say how to import the toolset"
         assert "gmail_search_messages(" in docs
         assert "ctx.step(" in docs
 
     def test_docs_do_not_present_operation_ids_as_callables(self) -> None:
         """'messages.search(...)' is what got invented into an import."""
-        from workflow_builder.agents.tool_registry import ToolsetRegistry
+        from loom.agents.tool_registry import ToolsetRegistry
 
         registry = ToolsetRegistry()
         registry.register(GMAIL_MANIFEST)
@@ -120,8 +120,8 @@ class TestGeneratedDocs:
         assert "messages.search(" not in docs
 
     def test_a_manifest_without_a_module_says_it_is_not_importable(self) -> None:
-        from workflow_builder.agents.tool_registry import ToolsetRegistry
-        from workflow_builder.toolsets.manifest import OperationSpec, ToolsetManifest
+        from loom.agents.tool_registry import ToolsetRegistry
+        from loom.toolsets.manifest import OperationSpec, ToolsetManifest
 
         registry = ToolsetRegistry()
         registry.register(
@@ -167,10 +167,10 @@ class TestPaginationIsDeclaredWhereItHappens:
 
     #: Toolset id → the module whose client methods do the paging.
     CLIENTS: ClassVar[dict[str, str]] = {
-        "jira": "workflow_builder.toolsets.jira.client",
-        "confluence": "workflow_builder.toolsets.confluence.client",
-        "gmail": "workflow_builder.toolsets.google.gmail.client",
-        "google_calendar": "workflow_builder.toolsets.google.calendar.client",
+        "jira": "loom.toolsets.jira.client",
+        "confluence": "loom.toolsets.confluence.client",
+        "gmail": "loom.toolsets.google.gmail.client",
+        "google_calendar": "loom.toolsets.google.calendar.client",
     }
 
     def _client_pages(self, module_name: str) -> set[str]:
@@ -206,7 +206,7 @@ class TestPaginationIsDeclaredWhereItHappens:
         agreed with each other and both disagreed with the code. The client is
         the ground truth, so this compares against it.
         """
-        from workflow_builder.toolsets.pagination import paginates
+        from loom.toolsets.pagination import paginates
 
         wrong: list[str] = []
         for manifest in self._manifests():
@@ -229,7 +229,7 @@ class TestPaginationIsDeclaredWhereItHappens:
         assert not wrong, "\n  ".join(["client and tool disagree:", *wrong])
 
     def test_every_manifest_matches_its_implementation(self) -> None:
-        from workflow_builder.toolsets.pagination import paginates
+        from loom.toolsets.pagination import paginates
 
         wrong: list[str] = []
         for manifest in self._manifests():
@@ -251,7 +251,7 @@ class TestPaginationIsDeclaredWhereItHappens:
 
     def test_the_paged_reads_are_reachable_as_a_group(self) -> None:
         """``paginated()`` is what the docs render; it must not be empty."""
-        from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
+        from loom.toolsets.jira.manifest import JIRA_MANIFEST
 
         paged = {op.function for op in JIRA_MANIFEST.paginated()}
         assert "jira_search_issues" in paged
@@ -260,8 +260,8 @@ class TestPaginationIsDeclaredWhereItHappens:
     def test_the_agent_is_told_which_reads_page(self) -> None:
         """The flag existed and reached the catalog, the lockfile, and nothing
         the model ever saw. This is the line that closes that gap."""
-        from workflow_builder.agents.tool_registry import ToolsetRegistry
-        from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
+        from loom.agents.tool_registry import ToolsetRegistry
+        from loom.toolsets.jira.manifest import JIRA_MANIFEST
 
         registry = ToolsetRegistry()
         registry.register(JIRA_MANIFEST)

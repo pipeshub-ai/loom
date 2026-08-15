@@ -9,8 +9,8 @@ Every example on this page assumes:
 ```python
 from typing import Any, Protocol
 
-from workflow_builder import Context, Runtime, workflow
-from workflow_builder.state.memory import MemoryStore
+from loom import Context, Runtime, workflow
+from loom.stores.memory import MemoryStore
 
 # Stand-ins for the framework you are wrapping.
 my_agent_framework: Any = None
@@ -24,8 +24,8 @@ def convert_tool(tool: Any) -> Any:
 ## AgentBackend Protocol
 
 ```python
-from workflow_builder.agents.backend import AgentBackend
-from workflow_builder.agents.result import AgentResult
+from loom.agents.backend import AgentBackend
+from loom.agents.result import AgentResult
 
 class AgentBackend(Protocol):
     async def run(
@@ -43,10 +43,10 @@ The `tools` parameter carries LOOM `Tool` objects resolved from the `ToolsetRegi
 The default. Uses the LOOM `BuiltInAgentRuntime` with Anthropic models.
 
 ```python
-from workflow_builder import Runtime
-from workflow_builder.state.memory import MemoryStore
-from workflow_builder.agents.backend import BuiltInBackend
-from workflow_builder.agents.providers.anthropic_provider import AnthropicProvider
+from loom import Runtime
+from loom.stores.memory import MemoryStore
+from loom.agents.backend import BuiltInBackend
+from loom.agents.providers.anthropic_provider import AnthropicProvider
 
 runtime = Runtime(
     store=MemoryStore(),
@@ -66,7 +66,7 @@ Runs agents via LangChain/LangGraph. LOOM tools are converted to LangChain tools
 ```python
 from langchain_anthropic import ChatAnthropic
 
-from workflow_builder.agents.backends.langchain import LangChainBackend
+from loom.agents.backends.langchain import LangChainBackend
 
 runtime = Runtime(
     store=MemoryStore(),
@@ -75,7 +75,7 @@ runtime = Runtime(
 )
 ```
 
-Install: `pip install workflow-builder[langchain]`
+Install: `pip install loomflow[langchain]`
 
 Requires: `ANTHROPIC_API_KEY` (or the relevant provider key).
 
@@ -86,7 +86,7 @@ Runs agents via the Agno framework.
 ```python
 from agno.models.anthropic import Claude
 
-from workflow_builder.agents.backends.agno import AgnoBackend
+from loom.agents.backends.agno import AgnoBackend
 
 runtime = Runtime(
     store=MemoryStore(),
@@ -95,14 +95,14 @@ runtime = Runtime(
 )
 ```
 
-Install: `pip install workflow-builder[agno]`
+Install: `pip install loomflow[agno]`
 
 ## PydanticAI Backend
 
 Runs agents via Pydantic AI.
 
 ```python
-from workflow_builder.agents.backends.pydantic_ai import PydanticAIBackend
+from loom.agents.backends.pydantic_ai import PydanticAIBackend
 
 runtime = Runtime(
     store=MemoryStore(),
@@ -111,7 +111,7 @@ runtime = Runtime(
 )
 ```
 
-Install: `pip install workflow-builder[pydantic-ai]`
+Install: `pip install loomflow[pydantic-ai]`
 
 ## Custom Backend
 
@@ -119,8 +119,8 @@ Implement the `AgentBackend` protocol:
 
 ```python
 from typing import Any
-from workflow_builder.agents.backend import AgentBackend
-from workflow_builder.agents.result import AgentResult
+from loom.agents.backend import AgentBackend
+from loom.agents.result import AgentResult
 
 class MyCustomBackend:
     def __init__(self, api_key: str):
@@ -153,7 +153,7 @@ class MyCustomBackend:
 Then pass it to the runtime — `agent_backend=` is the only line that changes:
 
 ```python
-from workflow_builder.agents.result import AgentResult
+from loom.agents.result import AgentResult
 
 
 class MyCustomBackend:            # the class defined above
@@ -175,7 +175,7 @@ runtime = Runtime(
 Once a backend is configured, use `ctx.agent()` in any workflow:
 
 ```python
-from workflow_builder import Context, workflow
+from loom import Context, workflow
 
 @workflow(name="research")
 async def research(ctx: Context) -> str:

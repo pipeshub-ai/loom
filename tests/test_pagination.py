@@ -17,9 +17,9 @@ from typing import Any
 
 import pytest
 
-from workflow_builder.toolsets.confluence.client import ConfluenceClient
-from workflow_builder.toolsets.jira.client import JiraClient
-from workflow_builder.toolsets.pagination import Page, Results, collect
+from loom.toolsets.confluence.client import ConfluenceClient
+from loom.toolsets.jira.client import JiraClient
+from loom.toolsets.pagination import Page, Results, collect
 
 # ---------------------------------------------------------------------------
 # The loop
@@ -419,14 +419,14 @@ class TestTheCodingAgentKnows:
     """
 
     def test_the_prompt_says_a_list_result_may_be_capped(self) -> None:
-        from workflow_builder.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
+        from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
 
         assert "at most its `max_results`" in DEFAULT_SYSTEM_PROMPT
         assert ".complete" in DEFAULT_SYSTEM_PROMPT
 
     def test_the_prompt_says_all_means_all(self) -> None:
         """The observed failure: "show all the stories" became max_results=100."""
-        from workflow_builder.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
+        from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
 
         assert "all / every / the full list" in DEFAULT_SYSTEM_PROMPT
         assert "raise the limit" in DEFAULT_SYSTEM_PROMPT
@@ -440,19 +440,19 @@ class TestTheCodingAgentKnows:
         journal, so the rule is one line. This asserts the caveat did not creep
         back in alongside the fix.
         """
-        from workflow_builder.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
+        from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
 
         assert "only **inside the step**" not in DEFAULT_SYSTEM_PROMPT
         assert "survives being returned from a step" in DEFAULT_SYSTEM_PROMPT
 
     def test_the_unbounded_case_is_not_solved_by_a_bigger_limit(self) -> None:
-        from workflow_builder.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
+        from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
 
         assert "no natural bound" in DEFAULT_SYSTEM_PROMPT
         assert "one page per step" in DEFAULT_SYSTEM_PROMPT
 
     def test_the_prompt_asks_for_the_coverage_to_be_reported(self) -> None:
-        from workflow_builder.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
+        from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
 
         flat = " ".join(DEFAULT_SYSTEM_PROMPT.split())
         assert "raise the limit and report the coverage" in flat
@@ -460,7 +460,7 @@ class TestTheCodingAgentKnows:
 
     def test_the_example_names_no_particular_toolset(self) -> None:
         """The prompt costs the same for every user; it stays generic."""
-        from workflow_builder.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
+        from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
 
         capped = DEFAULT_SYSTEM_PROMPT[
             DEFAULT_SYSTEM_PROMPT.index("What a toolset call hands back"):
@@ -479,8 +479,8 @@ class TestCoverageStage:
     """
 
     CAPPED = (
-        "from workflow_builder import Context, step, workflow\n"
-        "from workflow_builder.toolsets.jira.tools import jira_search_issues\n"
+        "from loom import Context, step, workflow\n"
+        "from loom.toolsets.jira.tools import jira_search_issues\n"
         "\n"
         "@step\n"
         "async def fetch() -> list:\n"
@@ -494,8 +494,8 @@ class TestCoverageStage:
     )
 
     async def _run(self, code: str, spec: str):
-        from workflow_builder.agents.checks import CheckContext
-        from workflow_builder.agents.stages import CoverageStage
+        from loom.agents.checks import CheckContext
+        from loom.agents.stages import CoverageStage
 
         return await CoverageStage().run(code, CheckContext(spec=spec))
 
@@ -535,12 +535,12 @@ class TestCoverageStage:
 
     async def test_it_is_a_warning_not_a_blocker(self) -> None:
         """Deciding 100 is enough is legitimate; not noticing is the defect."""
-        from workflow_builder.agents.stages import CoverageStage
+        from loom.agents.stages import CoverageStage
 
         assert CoverageStage().blocking is False
 
     async def test_it_runs_before_the_expensive_stages(self) -> None:
-        from workflow_builder.agents.stages import default_stages
+        from loom.agents.stages import default_stages
 
         names = [stage.name for stage in default_stages()]
         assert names.index("coverage") < names.index("smoke")
@@ -556,9 +556,9 @@ class TestAThirdPartyToolsetGetsTheSameView:
     """
 
     def _toolset(self):
-        from workflow_builder import step
-        from workflow_builder.agents.tool_registry import Toolset
-        from workflow_builder.toolsets.pagination import Page, collect
+        from loom import step
+        from loom.agents.tool_registry import Toolset
+        from loom.toolsets.pagination import Page, collect
 
         rows = [f"row-{i}" for i in range(250)]
 
@@ -601,7 +601,7 @@ class TestAThirdPartyToolsetGetsTheSameView:
         assert [op.id for op in manifest.paginated()] == ["widgets_search"]
 
     def test_it_appears_in_the_docs_the_agent_reads(self) -> None:
-        from workflow_builder.agents.tool_registry import ToolsetRegistry
+        from loom.agents.tool_registry import ToolsetRegistry
 
         registry = ToolsetRegistry()
         registry.register(self._toolset())
@@ -616,8 +616,8 @@ class TestAThirdPartyToolsetGetsTheSameView:
         Twelve lines of pattern per toolset is fine at four and ruinous at a
         thousand — it is the exact cost the three-tier catalog exists to avoid.
         """
-        from workflow_builder.agents.tool_registry import ToolsetRegistry
-        from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
+        from loom.agents.tool_registry import ToolsetRegistry
+        from loom.toolsets.jira.manifest import JIRA_MANIFEST
 
         registry = ToolsetRegistry()
         registry.register(self._toolset())
@@ -629,7 +629,7 @@ class TestAThirdPartyToolsetGetsTheSameView:
 
     async def test_its_paging_actually_works(self) -> None:
         """A declaration nobody ran is a claim, not a fact."""
-        from workflow_builder.agents.tools import ToolContext
+        from loom.agents.tools import ToolContext
 
         tool = self._toolset().resolve("widgets_search")
         ctx = ToolContext(agent_name="test")
@@ -645,8 +645,8 @@ class TestAThirdPartyToolsetGetsTheSameView:
 
     async def test_its_results_survive_a_journal(self) -> None:
         """The property the whole design rests on, for a toolset we do not own."""
-        from workflow_builder.agents.tools import ToolContext
-        from workflow_builder.core.serde import decode, encode
+        from loom.agents.tools import ToolContext
+        from loom.core.serde import decode, encode
 
         tool = self._toolset().resolve("widgets_search")
         found = await tool.invoke(

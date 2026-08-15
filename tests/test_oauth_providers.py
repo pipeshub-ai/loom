@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from workflow_builder.connectors.oauth_providers import (
+from loom.connectors.oauth_providers import (
     OAuthProviderConfig,
     discover_oidc,
     get_oauth_provider,

@@ -11,7 +11,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from workflow_builder.toolsets.jira.client import JiraClient
+from loom.toolsets.jira.client import JiraClient
 
 
 def client(handler) -> JiraClient:
@@ -74,7 +74,7 @@ class TestSearchUsers:
 
 class TestDiscoverability:
     def test_the_manifest_exposes_it(self) -> None:
-        from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
+        from loom.toolsets.jira.manifest import JIRA_MANIFEST
 
         op = JIRA_MANIFEST.find_operation("users.search")
         assert op is not None
@@ -82,14 +82,14 @@ class TestDiscoverability:
 
     def test_the_tool_docs_show_the_account_id_pattern(self) -> None:
         """The docs must teach the resolve-then-query shape, not just the call."""
-        from workflow_builder.toolsets.jira.tools import JIRA_TOOL_DOCS
+        from loom.toolsets.jira.tools import JIRA_TOOL_DOCS
 
         assert "jira_search_users" in JIRA_TOOL_DOCS
         assert "account_id" in JIRA_TOOL_DOCS
 
     def test_the_docs_warn_about_project_specific_values(self) -> None:
         """The trap that made a correct query look broken."""
-        from workflow_builder.toolsets.jira.tools import JIRA_TOOL_DOCS
+        from loom.toolsets.jira.tools import JIRA_TOOL_DOCS
 
         assert "In Progress" in JIRA_TOOL_DOCS
         assert "report the values that do" in JIRA_TOOL_DOCS
@@ -105,7 +105,7 @@ class TestResolveUserHandlesTypos:
 
     def _client(self, monkeypatch, responses):
         """A client whose user search replays *responses* keyed by query."""
-        from workflow_builder.toolsets.jira.client import JiraClient
+        from loom.toolsets.jira.client import JiraClient
 
         async def fake_get(self, path, **params):
             return responses.get(params.get("query"), [])
@@ -169,7 +169,7 @@ class TestProjectMetadata:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The gap that made a correct query look broken."""
-        from workflow_builder.toolsets.jira.client import JiraClient
+        from loom.toolsets.jira.client import JiraClient
 
         async def fake_get(self, path, **params):
             if path.endswith("/statuses"):
@@ -194,8 +194,8 @@ class TestCoverage:
         """Built-but-unreachable is the recurring defect in this codebase."""
         import inspect
 
-        from workflow_builder.toolsets.jira.client import JiraClient
-        from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
+        from loom.toolsets.jira.client import JiraClient
+        from loom.toolsets.jira.manifest import JIRA_MANIFEST
 
         capabilities = {
             name
@@ -203,7 +203,7 @@ class TestCoverage:
             if not name.startswith("_")
         }
         # Every public client method should be reachable from a documented tool.
-        import workflow_builder.toolsets.jira.tools as tools
+        import loom.toolsets.jira.tools as tools
 
         source = inspect.getsource(tools)
         unreachable = [c for c in capabilities if f".{c}(" not in source]

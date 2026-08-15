@@ -2,7 +2,7 @@
 
 *Which agent framework runs ctx.agent().*
 
-Defined in `workflow_builder/agents/backend.py`.
+Defined in `loom/agents/backend.py`.
 
 <!-- BEGIN GENERATED — do not edit below this line -->
 
@@ -39,7 +39,16 @@ Execute the agent with the given prompt and tools.
 - `agents.stages.CoverageStage`
 - `agents.stages.ResolutionStage`
 - `agents.stages.GrantStage`
+- `nodes.agentic.ClassifyNode`
+- `nodes.agentic.ExtractStructuredNode`
+- `nodes.agentic.SummarizeNode`
+- `nodes.agentic.JudgeNode`
 - `nodes.base.Node`
+- `nodes.control.SwitchNode`
+- `nodes.control.FilterNode`
+- `nodes.control.DedupeNode`
+- `nodes.control.BatchNode`
+- `nodes.control.ThrottleNode`
 - `nodes.guard.nodes.SchemaGuard`
 - `nodes.guard.nodes.PolicyGuard`
 - `nodes.guard.nodes.PiiGuard`
@@ -50,22 +59,13 @@ Execute the agent with the given prompt and tools.
 - `nodes.human.nodes.FormNode`
 - `nodes.human.nodes.ReviewNode`
 - `nodes.human.nodes.EscalateNode`
-- `nodes.stdlib.agentic.ClassifyNode`
-- `nodes.stdlib.agentic.ExtractStructuredNode`
-- `nodes.stdlib.agentic.SummarizeNode`
-- `nodes.stdlib.agentic.JudgeNode`
-- `nodes.stdlib.control.SwitchNode`
-- `nodes.stdlib.control.FilterNode`
-- `nodes.stdlib.control.DedupeNode`
-- `nodes.stdlib.control.BatchNode`
-- `nodes.stdlib.control.ThrottleNode`
-- `nodes.stdlib.io.HttpRequestNode`
-- `nodes.stdlib.io.WaitForWebhookNode`
-- `nodes.stdlib.transform.MapFieldsNode`
-- `nodes.stdlib.transform.TemplateNode`
-- `nodes.stdlib.transform.ExtractNode`
-- `nodes.stdlib.transform.JoinNode`
-- `nodes.stdlib.transform.RedactNode`
+- `nodes.io.HttpRequestNode`
+- `nodes.io.WaitForWebhookNode`
+- `nodes.transform.MapFieldsNode`
+- `nodes.transform.TemplateNode`
+- `nodes.transform.ExtractNode`
+- `nodes.transform.JoinNode`
+- `nodes.transform.RedactNode`
 - `runtime.engine.Runtime`
 
 ## Consumers

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 class TestJiraIssue:
     def test_fields(self) -> None:
-        from workflow_builder.toolsets.jira.models import JiraIssue
+        from loom.toolsets.jira.models import JiraIssue
 
         issue = JiraIssue(
             key="PROJ-1",
@@ -22,7 +22,7 @@ class TestJiraIssue:
         assert issue.issue_type == "Bug"
 
     def test_defaults(self) -> None:
-        from workflow_builder.toolsets.jira.models import JiraIssue
+        from loom.toolsets.jira.models import JiraIssue
 
         issue = JiraIssue(key="X-1")
         assert issue.id == ""
@@ -32,7 +32,7 @@ class TestJiraIssue:
         assert issue.url == ""
 
     def test_model_dump_shape(self) -> None:
-        from workflow_builder.toolsets.jira.models import JiraIssue
+        from loom.toolsets.jira.models import JiraIssue
 
         issue = JiraIssue(key="A-1", id="1", summary="Test")
         d = issue.model_dump()
@@ -44,7 +44,7 @@ class TestJiraIssue:
         assert set(d.keys()) == expected_keys
 
     def test_round_trip(self) -> None:
-        from workflow_builder.toolsets.jira.models import JiraIssue
+        from loom.toolsets.jira.models import JiraIssue
 
         original = JiraIssue(
             key="P-1", id="1", summary="s", status="Open",
@@ -60,14 +60,14 @@ class TestJiraIssue:
         import pytest
         from pydantic import ValidationError
 
-        from workflow_builder.toolsets.jira.models import JiraIssue
+        from loom.toolsets.jira.models import JiraIssue
 
         issue = JiraIssue(key="X-1")
         with pytest.raises(ValidationError):
             issue.key = "Y-2"  # type: ignore[misc]
 
     def test_json_schema(self) -> None:
-        from workflow_builder.toolsets.jira.models import JiraIssue
+        from loom.toolsets.jira.models import JiraIssue
 
         schema = JiraIssue.model_json_schema()
         assert "properties" in schema
@@ -77,7 +77,7 @@ class TestJiraIssue:
 
 class TestCreatedIssue:
     def test_fields(self) -> None:
-        from workflow_builder.toolsets.jira.models import CreatedIssue
+        from loom.toolsets.jira.models import CreatedIssue
 
         c = CreatedIssue(key="X-1", id="1", url="https://x/browse/X-1")
         assert c.key == "X-1"
@@ -88,7 +88,7 @@ class TestCreatedIssue:
 
 class TestComment:
     def test_fields(self) -> None:
-        from workflow_builder.toolsets.jira.models import Comment
+        from loom.toolsets.jira.models import Comment
 
         c = Comment(id="100", author="Alice", created="2024-01-01", body="Looks good")
         assert c.author == "Alice"
@@ -98,7 +98,7 @@ class TestComment:
         assert set(d.keys()) == {"id", "author", "created", "body"}
 
     def test_defaults(self) -> None:
-        from workflow_builder.toolsets.jira.models import Comment
+        from loom.toolsets.jira.models import Comment
 
         c = Comment(id="1")
         assert c.author == ""
@@ -108,7 +108,7 @@ class TestComment:
 
 class TestTransition:
     def test_fields(self) -> None:
-        from workflow_builder.toolsets.jira.models import Transition
+        from loom.toolsets.jira.models import Transition
 
         t = Transition(id="31", name="In Progress")
         assert t.id == "31"
@@ -117,7 +117,7 @@ class TestTransition:
 
 class TestJiraProject:
     def test_fields(self) -> None:
-        from workflow_builder.toolsets.jira.models import JiraProject
+        from loom.toolsets.jira.models import JiraProject
 
         p = JiraProject(key="XY", name="XY Project", id="10")
         d = p.model_dump()
@@ -126,7 +126,7 @@ class TestJiraProject:
 
 class TestJiraProjectDetail:
     def test_fields(self) -> None:
-        from workflow_builder.toolsets.jira.models import JiraProjectDetail
+        from loom.toolsets.jira.models import JiraProjectDetail
 
         p = JiraProjectDetail(
             key="XY", name="XY", id="10",
@@ -139,7 +139,7 @@ class TestJiraProjectDetail:
 
 class TestJiraUser:
     def test_fields(self) -> None:
-        from workflow_builder.toolsets.jira.models import JiraUser
+        from loom.toolsets.jira.models import JiraUser
 
         u = JiraUser(
             account_id="abc", display_name="Alice", email="a@b.com"
@@ -148,7 +148,7 @@ class TestJiraUser:
         assert u.display_name == "Alice"
 
     def test_defaults(self) -> None:
-        from workflow_builder.toolsets.jira.models import JiraUser
+        from loom.toolsets.jira.models import JiraUser
 
         u = JiraUser(account_id="x", display_name="X")
         assert u.email == ""

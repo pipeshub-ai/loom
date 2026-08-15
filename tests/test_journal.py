@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from workflow_builder.core.exceptions import NondeterminismError
-from workflow_builder.runtime.journal import (
+from loom.core.exceptions import NondeterminismError
+from loom.runtime.journal import (
     CompatibilityMode,
     EntryKind,
     EntryStatus,

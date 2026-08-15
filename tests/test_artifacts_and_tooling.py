@@ -15,16 +15,16 @@ from pathlib import Path
 
 import pytest
 
-from workflow_builder import Context, ExecutionStatus, Runtime, step, workflow
-from workflow_builder.state.memory import MemoryStore
-from workflow_builder.storage.artifact import (
+from loom import Context, ExecutionStatus, Runtime, step, workflow
+from loom.blobs.artifact import (
     ArtifactNotFound,
     ArtifactService,
     InMemoryArtifactStore,
     StoreBackedArtifactStore,
 )
-from workflow_builder.storage.attachment import Attachment
-from workflow_builder.storage.blob import BlobService, LocalBlobBackend
+from loom.blobs.attachment import Attachment
+from loom.blobs.blob import BlobService, LocalBlobBackend
+from loom.stores.memory import MemoryStore
 
 
 @pytest.fixture
@@ -77,7 +77,7 @@ class TestAttachment:
 
     async def test_survives_a_journal_round_trip(self) -> None:
         """Binary must come back byte-identical, not merely truthy."""
-        from workflow_builder.core.serde import decode, encode
+        from loom.core.serde import decode, encode
 
         payload = bytes(range(256))
         att = Attachment.from_bytes("blob.bin", payload)
@@ -300,7 +300,7 @@ class TestArtifactContextApi:
 class TestRetentionDeletesBlobs:
     async def test_compaction_reclaims_blob_storage(self, blobs: BlobService) -> None:
         """Compacting runs while leaving their blobs behind leaks storage forever."""
-        from workflow_builder.storage.retention import RetentionManager, RetentionPolicy
+        from loom.blobs.retention import RetentionManager, RetentionPolicy
 
         big = "x" * (400 * 1024)
 
@@ -332,7 +332,7 @@ class TestRetentionDeletesBlobs:
 
         assert report.runs_archived == 1
         assert report.payloads_deleted == 1
-        from workflow_builder.storage.blob import BlobNotFoundError
+        from loom.blobs.blob import BlobNotFoundError
 
         with pytest.raises(BlobNotFoundError):
             await blobs.load(ref)
@@ -340,7 +340,7 @@ class TestRetentionDeletesBlobs:
     async def test_compaction_without_blobs_leaves_them_alone(
         self, blobs: BlobService
     ) -> None:
-        from workflow_builder.storage.retention import RetentionManager, RetentionPolicy
+        from loom.blobs.retention import RetentionManager, RetentionPolicy
 
         store = MemoryStore()
         report = await RetentionManager(RetentionPolicy()).compact(store)
@@ -366,7 +366,7 @@ async def orphan_flow(ctx: Context, n: int) -> int:
 
 class TestOrphanRecovery:
     async def test_running_record_with_a_live_lease_is_left_alone(self) -> None:
-        from workflow_builder.core.models import ExecutionRecord
+        from loom.core.models import ExecutionRecord
 
         store = MemoryStore()
         await store.create_execution(
@@ -384,8 +384,8 @@ class TestOrphanRecovery:
 
     async def test_expired_lease_is_reclaimed_and_finished(self) -> None:
         """The crashed worker's run resumes and completes on another node."""
-        from workflow_builder.core.models import ExecutionRecord
-        from workflow_builder.core.serde import encode
+        from loom.core.models import ExecutionRecord
+        from loom.core.serde import encode
 
         store = MemoryStore()
         await store.create_execution(
@@ -410,7 +410,7 @@ class TestOrphanRecovery:
             await rt.shutdown()
 
     async def test_a_record_without_a_lease_is_not_an_orphan(self) -> None:
-        from workflow_builder.core.models import ExecutionRecord
+        from loom.core.models import ExecutionRecord
 
         store = MemoryStore()
         await store.create_execution(
@@ -426,7 +426,7 @@ class TestOrphanRecovery:
     async def test_a_run_this_node_is_driving_is_not_reclaimed(self) -> None:
         rt = Runtime(store=MemoryStore())
         rt._driving.add("mine")
-        from workflow_builder.core.models import ExecutionRecord
+        from loom.core.models import ExecutionRecord
 
         await rt.store.create_execution(
             ExecutionRecord(
@@ -479,7 +479,7 @@ class TestOrphanRecovery:
 
 
 _GOOD_FLOW = '''
-from workflow_builder import Context, step, workflow
+from loom import Context, step, workflow
 
 
 @step
@@ -497,14 +497,14 @@ async def generated(ctx: Context, n: int) -> int:
 
 class TestSmokeRun:
     def test_compile_check_catches_what_ast_parse_allows(self) -> None:
-        from workflow_builder.agents.smoke import compile_check
+        from loom.agents.smoke import compile_check
 
         # `return` outside a function parses but does not compile.
         assert not compile_check("return 5").ok
         assert compile_check(_GOOD_FLOW).ok
 
     def test_good_code_runs(self) -> None:
-        from workflow_builder.agents.smoke import smoke_run
+        from loom.agents.smoke import smoke_run
 
         result = smoke_run(_GOOD_FLOW, 21)
 
@@ -515,7 +515,7 @@ class TestSmokeRun:
         assert result.workflows_found == ["generated"]
 
     def test_import_error_is_reported_not_raised(self) -> None:
-        from workflow_builder.agents.smoke import smoke_run
+        from loom.agents.smoke import smoke_run
 
         code = "import definitely_not_a_real_package_xyz\n" + _GOOD_FLOW
         result = smoke_run(code)
@@ -525,7 +525,7 @@ class TestSmokeRun:
         assert "definitely_not_a_real_package_xyz" in result.error
 
     def test_a_file_with_no_workflow_fails(self) -> None:
-        from workflow_builder.agents.smoke import smoke_run
+        from loom.agents.smoke import smoke_run
 
         result = smoke_run("x = 1\n")
 
@@ -533,10 +533,10 @@ class TestSmokeRun:
         assert "no @workflow" in result.error
 
     def test_a_failing_workflow_is_not_reported_as_passing(self) -> None:
-        from workflow_builder.agents.smoke import smoke_run
+        from loom.agents.smoke import smoke_run
 
         code = '''
-from workflow_builder import Context, step, workflow
+from loom import Context, step, workflow
 
 
 @step(retry=1)
@@ -556,10 +556,10 @@ async def broken(ctx: Context, _n: int) -> int:
         assert "bad configuration" in result.error
 
     def test_an_infinite_loop_times_out(self) -> None:
-        from workflow_builder.agents.smoke import smoke_run
+        from loom.agents.smoke import smoke_run
 
         code = '''
-from workflow_builder import Context, step, workflow
+from loom import Context, step, workflow
 
 
 @step
@@ -579,7 +579,7 @@ async def hangs(ctx: Context, _n: int) -> int:
         assert "did not finish" in result.error
 
     def test_feedback_is_phrased_as_a_repair_instruction(self) -> None:
-        from workflow_builder.agents.smoke import smoke_run
+        from loom.agents.smoke import smoke_run
 
         result = smoke_run("import nope_not_real_pkg\n" + _GOOD_FLOW)
         feedback = result.as_feedback()
@@ -590,7 +590,7 @@ async def hangs(ctx: Context, _n: int) -> int:
     def test_feedback_carries_the_code_that_failed(self) -> None:
         """The coding agent is ephemeral, so a repair round that sends only the
         traceback asks the model to fix code it cannot see."""
-        from workflow_builder.agents.smoke import smoke_run
+        from loom.agents.smoke import smoke_run
 
         broken = "import nope_not_real_pkg\n" + _GOOD_FLOW
         feedback = smoke_run(broken).as_feedback(broken)
@@ -600,10 +600,10 @@ async def hangs(ctx: Context, _n: int) -> int:
 
     def test_agent_calls_resolve_against_a_mock_model(self) -> None:
         """No API key, no network — the mock provider stands in."""
-        from workflow_builder.agents.smoke import smoke_run
+        from loom.agents.smoke import smoke_run
 
         code = '''
-from workflow_builder import Context, step, workflow
+from loom import Context, step, workflow
 
 
 @step
@@ -631,7 +631,7 @@ async def uses_agent(ctx: Context, _n: int) -> str:
 def _loom(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     """Invoke the CLI the way a user does — through its module entry point."""
     return subprocess.run(
-        [sys.executable, "-m", "workflow_builder.cli", *args],
+        [sys.executable, "-m", "loom.cli", *args],
         capture_output=True,
         text=True,
         cwd=cwd,
@@ -641,12 +641,12 @@ def _loom(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[st
 class TestCli:
     def test_the_console_entry_point_imports(self) -> None:
         """The shipped script used to fail with ImportError before it did anything."""
-        from workflow_builder.cli import main
+        from loom.cli import main
 
         assert callable(main)
 
     def test_version(self) -> None:
-        from workflow_builder import __version__
+        from loom import __version__
 
         done = _loom("--version")
         assert done.returncode == 0
@@ -707,7 +707,7 @@ class TestCli:
 _FLOW_SOURCE = '''
 """A flow with two steps and a branch."""
 
-from workflow_builder import Context, step, workflow
+from loom import Context, step, workflow
 
 
 @step
@@ -753,7 +753,7 @@ def flow_file(tmp_path: Path) -> Path:
 class TestGraphPipeline:
     def test_extraction_is_scoped_to_the_workflow_body(self, flow_file: Path) -> None:
         """Module-level code and helpers must not become graph nodes."""
-        from workflow_builder.graph.pipeline import build_graph
+        from loom.graph.pipeline import build_graph
 
         graph = build_graph(flow_file)
         labels = [n.label for n in graph.nodes]
@@ -764,7 +764,7 @@ class TestGraphPipeline:
         assert labels.count("if") == 1
 
     def test_registry_pass_supplies_docstrings(self, flow_file: Path) -> None:
-        from workflow_builder.graph.pipeline import build_graph
+        from loom.graph.pipeline import build_graph
 
         graph = build_graph(flow_file)
         fetch = graph.find_node("fetch")
@@ -773,7 +773,7 @@ class TestGraphPipeline:
         assert fetch.description == "Fetch a record."
 
     def test_check_writes_both_artifacts(self, flow_file: Path) -> None:
-        from workflow_builder.graph.pipeline import check_file
+        from loom.graph.pipeline import check_file
 
         report = check_file(flow_file)
 
@@ -785,7 +785,7 @@ class TestGraphPipeline:
 
     def test_check_is_idempotent(self, flow_file: Path) -> None:
         """Re-running with no source change must not produce a noisy diff."""
-        from workflow_builder.graph.pipeline import check_file
+        from loom.graph.pipeline import check_file
 
         check_file(flow_file)
         second = check_file(flow_file)
@@ -794,7 +794,7 @@ class TestGraphPipeline:
         assert not second.graph_changed
 
     def test_check_detects_a_structural_change(self, flow_file: Path) -> None:
-        from workflow_builder.graph.pipeline import check_file
+        from loom.graph.pipeline import check_file
 
         check_file(flow_file)
         flow_file.write_text(
@@ -807,7 +807,7 @@ class TestGraphPipeline:
         assert check_file(flow_file).graph_changed
 
     def test_no_write_leaves_the_disk_alone(self, flow_file: Path) -> None:
-        from workflow_builder.graph.pipeline import check_file
+        from loom.graph.pipeline import check_file
 
         check_file(flow_file, write=False)
 
@@ -817,11 +817,11 @@ class TestGraphPipeline:
         """The completeness check is what stops a model hiding a step."""
         import asyncio
 
-        from workflow_builder.graph.explainer import (
+        from loom.graph.explainer import (
             SkeletonExplainer,
             verify_completeness,
         )
-        from workflow_builder.graph.pipeline import build_graph
+        from loom.graph.pipeline import build_graph
 
         graph = build_graph(flow_file)
         narration = asyncio.run(SkeletonExplainer().narrate(graph))
@@ -829,8 +829,8 @@ class TestGraphPipeline:
         assert verify_completeness(narration, graph) == []
 
     def test_an_incomplete_narration_is_reported(self, flow_file: Path) -> None:
-        from workflow_builder.graph.explainer import Narration
-        from workflow_builder.graph.pipeline import check_file
+        from loom.graph.explainer import Narration
+        from loom.graph.pipeline import check_file
 
         class ForgetfulExplainer:
             async def narrate(self, graph):
@@ -843,7 +843,7 @@ class TestGraphPipeline:
 
     def test_unimportable_file_degrades_to_the_ast_pass(self, tmp_path: Path) -> None:
         """A missing dependency should still yield a usable skeleton."""
-        from workflow_builder.graph.pipeline import build_graph
+        from loom.graph.pipeline import build_graph
 
         broken = tmp_path / "broken.py"
         broken.write_text(
@@ -856,8 +856,8 @@ class TestGraphPipeline:
 
 class TestReactFlowExport:
     def test_shape_matches_react_flow(self, flow_file: Path) -> None:
-        from workflow_builder.graph.pipeline import build_graph
-        from workflow_builder.graph.reactflow import to_react_flow
+        from loom.graph.pipeline import build_graph
+        from loom.graph.reactflow import to_react_flow
 
         payload = to_react_flow(build_graph(flow_file))
 
@@ -869,8 +869,8 @@ class TestReactFlowExport:
             assert {"id", "source", "target"} <= set(edge)
 
     def test_supplied_positions_win(self, flow_file: Path) -> None:
-        from workflow_builder.graph.pipeline import build_graph
-        from workflow_builder.graph.reactflow import to_react_flow
+        from loom.graph.pipeline import build_graph
+        from loom.graph.reactflow import to_react_flow
 
         graph = build_graph(flow_file)
         payload = to_react_flow(graph, positions={"fetch": (11.0, 22.0)})
@@ -879,8 +879,8 @@ class TestReactFlowExport:
         assert fetch["position"] == {"x": 11.0, "y": 22.0}
 
     def test_fallback_positions_are_assigned(self, flow_file: Path) -> None:
-        from workflow_builder.graph.pipeline import build_graph
-        from workflow_builder.graph.reactflow import to_react_flow
+        from loom.graph.pipeline import build_graph
+        from loom.graph.reactflow import to_react_flow
 
         payload = to_react_flow(build_graph(flow_file))
         xs = {node["position"]["x"] for node in payload["nodes"]}
@@ -889,17 +889,17 @@ class TestReactFlowExport:
         assert len(xs) > 1
 
     def test_edge_ids_are_unique(self, flow_file: Path) -> None:
-        from workflow_builder.graph.pipeline import build_graph
-        from workflow_builder.graph.reactflow import to_react_flow
+        from loom.graph.pipeline import build_graph
+        from loom.graph.reactflow import to_react_flow
 
         edges = to_react_flow(build_graph(flow_file))["edges"]
         assert len({e["id"] for e in edges}) == len(edges)
 
     async def test_run_status_overlays_onto_nodes(self, flow_file: Path) -> None:
         """The same canvas renders a live run, not just the static shape."""
-        from workflow_builder.graph.reactflow import to_react_flow
-        from workflow_builder.graph.trace import NodeTrace, RunTrace
-        from workflow_builder.graph.wgir import NodeKind, WGIRGraph, WGIRNode
+        from loom.graph.reactflow import to_react_flow
+        from loom.graph.trace import NodeTrace, RunTrace
+        from loom.graph.wgir import NodeKind, WGIRGraph, WGIRNode
 
         graph = WGIRGraph(
             flow_id="f",

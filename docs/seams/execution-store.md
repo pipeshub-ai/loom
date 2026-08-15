@@ -2,7 +2,7 @@
 
 *Where runs and journals are persisted.*
 
-Defined in `workflow_builder/state/base.py`.
+Defined in `loom/stores/base.py`.
 
 <!-- BEGIN GENERATED — do not edit below this line -->
 
@@ -52,14 +52,14 @@ Drop entries at or after ``from_path``; used by retry-from-failure.
 
 ## Implementations
 
-- `state.memory.MemoryStore`
-- `state.mongo.MongoStore`
-- `state.postgres.PostgresStore`
-- `state.sqlite.SQLiteStore`
+- `stores.memory.MemoryStore`
+- `stores.mongo.MongoStore`
+- `stores.postgres.PostgresStore`
+- `stores.sqlite.SQLiteStore`
 
 ## Consumers
 
 - `runtime.backend`
-- `state.__init__`
+- `stores.__init__`
 
 <!-- END GENERATED -->

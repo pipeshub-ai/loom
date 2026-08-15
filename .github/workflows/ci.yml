@@ -55,7 +55,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - run: pip install -e ".[dev]"
-      - run: pytest --tb=short -q --cov=workflow_builder --cov-report=term-missing
+      - run: pytest --tb=short -q --cov=loom --cov-report=term-missing
 
   # Executes every example in the README and docs/. Separate from `test`
   # because it needs the optional extras, a database, and several minutes —

@@ -10,14 +10,14 @@ from __future__ import annotations
 
 import pytest
 
-from workflow_builder import Context, ExecutionStatus, Runtime, step, workflow
-from workflow_builder.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
-from workflow_builder.agents.validator import CodeValidator
-from workflow_builder.core.exceptions import ConfigurationError
-from workflow_builder.state import from_url, store_from_env
-from workflow_builder.state.factory import STORE_URL_ENV
-from workflow_builder.state.memory import MemoryStore
-from workflow_builder.state.sqlite import SQLiteStore
+from loom import Context, ExecutionStatus, Runtime, step, workflow
+from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
+from loom.agents.validator import CodeValidator
+from loom.core.exceptions import ConfigurationError
+from loom.stores import from_url, store_from_env
+from loom.stores.factory import STORE_URL_ENV
+from loom.stores.memory import MemoryStore
+from loom.stores.sqlite import SQLiteStore
 
 
 @step
@@ -137,7 +137,7 @@ class TestWorkflowPortability:
 
 class TestGeneratedCodeDoesNotChooseAStore:
     def test_the_prompt_does_not_mandate_a_store_import(self) -> None:
-        assert "from workflow_builder.state.memory import MemoryStore" not in (
+        assert "from loom.stores.memory import MemoryStore" not in (
             DEFAULT_SYSTEM_PROMPT
         )
 
@@ -152,8 +152,8 @@ class TestGeneratedCodeDoesNotChooseAStore:
 
     def test_module_level_store_is_flagged(self) -> None:
         code = '''
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.state.memory import MemoryStore
+from loom import Context, Runtime, step, workflow
+from loom.stores.memory import MemoryStore
 
 rt = Runtime(store=MemoryStore())
 
@@ -175,8 +175,8 @@ async def w(ctx: Context, x: int) -> int:
     def test_a_store_inside_a_function_is_allowed(self) -> None:
         """Inside a function the choice is made by whoever calls it."""
         code = '''
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.state.memory import MemoryStore
+from loom import Context, Runtime, step, workflow
+from loom.stores.memory import MemoryStore
 
 @step
 async def s() -> int:
@@ -196,7 +196,7 @@ async def main() -> None:
     def test_a_store_under_main_is_allowed(self) -> None:
         """A demo block is a script, not the library."""
         code = '''
-from workflow_builder import Context, step, workflow
+from loom import Context, step, workflow
 
 @step
 async def s() -> int:
@@ -210,8 +210,8 @@ async def w(ctx: Context, x: int) -> int:
 if __name__ == "__main__":
     import asyncio
 
-    from workflow_builder import Runtime
-    from workflow_builder.state.memory import MemoryStore
+    from loom import Runtime
+    from loom.stores.memory import MemoryStore
 
     asyncio.run(Runtime(store=MemoryStore()).run(w, 1))
 '''
@@ -219,7 +219,7 @@ if __name__ == "__main__":
 
     def test_the_recommended_shape_validates_clean(self) -> None:
         code = '''
-from workflow_builder import Context, Retry, step, workflow
+from loom import Context, Retry, step, workflow
 
 
 @step(retry=Retry(max_attempts=3))
@@ -237,7 +237,7 @@ async def lookup(ctx: Context, key: str) -> dict:
 if __name__ == "__main__":
     import asyncio
 
-    from workflow_builder import Runtime
+    from loom import Runtime
 
     async def main() -> None:
         result = await Runtime.from_env().run(lookup, "abc")
@@ -249,7 +249,7 @@ if __name__ == "__main__":
 
     def test_the_scaffold_template_follows_its_own_advice(self) -> None:
         """`loom init` writes the shape the prompt describes."""
-        from workflow_builder.cli.scaffold import QUICKSTART_WORKFLOW
+        from loom.cli.scaffold import QUICKSTART_WORKFLOW
 
         assert "Runtime.from_env()" in QUICKSTART_WORKFLOW
         assert CodeValidator().validate(QUICKSTART_WORKFLOW) == []

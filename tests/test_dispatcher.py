@@ -13,7 +13,7 @@ import pytest
 
 class TestTriggerRecord:
     def test_fields_and_defaults(self) -> None:
-        from workflow_builder.core.models import TriggerRecord
+        from loom.core.models import TriggerRecord
 
         t = TriggerRecord(
             trigger_id="t1",
@@ -27,7 +27,7 @@ class TestTriggerRecord:
         assert t.last_fire_at is None
 
     def test_serialization_round_trip(self) -> None:
-        from workflow_builder.core.models import TriggerRecord
+        from loom.core.models import TriggerRecord
 
         t = TriggerRecord(
             trigger_id="t1",
@@ -41,7 +41,7 @@ class TestTriggerRecord:
         assert restored.workflow == t.workflow
 
     def test_with_all_fields(self) -> None:
-        from workflow_builder.core.models import (
+        from loom.core.models import (
             TriggerKind,
             TriggerRecord,
         )
@@ -70,8 +70,8 @@ class TestTriggerRecord:
 class TestInMemoryTriggerStore:
     @pytest.mark.asyncio
     async def test_save_and_get(self) -> None:
-        from workflow_builder.core.models import TriggerRecord
-        from workflow_builder.state.memory import MemoryStore
+        from loom.core.models import TriggerRecord
+        from loom.stores.memory import MemoryStore
 
         store = MemoryStore()
         t = TriggerRecord(
@@ -87,15 +87,15 @@ class TestInMemoryTriggerStore:
 
     @pytest.mark.asyncio
     async def test_get_nonexistent(self) -> None:
-        from workflow_builder.state.memory import MemoryStore
+        from loom.stores.memory import MemoryStore
 
         store = MemoryStore()
         assert await store.get_trigger("nope") is None
 
     @pytest.mark.asyncio
     async def test_list_triggers_all(self) -> None:
-        from workflow_builder.core.models import TriggerRecord
-        from workflow_builder.state.memory import MemoryStore
+        from loom.core.models import TriggerRecord
+        from loom.stores.memory import MemoryStore
 
         store = MemoryStore()
         await store.save_trigger(
@@ -108,8 +108,8 @@ class TestInMemoryTriggerStore:
 
     @pytest.mark.asyncio
     async def test_list_triggers_by_workflow(self) -> None:
-        from workflow_builder.core.models import TriggerRecord
-        from workflow_builder.state.memory import MemoryStore
+        from loom.core.models import TriggerRecord
+        from loom.stores.memory import MemoryStore
 
         store = MemoryStore()
         await store.save_trigger(
@@ -122,8 +122,8 @@ class TestInMemoryTriggerStore:
 
     @pytest.mark.asyncio
     async def test_due_triggers_filters_correctly(self) -> None:
-        from workflow_builder.core.models import TriggerRecord
-        from workflow_builder.state.memory import MemoryStore
+        from loom.core.models import TriggerRecord
+        from loom.stores.memory import MemoryStore
 
         store = MemoryStore()
         now = datetime.now(UTC)
@@ -151,15 +151,15 @@ class TestInMemoryTriggerStore:
 
     @pytest.mark.asyncio
     async def test_due_triggers_empty_store(self) -> None:
-        from workflow_builder.state.memory import MemoryStore
+        from loom.stores.memory import MemoryStore
 
         store = MemoryStore()
         assert await store.due_triggers(datetime.now(UTC)) == []
 
     @pytest.mark.asyncio
     async def test_due_triggers_respects_limit(self) -> None:
-        from workflow_builder.core.models import TriggerRecord
-        from workflow_builder.state.memory import MemoryStore
+        from loom.core.models import TriggerRecord
+        from loom.stores.memory import MemoryStore
 
         store = MemoryStore()
         now = datetime.now(UTC)
@@ -174,8 +174,8 @@ class TestInMemoryTriggerStore:
     @pytest.mark.asyncio
     async def test_due_triggers_timezone_naive_input(self) -> None:
         """Naive datetime should not crash — gets promoted to UTC."""
-        from workflow_builder.core.models import TriggerRecord
-        from workflow_builder.state.memory import MemoryStore
+        from loom.core.models import TriggerRecord
+        from loom.stores.memory import MemoryStore
 
         store = MemoryStore()
         now_aware = datetime.now(UTC)
@@ -190,8 +190,8 @@ class TestInMemoryTriggerStore:
 
     @pytest.mark.asyncio
     async def test_update_after_fire(self) -> None:
-        from workflow_builder.core.models import TriggerRecord
-        from workflow_builder.state.memory import MemoryStore
+        from loom.core.models import TriggerRecord
+        from loom.stores.memory import MemoryStore
 
         store = MemoryStore()
         now = datetime.now(UTC)
@@ -211,8 +211,8 @@ class TestInMemoryTriggerStore:
 
     @pytest.mark.asyncio
     async def test_update_after_fire_increments(self) -> None:
-        from workflow_builder.core.models import TriggerRecord
-        from workflow_builder.state.memory import MemoryStore
+        from loom.core.models import TriggerRecord
+        from loom.stores.memory import MemoryStore
 
         store = MemoryStore()
         now = datetime.now(UTC)
@@ -232,8 +232,8 @@ class TestInMemoryTriggerStore:
 
     @pytest.mark.asyncio
     async def test_delete_trigger(self) -> None:
-        from workflow_builder.core.models import TriggerRecord
-        from workflow_builder.state.memory import MemoryStore
+        from loom.core.models import TriggerRecord
+        from loom.stores.memory import MemoryStore
 
         store = MemoryStore()
         await store.save_trigger(
@@ -244,15 +244,15 @@ class TestInMemoryTriggerStore:
 
     @pytest.mark.asyncio
     async def test_delete_nonexistent_is_noop(self) -> None:
-        from workflow_builder.state.memory import MemoryStore
+        from loom.stores.memory import MemoryStore
 
         store = MemoryStore()
         await store.delete_trigger("nope")  # should not raise
 
     @pytest.mark.asyncio
     async def test_clear_includes_triggers(self) -> None:
-        from workflow_builder.core.models import TriggerRecord
-        from workflow_builder.state.memory import MemoryStore
+        from loom.core.models import TriggerRecord
+        from loom.stores.memory import MemoryStore
 
         store = MemoryStore()
         await store.save_trigger(
@@ -270,12 +270,12 @@ class TestInMemoryTriggerStore:
 class TestTriggerDispatcher:
     @pytest.mark.asyncio
     async def test_register_creates_trigger(self) -> None:
-        from workflow_builder import Context, workflow
-        from workflow_builder.runtime.dispatcher import (
+        from loom import Context, workflow
+        from loom.runtime.dispatcher import (
             TriggerDispatcher,
         )
-        from workflow_builder.runtime.engine import Runtime
-        from workflow_builder.triggers.specs import Schedule
+        from loom.runtime.engine import Runtime
+        from loom.triggers.specs import Schedule
 
         @workflow(
             name="daily",
@@ -297,12 +297,12 @@ class TestTriggerDispatcher:
 
     @pytest.mark.asyncio
     async def test_tick_fires_due_trigger(self) -> None:
-        from workflow_builder import Context, workflow
-        from workflow_builder.runtime.dispatcher import (
+        from loom import Context, workflow
+        from loom.runtime.dispatcher import (
             TriggerDispatcher,
         )
-        from workflow_builder.runtime.engine import Runtime
-        from workflow_builder.triggers.specs import Schedule
+        from loom.runtime.engine import Runtime
+        from loom.triggers.specs import Schedule
 
         @workflow(
             name="every_min",
@@ -325,12 +325,12 @@ class TestTriggerDispatcher:
 
     @pytest.mark.asyncio
     async def test_tick_skips_future_triggers(self) -> None:
-        from workflow_builder import Context, workflow
-        from workflow_builder.runtime.dispatcher import (
+        from loom import Context, workflow
+        from loom.runtime.dispatcher import (
             TriggerDispatcher,
         )
-        from workflow_builder.runtime.engine import Runtime
-        from workflow_builder.triggers.specs import Schedule
+        from loom.runtime.engine import Runtime
+        from loom.triggers.specs import Schedule
 
         @workflow(
             name="far_future",
@@ -349,11 +349,11 @@ class TestTriggerDispatcher:
     @pytest.mark.asyncio
     async def test_tick_handles_deleted_workflow(self) -> None:
         """Trigger for nonexistent workflow should be disabled."""
-        from workflow_builder.core.models import TriggerRecord
-        from workflow_builder.runtime.dispatcher import (
+        from loom.core.models import TriggerRecord
+        from loom.runtime.dispatcher import (
             TriggerDispatcher,
         )
-        from workflow_builder.runtime.engine import Runtime
+        from loom.runtime.engine import Runtime
 
         rt = Runtime()
         dispatcher = TriggerDispatcher(rt)
@@ -372,8 +372,8 @@ class TestTriggerDispatcher:
     @pytest.mark.asyncio
     async def test_interval_reconstruction(self) -> None:
         """Interval triggers should recompute next fire from seconds."""
-        from workflow_builder.core.models import TriggerRecord
-        from workflow_builder.runtime.dispatcher import (
+        from loom.core.models import TriggerRecord
+        from loom.runtime.dispatcher import (
             _next_fire_from_record,
         )
 
@@ -392,8 +392,8 @@ class TestTriggerDispatcher:
     @pytest.mark.asyncio
     async def test_cron_reconstruction(self) -> None:
         """Schedule triggers should recompute next fire from cron."""
-        from workflow_builder.core.models import TriggerRecord
-        from workflow_builder.runtime.dispatcher import (
+        from loom.core.models import TriggerRecord
+        from loom.runtime.dispatcher import (
             _next_fire_from_record,
         )
 
@@ -413,12 +413,12 @@ class TestTriggerDispatcher:
 
     @pytest.mark.asyncio
     async def test_multiple_triggers_on_workflow(self) -> None:
-        from workflow_builder import Context, workflow
-        from workflow_builder.runtime.dispatcher import (
+        from loom import Context, workflow
+        from loom.runtime.dispatcher import (
             TriggerDispatcher,
         )
-        from workflow_builder.runtime.engine import Runtime
-        from workflow_builder.triggers.specs import Schedule
+        from loom.runtime.engine import Runtime
+        from loom.triggers.specs import Schedule
 
         @workflow(
             name="multi",
@@ -446,11 +446,11 @@ class TestWorkflowTools:
     async def test_list_workflows(self) -> None:
         import json
 
-        from workflow_builder import Context, workflow
-        from workflow_builder.agents.workflow_tools import (
+        from loom import Context, workflow
+        from loom.agents.workflow_tools import (
             build_workflow_tools,
         )
-        from workflow_builder.runtime.engine import Runtime
+        from loom.runtime.engine import Runtime
 
         @workflow(name="test_wf")
         async def wf(ctx: Context, x: str) -> str:
@@ -468,11 +468,11 @@ class TestWorkflowTools:
     async def test_run_workflow(self) -> None:
         import json
 
-        from workflow_builder import Context, workflow
-        from workflow_builder.agents.workflow_tools import (
+        from loom import Context, workflow
+        from loom.agents.workflow_tools import (
             build_workflow_tools,
         )
-        from workflow_builder.runtime.engine import Runtime
+        from loom.runtime.engine import Runtime
 
         @workflow(name="adder")
         async def adder(ctx: Context, x: int) -> int:
@@ -489,11 +489,11 @@ class TestWorkflowTools:
     async def test_get_workflow_info(self) -> None:
         import json
 
-        from workflow_builder import Context, workflow
-        from workflow_builder.agents.workflow_tools import (
+        from loom import Context, workflow
+        from loom.agents.workflow_tools import (
             build_workflow_tools,
         )
-        from workflow_builder.runtime.engine import Runtime
+        from loom.runtime.engine import Runtime
 
         @workflow(name="info_test", description="A test workflow")
         async def info_test(ctx: Context, x: str) -> str:
@@ -510,10 +510,10 @@ class TestWorkflowTools:
     async def test_get_workflow_info_not_found(self) -> None:
         import json
 
-        from workflow_builder.agents.workflow_tools import (
+        from loom.agents.workflow_tools import (
             build_workflow_tools,
         )
-        from workflow_builder.runtime.engine import Runtime
+        from loom.runtime.engine import Runtime
 
         rt = Runtime()
         tools = build_workflow_tools(rt)
@@ -535,10 +535,10 @@ class TestSchedulesSurviveARestart:
     async def test_a_schedule_registered_on_sqlite_outlives_the_process(
         self, tmp_path
     ) -> None:
-        from workflow_builder import Context, Runtime, workflow
-        from workflow_builder.runtime.dispatcher import TriggerDispatcher
-        from workflow_builder.state import SQLiteStore
-        from workflow_builder.triggers import Schedule
+        from loom import Context, Runtime, workflow
+        from loom.runtime.dispatcher import TriggerDispatcher
+        from loom.stores import SQLiteStore
+        from loom.triggers import Schedule
 
         @workflow(name="restart_nightly", triggers=[Schedule(cron="0 9 * * *")])
         async def nightly(ctx: Context, _=None) -> str:
@@ -564,9 +564,9 @@ class TestSchedulesSurviveARestart:
 
     async def test_a_store_that_cannot_hold_schedules_says_so(self) -> None:
         """Refusing is read once; degrading is discovered in production."""
-        from workflow_builder import Runtime
-        from workflow_builder.core.exceptions import ConfigurationError
-        from workflow_builder.runtime.dispatcher import TriggerDispatcher
+        from loom import Runtime
+        from loom.core.exceptions import ConfigurationError
+        from loom.runtime.dispatcher import TriggerDispatcher
 
         # A real Runtime whose store implements ExecutionStore and no more —
         # which is exactly what a host writing its own backend produces.
@@ -582,9 +582,9 @@ class TestSchedulesSurviveARestart:
 
     async def test_an_explicit_ephemeral_store_is_still_allowed(self) -> None:
         """Opting out is fine; doing it by accident is not."""
-        from workflow_builder import Runtime
-        from workflow_builder.runtime.dispatcher import TriggerDispatcher
-        from workflow_builder.state import MemoryStore
+        from loom import Runtime
+        from loom.runtime.dispatcher import TriggerDispatcher
+        from loom.stores import MemoryStore
 
         dispatcher = TriggerDispatcher(Runtime(), trigger_store=MemoryStore())
         assert dispatcher._store is not None

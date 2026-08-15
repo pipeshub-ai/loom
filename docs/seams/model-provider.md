@@ -2,7 +2,7 @@
 
 *One model vendor behind one method.*
 
-Defined in `workflow_builder/agents/models.py`.
+Defined in `loom/agents/models.py`.
 
 <!-- BEGIN GENERATED — do not edit below this line -->
 

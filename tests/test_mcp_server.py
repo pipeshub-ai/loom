@@ -21,10 +21,10 @@ from pathlib import Path
 
 import pytest
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.facade import LocalFacade
-from workflow_builder.mcp_server import prompts, resources, tools
-from workflow_builder.state.memory import MemoryStore
+from loom import Context, Runtime, step, workflow
+from loom.facade import LocalFacade
+from loom.mcp_server import prompts, resources, tools
+from loom.stores.memory import MemoryStore
 
 pytest.importorskip("mcp", reason="needs the mcp extra")
 
@@ -451,7 +451,7 @@ class TestPromptsUnit:
 
 @pytest.fixture
 def server(facade: LocalFacade):
-    from workflow_builder.mcp_server import build_server
+    from loom.mcp_server import build_server
 
     return build_server(facade, name="loom-test")
 
@@ -467,7 +467,7 @@ class TestScheduler:
     async def test_a_sleeping_run_resumes_under_the_server(self) -> None:
         import asyncio
 
-        from workflow_builder.mcp_server import build_server
+        from loom.mcp_server import build_server
 
         @workflow(name="napper", description="Sleep, then finish")
         async def napper(ctx: Context, seconds: float) -> str:
@@ -497,14 +497,14 @@ class TestScheduler:
 
     async def test_it_can_be_turned_off(self, facade: LocalFacade) -> None:
         """One process per store should schedule; the rest opt out."""
-        from workflow_builder.mcp_server import build_server
+        from loom.mcp_server import build_server
 
         build_server(facade, scheduler=False)
         assert facade.runtime._scheduler_task is None
 
     def test_a_remote_facade_gets_no_scheduler(self) -> None:
         """Its server schedules its own; this process has no Runtime to tick."""
-        from workflow_builder.mcp_server.server import _scheduler_lifespan
+        from loom.mcp_server.server import _scheduler_lifespan
 
         class Remote:
             """Stands in for RemoteFacade — no .runtime attribute."""
@@ -515,13 +515,13 @@ class TestScheduler:
 class TestServerRegistration:
     async def test_bind_address_reaches_fastmcp(self, facade: LocalFacade) -> None:
         """The networked transports are unusable if these do not land."""
-        from workflow_builder.mcp_server import build_server
+        from loom.mcp_server import build_server
 
         built = build_server(facade, host="0.0.0.0", port=8931)
         assert (built.settings.host, built.settings.port) == ("0.0.0.0", 8931)
 
     def test_the_cli_passes_host_and_port_through(self) -> None:
-        from workflow_builder.cli import build_parser
+        from loom.cli import build_parser
 
         args = build_parser().parse_args(
             ["mcp", "--transport", "http", "--host", "0.0.0.0", "--port", "9001"]
@@ -529,15 +529,15 @@ class TestServerRegistration:
         assert (args.host, args.port) == ("0.0.0.0", 9001)
 
     def test_the_cli_has_a_no_authoring_flag(self) -> None:
-        from workflow_builder.cli import build_parser
+        from loom.cli import build_parser
 
         args = build_parser().parse_args(["mcp", "--no-authoring"])
         assert args.no_authoring is True
         assert build_parser().parse_args(["mcp"]).no_authoring is False
 
     async def test_authoring_tools_absent_when_disabled(self, facade: LocalFacade) -> None:
-        from workflow_builder.mcp_server import build_server
-        from workflow_builder.mcp_server.authoring_config import AuthoringConfig
+        from loom.mcp_server import build_server
+        from loom.mcp_server.authoring_config import AuthoringConfig
 
         server = build_server(facade, authoring=AuthoringConfig(enabled=False))
         names = {tool.name for tool in await server.list_tools()}
@@ -650,7 +650,7 @@ class TestValidateThenSmokeChain:
 
     async def test_validate_then_smoke_on_the_same_code(self, server) -> None:
         code = (
-            "from workflow_builder import Context, step, workflow\n\n"
+            "from loom import Context, step, workflow\n\n"
             "@step\n"
             "async def double(n: int) -> int:\n"
             "    return n * 2\n\n"
@@ -743,7 +743,7 @@ FLOWS = '''
 
 from __future__ import annotations
 
-from workflow_builder import Context, step, workflow
+from loom import Context, step, workflow
 
 
 @step
@@ -780,7 +780,7 @@ class TestStdioEndToEnd:
 
         return StdioServerParameters(
             command=sys.executable,
-            args=["-m", "workflow_builder.cli", "mcp", "--module", "flows.py"],
+            args=["-m", "loom.cli", "mcp", "--module", "flows.py"],
             cwd=str(project),
             env={
                 **os.environ,
@@ -914,7 +914,7 @@ class TestStdioEndToEnd:
         import subprocess
 
         done = subprocess.run(
-            [sys.executable, "-m", "workflow_builder.cli", "mcp", "--module", "flows.py"],
+            [sys.executable, "-m", "loom.cli", "mcp", "--module", "flows.py"],
             cwd=project,
             capture_output=True,
             text=True,
@@ -933,14 +933,14 @@ class TestStdioEndToEnd:
 
 class TestDeprecatedBridge:
     def test_it_warns(self) -> None:
-        from workflow_builder.mcp_server.bridge import RuntimeBridge
+        from loom.mcp_server.bridge import RuntimeBridge
 
         with pytest.warns(DeprecationWarning, match="LocalFacade"):
             RuntimeBridge()
 
     async def test_it_delegates_to_the_shared_facade(self) -> None:
         """One port underneath, so a fix in the facade reaches both callers."""
-        from workflow_builder.mcp_server.bridge import RuntimeBridge
+        from loom.mcp_server.bridge import RuntimeBridge
 
         with pytest.warns(DeprecationWarning):
             bridge = RuntimeBridge()

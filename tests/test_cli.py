@@ -1,6 +1,6 @@
 """CLI behaviour, driven through the real entry point.
 
-Every test invokes ``python -m workflow_builder.cli`` in a subprocess against a
+Every test invokes ``python -m loom.cli`` in a subprocess against a
 temporary project and a SQLite store, so what is exercised is exactly what a
 user runs — argument parsing, target resolution, exit codes, and all.
 
@@ -20,14 +20,14 @@ from pathlib import Path
 
 import pytest
 
-from workflow_builder.cli.output import Exit
+from loom.cli.output import Exit
 
 FLOWS = '''
 """Workflows for the CLI test project."""
 
 from __future__ import annotations
 
-from workflow_builder import Context, step, workflow
+from loom import Context, step, workflow
 
 
 @step
@@ -97,7 +97,7 @@ def loom(project: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
     env = {**os.environ, "LOOM_STORE": f"sqlite://{project / 'runs.db'}"}
     return subprocess.run(
-        [sys.executable, "-m", "workflow_builder.cli", *args],
+        [sys.executable, "-m", "loom.cli", *args],
         capture_output=True,
         text=True,
         cwd=project,
@@ -126,7 +126,7 @@ def start_run(project: Path, workflow: str, *extra: str) -> dict:
 
 class TestEntryPoint:
     def test_version(self, project: Path) -> None:
-        from workflow_builder import __version__
+        from loom import __version__
 
         done = loom(project, "--version")
         assert done.returncode == Exit.OK
@@ -227,8 +227,8 @@ class TestEnvFlags:
         assert run["output"] == "from-flag"
 
     def test_parse_env_rejects_a_bare_key(self) -> None:
-        from workflow_builder.cli.commands import parse_env
-        from workflow_builder.core.exceptions import ConfigurationError
+        from loom.cli.commands import parse_env
+        from loom.core.exceptions import ConfigurationError
 
         with pytest.raises(ConfigurationError, match="KEY=VAL"):
             parse_env(["NOEQUALS"], None)
@@ -471,11 +471,11 @@ class TestRemoteMode:
 
         import httpx
 
-        from workflow_builder import Context, Runtime, step, workflow
-        from workflow_builder.cli.targets import RemoteBackend
-        from workflow_builder.server.app import create_app
-        from workflow_builder.server.client import LoomClient
-        from workflow_builder.state.memory import MemoryStore
+        from loom import Context, Runtime, step, workflow
+        from loom.cli.targets import RemoteBackend
+        from loom.server.app import create_app
+        from loom.server.client import LoomClient
+        from loom.stores.memory import MemoryStore
 
         @step
         async def triple(n: int) -> int:
@@ -520,7 +520,7 @@ class TestRemoteMode:
         assert (await backend.retry(run["run_id"]))["status"] == "completed"
 
     async def test_publishing_remotely_is_refused_with_a_reason(self, backend) -> None:
-        from workflow_builder.core.exceptions import ConfigurationError
+        from loom.core.exceptions import ConfigurationError
 
         with pytest.raises(ConfigurationError, match="where the code is"):
             await backend.publish("tripler")
@@ -535,9 +535,9 @@ class TestTui:
     @pytest.fixture
     def backend(self):
         """A backend over a Runtime with one completed and one parked run."""
-        from workflow_builder import Context, Runtime, step, workflow
-        from workflow_builder.cli.targets import LocalBackend
-        from workflow_builder.state.memory import MemoryStore
+        from loom import Context, Runtime, step, workflow
+        from loom.cli.targets import LocalBackend
+        from loom.stores.memory import MemoryStore
 
         @step
         async def echo(value: str) -> str:
@@ -558,7 +558,7 @@ class TestTui:
 
     async def test_the_app_starts_and_lists_runs(self, backend) -> None:
         pytest.importorskip("textual")
-        from workflow_builder.cli.tui import LoomApp
+        from loom.cli.tui import LoomApp
 
         await backend.start("quick", "hello")
         await backend.start("parked", "x")
@@ -571,7 +571,7 @@ class TestTui:
 
     async def test_selecting_a_run_shows_its_journal(self, backend) -> None:
         pytest.importorskip("textual")
-        from workflow_builder.cli.tui import LoomApp
+        from loom.cli.tui import LoomApp
 
         await backend.start("quick", "hello")
 
@@ -583,7 +583,7 @@ class TestTui:
     async def test_approving_from_the_ui_completes_the_run(self, backend) -> None:
         """The pane that has no non-interactive equivalent."""
         pytest.importorskip("textual")
-        from workflow_builder.cli.tui import LoomApp
+        from loom.cli.tui import LoomApp
 
         run = await backend.start("parked", "x")
         assert run["status"] == "suspended"
@@ -598,7 +598,7 @@ class TestTui:
 
     async def test_quit_binding_exists(self, backend) -> None:
         pytest.importorskip("textual")
-        from workflow_builder.cli.tui import LoomApp
+        from loom.cli.tui import LoomApp
 
         assert any(b.key == "q" for b in LoomApp.BINDINGS)
 
@@ -612,11 +612,11 @@ class TestSiblingImports:
     """
 
     def test_a_workflow_file_can_import_its_neighbour(self, tmp_path: Path) -> None:
-        from workflow_builder.cli.targets import collect_workflows, load_module
+        from loom.cli.targets import collect_workflows, load_module
 
         (tmp_path / "helper.py").write_text("GREETING = 'hi'\n")
         (tmp_path / "flow.py").write_text(
-            "from workflow_builder import Context, workflow\n"
+            "from loom import Context, workflow\n"
             "import helper\n"
             "@workflow(name='greeter')\n"
             "async def greeter(ctx: Context, _in: str) -> str:\n"

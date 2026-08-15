@@ -28,9 +28,9 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).parent))
 from utils import header, log
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.state.memory import MemoryStore
-from workflow_builder.toolsets.pagination import Page, Results, collect
+from loom import Context, Runtime, step, workflow
+from loom.stores.memory import MemoryStore
+from loom.toolsets.pagination import Page, Results, collect
 
 # ---------------------------------------------------------------------------
 # A stand-in for a real API: 250 rows, served 40 at a time

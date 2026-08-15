@@ -23,8 +23,8 @@ from typing import Any
 
 import pytest
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.runtime.effects import (
+from loom import Context, Runtime, step, workflow
+from loom.runtime.effects import (
     DirectBroker,
     EffectBroker,
     EffectCall,
@@ -32,10 +32,10 @@ from workflow_builder.runtime.effects import (
     EffectResult,
     GuardedBroker,
 )
-from workflow_builder.security.authority import Authority
-from workflow_builder.security.grants import GrantSet
-from workflow_builder.state import MemoryStore
-from workflow_builder.toolsets.manifest import EffectClass
+from loom.security.authority import Authority
+from loom.security.grants import GrantSet
+from loom.stores import MemoryStore
+from loom.toolsets.manifest import EffectClass
 
 
 class RecordingBroker:
@@ -355,7 +355,7 @@ async def test_a_denial_is_journaled_so_replay_sees_it() -> None:
 
 async def test_a_workflow_grant_narrows_but_the_runtime_wins() -> None:
     """A workflow can limit itself; it cannot widen what the Runtime allows."""
-    from workflow_builder.runtime.context import _authority_for
+    from loom.runtime.context import _authority_for
 
     @workflow(name="broker_granted_flow", grants=GrantSet(agents=["triage"]))
     async def granted(ctx: Context, _: Any = None) -> str:
@@ -501,10 +501,10 @@ async def test_an_agent_is_refused_a_sibling_operation_mid_turn() -> None:
     The refusal comes back as a tool result rather than an exception, so the
     agent can adapt, and the transcript records why.
     """
-    from workflow_builder.agents.agent import Agent
-    from workflow_builder.agents.messages import ToolCall
-    from workflow_builder.agents.tool_registry import Toolset
-    from workflow_builder.testing import MockModelProvider, mock_response
+    from loom.agents.agent import Agent
+    from loom.agents.messages import ToolCall
+    from loom.agents.tool_registry import Toolset
+    from loom.testing import MockModelProvider, mock_response
 
     @step(name="search")
     async def search(query: str) -> str:

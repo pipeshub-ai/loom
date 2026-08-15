@@ -5,24 +5,24 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 
-from workflow_builder.agents.agent import Agent, PersistenceClass
-from workflow_builder.agents.executor import AgentExecutor
-from workflow_builder.agents.guardrails import allow, guardrail, reject, tripwire
-from workflow_builder.agents.limits import UsageLimits
-from workflow_builder.agents.messages import ToolCall
-from workflow_builder.agents.models import (
+from loom.agents.agent import Agent, PersistenceClass
+from loom.agents.executor import AgentExecutor
+from loom.agents.guardrails import allow, guardrail, reject, tripwire
+from loom.agents.limits import UsageLimits
+from loom.agents.messages import ToolCall
+from loom.agents.models import (
     FinishReason,
 )
-from workflow_builder.agents.output import FINAL_OUTPUT_TOOL
-from workflow_builder.agents.result import AgentResult
-from workflow_builder.agents.runner import BuiltInAgentRuntime
-from workflow_builder.agents.tools import tool
-from workflow_builder.core.exceptions import (
+from loom.agents.output import FINAL_OUTPUT_TOOL
+from loom.agents.result import AgentResult
+from loom.agents.runner import BuiltInAgentRuntime
+from loom.agents.tools import tool
+from loom.core.exceptions import (
     GuardrailTripwire,
     ModelBehaviorError,
     UsageLimitExceeded,
 )
-from workflow_builder.testing.mock import MockModelProvider, mock_response
+from loom.testing.mock import MockModelProvider, mock_response
 
 # ---------------------------------------------------------------------------
 # Agent construction
@@ -60,8 +60,8 @@ class TestMockModelProvider:
             mock_response("First"),
             mock_response("Second"),
         ])
-        from workflow_builder.agents.messages import user
-        from workflow_builder.agents.models import ModelRequest
+        from loom.agents.messages import user
+        from loom.agents.models import ModelRequest
 
         r1 = await provider.complete(ModelRequest(messages=[user("hi")]))
         assert r1.message.text() == "First"
@@ -73,8 +73,8 @@ class TestMockModelProvider:
     @pytest.mark.asyncio
     async def test_exhausted_responses(self) -> None:
         provider = MockModelProvider(responses=[mock_response("Only one")])
-        from workflow_builder.agents.messages import user
-        from workflow_builder.agents.models import ModelRequest
+        from loom.agents.messages import user
+        from loom.agents.models import ModelRequest
 
         await provider.complete(ModelRequest(messages=[user("1")]))
         r2 = await provider.complete(ModelRequest(messages=[user("2")]))
@@ -313,7 +313,7 @@ class TestAgentExecutorProtocol:
 class TestAgentInWorkflow:
     @pytest.mark.asyncio
     async def test_agent_step_in_workflow(self) -> None:
-        from workflow_builder import Context, Runtime, workflow
+        from loom import Context, Runtime, workflow
 
         provider = MockModelProvider(responses=[
             mock_response("Triaged as P2."),

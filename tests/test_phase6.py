@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from workflow_builder.eval.dataset import (
+from loom.eval.dataset import (
     AggregateScore,
     EvalCase,
     EvalDataset,
@@ -16,22 +16,22 @@ from workflow_builder.eval.dataset import (
     EvalScore,
     aggregate_scores,
 )
-from workflow_builder.importers.n8n import (
+from loom.importers.n8n import (
     FidelityReport,
     ImportResult,
     N8nImporter,
     N8nNode,
 )
-from workflow_builder.templates.template import (
+from loom.templates.template import (
     TemplateEngine,
     TemplateError,
     TemplateManifest,
     TemplateParam,
 )
-from workflow_builder.toolsets.drift import (
+from loom.toolsets.drift import (
     compare_operations,
 )
-from workflow_builder.toolsets.kinds import (
+from loom.toolsets.kinds import (
     ToolsetKind,
     classify_toolset,
     validate_namespace,

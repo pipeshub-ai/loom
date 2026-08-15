@@ -8,9 +8,9 @@ Every example on this page assumes these imports, and two steps standing in for
 whatever real work a workflow does:
 
 ```python
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.state.memory import MemoryStore
-from workflow_builder.triggers.specs import (
+from loom import Context, Runtime, step, workflow
+from loom.stores.memory import MemoryStore
+from loom.triggers.specs import (
     Chat,
     EmailInbox,
     Form,
@@ -75,7 +75,7 @@ Schedule(
 Simpler than cron when the exact phase does not matter:
 
 ```python
-from workflow_builder.triggers.specs import Interval
+from loom.triggers.specs import Interval
 
 @workflow(name="health_check", triggers=[Interval(every=300)])  # every 5 minutes
 async def health_check(ctx: Context) -> str:
@@ -89,7 +89,7 @@ async def health_check(ctx: Context) -> str:
 Invoked from the CLI, a test, or the dev UI. This is the default when no trigger is declared:
 
 ```python
-from workflow_builder.triggers.specs import Manual
+from loom.triggers.specs import Manual
 
 @workflow(name="one_off", triggers=[Manual(label="run_once")])
 async def one_off(ctx: Context) -> str:
@@ -101,7 +101,7 @@ async def one_off(ctx: Context) -> str:
 An HTTP endpoint that starts the workflow:
 
 ```python
-from workflow_builder.triggers.specs import Webhook, AuthMode
+from loom.triggers.specs import Webhook, AuthMode
 
 @workflow(name="github_push", triggers=[
     Webhook(
@@ -120,14 +120,14 @@ Auth modes: `NONE`, `BASIC`, `HEADER`, `HMAC`, `BEARER`.
 
 Response modes: `ACK` (return 202 immediately), `RESULT` (hold connection for output), `STREAM` (SSE).
 
-Requires `pip install workflow-builder[api]` for the FastAPI server.
+Requires `pip install loomflow[api]` for the FastAPI server.
 
 ### OnEvent
 
 Consume from a queue or event bus:
 
 ```python
-from workflow_builder.triggers.specs import OnEvent
+from loom.triggers.specs import OnEvent
 
 @workflow(name="order_handler", triggers=[
     OnEvent(topic="orders.created", source="kafka")
@@ -144,7 +144,7 @@ Options: `group` (consumer group), `batch_size`, `idempotency_field`.
 Poll a source that lacks webhooks, with cursor persistence:
 
 ```python
-from workflow_builder.triggers.specs import Poll
+from loom.triggers.specs import Poll
 
 @workflow(name="check_updates", triggers=[
     Poll(every=60, cursor_key="last_id")
@@ -160,7 +160,7 @@ The host persists the cursor between invocations. Idle polls (no new items) do n
 A conversational endpoint with session continuity:
 
 ```python
-from workflow_builder.triggers.specs import Chat
+from loom.triggers.specs import Chat
 
 @workflow(name="assistant", triggers=[
     Chat(path="/assistant", streaming=True, session_scoped=True)
@@ -174,7 +174,7 @@ async def assistant(ctx: Context) -> str:
 A hosted HTML form that starts the workflow on submit:
 
 ```python
-from workflow_builder.triggers.specs import Form, FormField
+from loom.triggers.specs import Form, FormField
 
 @workflow(name="feedback", triggers=[
     Form(
@@ -197,7 +197,7 @@ async def feedback(ctx: Context) -> str:
 The `TriggerDispatcher` routes incoming events to registered workflows:
 
 ```python
-from workflow_builder.triggers.routing import EventRouter, RoutingEvent
+from loom.triggers.routing import EventRouter, RoutingEvent
 
 router = EventRouter()
 

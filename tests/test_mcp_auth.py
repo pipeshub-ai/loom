@@ -21,9 +21,9 @@ from typing import Any
 import httpx
 import pytest
 
-from workflow_builder.core.exceptions import ConfigurationError
-from workflow_builder.identity.config import IdentitySettings, StaticPrincipalToken
-from workflow_builder.identity.verifier import (
+from loom.core.exceptions import ConfigurationError
+from loom.identity.config import IdentitySettings, StaticPrincipalToken
+from loom.identity.verifier import (
     IntrospectionTokenVerifier,
     StaticTokenVerifier,
     build_verifier,
@@ -57,7 +57,7 @@ def _mint(rsa_keys: dict[str, Any], **claims: Any) -> str:
 
 
 def _jwks_verifier(rsa_keys: dict[str, Any], monkeypatch: pytest.MonkeyPatch, **kwargs: Any):
-    from workflow_builder.identity.verifier import JWKSTokenVerifier
+    from loom.identity.verifier import JWKSTokenVerifier
 
     verifier = JWKSTokenVerifier(
         jwks_uri="https://auth.test/.well-known/jwks.json",
@@ -365,7 +365,7 @@ class TestBuildVerifier:
         assert isinstance(build_verifier(settings), StaticTokenVerifier)
 
     def test_a_valid_jwks_config_builds_the_jwks_verifier(self) -> None:
-        from workflow_builder.identity.verifier import JWKSTokenVerifier
+        from loom.identity.verifier import JWKSTokenVerifier
 
         settings = IdentitySettings(
             jwks_uri="https://auth.test/jwks.json",
@@ -444,14 +444,14 @@ class TestIdentitySettings:
 
 class TestBuildMcpAuth:
     def test_unconfigured_settings_yield_no_auth(self) -> None:
-        from workflow_builder.mcp_server.auth import build_mcp_auth
+        from loom.mcp_server.auth import build_mcp_auth
 
         assert build_mcp_auth(IdentitySettings()) is None
 
     def test_a_verifier_with_no_issuer_or_resource_is_refused(self, tmp_path) -> None:
         """Reachable via static tokens, which need neither on their own —
         but AuthSettings itself requires both to publish RFC 9728 metadata."""
-        from workflow_builder.mcp_server.auth import build_mcp_auth
+        from loom.mcp_server.auth import build_mcp_auth
 
         path = tmp_path / "tokens.json"
         path.write_text(json.dumps({"tok": {"subject": "alice"}}))
@@ -461,7 +461,7 @@ class TestBuildMcpAuth:
             build_mcp_auth(settings)
 
     def test_a_fully_configured_settings_builds_everything(self, tmp_path) -> None:
-        from workflow_builder.mcp_server.auth import build_mcp_auth
+        from loom.mcp_server.auth import build_mcp_auth
 
         path = tmp_path / "tokens.json"
         path.write_text(json.dumps({"tok": {"subject": "alice", "scopes": ["runs:read"]}}))
@@ -519,7 +519,7 @@ def _authenticated(scopes_token: str):
 
 class TestPrincipalFacadeHelper:
     def test_unwrapped_when_auth_is_disabled(self) -> None:
-        from workflow_builder.mcp_server.server import _principal_facade
+        from loom.mcp_server.server import _principal_facade
 
         sentinel = object()
         assert _principal_facade(sentinel, False) is sentinel
@@ -528,8 +528,8 @@ class TestPrincipalFacadeHelper:
         from mcp.server.auth.middleware.auth_context import AuthenticatedUser, auth_context_var
         from mcp.server.auth.provider import AccessToken
 
-        from workflow_builder.identity.facade import AuthorizedFacade
-        from workflow_builder.mcp_server.server import _principal_facade
+        from loom.identity.facade import AuthorizedFacade
+        from loom.mcp_server.server import _principal_facade
 
         access = AccessToken(
             token="tok", client_id="loom-cli", scopes=["runs:write"], subject="alice"
@@ -545,8 +545,8 @@ class TestPrincipalFacadeHelper:
         assert wrapped.principal.has("runs:write")
 
     async def test_no_token_in_context_falls_back_to_anonymous(self) -> None:
-        from workflow_builder.identity.principal import ANONYMOUS
-        from workflow_builder.mcp_server.server import _principal_facade
+        from loom.identity.principal import ANONYMOUS
+        from loom.mcp_server.server import _principal_facade
 
         wrapped = _principal_facade(object(), True)
         assert wrapped.principal is ANONYMOUS
@@ -554,7 +554,7 @@ class TestPrincipalFacadeHelper:
 
 class TestServeRefusesUnauthenticatedNetworkBinds:
     def test_a_public_bind_with_no_identity_is_refused(self) -> None:
-        from workflow_builder.mcp_server import serve
+        from loom.mcp_server import serve
 
         with pytest.raises(ValueError, match="refusing to bind"):
             serve(object(), transport="http", host="0.0.0.0", identity=IdentitySettings())
@@ -564,7 +564,7 @@ class TestServeRefusesUnauthenticatedNetworkBinds:
     ) -> None:
         """Only the guard is under test — stub `build_server`/`.run()` so this
         does not actually open a socket."""
-        from workflow_builder import mcp_server
+        from loom import mcp_server
 
         called = {}
 
@@ -586,7 +586,7 @@ class TestServeRefusesUnauthenticatedNetworkBinds:
     def test_stdio_is_always_fine_regardless_of_host(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from workflow_builder import mcp_server
+        from loom import mcp_server
 
         def fake_build_server(*args: Any, **kwargs: Any):
             class _Stub:
@@ -605,9 +605,9 @@ class TestBuildServerHonoursTransport:
     what ``LOOM_AUTH_*`` says."""
 
     def _facade(self):
-        from workflow_builder import Context, Runtime, step, workflow
-        from workflow_builder.facade import LocalFacade
-        from workflow_builder.state.memory import MemoryStore
+        from loom import Context, Runtime, step, workflow
+        from loom.facade import LocalFacade
+        from loom.stores.memory import MemoryStore
 
         @step
         async def double(n: int) -> int:
@@ -624,7 +624,7 @@ class TestBuildServerHonoursTransport:
     async def test_stdio_ignores_identity_entirely(
         self, static_identity: IdentitySettings
     ) -> None:
-        from workflow_builder.mcp_server import build_server
+        from loom.mcp_server import build_server
 
         server = build_server(
             self._facade(), identity=static_identity, transport="stdio"
@@ -639,7 +639,7 @@ class TestBuildServerHonoursTransport:
     ) -> None:
         from mcp.server.fastmcp.exceptions import ToolError
 
-        from workflow_builder.mcp_server import build_server
+        from loom.mcp_server import build_server
 
         server = build_server(
             self._facade(), identity=static_identity, transport="streamable-http"
@@ -653,7 +653,7 @@ class TestBuildServerHonoursTransport:
         from mcp.server.auth.middleware.auth_context import AuthenticatedUser, auth_context_var
         from mcp.server.auth.provider import AccessToken
 
-        from workflow_builder.mcp_server import build_server
+        from loom.mcp_server import build_server
 
         server = build_server(
             self._facade(), identity=static_identity, transport="streamable-http"
@@ -676,7 +676,7 @@ class TestBuildServerHonoursTransport:
         from mcp.server.auth.middleware.auth_context import AuthenticatedUser, auth_context_var
         from mcp.server.auth.provider import AccessToken
 
-        from workflow_builder.mcp_server import build_server
+        from loom.mcp_server import build_server
 
         server = build_server(
             self._facade(), identity=static_identity, transport="streamable-http"

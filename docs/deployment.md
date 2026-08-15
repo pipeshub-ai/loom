@@ -15,8 +15,8 @@
 ## Docker
 
 ```bash
-docker build -t workflow-builder .
-docker run --env-file .env workflow-builder
+docker build -t loomflow .
+docker run --env-file .env loomflow
 ```
 
 ## Docker Compose (with MongoDB)
@@ -29,7 +29,7 @@ docker-compose up -d
 
 ```python
 # MongoDB — connecting is async, so inside an async function
-from workflow_builder.state.mongo import MongoStore
+from loom.stores.mongo import MongoStore
 
 async def mongo_store() -> MongoStore:
     store = MongoStore("mongodb://user:pass@host:27017", database="workflows")
@@ -37,7 +37,7 @@ async def mongo_store() -> MongoStore:
     return store
 
 # PostgreSQL
-from workflow_builder.state.postgres import PostgresStore
+from loom.stores.postgres import PostgresStore
 
 async def postgres_store() -> PostgresStore:
     store = PostgresStore("postgresql://user:pass@host/workflows")

@@ -8,10 +8,10 @@ Two toolsets over one OAuth layer. Pure REST via httpx — no
 Every example on this page assumes:
 
 ```python
-from workflow_builder import Context, Runtime, workflow
-from workflow_builder.security.grants import GrantSet
-from workflow_builder.toolsets.google.calendar.tools import calendar_list_events
-from workflow_builder.toolsets.google.gmail.tools import (
+from loom import Context, Runtime, workflow
+from loom.security.grants import GrantSet
+from loom.toolsets.google.calendar.tools import calendar_list_events
+from loom.toolsets.google.gmail.tools import (
     gmail_modify_labels,
     gmail_search_messages,
     gmail_send_message,
@@ -19,10 +19,10 @@ from workflow_builder.toolsets.google.gmail.tools import (
 ```
 
 ```python
-from workflow_builder.toolsets.google.gmail.tools import (
+from loom.toolsets.google.gmail.tools import (
     gmail_search_messages, gmail_send_message,
 )
-from workflow_builder.toolsets.google.calendar.tools import calendar_list_events
+from loom.toolsets.google.calendar.tools import calendar_list_events
 
 @workflow(name="triage")
 async def triage(ctx: Context, _in: str) -> int:
@@ -56,7 +56,7 @@ access token is dead within the hour. One-time setup in the
 Then let the shipped helper do the flow:
 
 ```bash
-python -m workflow_builder.toolsets.google.setup \
+python -m loom.toolsets.google.setup \
     --client-id ... --client-secret ... --scopes write
 ```
 
@@ -92,7 +92,7 @@ importing a toolset reads nothing.
 |---|---|
 | `GOOGLE_ACCESS_TOKEN` | A token minted elsewhere: a test, a gateway, the OAuth playground. |
 | `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` + `GOOGLE_REFRESH_TOKEN` | The usual choice — a workflow acting as one person. Self-renewing. |
-| `GOOGLE_SERVICE_ACCOUNT_FILE` (+ `GOOGLE_IMPERSONATE_SUBJECT`) | Workspace domain-wide delegation. Needs `pip install 'workflow-builder[google]'`. |
+| `GOOGLE_SERVICE_ACCOUNT_FILE` (+ `GOOGLE_IMPERSONATE_SUBJECT`) | Workspace domain-wide delegation. Needs `pip install 'loomflow[google]'`. |
 
 Tokens are cached until just before expiry and refreshed under a lock, so ten
 parallel Gmail steps mint one token between them. Gmail and Calendar share the

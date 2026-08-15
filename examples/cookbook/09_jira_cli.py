@@ -37,9 +37,9 @@ from typing import ClassVar
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils import require_env
 
-from workflow_builder.agents.coding_agent import WorkflowCodingAgent
-from workflow_builder.agents.providers.anthropic_provider import AnthropicProvider
-from workflow_builder.agents.tool_registry import Toolset, ToolsetRegistry
+from loom.agents.coding_agent import WorkflowCodingAgent
+from loom.agents.providers.anthropic_provider import AnthropicProvider
+from loom.agents.tool_registry import Toolset, ToolsetRegistry
 
 # ---------------------------------------------------------------------------
 # Preset queries
@@ -117,13 +117,13 @@ def _build_jira_toolset() -> Toolset:
     grows an operation — this one had drifted to nine of sixteen — and the
     symptom is an agent told a capability exists and then refused it.
     """
-    from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
+    from loom.toolsets.jira.manifest import JIRA_MANIFEST
 
     def _resolver(op_id: str):
         # Imports happen only when a tool is actually resolved.
         import importlib
 
-        from workflow_builder.agents.tools import coerce_tool
+        from loom.agents.tools import coerce_tool
 
         module = importlib.import_module(JIRA_MANIFEST.tools_module)
         by_function = {op.function: op for op in JIRA_MANIFEST.all_operations()}
@@ -391,7 +391,7 @@ async def main() -> None:
     if args.debug:
         # Tool traffic on its own logger, so it can be turned on without the
         # rest of the agent's chatter.
-        from workflow_builder.agents.coding_agent import trace_tool_calls
+        from loom.agents.coding_agent import trace_tool_calls
 
         trace_tool_calls()
 

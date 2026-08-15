@@ -7,8 +7,8 @@ import pytest
 
 class TestToolset:
     def test_from_steps(self) -> None:
-        from workflow_builder import Retry, step
-        from workflow_builder.agents.tool_registry import Toolset
+        from loom import Retry, step
+        from loom.agents.tool_registry import Toolset
 
         @step(retry=Retry(max_attempts=2))
         async def my_search(query: str) -> list:
@@ -34,7 +34,7 @@ class TestToolset:
         assert "query" in tool.parameters.get("properties", {})
 
     def test_from_callables(self) -> None:
-        from workflow_builder.agents.tool_registry import Toolset
+        from loom.agents.tool_registry import Toolset
 
         async def web_search(query: str) -> str:
             """Search the web."""
@@ -46,7 +46,7 @@ class TestToolset:
         assert len(ts.manifest.all_operations()) == 1
 
     def test_resolve_unknown_raises(self) -> None:
-        from workflow_builder.agents.tool_registry import Toolset
+        from loom.agents.tool_registry import Toolset
 
         async def noop() -> None:
             pass
@@ -56,8 +56,8 @@ class TestToolset:
             ts.resolve("nonexistent")
 
     def test_resolve_all(self) -> None:
-        from workflow_builder import step
-        from workflow_builder.agents.tool_registry import Toolset
+        from loom import step
+        from loom.agents.tool_registry import Toolset
 
         @step
         async def a() -> str:
@@ -76,7 +76,7 @@ class TestToolset:
 
 class TestToolsetRegistry:
     def test_register_and_list(self) -> None:
-        from workflow_builder.agents.tool_registry import (
+        from loom.agents.tool_registry import (
             Toolset,
             ToolsetRegistry,
         )
@@ -93,8 +93,8 @@ class TestToolsetRegistry:
         assert sorted(registry.list_toolsets()) == ["alpha", "beta"]
 
     def test_resolve_tools_all(self) -> None:
-        from workflow_builder import step
-        from workflow_builder.agents.tool_registry import (
+        from loom import step
+        from loom.agents.tool_registry import (
             Toolset,
             ToolsetRegistry,
         )
@@ -117,8 +117,8 @@ class TestToolsetRegistry:
         assert len(tools) == 2
 
     def test_resolve_tools_selective(self) -> None:
-        from workflow_builder import step
-        from workflow_builder.agents.tool_registry import (
+        from loom import step
+        from loom.agents.tool_registry import (
             Toolset,
             ToolsetRegistry,
         )
@@ -141,8 +141,8 @@ class TestToolsetRegistry:
         assert len(tools) == 1
 
     def test_describe_auto_generated(self) -> None:
-        from workflow_builder import step
-        from workflow_builder.agents.tool_registry import (
+        from loom import step
+        from loom.agents.tool_registry import (
             Toolset,
             ToolsetRegistry,
         )
@@ -164,13 +164,13 @@ class TestToolsetRegistry:
         assert "Available tools" in desc
 
     def test_describe_empty(self) -> None:
-        from workflow_builder.agents.tool_registry import ToolsetRegistry
+        from loom.agents.tool_registry import ToolsetRegistry
 
         assert ToolsetRegistry().describe() == ""
 
     def test_resolve_one(self) -> None:
-        from workflow_builder import step
-        from workflow_builder.agents.tool_registry import (
+        from loom import step
+        from loom.agents.tool_registry import (
             Toolset,
             ToolsetRegistry,
         )
@@ -187,16 +187,16 @@ class TestToolsetRegistry:
         assert tool.name == "my_fn"
 
     def test_resolve_one_unknown_toolset(self) -> None:
-        from workflow_builder.agents.tool_registry import ToolsetRegistry
-        from workflow_builder.core.exceptions import RegistryError
+        from loom.agents.tool_registry import ToolsetRegistry
+        from loom.core.exceptions import RegistryError
 
         with pytest.raises(RegistryError):
             ToolsetRegistry().resolve_one("nope", "op")
 
     def test_resolve_tools_rejects_unknown_id(self) -> None:
         """A typo'd toolset id must not silently yield fewer tools."""
-        from workflow_builder.agents.tool_registry import ToolsetRegistry
-        from workflow_builder.core.exceptions import RegistryError
+        from loom.agents.tool_registry import ToolsetRegistry
+        from loom.core.exceptions import RegistryError
 
         with pytest.raises(RegistryError, match="jria"):
             ToolsetRegistry().resolve_tools(["jria"])
@@ -204,7 +204,7 @@ class TestToolsetRegistry:
 
 class TestRuntimeToolsetIntegration:
     def test_runtime_has_toolsets(self) -> None:
-        from workflow_builder import Runtime
+        from loom import Runtime
 
         rt = Runtime()
         assert hasattr(rt, "toolsets")
@@ -212,9 +212,9 @@ class TestRuntimeToolsetIntegration:
 
     @pytest.mark.asyncio
     async def test_ctx_agent_resolves_tools(self) -> None:
-        from workflow_builder import Context, Runtime, workflow
-        from workflow_builder.agents.result import AgentResult
-        from workflow_builder.agents.tool_registry import Toolset
+        from loom import Context, Runtime, workflow
+        from loom.agents.result import AgentResult
+        from loom.agents.tool_registry import Toolset
 
         received_tools: list = []
 
@@ -244,9 +244,9 @@ class TestRuntimeToolsetIntegration:
 
     @pytest.mark.asyncio
     async def test_ctx_agent_selective_toolsets(self) -> None:
-        from workflow_builder import Context, Runtime, workflow
-        from workflow_builder.agents.result import AgentResult
-        from workflow_builder.agents.tool_registry import Toolset
+        from loom import Context, Runtime, workflow
+        from loom.agents.result import AgentResult
+        from loom.agents.tool_registry import Toolset
 
         received_tools: list = []
 
@@ -280,11 +280,11 @@ class TestRuntimeToolsetIntegration:
 
 class TestCodingAgentToolRegistry:
     def test_system_prompt_includes_registry_docs(self) -> None:
-        from workflow_builder import step
-        from workflow_builder.agents.coding_agent import (
+        from loom import step
+        from loom.agents.coding_agent import (
             WorkflowCodingAgent,
         )
-        from workflow_builder.agents.tool_registry import (
+        from loom.agents.tool_registry import (
             Toolset,
             ToolsetRegistry,
         )

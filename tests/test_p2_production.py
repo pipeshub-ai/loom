@@ -13,28 +13,28 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from workflow_builder import Context, ExecutionStatus, Runtime, step, workflow
-from workflow_builder.agents.result import AgentResult
-from workflow_builder.agents.tool_registry import Toolset
-from workflow_builder.core.exceptions import (
+from loom import Context, ExecutionStatus, Runtime, step, workflow
+from loom.agents.result import AgentResult
+from loom.agents.tool_registry import Toolset
+from loom.blobs.retention import RetentionManager, RetentionPolicy
+from loom.core.exceptions import (
     AdmissionRejected,
     ConfigurationError,
     GrantDenied,
 )
-from workflow_builder.runtime.flowcontrol import (
+from loom.runtime.flowcontrol import (
     AdmissionController,
     ConcurrencyPolicy,
     FlowControlPolicy,
     RateLimitPolicy,
     SingletonPolicy,
 )
-from workflow_builder.runtime.leader import InMemoryLockProvider, LeaderElector
-from workflow_builder.security.grants import GrantSet
-from workflow_builder.security.rbac import AuthorizationError, Role
-from workflow_builder.state.memory import MemoryStore
-from workflow_builder.storage.retention import RetentionManager, RetentionPolicy
-from workflow_builder.triggers.queue import InMemoryQueue, QueueConsumer
-from workflow_builder.triggers.specs import OnEvent
+from loom.runtime.leader import InMemoryLockProvider, LeaderElector
+from loom.security.grants import GrantSet
+from loom.security.rbac import AuthorizationError, Role
+from loom.stores.memory import MemoryStore
+from loom.triggers.queue import InMemoryQueue, QueueConsumer
+from loom.triggers.specs import OnEvent
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -61,8 +61,8 @@ async def _seed_run(
     run_id: str,
 ) -> None:
     """Write a terminal-looking run straight to the store, aged as requested."""
-    from workflow_builder.core.models import ExecutionRecord
-    from workflow_builder.runtime.journal import EntryKind, EntryStatus, JournalEntry
+    from loom.core.models import ExecutionRecord
+    from loom.runtime.journal import EntryKind, EntryStatus, JournalEntry
 
     when = datetime.now(UTC) - timedelta(days=finished_days_ago)
     record = ExecutionRecord(
@@ -161,7 +161,7 @@ class TestRetention:
 
     async def test_deleting_frees_the_idempotency_key(self) -> None:
         """Otherwise the key resolves forever to a run that no longer exists."""
-        from workflow_builder.core.models import ExecutionRecord
+        from loom.core.models import ExecutionRecord
 
         store = MemoryStore()
         await store.create_execution(
@@ -647,7 +647,7 @@ class TestQueueConsumer:
         rt = Runtime(store=MemoryStore())
         consumer = QueueConsumer.for_workflow(rt, InMemoryQueue(), queue_wf)
 
-        from workflow_builder.triggers.queue import QueueMessage
+        from loom.triggers.queue import QueueMessage
 
         key = consumer.idempotency_key(QueueMessage(id="m9", payload={"order_id": "Z"}))
         assert key.endswith(":Z")  # the declared field won, not the message id
@@ -698,8 +698,8 @@ def api():
     """An in-process client bound to an app over a fresh Runtime."""
     import httpx
 
-    from workflow_builder.server import LoomClient
-    from workflow_builder.server.app import create_app
+    from loom.server import LoomClient
+    from loom.server.app import create_app
 
     rt = Runtime(store=MemoryStore())
     rt.register_all([http_wf, http_approval_wf])
@@ -752,7 +752,7 @@ class TestHttpSurface:
         assert first["run_id"] == second["run_id"]
 
     async def test_unknown_workflow_is_404(self, api) -> None:
-        from workflow_builder.server import LoomClientError
+        from loom.server import LoomClientError
 
         client, _ = api
         with pytest.raises(LoomClientError) as caught:
@@ -761,7 +761,7 @@ class TestHttpSurface:
         assert not caught.value.retryable
 
     async def test_unknown_run_is_404(self, api) -> None:
-        from workflow_builder.server import LoomClientError
+        from loom.server import LoomClientError
 
         client, _ = api
         with pytest.raises(LoomClientError) as caught:
@@ -805,8 +805,8 @@ class TestHttpSurface:
     async def test_rbac_denial_is_403(self) -> None:
         import httpx
 
-        from workflow_builder.server import LoomClient, LoomClientError
-        from workflow_builder.server.app import create_app
+        from loom.server import LoomClient, LoomClientError
+        from loom.server.app import create_app
 
         rt = Runtime(store=MemoryStore(), role=Role.VIEWER)
         rt.register(http_wf)
@@ -822,8 +822,8 @@ class TestHttpSurface:
     async def test_admission_rejection_maps_to_429(self) -> None:
         import httpx
 
-        from workflow_builder.server import LoomClient, LoomClientError
-        from workflow_builder.server.app import create_app
+        from loom.server import LoomClient, LoomClientError
+        from loom.server.app import create_app
 
         rt = Runtime(store=MemoryStore(), admission=AdmissionController())
         rt.register(limited_wf)

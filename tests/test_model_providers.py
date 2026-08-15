@@ -17,21 +17,21 @@ from typing import Any
 
 import pytest
 
-from workflow_builder.agents.messages import (
+from loom.agents.messages import (
     ToolCall,
     assistant,
     system,
     tool_result,
     user,
 )
-from workflow_builder.agents.models import (
+from loom.agents.models import (
     FinishReason,
     ModelRequest,
     ModelSettings,
     ToolSchema,
     estimate_cost,
 )
-from workflow_builder.core.models import Usage
+from loom.core.models import Usage
 
 SEARCH_TOOL = ToolSchema(
     name="search",
@@ -86,7 +86,7 @@ class TestPricing:
 
     def test_the_default_openai_model_is_priced(self) -> None:
         """A default that reports zero cost makes budgets unenforceable."""
-        from workflow_builder.agents.providers import OpenAIProvider
+        from loom.agents.providers import OpenAIProvider
 
         model = OpenAIProvider(api_key="x").model_name
         usage = Usage(input_tokens=1_000_000, output_tokens=1_000_000)
@@ -155,7 +155,7 @@ def _openai_tool_call(call_id: str, name: str, arguments: str) -> Any:
 @pytest.fixture
 def openai_provider():
     """A provider whose client records the kwargs it was called with."""
-    from workflow_builder.agents.providers import OpenAIProvider
+    from loom.agents.providers import OpenAIProvider
 
     provider = OpenAIProvider(model_name="gpt-4.1", api_key="test")
     captured: dict[str, Any] = {}
@@ -443,7 +443,7 @@ def _call_part(name: str, args: dict) -> Any:
 
 @pytest.fixture
 def gemini_provider():
-    from workflow_builder.agents.providers import GeminiProvider
+    from loom.agents.providers import GeminiProvider
 
     captured: dict[str, Any] = {}
     reply = FakeGeminiResponse([_text_part("done")])
@@ -642,8 +642,8 @@ class TestGeminiResponse:
 
 class TestProvidersAreInterchangeable:
     def test_all_satisfy_the_protocol(self) -> None:
-        from workflow_builder.agents.models import ModelProvider
-        from workflow_builder.agents.providers import (
+        from loom.agents.models import ModelProvider
+        from loom.agents.providers import (
             AnthropicProvider,
             GeminiProvider,
             OpenAIProvider,
@@ -658,7 +658,7 @@ class TestProvidersAreInterchangeable:
         """Lazy exports: the extras are optional, so importing must be free."""
         import importlib
 
-        module = importlib.import_module("workflow_builder.agents.providers")
+        module = importlib.import_module("loom.agents.providers")
         assert set(module.__all__) == {
             "AnthropicProvider",
             "GeminiProvider",
@@ -666,7 +666,7 @@ class TestProvidersAreInterchangeable:
         }
 
     def test_unknown_attribute_raises_attribute_error(self) -> None:
-        import workflow_builder.agents.providers as providers
+        import loom.agents.providers as providers
 
         with pytest.raises(AttributeError, match="CohereProvider"):
             _ = providers.CohereProvider
@@ -675,7 +675,7 @@ class TestProvidersAreInterchangeable:
         self, openai_provider, gemini_provider
     ) -> None:
         """The point of the protocol: swapping vendors is a one-line change."""
-        from workflow_builder.agents.agent import Agent
+        from loom.agents.agent import Agent
 
         for provider, _ in (openai_provider, gemini_provider):
             agent = Agent(name="portable", model=provider)
@@ -693,8 +693,8 @@ class TestAgentResultsSurviveReplay:
 
     @staticmethod
     def _scripted_agent():
-        from workflow_builder.agents.agent import Agent
-        from workflow_builder.testing import MockModelProvider, mock_response
+        from loom.agents.agent import Agent
+        from loom.testing import MockModelProvider, mock_response
 
         return Agent(
             name="scripted",
@@ -711,8 +711,8 @@ class TestAgentResultsSurviveReplay:
     async def test_agent_result_is_still_typed_on_replay(self) -> None:
         """It decoded back as a plain dict, so `result.output` raised
         AttributeError on the second attempt but not the first."""
-        from workflow_builder import Context, Runtime, workflow
-        from workflow_builder.state.memory import MemoryStore
+        from loom import Context, Runtime, workflow
+        from loom.stores.memory import MemoryStore
 
         agent = self._scripted_agent()
 
@@ -732,8 +732,8 @@ class TestAgentResultsSurviveReplay:
     async def test_agent_tokens_reach_the_run_total(self) -> None:
         """total_usage() skipped every agent entry, so an agent run always
         reported zero tokens — the main number anyone wants from it."""
-        from workflow_builder import Context, Runtime, workflow
-        from workflow_builder.state.memory import MemoryStore
+        from loom import Context, Runtime, workflow
+        from loom.stores.memory import MemoryStore
 
         agent = self._scripted_agent()
 
@@ -748,7 +748,7 @@ class TestAgentResultsSurviveReplay:
 
     def test_a_composite_agent_entry_is_not_double_counted(self) -> None:
         """When per-turn entries exist beneath an agent, its rollup is skipped."""
-        from workflow_builder.runtime.journal import (
+        from loom.runtime.journal import (
             EntryKind,
             EntryStatus,
             Journal,

@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import pytest
 
-from workflow_builder.agents.checks import (
+from loom.agents.checks import (
     CheckContext,
     CheckPipeline,
     CheckResult,
     PipelineReport,
 )
-from workflow_builder.agents.stages import (
+from loom.agents.stages import (
     CompileStage,
     LintStage,
     ReplayStage,
@@ -25,10 +25,10 @@ from workflow_builder.agents.stages import (
     TypeStage,
     default_stages,
 )
-from workflow_builder.agents.validator import CodeIssue
+from loom.agents.validator import CodeIssue
 
 GOOD = '''
-from workflow_builder import Context, step, workflow
+from loom import Context, step, workflow
 
 @step
 async def double(n: int) -> int:
@@ -138,7 +138,7 @@ class TestConcreteStages:
 
     async def test_static_applies_the_ast_rules(self) -> None:
         result = await StaticStage().run(
-            "from workflow_builder.state.memory import MemoryStore\n"
+            "from loom.stores.memory import MemoryStore\n"
             "store = MemoryStore()\n",
             CheckContext(),
         )
@@ -146,7 +146,7 @@ class TestConcreteStages:
 
     async def test_static_honours_the_available_toolsets(self) -> None:
         result = await StaticStage().run(
-            "from workflow_builder.toolsets.nope.tools import thing\n",
+            "from loom.toolsets.nope.tools import thing\n",
             CheckContext(available_toolsets={"jira"}),
         )
         assert any(i.category == "toolset" for i in result.errors)
@@ -167,7 +167,7 @@ class TestConcreteStages:
 
     async def test_clean_code_produces_no_type_noise(self) -> None:
         """It reported 41 warnings on a correct workflow — all of them from
-        inside workflow_builder, followed through its imports. Noise at that
+        inside loom, followed through its imports. Noise at that
         volume is worse than no type checking, because it buries the real ones."""
         result = await TypeStage().run(GOOD, CheckContext())
         if result.skipped:
@@ -238,7 +238,7 @@ class TestSmokeAndReplay:
         """What the static determinism lint cannot see."""
         wobbly = '''
 import random
-from workflow_builder import Context, step, workflow
+from loom import Context, step, workflow
 
 @step
 async def pick() -> int:
@@ -289,8 +289,8 @@ class TestGenerateAlwaysAnswers:
     """
 
     async def test_an_agent_failure_becomes_an_issue_not_an_exception(self) -> None:
-        from workflow_builder.agents.coding_agent import WorkflowCodingAgent
-        from workflow_builder.core.exceptions import UsageLimitExceeded
+        from loom.agents.coding_agent import WorkflowCodingAgent
+        from loom.core.exceptions import UsageLimitExceeded
 
         class FakeModel:
             model_name = "fake"
@@ -300,7 +300,7 @@ class TestGenerateAlwaysAnswers:
             async def __call__(self, *a, **k):
                 raise UsageLimitExceeded("agent exceeded its budget of 23 turns")
 
-        import workflow_builder.agents.agent as agent_module
+        import loom.agents.agent as agent_module
 
         original = agent_module.Agent
         agent_module.Agent = Exploding
@@ -316,7 +316,7 @@ class TestGenerateAlwaysAnswers:
         assert "max_discovery_turns" in result.issues[0].message
 
     def test_the_budgets_are_separate_and_tunable(self) -> None:
-        from workflow_builder.agents.coding_agent import WorkflowCodingAgent
+        from loom.agents.coding_agent import WorkflowCodingAgent
 
         agent = WorkflowCodingAgent(
             object(), max_repair_attempts=2, max_discovery_turns=30
@@ -334,11 +334,11 @@ class TestToolsetOnlyWorkflows:
     """
 
     def test_no_step_warning_for_a_toolset_workflow(self) -> None:
-        from workflow_builder.agents.validator import CodeValidator
+        from loom.agents.validator import CodeValidator
 
         code = (
-            "from workflow_builder import Context, workflow\n"
-            "from workflow_builder.toolsets.jira.tools import jira_search_issues\n\n"
+            "from loom import Context, workflow\n"
+            "from loom.toolsets.jira.tools import jira_search_issues\n\n"
             "@workflow(name='x')\n"
             "async def x(ctx: Context, q: str) -> str:\n"
             "    return str(await ctx.step(jira_search_issues, q))\n"
@@ -346,10 +346,10 @@ class TestToolsetOnlyWorkflows:
         assert not CodeValidator().validate(code)
 
     def test_the_warning_still_fires_without_toolsets(self) -> None:
-        from workflow_builder.agents.validator import CodeValidator
+        from loom.agents.validator import CodeValidator
 
         code = (
-            "from workflow_builder import Context, workflow\n\n"
+            "from loom import Context, workflow\n\n"
             "@workflow(name='y')\n"
             "async def y(ctx: Context, q: str) -> str:\n"
             "    return q\n"
@@ -367,8 +367,8 @@ class TestRepairKeepsContext:
     """
 
     def test_the_prompt_carries_the_spec(self) -> None:
-        from workflow_builder.agents.checks import PipelineReport
-        from workflow_builder.agents.coding_agent import _repair_prompt
+        from loom.agents.checks import PipelineReport
+        from loom.agents.coding_agent import _repair_prompt
 
         report = PipelineReport(
             results=[CheckResult("compile", issues=[CodeIssue("syntax", "bad", "error")])]
@@ -380,18 +380,18 @@ class TestRepairKeepsContext:
         assert "bad" in prompt
 
     def test_it_forbids_answering_with_a_question(self) -> None:
-        from workflow_builder.agents.checks import PipelineReport
-        from workflow_builder.agents.coding_agent import _repair_prompt
+        from loom.agents.checks import PipelineReport
+        from loom.agents.coding_agent import _repair_prompt
 
         prompt = _repair_prompt(PipelineReport(), "code", spec="do a thing")
         assert "no questions, no prose" in prompt
 
     async def test_a_regressing_repair_is_discarded(self) -> None:
         """Prose in place of code is the case that motivated this."""
-        from workflow_builder.agents.checks import CheckContext
-        from workflow_builder.agents.coding_agent import CodingOutput, WorkflowCodingAgent
+        from loom.agents.checks import CheckContext
+        from loom.agents.coding_agent import CodingOutput, WorkflowCodingAgent
 
-        original = "from workflow_builder import workflow  # at least Python\n"
+        original = "from loom import workflow  # at least Python\n"
         prose = "I need to see the original workflow specification to help.\n"
 
         class Replying:
@@ -408,8 +408,8 @@ class TestRepairKeepsContext:
         assert rounds >= 1
 
     async def test_an_improving_repair_is_taken(self) -> None:
-        from workflow_builder.agents.checks import CheckContext
-        from workflow_builder.agents.coding_agent import CodingOutput, WorkflowCodingAgent
+        from loom.agents.checks import CheckContext
+        from loom.agents.coding_agent import CodingOutput, WorkflowCodingAgent
 
         broken = "def f(:\n"
         fixed = GOOD
@@ -439,7 +439,7 @@ class TestRuntimeFromEnvCanRunAgentNodes:
     def test_a_provider_key_configures_a_backend(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from workflow_builder import Runtime
+        from loom import Runtime
 
         for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
             monkeypatch.delenv(key, raising=False)
@@ -449,7 +449,7 @@ class TestRuntimeFromEnvCanRunAgentNodes:
 
     def test_no_key_means_no_backend(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Most workflows never call one; absence is not a misconfiguration."""
-        from workflow_builder import Runtime
+        from loom import Runtime
 
         for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
             monkeypatch.delenv(key, raising=False)
@@ -457,14 +457,14 @@ class TestRuntimeFromEnvCanRunAgentNodes:
         assert Runtime.from_env().agent_backend is None
 
     def test_an_explicit_choice_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from workflow_builder import Runtime
+        from loom import Runtime
 
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         assert Runtime.from_env(agent_backend=None).agent_backend is None
 
     def test_the_demo_block_prints_the_error(self) -> None:
         """"Status: failed / Output: None" says nothing a reader can act on."""
-        from workflow_builder.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
+        from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
 
         assert "if result.error:" in DEFAULT_SYSTEM_PROMPT
         assert "result.error.message" in DEFAULT_SYSTEM_PROMPT
@@ -478,8 +478,8 @@ class TestCodingResultLoad:
     """
 
     def test_it_returns_the_workflow(self) -> None:
-        from workflow_builder.agents.coding_agent import CodingResult
-        from workflow_builder.runtime.workflow import WorkflowDefinition
+        from loom.agents.coding_agent import CodingResult
+        from loom.runtime.workflow import WorkflowDefinition
 
         definition = CodingResult(code=GOOD).load()
 
@@ -487,9 +487,9 @@ class TestCodingResultLoad:
         assert definition.name == "doubler"
 
     async def test_the_loaded_workflow_actually_runs(self) -> None:
-        from workflow_builder import Runtime
-        from workflow_builder.agents.coding_agent import CodingResult
-        from workflow_builder.state.memory import MemoryStore
+        from loom import Runtime
+        from loom.agents.coding_agent import CodingResult
+        from loom.stores.memory import MemoryStore
 
         definition = CodingResult(code=GOOD).load()
         runtime = Runtime(store=MemoryStore())
@@ -501,8 +501,8 @@ class TestCodingResultLoad:
 
     def test_no_code_raises_with_the_reason(self) -> None:
         """A refusal carries why; loading it should repeat that, not say None."""
-        from workflow_builder.agents.coding_agent import CodingResult
-        from workflow_builder.agents.validator import CodeIssue
+        from loom.agents.coding_agent import CodingResult
+        from loom.agents.validator import CodeIssue
 
         result = CodingResult(
             code="",
@@ -512,7 +512,7 @@ class TestCodingResultLoad:
             result.load()
 
     def test_code_without_a_workflow_raises(self) -> None:
-        from workflow_builder.agents.coding_agent import CodingResult
+        from loom.agents.coding_agent import CodingResult
 
         with pytest.raises(ValueError, match="declares no @workflow"):
             CodingResult(code="x = 1\n").load()
@@ -533,11 +533,11 @@ class TestTheAuthoringPlaneNeedsNoExecutor:
     """
 
     AUTHORING = (
-        "workflow_builder/agents/coding_agent.py",
-        "workflow_builder/agents/stages.py",
-        "workflow_builder/agents/checks.py",
-        "workflow_builder/agents/validator.py",
-        "workflow_builder/agents/coding_tools.py",
+        "loom/agents/coding_agent.py",
+        "loom/agents/stages.py",
+        "loom/agents/checks.py",
+        "loom/agents/validator.py",
+        "loom/agents/coding_tools.py",
     )
 
     def _source(self, relative: str) -> str:
@@ -569,7 +569,7 @@ class TestTheAuthoringPlaneNeedsNoExecutor:
 
     def test_generating_a_workflow_constructs_no_runtime(self) -> None:
         """The property end to end, not module by module."""
-        from workflow_builder.agents.coding_agent import WorkflowCodingAgent
+        from loom.agents.coding_agent import WorkflowCodingAgent
 
         agent = WorkflowCodingAgent(model=object())
 
@@ -581,7 +581,7 @@ class TestTheAuthoringPlaneNeedsNoExecutor:
         """Where the Runtime legitimately appears — and where it stays."""
         import inspect
 
-        from workflow_builder.agents import smoke
+        from loom.agents import smoke
 
         source = inspect.getsource(smoke)
         assert "subprocess" in source
@@ -606,12 +606,12 @@ class TestIsCleanAgreesWithThePipeline:
     """
 
     def _result(self, **kwargs):
-        from workflow_builder.agents.coding_agent import CodingResult
+        from loom.agents.coding_agent import CodingResult
 
         return CodingResult(code="x = 1", **kwargs)
 
     def _smoke(self, error: str):
-        from workflow_builder.agents.smoke import SmokeResult
+        from loom.agents.smoke import SmokeResult
 
         return SmokeResult(ok=False, phase="run", error=error, traceback="")
 
@@ -636,7 +636,7 @@ class TestIsCleanAgreesWithThePipeline:
         assert result.blockers == ["smoke: 'NoneType' has no attribute 'x'"]
 
     def test_an_error_issue_blocks_and_names_its_category(self) -> None:
-        from workflow_builder.agents.validator import CodeIssue
+        from loom.agents.validator import CodeIssue
 
         result = self._result(
             issues=[
@@ -651,7 +651,7 @@ class TestIsCleanAgreesWithThePipeline:
 
     def test_blockers_is_empty_exactly_when_clean(self) -> None:
         """The two must not be able to disagree, whatever is set."""
-        from workflow_builder.agents.validator import CodeIssue
+        from loom.agents.validator import CodeIssue
 
         for result in (
             self._result(),

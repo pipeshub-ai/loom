@@ -33,7 +33,7 @@ Version 1.0 · Codename `loom` · Author: PipesHub AI
 
 ## 1.1 The Thesis
 
-**workflow-builder** (codename LOOM) is a pip-installable, library-first durable execution SDK whose
+**loomflow** (codename LOOM) is a pip-installable, library-first durable execution SDK whose
 primary deliverable is a **Workflow Coding Agent** — an LLM-powered agent that authors workflow code
 mixing third-party SDK calls, workflow constructs (`@workflow`, `@step`, `ctx.*`), and raw Python.
 
@@ -212,7 +212,7 @@ Moving between profiles is a config change plus a migration, **never a code chan
 The embedded profile has **zero external dependencies** beyond Python itself:
 
 ```bash
-pip install workflow-builder       # only requires: pydantic, pydantic-settings
+pip install loomflow       # only requires: pydantic, pydantic-settings
 python my_workflow.py              # runs with SQLite journal, in-process worker
 ```
 
@@ -227,9 +227,9 @@ path. Production features (PostgreSQL/MongoDB, HA, external backends) are option
 installed only when needed:
 
 ```bash
-pip install workflow-builder[postgres]    # adds asyncpg
-pip install workflow-builder[mongodb]     # adds motor
-pip install workflow-builder[temporal]    # adds temporalio
+pip install loomflow[postgres]    # adds asyncpg
+pip install loomflow[mongodb]     # adds motor
+pip install loomflow[temporal]    # adds temporalio
 ```
 
 ## 2.4 The Determinism Dial
@@ -1221,7 +1221,7 @@ class AuthoringSession(BaseModel):
     transcript_ref: str         # for humans reviewing intent
 ```
 
-The builder is itself a session agent: `Agent("workflow-builder", persistence="session")` whose
+The builder is itself a session agent: `Agent("loomflow", persistence="session")` whose
 session key is the `authoring_session.id`. Reload from spec + decision log + diagnostics, not the
 transcript.
 
@@ -1439,7 +1439,7 @@ register_toolset_from_openapi("https://api.internal.com/openapi.json", id="inter
 Users install toolset packages as pip extras, and they auto-register:
 
 ```bash
-pip install workflow-builder                        # core only
+pip install loomflow                        # core only
 pip install loom-toolset-slack                       # community toolset
 pip install my-company-toolset                       # custom internal toolset
 ```
@@ -2720,7 +2720,7 @@ All steps are additive. No breaking changes to the existing public API.
 
 ## Phase 1 — Core Library (V1)
 
-**Goal:** `pip install workflow-builder`, a working durable execution engine with the correct
+**Goal:** `pip install loomflow`, a working durable execution engine with the correct
 one-way-door decisions baked in.
 
 | Deliverable | Description | Exit Criteria |
@@ -2888,7 +2888,7 @@ app = Loom(profile="external", backend=TemporalBackend(...))
 ## 15.5 Repository Layout (Canonical)
 
 ```
-src/workflow_builder/
+src/loom/
 ├── core/                   # Foundation: models, types, exceptions, retry, serde
 │   ├── models.py           # ExecutionRecord, StepRecord, Usage, Status enums
 │   ├── types.py            # Duration, JSONDict, JSONValue

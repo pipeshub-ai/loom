@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from workflow_builder.triggers.filter import FilterSpec
-from workflow_builder.triggers.routing import EventRouter, RoutingEvent
+from loom.triggers.filter import FilterSpec
+from loom.triggers.routing import EventRouter, RoutingEvent
 
 # ---------------------------------------------------------------------------
 # FilterSpec — exact match

@@ -10,7 +10,7 @@ whole round trip in one file. In production you would serve the app with
 uvicorn and point real clients at it.
 
 Requires:
-    pip install workflow-builder[api]
+    pip install loomflow[api]
 
 Run:
     python3 examples/cookbook/16_http_server.py
@@ -25,10 +25,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils import header, log
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.server import LoomClient
-from workflow_builder.server.app import create_app
-from workflow_builder.state.memory import MemoryStore
+from loom import Context, Runtime, step, workflow
+from loom.server import LoomClient
+from loom.server.app import create_app
+from loom.stores.memory import MemoryStore
 
 # ---------------------------------------------------------------------------
 # Workflows to expose

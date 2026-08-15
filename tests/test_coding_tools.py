@@ -6,8 +6,8 @@ import json
 
 import pytest
 
-from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
-from workflow_builder.toolsets.registry import register_toolset
+from loom.toolsets.jira.manifest import JIRA_MANIFEST
+from loom.toolsets.registry import register_toolset
 
 
 @pytest.fixture
@@ -22,14 +22,14 @@ def jira_registered() -> None:
 
 class TestSearchToolsets:
     async def test_finds_registered_jira(self, jira_registered: None) -> None:
-        from workflow_builder.agents.coding_tools import search_toolsets
+        from loom.agents.coding_tools import search_toolsets
 
         cards = json.loads(await search_toolsets.fn("jira"))
         assert len(cards) >= 1
         assert cards[0]["toolset_id"] == "jira"
 
     async def test_returns_empty_for_unknown(self) -> None:
-        from workflow_builder.agents.coding_tools import search_toolsets
+        from loom.agents.coding_tools import search_toolsets
 
         cards = json.loads(await search_toolsets.fn("nonexistent_xyz_toolset_99"))
         assert cards == []
@@ -37,14 +37,14 @@ class TestSearchToolsets:
 
 class TestShowToolset:
     async def test_shows_jira_ops(self, jira_registered: None) -> None:
-        from workflow_builder.agents.coding_tools import show_toolset
+        from loom.agents.coding_tools import show_toolset
 
         data = json.loads(await show_toolset.fn("jira"))
         assert data["toolset_id"] == "jira"
         assert len(data["ops"]) >= 7
 
     async def test_error_for_unknown(self) -> None:
-        from workflow_builder.agents.coding_tools import show_toolset
+        from loom.agents.coding_tools import show_toolset
 
         data = json.loads(await show_toolset.fn("nonexistent"))
         assert "error" in data
@@ -52,7 +52,7 @@ class TestShowToolset:
 
 class TestGetToolContract:
     async def test_gets_jira_search_contract(self, jira_registered: None) -> None:
-        from workflow_builder.agents.coding_tools import get_tool_contract
+        from loom.agents.coding_tools import get_tool_contract
 
         data = json.loads(await get_tool_contract.fn("jira.issues.search"))
         assert data["op_id"] == "issues.search"
@@ -60,7 +60,7 @@ class TestGetToolContract:
         assert "input_schema" in data
 
     async def test_error_for_invalid_path(self) -> None:
-        from workflow_builder.agents.coding_tools import get_tool_contract
+        from loom.agents.coding_tools import get_tool_contract
 
         data = json.loads(await get_tool_contract.fn("bad_path"))
         assert "error" in data
@@ -68,7 +68,7 @@ class TestGetToolContract:
 
 class TestGetToolDocs:
     async def test_returns_jira_docs(self) -> None:
-        from workflow_builder.agents.coding_tools import get_tool_docs
+        from loom.agents.coding_tools import get_tool_docs
 
         result = await get_tool_docs.fn("jira")
         assert "jira_search_issues" in result
@@ -76,7 +76,7 @@ class TestGetToolDocs:
         assert "JiraIssue" in result
 
     async def test_error_for_unknown_toolset(self) -> None:
-        from workflow_builder.agents.coding_tools import get_tool_docs
+        from loom.agents.coding_tools import get_tool_docs
 
         data = json.loads(await get_tool_docs.fn("unknown_toolset"))
         assert "error" in data
@@ -84,10 +84,10 @@ class TestGetToolDocs:
 
 class TestValidateCode:
     async def test_valid_code(self) -> None:
-        from workflow_builder.agents.coding_tools import validate_code
+        from loom.agents.coding_tools import validate_code
 
         code = '''\
-from workflow_builder import Context, step, workflow
+from loom import Context, step, workflow
 
 @step
 async def greet(name: str) -> str:
@@ -100,7 +100,7 @@ async def hello(ctx: Context, name: str) -> str:
         assert "Valid" in await validate_code.fn(code)
 
     async def test_invalid_code_syntax(self) -> None:
-        from workflow_builder.agents.coding_tools import validate_code
+        from loom.agents.coding_tools import validate_code
 
         issues = json.loads(await validate_code.fn("def broken("))
         assert len(issues) > 0
@@ -108,10 +108,10 @@ async def hello(ctx: Context, name: str) -> str:
         assert issues[0]["category"] == "syntax"
 
     async def test_missing_workflow(self) -> None:
-        from workflow_builder.agents.coding_tools import validate_code
+        from loom.agents.coding_tools import validate_code
 
         code = '''\
-from workflow_builder import step
+from loom import step
 
 @step
 async def greet(name: str) -> str:
@@ -121,15 +121,15 @@ async def greet(name: str) -> str:
         assert any(i["category"] == "structure" for i in issues)
 
     async def test_flags_disallowed_import(self) -> None:
-        from workflow_builder.agents.coding_tools import build_coding_tools
-        from workflow_builder.agents.validator import CodeValidator
+        from loom.agents.coding_tools import build_coding_tools
+        from loom.agents.validator import CodeValidator
 
         code = '''\
 import json
 
 import pandas as pd
 
-from workflow_builder import Context, step, workflow
+from loom import Context, step, workflow
 
 @step
 async def load(path: str) -> int:
@@ -147,12 +147,12 @@ async def load_wf(ctx: Context, path: str) -> int:
         assert any("pandas" in i["message"] for i in flagged)
         # stdlib and the SDK itself are never flagged
         assert not any("json" in i["message"] for i in flagged)
-        assert not any("workflow_builder" in i["message"] for i in flagged)
+        assert not any("loom" in i["message"] for i in flagged)
 
 
 class TestBuildCodingTools:
     def test_returns_the_authoring_tools(self) -> None:
-        from workflow_builder.agents.coding_tools import build_coding_tools
+        from loom.agents.coding_tools import build_coding_tools
 
         tools = build_coding_tools()
         names = {t.name for t in tools}
@@ -173,8 +173,8 @@ class TestBuildCodingTools:
         assert "ask_user" not in names
 
     def test_ask_user_is_included_only_when_interaction_is_set(self) -> None:
-        from workflow_builder.agents.coding_tools import build_coding_tools
-        from workflow_builder.agents.interaction import CallbackUserInteraction, UserResponse
+        from loom.agents.coding_tools import build_coding_tools
+        from loom.agents.interaction import CallbackUserInteraction, UserResponse
 
         tools = build_coding_tools(
             interaction=CallbackUserInteraction(lambda q: UserResponse(answer="x"))
@@ -183,7 +183,7 @@ class TestBuildCodingTools:
         assert len(tools) == len(build_coding_tools()) + 1
 
     def test_all_have_descriptions(self) -> None:
-        from workflow_builder.agents.coding_tools import build_coding_tools
+        from loom.agents.coding_tools import build_coding_tools
 
         for t in build_coding_tools():
             assert t.description, f"Tool {t.name} missing description"

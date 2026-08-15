@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-from workflow_builder import Context, Retry, step, workflow
+from loom import Context, Retry, step, workflow
 
 # ---------------------------------------------------------------------------
 # Data models

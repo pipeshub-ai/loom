@@ -23,26 +23,26 @@ from typing import Any
 
 import pytest
 
-from workflow_builder import Context, Runtime, workflow
-from workflow_builder.connectors.credentials import (
+from loom import Context, Runtime, workflow
+from loom.connectors.credentials import (
     MemoryCredentialStore,
     StoredCredential,
     credential_store_scope,
     current_credential_store,
     resolve_bearer_token,
 )
-from workflow_builder.core.exceptions import AuthExpired
-from workflow_builder.core.models import ExecutionStatus
-from workflow_builder.core.retry import PERMANENT_ERRORS
-from workflow_builder.core.secret import Secret
-from workflow_builder.identity.facade import PRINCIPAL_KEY
-from workflow_builder.identity.principal import ServicePrincipal
-from workflow_builder.runtime.dispatcher import TriggerDispatcher
-from workflow_builder.state.memory import MemoryStore
-from workflow_builder.toolsets.confluence.client import ConfluenceClient
-from workflow_builder.toolsets.google.auth import GoogleAuth, GoogleCredentials
-from workflow_builder.toolsets.google.errors import GoogleAuthError
-from workflow_builder.toolsets.jira.client import JiraClient
+from loom.core.exceptions import AuthExpired
+from loom.core.models import ExecutionStatus
+from loom.core.retry import PERMANENT_ERRORS
+from loom.core.secret import Secret
+from loom.identity.facade import PRINCIPAL_KEY
+from loom.identity.principal import ServicePrincipal
+from loom.runtime.dispatcher import TriggerDispatcher
+from loom.stores.memory import MemoryStore
+from loom.toolsets.confluence.client import ConfluenceClient
+from loom.toolsets.google.auth import GoogleAuth, GoogleCredentials
+from loom.toolsets.google.errors import GoogleAuthError
+from loom.toolsets.jira.client import JiraClient
 
 
 def _cred(token: str, **overrides: Any) -> StoredCredential:
@@ -264,7 +264,7 @@ class TestAuthExpiredParksTheRun:
         assert AuthExpired in PERMANENT_ERRORS
 
     async def test_a_credential_lookup_that_raises_auth_expired_suspends_the_run(self) -> None:
-        from workflow_builder import step
+        from loom import step
 
         @step
         async def touch_jira() -> str:
@@ -286,7 +286,7 @@ class TestAuthExpiredParksTheRun:
         """The exact shape 'loom connect jira' + event delivery produces:
         the second attempt sees working credentials and the run completes,
         with no special-casing needed in the step itself."""
-        from workflow_builder import step
+        from loom import step
 
         attempts: list[int] = []
 
@@ -312,7 +312,7 @@ class TestAuthExpiredParksTheRun:
     async def test_broadcast_send_event_finds_and_resumes_a_parked_run(self) -> None:
         """The mechanism 'loom connect <name>' relies on: a broadcast by
         event name alone (no run_id) reaches every run parked on it."""
-        from workflow_builder import step
+        from loom import step
 
         attempts: list[int] = []
 
@@ -345,9 +345,9 @@ class TestAuthExpiredParksTheRun:
         contract is what a calling script actually branches on. A first step
         that already completed must not re-run when the second step's parked
         credential is delivered and the workflow re-enters."""
-        from workflow_builder import step
-        from workflow_builder.cli.output import Exit, exit_for
-        from workflow_builder.facade import LocalFacade
+        from loom import step
+        from loom.cli.output import Exit, exit_for
+        from loom.facade import LocalFacade
 
         first_step_runs: list[int] = []
         second_step_attempts: list[int] = []
@@ -399,7 +399,7 @@ class TestAuthExpiredParksTheRun:
         toolset clients do via the current_credential_store() contextvar),
         the store's own expiry check raises AuthExpired, and the run parks
         on the same store-derived name with no special-casing in the step."""
-        from workflow_builder import step
+        from loom import step
 
         @step
         async def call_jira() -> str:
@@ -429,7 +429,7 @@ class TestAuthExpiredParksTheRun:
         """Runtime(credentials=None) is the default — nothing here should be
         reachable, and a step that fails for an ordinary reason still just
         fails, not suspends."""
-        from workflow_builder import step
+        from loom import step
 
         @step
         async def boom() -> str:
@@ -461,11 +461,11 @@ class TestNoSecretEscapes:
 
         import httpx
 
-        from workflow_builder import step
-        from workflow_builder.cli.output import Printer
-        from workflow_builder.connectors.credentials import EncryptedFileCredentialStore
-        from workflow_builder.facade import LocalFacade
-        from workflow_builder.server.app import create_app
+        from loom import step
+        from loom.cli.output import Printer
+        from loom.connectors.credentials import EncryptedFileCredentialStore
+        from loom.facade import LocalFacade
+        from loom.server.app import create_app
 
         marker = "sk-super-secret-token-do-not-leak-9f3c2a"
 
@@ -533,7 +533,7 @@ class TestNoSecretEscapes:
     ) -> None:
         """The failure path matters too: AuthExpired's own message must not
         embed the (already-expired) secret value."""
-        from workflow_builder.connectors.credentials import EncryptedFileCredentialStore
+        from loom.connectors.credentials import EncryptedFileCredentialStore
 
         marker = "sk-expired-secret-should-not-appear-in-any-error-77abf1"
         store = EncryptedFileCredentialStore(path=tmp_path / "creds.enc")
@@ -568,7 +568,7 @@ class TestServiceIdentity:
     async def test_a_scheduled_run_is_pinned_to_the_service_principal(self) -> None:
         from datetime import UTC, datetime, timedelta
 
-        from workflow_builder.triggers.specs import Schedule
+        from loom.triggers.specs import Schedule
 
         @workflow(name="nightly", triggers=[Schedule("* * * * *")])
         async def nightly(ctx: Context, _: None = None) -> str:

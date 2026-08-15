@@ -1,6 +1,6 @@
-# workflow-builder Documentation
+# loomflow Documentation
 
-**workflow-builder** (LOOM) is a library-first durable execution SDK for AI-powered workflows. Install with pip, write Python, and get deterministic replay, agent orchestration, and pluggable storage out of the box.
+**loomflow** (LOOM) is a library-first durable execution SDK for AI-powered workflows. Install with pip, write Python, and get deterministic replay, agent orchestration, and pluggable storage out of the box.
 
 ## Why LOOM
 
@@ -25,7 +25,7 @@ not a marketing gloss over it: some of this is shipped and tested today; some
 is the direction the architecture is built toward and isn't there yet. Both
 matter, so here's which is which — and the "Planned" rows are exactly where
 [community contributions](https://github.com/pipeshub-ai/loom/blob/main/CONTRIBUTING.md)
-help most, since each one is scoped in [`docs/implementation-plan.md`](implementation-plan.md)
+help most, since each one is scoped in [`docs/design/implementation-plan.md`](design/implementation-plan.md)
 with its own exit criteria.
 
 | Capability | Status | Where |
@@ -37,13 +37,13 @@ with its own exit criteria.
 | Code projected to a graph (`loom check`, `graph.json`) | **Shipped** | `CLAUDE.md` — "Graph is projected from code" |
 | Typed toolsets exposed to the coding agent as a live catalog | **Shipped** (manifest-based) | [Toolsets](guides/toolsets.md) |
 | Toolset catalog auto-generated from an OpenAPI spec | Planned — Phase 3 | [`phases/phase-3-integrations.md`](../phases/phase-3-integrations.md) |
-| Sandboxed execution — generated code runs with no ambient credentials | Planned — Phase 3 (`ExecutionBackend`) | [Implementation plan](implementation-plan.md) §3.1 |
+| Sandboxed execution — generated code runs with no ambient credentials | Planned — Phase 3 (`ExecutionBackend`) | [Implementation plan](design/implementation-plan.md) §3.1 |
 | Authority via a scoped grant, checked per call | **Shipped**, in-process only | [Grants and progress](guides/grants.md) |
-| Code saved and versioned, with commit/activate/rollback | Planned — Phase 5 (`SourceStore`/`VersionStore`) | [Implementation plan](implementation-plan.md) §4 |
-| Session-shaped execution trace for debugging | Planned — Phase 5 (`TraceView`) | [Implementation plan](implementation-plan.md) §4 |
+| Code saved and versioned, with commit/activate/rollback | Planned — Phase 5 (`SourceStore`/`VersionStore`) | [Implementation plan](design/implementation-plan.md) §4 |
+| Session-shaped execution trace for debugging | Planned — Phase 5 (`TraceView`) | [Implementation plan](design/implementation-plan.md) §4 |
 | Visualization: an agent renders the code as a UI, verified against the extracted graph | Planned — hybrid design | [`phases/phase-4-visualization.md`](../phases/phase-4-visualization.md) |
 
-See [PipesHub integration](pipeshub-integration.md) for the fullest version of
+See [PipesHub integration](design/pipeshub-integration.md) for the fullest version of
 this story — the product built on top of LOOM that this table is describing.
 
 ## Quick Links
@@ -68,9 +68,9 @@ this story — the product built on top of LOOM that this table is describing.
 
 ## Design
 
-- [Three planes](planes-plan.md) -- Control, authoring, and execution: the split, the storage parity gaps, and the plan
-- [Implementation plan](implementation-plan.md) -- The ports LOOM is adding, and the boundary rule that decides what stays out
-- [PipesHub integration](pipeshub-integration.md) -- PipesHub's workflow system, the gap analysis, and the phased plan to run it on LOOM
+- [Three planes](design/planes-plan.md) -- Control, authoring, and execution: the split, the storage parity gaps, and the plan
+- [Implementation plan](design/implementation-plan.md) -- The ports LOOM is adding, and the boundary rule that decides what stays out
+- [PipesHub integration](design/pipeshub-integration.md) -- PipesHub's workflow system, the gap analysis, and the phased plan to run it on LOOM
 
 ## Examples
 

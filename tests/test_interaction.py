@@ -8,7 +8,7 @@ from io import StringIO
 
 import pytest
 
-from workflow_builder.agents.interaction import (
+from loom.agents.interaction import (
     AskUserGate,
     CallbackUserInteraction,
     CLIUserInteraction,
@@ -16,7 +16,7 @@ from workflow_builder.agents.interaction import (
     UserResponse,
     make_ask_user_tool,
 )
-from workflow_builder.agents.tools import ToolContext
+from loom.agents.tools import ToolContext
 
 
 class TestCallbackUserInteraction:
@@ -124,13 +124,13 @@ class TestAskUserTool:
 
 class TestCodingAgentAskUser:
     async def test_asks_receives_and_uses_the_answer(self) -> None:
-        from workflow_builder.agents.coding_agent import WorkflowCodingAgent
-        from workflow_builder.agents.messages import ToolCall
-        from workflow_builder.agents.output import FINAL_OUTPUT_TOOL
-        from workflow_builder.testing.mock import MockModelProvider, mock_response
+        from loom.agents.coding_agent import WorkflowCodingAgent
+        from loom.agents.messages import ToolCall
+        from loom.agents.output import FINAL_OUTPUT_TOOL
+        from loom.testing.mock import MockModelProvider, mock_response
 
         code = (
-            "from workflow_builder import Context, step, workflow\n"
+            "from loom import Context, step, workflow\n"
             "\n"
             "@step\n"
             "async def greet(name: str) -> str:\n"
@@ -182,7 +182,7 @@ class TestCodingAgentAskUser:
         assert "Asking the user" in agent.build_system_prompt()
 
     def test_prompt_omits_ask_section_without_interaction(self) -> None:
-        from workflow_builder.agents.coding_agent import WorkflowCodingAgent
+        from loom.agents.coding_agent import WorkflowCodingAgent
 
         agent = WorkflowCodingAgent(model=object(), smoke_test=False)
         assert "ask_user" not in agent.build_system_prompt()

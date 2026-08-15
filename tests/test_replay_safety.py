@@ -11,16 +11,16 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 
-from workflow_builder import Context, ExecutionStatus, Runtime, step, workflow
-from workflow_builder.core.exceptions import InputMismatch, NondeterminismError
-from workflow_builder.runtime.journal import (
+from loom import Context, ExecutionStatus, Runtime, step, workflow
+from loom.core.exceptions import InputMismatch, NondeterminismError
+from loom.runtime.journal import (
     CompatibilityMode,
     EntryKind,
     Journal,
     JournalEntry,
     VerifyMode,
 )
-from workflow_builder.state.memory import MemoryStore
+from loom.stores.memory import MemoryStore
 
 
 class Order(BaseModel):
@@ -243,8 +243,8 @@ class TestIngressBoundaries:
 
     def test_the_cli_reports_usage_not_failure(self) -> None:
         """Exit 2, not 1: a rejected payload left no run to have failed."""
-        from workflow_builder.cli.commands import run_async
-        from workflow_builder.cli.output import Exit
+        from loom.cli.commands import run_async
+        from loom.cli.output import Exit
 
         async def boom() -> int:
             raise InputMismatch("missing required field 'quantity'")
@@ -257,7 +257,7 @@ class TestIngressBoundaries:
         pytest.importorskip("fastapi")
         import httpx
 
-        from workflow_builder.server.app import create_app
+        from loom.server.app import create_app
 
         @workflow(name="http_order")
         async def http_order(ctx: Context, order: Order) -> str:
@@ -365,7 +365,7 @@ class TestReplayedValueContractDrift:
     def test_a_mismatched_payload_is_reported(self) -> None:
         from pydantic import BaseModel
 
-        from workflow_builder.core.serde import decode, drift_of
+        from loom.core.serde import decode, drift_of
 
         class Widened(BaseModel):
             sku: str
@@ -381,7 +381,7 @@ class TestReplayedValueContractDrift:
     def test_a_matching_payload_reports_nothing(self) -> None:
         from pydantic import BaseModel
 
-        from workflow_builder.core.serde import decode, drift_of
+        from loom.core.serde import decode, drift_of
 
         class Order(BaseModel):
             sku: str

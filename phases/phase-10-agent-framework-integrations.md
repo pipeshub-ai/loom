@@ -16,9 +16,9 @@
 | Each integration has a runnable example | All | All |
 | Each integration has passing tests | All | All |
 | AgentExecutor adapters pass conformance suite | All | All |
-| Examples work with `pip install workflow-builder[framework]` | >= 5 | All |
+| Examples work with `pip install loomflow[framework]` | >= 5 | All |
 
-**"Done" means:** A user can `pip install workflow-builder[langgraph]` and use a LangGraph agent as an executor inside a LOOM workflow, or expose a LOOM workflow as a tool inside a LangGraph agent. The same pattern works for CrewAI, Pydantic AI, OpenAI Agents SDK, Claude SDK, Agno, and AutoGen. Each has a tested example and an adapter that implements `AgentExecutor`.
+**"Done" means:** A user can `pip install loomflow[langgraph]` and use a LangGraph agent as an executor inside a LOOM workflow, or expose a LOOM workflow as a tool inside a LangGraph agent. The same pattern works for CrewAI, Pydantic AI, OpenAI Agents SDK, Claude SDK, Agno, and AutoGen. Each has a tested example and an adapter that implements `AgentExecutor`.
 
 ---
 
@@ -81,8 +81,8 @@ from __future__ import annotations
 from typing import Any
 from dataclasses import dataclass
 
-from workflow_builder.agents.models import ModelProvider, ModelRequest, ModelResponse
-from workflow_builder.agents.tools import Tool
+from loom.agents.models import ModelProvider, ModelRequest, ModelResponse
+from loom.agents.tools import Tool
 
 # --- Direction A: LangGraph as AgentExecutor inside LOOM ---
 
@@ -158,7 +158,7 @@ def workflow_as_langchain_tool(runtime, workflow_id: str, description: str = "")
     """Expose a LOOM workflow as a LangChain tool for use in LangGraph.
 
     Usage:
-        from workflow_builder.integrations.langgraph_adapter import workflow_as_langchain_tool
+        from loom.integrations.langgraph_adapter import workflow_as_langchain_tool
         tool = workflow_as_langchain_tool(runtime, "lead_outreach", "Run lead outreach workflow")
         agent = create_react_agent(model, tools=[tool])
     """
@@ -188,8 +188,8 @@ def workflow_as_langchain_tool(runtime, workflow_id: str, description: str = "")
 
 from langgraph.prebuilt import create_react_agent
 from langchain_openai import ChatOpenAI
-from workflow_builder import workflow, step, Context
-from workflow_builder.integrations.langgraph_adapter import LangGraphExecutor, LangGraphExecutorConfig
+from loom import workflow, step, Context
+from loom.integrations.langgraph_adapter import LangGraphExecutor, LangGraphExecutorConfig
 
 # 1. Build a LangGraph agent
 model = ChatOpenAI(model="gpt-4o-mini")
@@ -223,7 +223,7 @@ Pydantic AI's dependency injection pattern maps cleanly to LOOM's runtime inject
 
 from __future__ import annotations
 from typing import Any, TypeVar
-from workflow_builder.agents.tools import Tool
+from loom.agents.tools import Tool
 
 T = TypeVar("T")
 
@@ -279,7 +279,7 @@ def workflow_as_pydantic_tool(runtime, workflow_id: str):
 
     Usage:
         from pydantic_ai import Agent
-        from workflow_builder.integrations.pydantic_ai_adapter import workflow_as_pydantic_tool
+        from loom.integrations.pydantic_ai_adapter import workflow_as_pydantic_tool
 
         agent = Agent('openai:gpt-4o', deps_type=WorkflowRuntime)
 
@@ -303,8 +303,8 @@ def workflow_as_pydantic_tool(runtime, workflow_id: str):
 
 from pydantic_ai import Agent
 from pydantic import BaseModel
-from workflow_builder import workflow, step, Context
-from workflow_builder.integrations.pydantic_ai_adapter import PydanticAIExecutor
+from loom import workflow, step, Context
+from loom.integrations.pydantic_ai_adapter import PydanticAIExecutor
 
 class AnalysisResult(BaseModel):
     summary: str
@@ -345,7 +345,7 @@ async def analyze_document(ctx: Context, url: str) -> dict:
 
 from __future__ import annotations
 from typing import Any
-from workflow_builder.agents.tools import Tool
+from loom.agents.tools import Tool
 
 class OpenAIAgentsExecutor:
     """Wraps an OpenAI Agent (from openai-agents SDK) as a LOOM AgentExecutor."""
@@ -420,7 +420,7 @@ The Claude SDK uses the Messages API with tool_use. The integration wraps the to
 from __future__ import annotations
 from typing import Any
 import json
-from workflow_builder.agents.tools import Tool
+from loom.agents.tools import Tool
 
 class ClaudeExecutor:
     """Wraps the Anthropic Messages API as a LOOM AgentExecutor.
@@ -529,7 +529,7 @@ def workflow_as_claude_tool(runtime, workflow_id: str, description: str = "") ->
 
 from __future__ import annotations
 from typing import Any
-from workflow_builder.agents.tools import Tool
+from loom.agents.tools import Tool
 
 class CrewAIExecutor:
     """Wraps a CrewAI Crew as a LOOM AgentExecutor.
@@ -600,7 +600,7 @@ def workflow_as_crew_tool(runtime, workflow_id: str, description: str = ""):
 
 from __future__ import annotations
 from typing import Any
-from workflow_builder.agents.tools import Tool
+from loom.agents.tools import Tool
 
 class AgnoExecutor:
     """Wraps an Agno Agent as a LOOM AgentExecutor."""
@@ -659,7 +659,7 @@ def workflow_as_agno_tool(runtime, workflow_id: str):
 
 from __future__ import annotations
 from typing import Any
-from workflow_builder.agents.tools import Tool
+from loom.agents.tools import Tool
 
 class AutoGenExecutor:
     """Wraps an AutoGen team/agent as a LOOM AgentExecutor."""
@@ -728,8 +728,8 @@ A framework-free ReAct agent that uses LOOM tools directly. Useful as a referenc
 from __future__ import annotations
 from typing import Any
 import json
-from workflow_builder.agents.tools import Tool
-from workflow_builder.agents.models import ModelProvider, ModelRequest, ToolSchema
+from loom.agents.tools import Tool
+from loom.agents.models import ModelProvider, ModelRequest, ToolSchema
 
 class ReactExecutor:
     """A minimal ReAct agent executor using any ModelProvider.
@@ -750,7 +750,7 @@ class ReactExecutor:
         settings: dict | None = None,
         context: Any = None,
     ) -> Any:
-        from workflow_builder.agents.messages import Message
+        from loom.agents.messages import Message
 
         tool_schemas = [
             ToolSchema(name=t.name, description=t.description, parameters=t.parameters)
@@ -829,7 +829,7 @@ All `AgentExecutor` adapters must pass a conformance suite.
 from __future__ import annotations
 import pytest
 from typing import Any
-from workflow_builder.agents.tools import Tool
+from loom.agents.tools import Tool
 
 class ExecutorConformanceSuite:
     """Base class for testing AgentExecutor implementations.
@@ -901,7 +901,7 @@ class ExecutorConformanceSuite:
 ## 4. Directory Structure
 
 ```
-src/workflow_builder/
+src/loom/
 ├── integrations/                    # NEW: Phase 10
 │   ├── __init__.py                  # Re-exports adapter factories
 │   ├── langgraph_adapter.py         # LangGraph <-> LOOM
@@ -1073,7 +1073,7 @@ flowchart TD
 - E2E test shows multi-framework workflow working end-to-end.
 
 ### User Perspective
-- Users install only what they need: `pip install workflow-builder[langgraph]`.
+- Users install only what they need: `pip install loomflow[langgraph]`.
 - Each example is self-contained and runnable.
 - Bi-directional means users aren't locked in: start with CrewAI, migrate to LangGraph later.
 

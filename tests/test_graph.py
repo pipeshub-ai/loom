@@ -11,31 +11,31 @@ from pathlib import Path
 
 import pytest
 
-from workflow_builder.graph.canvas import (
+from loom.graph.canvas import (
     GraphPatch,
     PatchApplier,
     PatchOp,
     PatchValidationError,
 )
-from workflow_builder.graph.emitter import (
+from loom.graph.emitter import (
     emit_graph_json,
     graph_changed,
     load_graph_json,
 )
-from workflow_builder.graph.explainer import (
+from loom.graph.explainer import (
     Narration,
     SkeletonExplainer,
     verify_completeness,
 )
-from workflow_builder.graph.export import to_mermaid
-from workflow_builder.graph.extractor import (
+from loom.graph.export import to_mermaid
+from loom.graph.extractor import (
     RegistryCollector,
     extract_from_source,
     merge_passes,
 )
-from workflow_builder.graph.timetravel import TimeTraveler
-from workflow_builder.graph.trace import RunTrace, overlay_journal
-from workflow_builder.graph.wgir import (
+from loom.graph.timetravel import TimeTraveler
+from loom.graph.trace import RunTrace, overlay_journal
+from loom.graph.wgir import (
     EdgeKind,
     NodeKind,
     SourceRange,
@@ -43,8 +43,8 @@ from workflow_builder.graph.wgir import (
     WGIRGraph,
     WGIRNode,
 )
-from workflow_builder.runtime.journal import EntryKind, EntryStatus, JournalEntry
-from workflow_builder.steps.definition import effect, pure
+from loom.runtime.journal import EntryKind, EntryStatus, JournalEntry
+from loom.steps.definition import effect, pure
 
 # ---------------------------------------------------------------------------
 # WGIR Data Model

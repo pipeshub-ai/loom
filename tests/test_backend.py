@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import pytest
 
-from workflow_builder.core.exceptions import BackendCapabilityError
-from workflow_builder.runtime.backend import (
+from loom.core.exceptions import BackendCapabilityError
+from loom.runtime.backend import (
     Capabilities,
     Capability,
     DurabilityBackend,
     EmbeddedBackend,
 )
-from workflow_builder.runtime.engine import Runtime
-from workflow_builder.state.memory import MemoryStore
+from loom.runtime.engine import Runtime
+from loom.stores.memory import MemoryStore
 
 
 class TestCapabilities:
@@ -76,7 +76,7 @@ class TestRuntimeBackendIntegration:
 
     @pytest.mark.asyncio
     async def test_end_to_end_with_backend(self) -> None:
-        from workflow_builder import Context, step, workflow
+        from loom import Context, step, workflow
 
         @step
         async def double(x: int) -> int:

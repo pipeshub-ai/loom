@@ -13,8 +13,8 @@ Run:
 
 from __future__ import annotations
 
-from workflow_builder import Context, Failure, OnError, Retry, Runtime, step, workflow
-from workflow_builder.state.memory import MemoryStore
+from loom import Context, Failure, OnError, Retry, Runtime, step, workflow
+from loom.stores.memory import MemoryStore
 
 # Simulate a flaky service that eventually succeeds
 _call_count: dict[str, int] = {}

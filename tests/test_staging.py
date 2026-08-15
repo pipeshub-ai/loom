@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from workflow_builder import Context, ExecutionStatus, Runtime, workflow
-from workflow_builder.state.memory import MemoryStore
-from workflow_builder.storage.attachment import Attachment
-from workflow_builder.storage.blob import BlobService, LocalBlobBackend
-from workflow_builder.storage.retention import RetentionManager, RetentionPolicy
-from workflow_builder.storage.staging import StagingManager, StagingNotFound
+from loom import Context, ExecutionStatus, Runtime, workflow
+from loom.blobs.attachment import Attachment
+from loom.blobs.blob import BlobService, LocalBlobBackend
+from loom.blobs.retention import RetentionManager, RetentionPolicy
+from loom.blobs.staging import StagingManager, StagingNotFound
+from loom.stores.memory import MemoryStore
 
 
 @pytest.fixture

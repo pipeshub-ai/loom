@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from workflow_builder import Context, step, workflow
+from loom import Context, step, workflow
 
 # ---------------------------------------------------------------------------
 # RuntimeBridge
@@ -57,7 +57,7 @@ async def awaits_approval(ctx: Context, payload: dict) -> str:
 class TestRuntimeBridge:
     @pytest.fixture()
     def bridge(self):
-        from workflow_builder.mcp_server.bridge import RuntimeBridge
+        from loom.mcp_server.bridge import RuntimeBridge
 
         b = RuntimeBridge(store_url="memory://")
         b.register_workflow(
@@ -87,7 +87,7 @@ class TestRuntimeBridge:
 
     @pytest.mark.asyncio()
     async def test_list_workflows_empty(self) -> None:
-        from workflow_builder.mcp_server.bridge import RuntimeBridge
+        from loom.mcp_server.bridge import RuntimeBridge
 
         b = RuntimeBridge()
         wfs = await b.list_workflows()
@@ -243,7 +243,7 @@ class TestRuntimeBridge:
 
 class TestPromptBuilders:
     def test_create_workflow_prompt(self) -> None:
-        from workflow_builder.mcp_server.prompts import (
+        from loom.mcp_server.prompts import (
             build_create_workflow_prompt,
         )
 
@@ -255,7 +255,7 @@ class TestPromptBuilders:
         assert "@step" in result
 
     def test_debug_run_prompt(self) -> None:
-        from workflow_builder.mcp_server.prompts import (
+        from loom.mcp_server.prompts import (
             build_debug_run_prompt,
         )
 
@@ -267,7 +267,7 @@ class TestPromptBuilders:
         assert "timeout" in result
 
     def test_explain_workflow_prompt(self) -> None:
-        from workflow_builder.mcp_server.prompts import (
+        from loom.mcp_server.prompts import (
             build_explain_workflow_prompt,
         )
 
@@ -278,7 +278,7 @@ class TestPromptBuilders:
         assert "crm_sync" in result
 
     def test_explain_workflow_not_found(self) -> None:
-        from workflow_builder.mcp_server.prompts import (
+        from loom.mcp_server.prompts import (
             build_explain_workflow_prompt,
         )
 
@@ -286,7 +286,7 @@ class TestPromptBuilders:
         assert "Not found" in result
 
     def test_optimize_prompt(self) -> None:
-        from workflow_builder.mcp_server.prompts import (
+        from loom.mcp_server.prompts import (
             build_optimize_prompt,
         )
 
@@ -295,7 +295,7 @@ class TestPromptBuilders:
         assert "parallel" in result
 
     def test_review_prompt(self) -> None:
-        from workflow_builder.mcp_server.prompts import (
+        from loom.mcp_server.prompts import (
             build_review_prompt,
         )
 
@@ -313,6 +313,6 @@ class TestPromptBuilders:
 class TestServerFactory:
     def test_create_server_importable(self) -> None:
         """The create_server function is importable."""
-        from workflow_builder.mcp_server import create_server
+        from loom.mcp_server import create_server
 
         assert callable(create_server)

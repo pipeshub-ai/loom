@@ -28,16 +28,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils import header, log, require_env
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.agents.coding_agent import WorkflowCodingAgent
-from workflow_builder.agents.providers.anthropic_provider import (
+from loom import Context, Runtime, step, workflow
+from loom.agents.coding_agent import WorkflowCodingAgent
+from loom.agents.providers.anthropic_provider import (
     AnthropicProvider,
 )
-from workflow_builder.agents.tool_registry import Toolset, ToolsetRegistry
-from workflow_builder.agents.workflow_tools import build_workflow_tools
-from workflow_builder.runtime.dispatcher import TriggerDispatcher
-from workflow_builder.state.memory import MemoryStore
-from workflow_builder.triggers.specs import Schedule
+from loom.agents.tool_registry import Toolset, ToolsetRegistry
+from loom.agents.workflow_tools import build_workflow_tools
+from loom.runtime.dispatcher import TriggerDispatcher
+from loom.stores.memory import MemoryStore
+from loom.triggers.specs import Schedule
 
 # ---------------------------------------------------------------------------
 # Sample workflows to pre-register
@@ -113,8 +113,8 @@ class WorkflowManagerAgent:
 
     async def chat(self, message: str) -> str:
         """Process a user message and return the agent's response."""
-        from workflow_builder.agents.agent import Agent
-        from workflow_builder.agents.tools import tool
+        from loom.agents.agent import Agent
+        from loom.agents.tools import tool
 
         # Build tools from registry + workflow tools
         wf_tools = build_workflow_tools(self._runtime)

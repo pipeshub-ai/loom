@@ -9,26 +9,26 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.agents.agent import Agent
-from workflow_builder.agents.messages import ToolCall
-from workflow_builder.agents.tools import tool
-from workflow_builder.core.types import Page
-from workflow_builder.resources.base import Depends, ResourceScope, resource
-from workflow_builder.runtime.backend import EmbeddedBackend
-from workflow_builder.security.grants import derive_grants
-from workflow_builder.state.memory import MemoryStore
-from workflow_builder.steps.definition import StepClass, effect, pure
-from workflow_builder.testing.mock import MockModelProvider, mock_response
-from workflow_builder.toolsets.catalog import ToolsetCatalog
-from workflow_builder.toolsets.certify import certify
-from workflow_builder.toolsets.connections import ConnectionBroker
-from workflow_builder.toolsets.gateway import RateLimitConfig, RateLimiter
-from workflow_builder.toolsets.lock import generate_lock, verify_lock
-from workflow_builder.toolsets.manifest import EffectClass, OperationSpec, ToolsetManifest
-from workflow_builder.toolsets.registry import get_catalog, register_toolset, unregister_toolset
-from workflow_builder.triggers.filter import FilterSpec
-from workflow_builder.triggers.routing import EventRouter, RoutingEvent
+from loom import Context, Runtime, step, workflow
+from loom.agents.agent import Agent
+from loom.agents.messages import ToolCall
+from loom.agents.tools import tool
+from loom.core.types import Page
+from loom.resources.base import Depends, ResourceScope, resource
+from loom.runtime.backend import EmbeddedBackend
+from loom.security.grants import derive_grants
+from loom.steps.definition import StepClass, effect, pure
+from loom.stores.memory import MemoryStore
+from loom.testing.mock import MockModelProvider, mock_response
+from loom.toolsets.catalog import ToolsetCatalog
+from loom.toolsets.certify import certify
+from loom.toolsets.connections import ConnectionBroker
+from loom.toolsets.gateway import RateLimitConfig, RateLimiter
+from loom.toolsets.lock import generate_lock, verify_lock
+from loom.toolsets.manifest import EffectClass, OperationSpec, ToolsetManifest
+from loom.toolsets.registry import get_catalog, register_toolset, unregister_toolset
+from loom.triggers.filter import FilterSpec
+from loom.triggers.routing import EventRouter, RoutingEvent
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -620,7 +620,7 @@ class TestStructuredOutputInWorkflow:
     @pytest.mark.asyncio
     async def test_structured_agent_in_workflow(self) -> None:
         """Agent with structured output inside a workflow."""
-        from workflow_builder.agents.output import FINAL_OUTPUT_TOOL
+        from loom.agents.output import FINAL_OUTPUT_TOOL
 
         class TriageResult(BaseModel):
             priority: str

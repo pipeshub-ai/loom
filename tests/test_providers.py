@@ -20,7 +20,7 @@ class TestAnthropicSamplingControls:
     """
 
     def test_claude_5_is_detected(self) -> None:
-        from workflow_builder.agents.providers.anthropic_provider import (
+        from loom.agents.providers.anthropic_provider import (
             _rejects_sampling_controls,
         )
 
@@ -29,7 +29,7 @@ class TestAnthropicSamplingControls:
 
     def test_claude_4_still_accepts_them(self) -> None:
         """Narrow on purpose: dropping these everywhere ignores the caller."""
-        from workflow_builder.agents.providers.anthropic_provider import (
+        from loom.agents.providers.anthropic_provider import (
             _rejects_sampling_controls,
         )
 
@@ -38,8 +38,8 @@ class TestAnthropicSamplingControls:
 
     async def test_the_request_omits_them_for_claude_5(self) -> None:
         pytest.importorskip("anthropic")
-        from workflow_builder.agents.models import ModelRequest, ModelSettings
-        from workflow_builder.agents.providers import AnthropicProvider
+        from loom.agents.models import ModelRequest, ModelSettings
+        from loom.agents.providers import AnthropicProvider
 
         sent: dict = {}
 
@@ -68,8 +68,8 @@ class TestAnthropicSamplingControls:
 
     async def test_the_request_keeps_them_for_claude_4(self) -> None:
         pytest.importorskip("anthropic")
-        from workflow_builder.agents.models import ModelRequest, ModelSettings
-        from workflow_builder.agents.providers import AnthropicProvider
+        from loom.agents.models import ModelRequest, ModelSettings
+        from loom.agents.providers import AnthropicProvider
 
         sent: dict = {}
 

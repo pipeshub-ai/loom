@@ -24,18 +24,18 @@ from typing import Any
 
 import pytest
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.facade import (
+from loom import Context, Runtime, step, workflow
+from loom.facade import (
     LocalFacade,
     RemoteFacade,
     RuntimeFacade,
     describe_entry,
 )
-from workflow_builder.identity.facade import AuthorizedFacade
-from workflow_builder.identity.principal import Principal
-from workflow_builder.state import MemoryStore
+from loom.identity.facade import AuthorizedFacade
+from loom.identity.principal import Principal
+from loom.stores import MemoryStore
 
-SOURCE = Path(__file__).resolve().parent.parent / "src" / "workflow_builder"
+SOURCE = Path(__file__).resolve().parent.parent / "src" / "loom"
 
 
 @step(name="parity_echo")
@@ -71,8 +71,8 @@ def http():
     """A LoomClient wired to an in-process app, plus the facade behind it."""
     httpx = pytest.importorskip("httpx")
     pytest.importorskip("fastapi")
-    from workflow_builder.server import LoomClient
-    from workflow_builder.server.app import create_app
+    from loom.server import LoomClient
+    from loom.server.app import create_app
 
     facade = LocalFacade(_runtime())
     transport = httpx.ASGITransport(app=create_app(facade))
@@ -145,7 +145,7 @@ def test_the_http_surface_goes_through_the_facade() -> None:
 
 
 async def test_a_run_reads_the_same_through_every_surface(http) -> None:
-    from workflow_builder.mcp_server import tools
+    from loom.mcp_server import tools
 
     client, facade = http
     started = await client.start("parity_flow", "hello", wait=True)
@@ -221,7 +221,7 @@ async def test_an_event_delivered_over_http_advances_the_run(http) -> None:
 
 
 async def test_a_missing_run_is_absent_everywhere(http) -> None:
-    from workflow_builder.server import LoomClientError
+    from loom.server import LoomClientError
 
     client, facade = http
 
@@ -270,7 +270,7 @@ class TestSchedulingIsOnThePort:
     async def test_an_unknown_workflow_cannot_be_scheduled(
         self, local: LocalFacade
     ) -> None:
-        from workflow_builder.core.exceptions import RegistryError
+        from loom.core.exceptions import RegistryError
 
         with pytest.raises(RegistryError):
             await local.schedule("no_such_flow", "0 9 * * *")
@@ -285,7 +285,7 @@ class TestSchedulingIsOnThePort:
 
     async def test_remote_scheduling_says_where_to_go(self) -> None:
         """Refusing with a route beats a NotImplementedError."""
-        from workflow_builder.core.exceptions import ConfigurationError
+        from loom.core.exceptions import ConfigurationError
 
         remote = RemoteFacade(client=object())
         for call in (
@@ -306,7 +306,7 @@ class TestWorkflowManagerAgent:
     """
 
     def _manager(self, runtime):
-        from workflow_builder.agents.workflow_tools import WorkflowManagerAgent
+        from loom.agents.workflow_tools import WorkflowManagerAgent
 
         return WorkflowManagerAgent(LocalFacade(runtime), model=object())
 
@@ -337,7 +337,7 @@ class TestWorkflowManagerAgent:
 
     def test_its_loop_is_swappable(self) -> None:
         """Same rule as the coding agent: the turn loop is not LOOM's business."""
-        from workflow_builder.agents.workflow_tools import WorkflowManagerAgent
+        from loom.agents.workflow_tools import WorkflowManagerAgent
 
         sentinel = object()
         agent = WorkflowManagerAgent(
@@ -350,7 +350,7 @@ class TestWorkflowManagerAgent:
         """End to end, without a model: the tools are the part that must work."""
         import json
 
-        from workflow_builder.agents.workflow_tools import build_workflow_tools
+        from loom.agents.workflow_tools import build_workflow_tools
 
         rt = _runtime()
         tools = {fn.__name__: fn for fn in build_workflow_tools(LocalFacade(rt))}
@@ -371,7 +371,7 @@ class TestWorkflowManagerAgent:
 
     async def test_a_runtime_is_still_accepted_and_wrapped(self) -> None:
         """Existing callers keep working; a facade is what to pass."""
-        from workflow_builder.agents.workflow_tools import build_workflow_tools
+        from loom.agents.workflow_tools import build_workflow_tools
 
         assert len(build_workflow_tools(_runtime())) == 9
 
@@ -389,7 +389,7 @@ class TestAuthorizedFacade:
         return Principal(subject=subject, scopes=frozenset(scopes))
 
     async def test_a_missing_scope_is_refused_before_the_call_happens(self) -> None:
-        from workflow_builder.core.exceptions import InsufficientScope
+        from loom.core.exceptions import InsufficientScope
 
         facade = AuthorizedFacade(LocalFacade(_runtime()), self._principal("alice"))
         with pytest.raises(InsufficientScope):
@@ -443,7 +443,7 @@ class TestAuthorizedFacade:
         assert replayed["input"] is None
 
     async def test_a_stranger_cannot_retry_or_replay_someone_elses_run(self) -> None:
-        from workflow_builder.core.exceptions import InsufficientScope
+        from loom.core.exceptions import InsufficientScope
 
         rt = _runtime()
         alice = AuthorizedFacade(

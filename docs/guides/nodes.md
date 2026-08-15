@@ -40,8 +40,8 @@ documenting the node.
 ```python
 from pydantic import BaseModel, Field
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.nodes import (
+from loom import Context, Runtime, step, workflow
+from loom.nodes import (
     EffectClass,
     Node,
     NodeCategory,
@@ -50,7 +50,7 @@ from workflow_builder.nodes import (
     get_node_catalog,
     register_node,
 )
-from workflow_builder.state import MemoryStore
+from loom.stores import MemoryStore
 
 
 class ScoreIn(BaseModel):
@@ -84,8 +84,8 @@ exactly like one that was given nothing.
 ```python
 from pydantic import BaseModel, Field
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.nodes import (
+from loom import Context, Runtime, step, workflow
+from loom.nodes import (
     EffectClass,
     Node,
     NodeCategory,
@@ -94,7 +94,7 @@ from workflow_builder.nodes import (
     get_node_catalog,
     register_node,
 )
-from workflow_builder.state import MemoryStore
+from loom.stores import MemoryStore
 
 
 class ScoreIn(BaseModel):
@@ -290,7 +290,7 @@ lead_score = "my_package.nodes:LeadScoreNode"
 ```
 
 Entry points load the first time a `Runtime` builds its node registry, so
-importing `workflow_builder` does not import every installed node package.
+importing `loom` does not import every installed node package.
 
 To keep a node local to one Runtime — a project-specific node that should not
 leak into another host in the same process:
@@ -365,7 +365,7 @@ would silently gain a field the original run never produced.
 | Concern | Where |
 |---|---|
 | Categories, the catalog, the prompt budget | `CLAUDE.md`, "Nodes" |
-| Human-in-the-loop and `HumanChannel` | `workflow_builder.nodes.human` |
-| Guardrail nodes and the four verdicts | `workflow_builder.nodes.guard` |
+| Human-in-the-loop and `HumanChannel` | `loom.nodes.human` |
+| Guardrail nodes and the four verdicts | `loom.nodes.guard` |
 | The built-in library | `loom nodes` |
-| Design and rationale | `docs/nodes-plan.md` |
+| Design and rationale | `docs/design/nodes-plan.md` |

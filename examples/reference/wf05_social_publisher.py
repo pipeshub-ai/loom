@@ -6,7 +6,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel
 
-from workflow_builder import Context, OnError, Retry, step, workflow
+from loom import Context, OnError, Retry, step, workflow
 
 # ---------------------------------------------------------------------------
 # Data models

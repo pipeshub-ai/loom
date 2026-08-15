@@ -7,7 +7,7 @@ a function and a ``SyntaxError`` in a script.
 
 ``compile`` rather than ``ast.parse``. The parser accepts top-level ``await``;
 only compilation rejects it, which is the same distinction
-:func:`workflow_builder.agents.smoke.compile_check` exists for — and the reason
+:func:`loom.agents.smoke.compile_check` exists for — and the reason
 a first attempt at this test passed while the README was broken.
 
 Deliberately not checked: whether an example survives being pasted into the
@@ -127,7 +127,7 @@ class TestExampleRunner:
         )
         assert not is_environmental(
             "ImportError: cannot import name 'AnthropicProvider' "
-            "from 'workflow_builder.agents.models'"
+            "from 'loom.agents.models'"
         )
         assert not is_environmental("AttributeError: 'CodingResult' object has no attribute 'load'")
 
@@ -144,7 +144,7 @@ class TestExampleRunner:
 
         triggers = [e for e in examples() if e.path.name == "triggers.md"]
         assert triggers
-        assert all("from workflow_builder import" in e.code for e in triggers)
+        assert all("from loom import" in e.code for e in triggers)
 
     def test_running_a_good_example_reports_ok(self, tmp_path: Path) -> None:
         from docs_examples import Example, run

@@ -8,7 +8,7 @@ before anything about tokens exists.
 
 from __future__ import annotations
 
-from workflow_builder.security.grants import GrantSet, derive_grants
+from loom.security.grants import GrantSet, derive_grants
 
 
 class TestIsEmpty:

@@ -33,11 +33,11 @@ from typing import NamedTuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils import require_env
 
-from workflow_builder.agents.coding_agent import WorkflowCodingAgent
-from workflow_builder.agents.providers.anthropic_provider import AnthropicProvider
-from workflow_builder.toolsets.jira import JIRA_MANIFEST
-from workflow_builder.toolsets.jira.tools import JIRA_TOOL_DOCS
-from workflow_builder.toolsets.registry import register_toolset
+from loom.agents.coding_agent import WorkflowCodingAgent
+from loom.agents.providers.anthropic_provider import AnthropicProvider
+from loom.toolsets.jira import JIRA_MANIFEST
+from loom.toolsets.jira.tools import JIRA_TOOL_DOCS
+from loom.toolsets.registry import register_toolset
 
 # ---------------------------------------------------------------------------
 # Natural-language queries — each becomes a generated + executed workflow

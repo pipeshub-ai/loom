@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Renamed — `workflow_builder` is now `loom`
+
+The import package is `loom`; the distribution is `loomflow`.
+
+```python
+from loom import Context, Runtime, step, workflow    # was: from workflow_builder import ...
+```
+
+Everything else already said Loom — the `loom` CLI, `$LOOM_STORE`, the
+`loom_toolset` and `loom_node` entry points, `[tool.loom]` in `pyproject.toml`.
+`workflow_builder` survived only in `import` lines, which is the same
+two-names-for-one-thing shape this project keeps finding at the root of its own
+bugs.
+
+`import workflow_builder` keeps working and warns once. It forwards submodules
+through a meta-path finder rather than re-importing them, so
+`workflow_builder.nodes.Node is loom.nodes.Node` — a shim that imported twice
+would give you two classes with one name and break every `isinstance` across the
+boundary. **Removed in 1.0.**
+
+**One behavioural change.** `MongoStore`'s default database is now `loom`, not
+`workflow_builder`. A database name lives in *your* storage rather than in this
+code, so switching it silently would point an existing deployment at an empty
+database — which reads as "no runs" rather than as an error.
+`ensure_indexes()` now checks for the old database and says so:
+
+```
+database 'loom' is empty, but 412 runs exist in 'workflow_builder' — the name
+this store used before the package was renamed to loom. Pass
+MongoStore(uri, database="workflow_builder") to keep using them, or rename the
+database.
+```
+
+Nothing else in the rename changes behaviour: it is `git mv` plus a sweep of
+module paths, including the ones that live in string literals (`tools_module`,
+`node_class`, `import_module`, the validator's import allowlist).
+
 Architecture audit remediation. Several capabilities were implemented and unit
 tested but never reached by the engine; these changes wire them up, and the
 accompanying tests drive each one through the public API rather than calling the
@@ -85,7 +122,7 @@ calling the policy objects directly.
   derives from the message — at-least-once delivery, exactly-once execution.
   Failed submits requeue and then dead-letter. Configuration is read from the
   workflow's own `OnEvent` trigger.
-- **HTTP surface.** `workflow_builder.server.create_app(runtime)` (needs the
+- **HTTP surface.** `loom.server.create_app(runtime)` (needs the
   `api` extra) exposes workflows, runs, journals, events, cancel, and replay;
   `LoomClient` is the thin client. This is the realistic answer to using LOOM
   from other languages: authoring stays Python, operation does not have to be.
@@ -117,7 +154,7 @@ calling the policy objects directly.
   the layer that lets a stable name point at changing content. Republishing
   identical bytes resolves to the existing version, and reads are journaled so a
   replay pins the version the original run saw.
-- **`S3BlobBackend`** for S3-compatible storage (`pip install workflow-builder[s3]`),
+- **`S3BlobBackend`** for S3-compatible storage (`pip install loomflow[s3]`),
   and `RetentionManager.compact(blobs=...)` now deletes the blobs it orphans —
   compaction previously reclaimed rows while leaking content forever.
 - **Orphan recovery** — runs take a lease (`node_id`, heartbeated at a third of
@@ -127,7 +164,7 @@ calling the policy objects directly.
   fields existed and nothing wrote them. Wired into `start_scheduler`.
 - **Run provenance** — `ExecutionRecord.code_hash` records the workflow body a
   run started from.
-- **A working CLI**, installed as both `loom` and `workflow-builder`:
+- **A working CLI**, installed as both `loom` and `loomflow`:
   `check` (emit `<flow>.graph.json` + `<flow>.description.md`), `graph`
   (`--format mermaid|json|react-flow`), `describe`, and `init`.
 - **The visualization pipeline is connected** (`graph/pipeline.py`). The
@@ -144,12 +181,12 @@ calling the policy objects directly.
 
 ### Changed — persistence is the host's decision, not the workflow's
 
-The coding agent's prompt mandated `from workflow_builder.state.memory import
+The coding agent's prompt mandated `from loom.stores.memory import
 MemoryStore` and a `Runtime(store=MemoryStore())` in *every* file it generated,
 so each workflow chose its own persistence and could not be pointed at Postgres
 without editing it. Generated code now declares steps and workflows only.
 
-- **`workflow_builder.state.from_url(url)`** builds a store from
+- **`loom.stores.from_url(url)`** builds a store from
   `memory://` / `sqlite:///path.db` / `postgres://…` / `mongodb://…`, with errors
   that name the `pip install` that fixes a missing driver. Replaces a private
   copy that had been hiding in the MCP bridge.
@@ -453,7 +490,7 @@ ones.
   `replay_run`. Four resources and five prompts round out the surface.
 - **One port, two clients.** The CLI's `CliBackend` and the MCP server's
   `RuntimeBridge` were two names for the same thing. Both now depend on
-  `workflow_builder.facade.RuntimeFacade`, with `LocalFacade` and `RemoteFacade`
+  `loom.facade.RuntimeFacade`, with `LocalFacade` and `RemoteFacade`
   as the implementations — so `--server URL` works for `loom mcp` exactly as it
   does for `loom run`, and every capability is written once.
 - **The server explains states a model misreads.** A suspended run is reported
@@ -523,19 +560,19 @@ until the CLI needed one in remote mode.
 
 ### Added — OpenAI and Gemini model providers
 
-- **`OpenAIProvider`** (`pip install workflow-builder[openai]`). Also serves any
+- **`OpenAIProvider`** (`pip install loomflow[openai]`). Also serves any
   OpenAI-compatible endpoint via `base_url` — Azure, Together, Groq, vLLM,
   Ollama. Routes o-series and gpt-5 models to `max_completion_tokens` and omits
   `temperature`/`top_p`, which those models reject; supports strict tool schemas,
   JSON-schema response formats, and per-call `tool_choice`.
-- **`GeminiProvider`** (`pip install workflow-builder[gemini]`), on the
+- **`GeminiProvider`** (`pip install loomflow[gemini]`), on the
   `google-genai` SDK. Handles the three ways Gemini's format diverges: the system
   prompt is configuration rather than a turn, assistant turns use the `model`
   role, and a function *response* is keyed by function **name** while LOOM tracks
   calls by id. It also strips the JSON Schema keywords Gemini rejects (`$defs`,
   `$ref`, `additionalProperties`), which Pydantic emits for any nested model, and
   reports `TOOL_CALLS` when Gemini returns a function call labelled `STOP`.
-- `workflow_builder.agents.providers` now exports all three lazily, so importing
+- `loom.agents.providers` now exports all three lazily, so importing
   it requires no vendor SDK. `anthropic` also became a named extra.
 - Pricing entries for current OpenAI, Anthropic, and Google models, including
   `gpt-5.6-luna` at $0.20 / $1.80 per million tokens. Its siblings `gpt-5.6-sol`
@@ -599,10 +636,10 @@ value — so the override is a narrow list rather than a family prefix. An expli
   node kind; the method did not exist. A drift test now asserts every `ctx.*`
   name the extractor knows about is real.
 - **Import-symbol validation.** `CodeValidator` resolves `from X import Y` and
-  reports `'workflow_builder' has no attribute 'Retryy'; did you mean 'Retry'?`.
+  reports `'loom' has no attribute 'Retryy'; did you mean 'Retry'?`.
   Previously only package *names* were checked, so a real package with a
   misspelled symbol passed validation and failed on the user's machine. Only
-  `workflow_builder` and the stdlib are imported during validation — importing an
+  `loom` and the stdlib are imported during validation — importing an
   arbitrary package to check a name would run its side effects.
 - **Supervisor review** (`agents/supervisor.py`). `WorkflowCodingAgent(supervisor=
   CodeSupervisor(model))` adds a second model that reviews the finished code
@@ -628,7 +665,7 @@ value — so the override is a narrow list rather than a family prefix. An expli
   replay handed the workflow a raw dict instead of an `Invoice`. Silently, and
   only on the second attempt. `resolve_annotations()` now evaluates them.
 - **The shipped console script had never worked.** `cli/` (an empty package)
-  shadowed `cli.py`, so `workflow-builder` raised `ImportError`; and `cli.py`
+  shadowed `cli.py`, so `loomflow` raised `ImportError`; and `cli.py`
   imported `Workflow` and `WorkflowExecutor`, neither of which exists.
 - **`CacheStore.set(key, value, 0)` silently discarded the value**, since zero
   was read as "already expired". Non-positive TTL now means no expiry, which is
@@ -758,5 +795,5 @@ value — so the override is a narrow list rather than a family prefix. An expli
 - `SQLiteStore` (file-based, for local development)
 - Step retry with configurable backoff
 - Suspension model (sleep, wait-for-event)
-- CLI (`workflow-builder` command)
+- CLI (`loomflow` command)
 - `Tracer` protocol with `NoopTracer`

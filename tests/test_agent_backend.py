@@ -7,7 +7,7 @@ import pytest
 
 class TestAgentBackendProtocol:
     def test_builtin_backend_conforms(self) -> None:
-        from workflow_builder.agents.backend import (
+        from loom.agents.backend import (
             AgentBackend,
             BuiltInBackend,
         )
@@ -19,8 +19,8 @@ class TestAgentBackendProtocol:
         assert isinstance(backend, AgentBackend)
 
     def test_langchain_backend_conforms(self) -> None:
-        from workflow_builder.agents.backend import AgentBackend
-        from workflow_builder.agents.backends.langchain import (
+        from loom.agents.backend import AgentBackend
+        from loom.agents.backends.langchain import (
             LangChainBackend,
         )
 
@@ -30,8 +30,8 @@ class TestAgentBackendProtocol:
 
 class TestRuntimeAgentBackend:
     def test_runtime_accepts_agent_backend(self) -> None:
-        from workflow_builder import Runtime
-        from workflow_builder.agents.backend import BuiltInBackend
+        from loom import Runtime
+        from loom.agents.backend import BuiltInBackend
 
         class FakeModel:
             model_name = "test"
@@ -41,7 +41,7 @@ class TestRuntimeAgentBackend:
         assert rt.agent_backend is backend
 
     def test_runtime_default_no_backend(self) -> None:
-        from workflow_builder import Runtime
+        from loom import Runtime
 
         rt = Runtime()
         assert rt.agent_backend is None
@@ -50,8 +50,8 @@ class TestRuntimeAgentBackend:
 class TestCtxAgentPromptOnly:
     @pytest.mark.asyncio
     async def test_prompt_only_uses_backend(self) -> None:
-        from workflow_builder import Context, Runtime, workflow
-        from workflow_builder.agents.result import AgentResult
+        from loom import Context, Runtime, workflow
+        from loom.agents.result import AgentResult
 
         class FakeBackend:
             supports_history = True
@@ -75,7 +75,7 @@ class TestCtxAgentPromptOnly:
 
     @pytest.mark.asyncio
     async def test_prompt_only_without_backend_raises(self) -> None:
-        from workflow_builder import Context, Runtime, workflow
+        from loom import Context, Runtime, workflow
 
         @workflow(name="test_no_backend")
         async def test_wf(ctx: Context, q: str) -> str:
@@ -89,9 +89,9 @@ class TestCtxAgentPromptOnly:
     @pytest.mark.asyncio
     async def test_agent_object_still_works(self) -> None:
         """Backward compat: ctx.agent(Agent(...), input) still works."""
-        from workflow_builder import Context, Runtime, workflow
-        from workflow_builder.agents.agent import Agent
-        from workflow_builder.agents.result import AgentResult
+        from loom import Context, Runtime, workflow
+        from loom.agents.agent import Agent
+        from loom.agents.result import AgentResult
 
         class FakeExecutor:
             agent_id = "fake"
@@ -123,10 +123,10 @@ class TestLangChainBackendMocked:
     async def test_run_returns_agent_result(self) -> None:
         from unittest.mock import AsyncMock, patch
 
-        from workflow_builder.agents.backends.langchain import (
+        from loom.agents.backends.langchain import (
             LangChainBackend,
         )
-        from workflow_builder.agents.result import AgentResult
+        from loom.agents.result import AgentResult
 
         backend = LangChainBackend(llm=object())
 

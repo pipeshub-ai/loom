@@ -16,11 +16,11 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from workflow_builder import Context, ExecutionStatus, Runtime, step, workflow
-from workflow_builder.core.models import Event, ExecutionRecord, TriggerRecord
-from workflow_builder.runtime.journal import EntryKind, EntryStatus, JournalEntry
-from workflow_builder.state.memory import MemoryStore
-from workflow_builder.state.sqlite import SQLiteStore
+from loom import Context, ExecutionStatus, Runtime, step, workflow
+from loom.core.models import Event, ExecutionRecord, TriggerRecord
+from loom.runtime.journal import EntryKind, EntryStatus, JournalEntry
+from loom.stores.memory import MemoryStore
+from loom.stores.sqlite import SQLiteStore
 
 
 @pytest.fixture(params=["memory", "sqlite"])
@@ -435,8 +435,8 @@ class TestEngineAgainstEachStore:
 
 class TestProtocolCoverage:
     @pytest.mark.parametrize("module,name", [
-        ("workflow_builder.state.mongo", "MongoStore"),
-        ("workflow_builder.state.postgres", "PostgresStore"),
+        ("loom.stores.mongo", "MongoStore"),
+        ("loom.stores.postgres", "PostgresStore"),
     ])
     def test_remote_stores_implement_the_full_surface(self, module, name) -> None:
         """These need a server to run, so at least assert nothing is missing."""
@@ -604,7 +604,7 @@ class TestRedisStore:
     """
 
     def _store(self):
-        from workflow_builder.state.redis import RedisStore
+        from loom.stores.redis import RedisStore
 
         return RedisStore(client=FakeRedis())
 
@@ -616,7 +616,7 @@ class TestRedisStore:
             assert not hasattr(store, method), f"Redis must not offer {method}"
 
     def test_it_satisfies_the_two_protocols_it_claims(self) -> None:
-        from workflow_builder.state.base import CacheStore, LockProvider
+        from loom.stores.base import CacheStore, LockProvider
 
         store = self._store()
         for protocol in (CacheStore, LockProvider):

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.toolsets.jira.tools import jira_search_issues
-from workflow_builder.toolsets.pagination import Results
+from loom import Context, Runtime, step, workflow
+from loom.toolsets.jira.tools import jira_search_issues
+from loom.toolsets.pagination import Results
 
 
 @step

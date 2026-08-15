@@ -20,12 +20,12 @@ from typing import Any
 
 import pytest
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.core.exceptions import ConfigurationError
-from workflow_builder.core.models import ExecutionStatus
-from workflow_builder.runtime.clock import Clock, ManualClock, SystemClock
-from workflow_builder.state import MemoryStore
-from workflow_builder.testing import advance, advance_to, settled
+from loom import Context, Runtime, step, workflow
+from loom.core.exceptions import ConfigurationError
+from loom.core.models import ExecutionStatus
+from loom.runtime.clock import Clock, ManualClock, SystemClock
+from loom.stores import MemoryStore
+from loom.testing import advance, advance_to, settled
 
 NINE_AM = datetime(2026, 3, 2, 9, 0, tzinfo=UTC)
 
@@ -235,8 +235,8 @@ async def test_a_resumed_run_sees_the_time_it_woke_at() -> None:
 
 async def test_a_cron_trigger_fires_at_its_hour_and_not_before() -> None:
     """The trigger-point case: 9am means 9am."""
-    from workflow_builder.runtime.dispatcher import TriggerDispatcher
-    from workflow_builder.triggers import Schedule
+    from loom.runtime.dispatcher import TriggerDispatcher
+    from loom.triggers import Schedule
 
     @workflow(name="clock_daily", triggers=[Schedule(cron="0 9 * * *")])
     async def daily(ctx: Context, _: Any = None) -> str:
@@ -259,8 +259,8 @@ async def test_a_cron_trigger_fires_at_its_hour_and_not_before() -> None:
 
 async def test_a_cron_trigger_fires_once_per_occurrence() -> None:
     """Ticking twice inside one minute must not fire twice."""
-    from workflow_builder.runtime.dispatcher import TriggerDispatcher
-    from workflow_builder.triggers import Schedule
+    from loom.runtime.dispatcher import TriggerDispatcher
+    from loom.triggers import Schedule
 
     @workflow(name="clock_hourly", triggers=[Schedule(cron="0 * * * *")])
     async def hourly(ctx: Context, _: Any = None) -> str:
@@ -343,7 +343,7 @@ def scheduled():
     exercise the real persistence path rather than a substitute the production
     code never sees.
     """
-    from workflow_builder.runtime.dispatcher import TriggerDispatcher
+    from loom.runtime.dispatcher import TriggerDispatcher
 
     store = MemoryStore()
     rt = Runtime(store=store, clock=ManualClock(datetime(2026, 3, 2, 8, 0, tzinfo=UTC)))
@@ -356,7 +356,7 @@ def _at(hour: int, minute: int = 0, day: int = 2) -> datetime:
 
 async def test_the_dispatcher_uses_the_runtimes_own_store(scheduled) -> None:
     """Not a private dict — a restart has to find the schedule again."""
-    from workflow_builder.triggers import Schedule
+    from loom.triggers import Schedule
 
     _, dispatcher, store = scheduled
 
@@ -378,8 +378,8 @@ async def test_a_second_dispatcher_inherits_the_schedule(scheduled) -> None:
     The schedule lives in the store, so a fresh dispatcher over the same store
     picks up where the last one left off rather than starting the cron over.
     """
-    from workflow_builder.runtime.dispatcher import TriggerDispatcher
-    from workflow_builder.triggers import Schedule
+    from loom.runtime.dispatcher import TriggerDispatcher
+    from loom.triggers import Schedule
 
     rt, dispatcher, _ = scheduled
 
@@ -399,7 +399,7 @@ async def test_a_second_dispatcher_inherits_the_schedule(scheduled) -> None:
 
 
 async def test_an_interval_trigger_fires_every_period(scheduled) -> None:
-    from workflow_builder.triggers import Interval
+    from loom.triggers import Interval
 
     rt, dispatcher, _ = scheduled
 
@@ -425,7 +425,7 @@ async def test_a_long_jump_fires_once_not_once_per_missed_period(scheduled) -> N
     to, at exactly the moment it has just come back up. Catch-up is a policy a
     host can add; stampeding is not a default anyone wants.
     """
-    from workflow_builder.triggers import Interval
+    from loom.triggers import Interval
 
     rt, dispatcher, _ = scheduled
 
@@ -444,8 +444,8 @@ async def test_a_long_jump_fires_once_not_once_per_missed_period(scheduled) -> N
 
 async def test_the_run_a_trigger_starts_records_the_schedule(scheduled) -> None:
     """A scheduled run must be tellable from a hand-started one."""
-    from workflow_builder.core.models import TriggerKind
-    from workflow_builder.triggers import Schedule
+    from loom.core.models import TriggerKind
+    from loom.triggers import Schedule
 
     rt, dispatcher, _ = scheduled
 
@@ -463,7 +463,7 @@ async def test_the_run_a_trigger_starts_records_the_schedule(scheduled) -> None:
 
 
 async def test_a_disabled_trigger_stays_quiet(scheduled) -> None:
-    from workflow_builder.triggers import Schedule
+    from loom.triggers import Schedule
 
     rt, dispatcher, store = scheduled
 
@@ -482,7 +482,7 @@ async def test_a_disabled_trigger_stays_quiet(scheduled) -> None:
 
 async def test_a_scheduled_workflow_that_sleeps_still_resumes(scheduled) -> None:
     """The two schedulers in one move: the trigger starts it, the timer finishes it."""
-    from workflow_builder.triggers import Schedule
+    from loom.triggers import Schedule
 
     rt, dispatcher, _ = scheduled
 

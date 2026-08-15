@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import httpx
 
-from workflow_builder import Context, Retry, Runtime, step, workflow
-from workflow_builder.state.memory import MemoryStore
+from loom import Context, Retry, Runtime, step, workflow
+from loom.stores.memory import MemoryStore
 
 # ---------------------------------------------------------------------------
 # Steps — all I/O lives here, never in the workflow body

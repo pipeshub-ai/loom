@@ -12,9 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from workflow_builder.core.exceptions import ConfigurationError
-from workflow_builder.runtime.engine import Runtime
-from workflow_builder.storage.blob import (
+from loom.blobs.blob import (
     BlobMeta,
     BlobNotFoundError,
     BlobService,
@@ -24,6 +22,8 @@ from workflow_builder.storage.blob import (
     blob_backend_from_url,
     blob_service_from_env,
 )
+from loom.core.exceptions import ConfigurationError
+from loom.runtime.engine import Runtime
 
 
 @pytest.fixture
@@ -150,7 +150,7 @@ class TestFactory:
                 blob_backend_from_url("s3://bucket/prefix")
             return
         backend = blob_backend_from_url("s3://bucket/prefix")
-        from workflow_builder.storage.blob import S3BlobBackend
+        from loom.blobs.blob import S3BlobBackend
 
         assert isinstance(backend, S3BlobBackend)
 

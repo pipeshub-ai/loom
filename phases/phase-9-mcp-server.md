@@ -20,7 +20,7 @@
 | Streamable HTTP transport works | Yes | Yes |
 | Tests pass without real MCP client | All | All |
 
-**"Done" means:** A user adds `{"mcpServers": {"loom": {"command": "python", "args": ["-m", "workflow_builder.mcp"]}}}` to their Claude Desktop or Cursor config, and can then ask "list my workflows," "run the lead outreach workflow," "show me the status of run X," or "create a new workflow that does Y" — all through natural language, with the MCP server handling tool dispatch.
+**"Done" means:** A user adds `{"mcpServers": {"loom": {"command": "python", "args": ["-m", "loom.mcp"]}}}` to their Claude Desktop or Cursor config, and can then ask "list my workflows," "run the lead outreach workflow," "show me the status of run X," or "create a new workflow that does Y" — all through natural language, with the MCP server handling tool dispatch.
 
 ---
 
@@ -129,10 +129,10 @@ def create_server(
     name: str = "loom",
 ) -> Server:
     """Create and configure the LOOM MCP server."""
-    from workflow_builder.mcp_server.tools import register_tools
-    from workflow_builder.mcp_server.resources import register_resources
-    from workflow_builder.mcp_server.prompts import register_prompts
-    from workflow_builder.mcp_server.bridge import RuntimeBridge
+    from loom.mcp_server.tools import register_tools
+    from loom.mcp_server.resources import register_resources
+    from loom.mcp_server.prompts import register_prompts
+    from loom.mcp_server.bridge import RuntimeBridge
 
     server = Server(name)
     bridge = RuntimeBridge(store_url=store_url)
@@ -157,9 +157,9 @@ import asyncio
 import logging
 from typing import Any
 
-from workflow_builder.runtime.engine import Runtime
-from workflow_builder.state.sqlite import SQLiteStore
-from workflow_builder.state.memory import MemoryStore
+from loom.runtime.engine import Runtime
+from loom.stores.sqlite import SQLiteStore
+from loom.stores.memory import MemoryStore
 
 logger = logging.getLogger("workflow.mcp.bridge")
 
@@ -285,7 +285,7 @@ from typing import Any
 from mcp.server import Server
 from mcp.types import TextContent
 
-from workflow_builder.mcp_server.bridge import RuntimeBridge
+from loom.mcp_server.bridge import RuntimeBridge
 
 def register_tools(server: Server, bridge: RuntimeBridge):
     """Register all LOOM tools with the MCP server."""
@@ -462,7 +462,7 @@ Read-only data that clients can browse and fetch.
 from __future__ import annotations
 import json
 from mcp.server import Server
-from workflow_builder.mcp_server.bridge import RuntimeBridge
+from loom.mcp_server.bridge import RuntimeBridge
 
 def register_resources(server: Server, bridge: RuntimeBridge):
     """Register LOOM resources with the MCP server."""
@@ -516,7 +516,7 @@ Reusable prompt templates that guide the model's interaction with LOOM.
 from __future__ import annotations
 from mcp.server import Server
 from mcp.types import PromptMessage, TextContent
-from workflow_builder.mcp_server.bridge import RuntimeBridge
+from loom.mcp_server.bridge import RuntimeBridge
 
 def register_prompts(server: Server, bridge: RuntimeBridge):
     """Register LOOM prompt templates with the MCP server."""
@@ -667,7 +667,7 @@ Check for:
 ```python
 # mcp_server/__main__.py (NEW)
 
-"""Entry point: python -m workflow_builder.mcp"""
+"""Entry point: python -m loom.mcp"""
 
 import argparse
 import asyncio
@@ -688,7 +688,7 @@ def main():
 
     logging.basicConfig(level=getattr(logging, args.log_level))
 
-    from workflow_builder.mcp_server import create_server
+    from loom.mcp_server import create_server
 
     server = create_server(store_url=args.store, name=args.name)
 
@@ -736,7 +736,7 @@ if __name__ == "__main__":
     "mcpServers": {
         "loom": {
             "command": "python",
-            "args": ["-m", "workflow_builder.mcp"],
+            "args": ["-m", "loom.mcp"],
             "env": {
                 "LOOM_STORE_URL": "sqlite:///~/.loom/journal.db"
             }
@@ -749,7 +749,7 @@ if __name__ == "__main__":
     "mcpServers": {
         "loom": {
             "command": "python",
-            "args": ["-m", "workflow_builder.mcp", "--store", "sqlite:///workflows.db"]
+            "args": ["-m", "loom.mcp", "--store", "sqlite:///workflows.db"]
         }
     }
 }
@@ -759,7 +759,7 @@ if __name__ == "__main__":
     "mcpServers": {
         "loom": {
             "command": "python",
-            "args": ["-m", "workflow_builder.mcp"],
+            "args": ["-m", "loom.mcp"],
             "env": {}
         }
     }
@@ -780,10 +780,10 @@ if __name__ == "__main__":
 ## 4. Directory Structure
 
 ```
-src/workflow_builder/
+src/loom/
 ├── mcp_server/                     # NEW: Phase 9
 │   ├── __init__.py                 # create_server() factory
-│   ├── __main__.py                 # CLI entry point (python -m workflow_builder.mcp)
+│   ├── __main__.py                 # CLI entry point (python -m loom.mcp)
 │   ├── bridge.py                   # RuntimeBridge — connects MCP to LOOM runtime
 │   ├── tools.py                    # MCP tool definitions (12 tools)
 │   ├── resources.py                # MCP resource definitions (6 resource types)
@@ -814,8 +814,8 @@ tests/
 | File | Change Type | What Changes |
 |------|-------------|--------------|
 | `mcp_server/` (entire directory) | NEW | All MCP server code |
-| `setup.py` / `pyproject.toml` | MODIFY | Add `mcp` optional dependency: `pip install workflow-builder[mcp]` |
-| `cli.py` | MODIFY | Add `loom mcp` subcommand (alias for `python -m workflow_builder.mcp`) |
+| `setup.py` / `pyproject.toml` | MODIFY | Add `mcp` optional dependency: `pip install loomflow[mcp]` |
+| `cli.py` | MODIFY | Add `loom mcp` subcommand (alias for `python -m loom.mcp`) |
 | `__init__.py` | NO CHANGE | MCP server is not part of the public SDK surface |
 
 ---
@@ -921,7 +921,7 @@ flowchart TD
 - E2E tests run against MemoryStore with Phase 8 reference workflows.
 
 ### User Perspective
-- Setup is one line in config file — `"command": "python", "args": ["-m", "workflow_builder.mcp"]`.
+- Setup is one line in config file — `"command": "python", "args": ["-m", "loom.mcp"]`.
 - Natural language works: "list my workflows" → `list_workflows` tool → formatted response.
 - Prompts guide users through common tasks: creating, debugging, reviewing workflows.
 - Works with any MCP client — not locked to a specific IDE or assistant.

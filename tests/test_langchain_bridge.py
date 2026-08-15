@@ -9,7 +9,7 @@ import pytest
 
 class TestLangChainAgentExecutorProtocol:
     def test_has_agent_id(self) -> None:
-        from workflow_builder.integrations.langgraph_agent import (
+        from loom.integrations.langgraph_agent import (
             LangChainAgentExecutor,
         )
 
@@ -19,7 +19,7 @@ class TestLangChainAgentExecutorProtocol:
         assert exec_.agent_id == "test"
 
     def test_default_agent_id(self) -> None:
-        from workflow_builder.integrations.langgraph_agent import (
+        from loom.integrations.langgraph_agent import (
             LangChainAgentExecutor,
         )
 
@@ -27,10 +27,10 @@ class TestLangChainAgentExecutorProtocol:
         assert exec_.agent_id == "langchain"
 
     def test_conforms_to_protocol(self) -> None:
-        from workflow_builder.agents.executor import (
+        from loom.agents.executor import (
             AgentExecutor,
         )
-        from workflow_builder.integrations.langgraph_agent import (
+        from loom.integrations.langgraph_agent import (
             LangChainAgentExecutor,
         )
 
@@ -40,7 +40,7 @@ class TestLangChainAgentExecutorProtocol:
         assert isinstance(exec_, AgentExecutor)
 
     def test_has_execute_method(self) -> None:
-        from workflow_builder.integrations.langgraph_agent import (
+        from loom.integrations.langgraph_agent import (
             LangChainAgentExecutor,
         )
 
@@ -54,8 +54,8 @@ class TestLangChainAgentExecutorMocked:
     async def test_execute_returns_agent_result(self) -> None:
         from unittest.mock import AsyncMock
 
-        from workflow_builder.agents.result import AgentResult
-        from workflow_builder.integrations.langgraph_agent import (
+        from loom.agents.result import AgentResult
+        from loom.integrations.langgraph_agent import (
             LangChainAgentExecutor,
         )
 
@@ -92,7 +92,7 @@ class TestLangChainAgentExecutorMocked:
     async def test_execute_handles_empty_messages(self) -> None:
         from unittest.mock import AsyncMock
 
-        from workflow_builder.integrations.langgraph_agent import (
+        from loom.integrations.langgraph_agent import (
             LangChainAgentExecutor,
         )
 
@@ -109,7 +109,7 @@ class TestLangChainAgentExecutorMocked:
     async def test_execute_counts_tool_calls(self) -> None:
         from unittest.mock import AsyncMock
 
-        from workflow_builder.integrations.langgraph_agent import (
+        from loom.integrations.langgraph_agent import (
             LangChainAgentExecutor,
         )
 
@@ -143,8 +143,8 @@ class TestLangChainAgentWithLOOMAgent:
     async def test_agent_uses_langchain_executor(self) -> None:
         from unittest.mock import AsyncMock
 
-        from workflow_builder.agents.agent import Agent
-        from workflow_builder.integrations.langgraph_agent import (
+        from loom.agents.agent import Agent
+        from loom.integrations.langgraph_agent import (
             LangChainAgentExecutor,
         )
 
@@ -172,7 +172,7 @@ class TestLangChainAgentWithLOOMAgent:
 
 class TestLangChainToolDocs:
     def test_docs_exist(self) -> None:
-        from workflow_builder.integrations.langchain_tools_docs import (
+        from loom.integrations.langchain_tools_docs import (
             LANGCHAIN_TOOL_DOCS,
         )
 
@@ -182,6 +182,6 @@ class TestLangChainToolDocs:
         assert "result.output" in LANGCHAIN_TOOL_DOCS
 
     async def test_registered_in_coding_tools(self) -> None:
-        from workflow_builder.agents.coding_tools import get_tool_docs
+        from loom.agents.coding_tools import get_tool_docs
 
         assert "ctx.agent" in await get_tool_docs.fn("langchain")

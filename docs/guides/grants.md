@@ -13,11 +13,11 @@ Runtime wants.
 ```python
 import asyncio
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.runtime.effects import DirectBroker, GuardedBroker
-from workflow_builder.security.authority import Authority
-from workflow_builder.security.grants import GrantSet
-from workflow_builder.state import MemoryStore
+from loom import Context, Runtime, step, workflow
+from loom.runtime.effects import DirectBroker, GuardedBroker
+from loom.security.authority import Authority
+from loom.security.grants import GrantSet
+from loom.stores import MemoryStore
 ```
 
 ## The effect broker
@@ -174,8 +174,8 @@ loom watch <run>          # progress interleaved with journal entries
 ```
 
 ```python
-from workflow_builder.facade import LocalFacade
-from workflow_builder.mcp_server import tools
+from loom.facade import LocalFacade
+from loom.mcp_server import tools
 
 
 @workflow(name="guide_watched")

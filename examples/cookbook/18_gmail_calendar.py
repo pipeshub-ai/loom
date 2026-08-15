@@ -20,7 +20,7 @@ Requires (add to .env):
       or GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET + GOOGLE_REFRESH_TOKEN
 
 Get Google credentials with:
-    python -m workflow_builder.toolsets.google.setup --scopes read
+    python -m loom.toolsets.google.setup --scopes read
 
 Run:
     python3 examples/cookbook/18_gmail_calendar.py            # read-only
@@ -40,9 +40,9 @@ from typing import Any, NamedTuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils import box, header, log, print_coding_result, require_any_env
 
-from workflow_builder.agents.coding_agent import WorkflowCodingAgent
-from workflow_builder.agents.tool_registry import ToolsetRegistry
-from workflow_builder.toolsets.google import GMAIL_MANIFEST, GOOGLE_CALENDAR_MANIFEST
+from loom.agents.coding_agent import WorkflowCodingAgent
+from loom.agents.tool_registry import ToolsetRegistry
+from loom.toolsets.google import GMAIL_MANIFEST, GOOGLE_CALENDAR_MANIFEST
 
 WRITE = "--write" in sys.argv
 DRY_RUN = "--dry-run" in sys.argv
@@ -156,8 +156,8 @@ async def execute(code: str, spec: Spec) -> None:
     """Run the generated workflow against the real account."""
     from utils import load_workflow
 
-    from workflow_builder import Runtime
-    from workflow_builder.state.memory import MemoryStore
+    from loom import Runtime
+    from loom.stores.memory import MemoryStore
 
     try:
         definition = load_workflow(code)
@@ -186,7 +186,7 @@ async def execute(code: str, spec: Spec) -> None:
 
 def pick_model() -> object:
     """Return whichever provider has a usable key, preferring Anthropic."""
-    from workflow_builder.agents.providers import AnthropicProvider, OpenAIProvider
+    from loom.agents.providers import AnthropicProvider, OpenAIProvider
 
     if os.environ.get("ANTHROPIC_API_KEY"):
         return AnthropicProvider()

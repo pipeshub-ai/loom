@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from workflow_builder.core.exceptions import (
+from loom.core.exceptions import (
     AgentError,
     ApprovalRejected,
     AuthExpired,

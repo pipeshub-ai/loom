@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from workflow_builder.storage.blob import (
+from loom.blobs.blob import (
     BlobBackend,
     BlobNotFoundError,
     LocalBlobBackend,
@@ -29,7 +29,7 @@ def _s3() -> BlobBackend | None:
     if not url:
         return None
     try:
-        from workflow_builder.storage.blob import blob_backend_from_url
+        from loom.blobs.blob import blob_backend_from_url
 
         return blob_backend_from_url(url)
     except Exception:
@@ -41,7 +41,7 @@ def _azure() -> BlobBackend | None:
     if not url:
         return None
     try:
-        from workflow_builder.storage.blob import blob_backend_from_url
+        from loom.blobs.blob import blob_backend_from_url
 
         return blob_backend_from_url(url)
     except Exception:
@@ -53,7 +53,7 @@ def _gcs() -> BlobBackend | None:
     if not url:
         return None
     try:
-        from workflow_builder.storage.blob import blob_backend_from_url
+        from loom.blobs.blob import blob_backend_from_url
 
         return blob_backend_from_url(url)
     except Exception:

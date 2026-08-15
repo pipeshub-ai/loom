@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from workflow_builder import (
+from loom import (
     Context,
     ExecutionStatus,
     Failure,
@@ -263,7 +263,7 @@ class TestReplay:
 class TestStepClassesInRuntime:
     @pytest.mark.asyncio
     async def test_pure_step(self) -> None:
-        from workflow_builder.steps.definition import pure
+        from loom.steps.definition import pure
 
         @pure
         async def format_name(name: str) -> str:
@@ -279,7 +279,7 @@ class TestStepClassesInRuntime:
 
     @pytest.mark.asyncio
     async def test_effect_step(self) -> None:
-        from workflow_builder.steps.definition import effect
+        from loom.steps.definition import effect
 
         @effect(timeout=10)
         async def fetch(url: str) -> str:
@@ -295,7 +295,7 @@ class TestStepClassesInRuntime:
 
     @pytest.mark.asyncio
     async def test_node_step(self) -> None:
-        from workflow_builder.steps.definition import node
+        from loom.steps.definition import node
 
         @node
         async def transform(data: dict) -> dict:
@@ -395,7 +395,7 @@ class TestExecutionResultReads:
     """
 
     def test_a_completed_run_leads_with_the_output(self) -> None:
-        from workflow_builder.core.models import ExecutionResult, ExecutionStatus
+        from loom.core.models import ExecutionResult, ExecutionStatus
 
         text = repr(
             ExecutionResult(
@@ -411,7 +411,7 @@ class TestExecutionResultReads:
         assert len(text) < 200, "a summary should not scroll"
 
     def test_a_failed_run_leads_with_the_error(self) -> None:
-        from workflow_builder.core.models import (
+        from loom.core.models import (
             ErrorInfo,
             ExecutionResult,
             ExecutionStatus,
@@ -429,7 +429,7 @@ class TestExecutionResultReads:
         assert "upstream is down" in text
 
     def test_a_long_output_is_clipped(self) -> None:
-        from workflow_builder.core.models import ExecutionResult, ExecutionStatus
+        from loom.core.models import ExecutionResult, ExecutionStatus
 
         text = repr(
             ExecutionResult(
@@ -443,7 +443,7 @@ class TestExecutionResultReads:
         assert "…" in text
 
     def test_str_and_repr_agree(self) -> None:
-        from workflow_builder.core.models import ExecutionResult, ExecutionStatus
+        from loom.core.models import ExecutionResult, ExecutionStatus
 
         result = ExecutionResult(
             run_id="r", workflow="w", status=ExecutionStatus.COMPLETED, output=1
@@ -452,7 +452,7 @@ class TestExecutionResultReads:
 
     def test_every_field_is_still_there(self) -> None:
         """Presentation only — nothing is hidden from a caller that asks."""
-        from workflow_builder.core.models import ExecutionResult, ExecutionStatus
+        from loom.core.models import ExecutionResult, ExecutionStatus
 
         result = ExecutionResult(
             run_id="r", workflow="w", status=ExecutionStatus.COMPLETED, output=42

@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from workflow_builder.core.types import Page
-from workflow_builder.resources.base import (
+from loom.core.types import Page
+from loom.resources.base import (
     Depends,
     ResourceDefinition,
     ResourceScope,
     resource,
 )
-from workflow_builder.security.grants import GrantSet, derive_grants
+from loom.security.grants import GrantSet, derive_grants
 
 # ---------------------------------------------------------------------------
 # Page[T]

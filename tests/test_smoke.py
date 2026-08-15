@@ -13,11 +13,11 @@ class TestWaitsDoNotHideDefects:
     """
 
     def test_a_defect_behind_a_long_sleep_is_caught(self) -> None:
-        from workflow_builder.agents.smoke import smoke_run
+        from loom.agents.smoke import smoke_run
 
         code = '''
 from datetime import timedelta
-from workflow_builder import Context, step, workflow
+from loom import Context, step, workflow
 
 @step
 async def broken() -> str:
@@ -39,11 +39,11 @@ async def sleeper(ctx: Context, _in: str) -> str:
 
     def test_a_long_sleep_alone_does_not_fail_a_good_workflow(self) -> None:
         """The wait is usually the point of the workflow; keeping it must be free."""
-        from workflow_builder.agents.smoke import smoke_run
+        from loom.agents.smoke import smoke_run
 
         code = '''
 from datetime import timedelta
-from workflow_builder import Context, step, workflow
+from loom import Context, step, workflow
 
 @step
 async def after_the_wait(name: str) -> str:
@@ -64,10 +64,10 @@ async def patient(ctx: Context, name: str) -> str:
 
     def test_parking_after_real_work_still_passes(self) -> None:
         """Human-in-the-loop workflows park by design; that is not a defect."""
-        from workflow_builder.agents.smoke import smoke_run
+        from loom.agents.smoke import smoke_run
 
         code = '''
-from workflow_builder import Context, step, workflow
+from loom import Context, step, workflow
 
 @step
 async def prepare(name: str) -> str:
@@ -88,10 +88,10 @@ async def approver(ctx: Context, name: str) -> str:
         assert result.steps_executed >= 1
 
     def test_a_completing_workflow_reports_its_steps(self) -> None:
-        from workflow_builder.agents.smoke import smoke_run
+        from loom.agents.smoke import smoke_run
 
         code = '''
-from workflow_builder import Context, step, workflow
+from loom import Context, step, workflow
 
 @step
 async def double(n: int) -> int:
@@ -118,7 +118,7 @@ class TestEnvironmentalFailures:
     """
 
     def test_auth_failures_are_environmental(self) -> None:
-        from workflow_builder.agents.smoke import SmokeResult
+        from loom.agents.smoke import SmokeResult
 
         for message in (
             "Google API 401: invalid authentication credentials",
@@ -131,24 +131,24 @@ class TestEnvironmentalFailures:
 
     def test_code_defects_are_not_environmental(self) -> None:
         """These are exactly what the smoke run exists to catch."""
-        from workflow_builder.agents.smoke import SmokeResult
+        from loom.agents.smoke import SmokeResult
 
         for message in (
             "No module named 'loom'",
-            "cannot import name 'Retryy' from 'workflow_builder'",
+            "cannot import name 'Retryy' from 'loom'",
             "TypeError: double() takes 1 positional argument but 2 were given",
         ):
             result = SmokeResult(ok=False, phase="run", error=message)
             assert not result.environmental, message
 
     def test_a_pass_is_never_environmental(self) -> None:
-        from workflow_builder.agents.smoke import SmokeResult
+        from loom.agents.smoke import SmokeResult
 
         assert not SmokeResult(ok=True, phase="done").environmental
 
     async def test_the_repair_loop_leaves_environmental_failures_alone(self) -> None:
         """The regression: repairing an unfixable 401 costs the whole feature."""
-        from workflow_builder.agents.coding_agent import WorkflowCodingAgent
+        from loom.agents.coding_agent import WorkflowCodingAgent
 
         code = "# original code that needs credentials\n"
         calls: list[str] = []
@@ -160,13 +160,13 @@ class TestEnvironmentalFailures:
         coder = WorkflowCodingAgent(object(), smoke_test=True)
 
         def fake_smoke(*_args, **_kwargs):
-            from workflow_builder.agents.smoke import SmokeResult
+            from loom.agents.smoke import SmokeResult
 
             return SmokeResult(
                 ok=False, phase="run", error="Google API 401: invalid credentials"
             )
 
-        import workflow_builder.agents.coding_agent as module
+        import loom.agents.coding_agent as module
 
         original = module.smoke_run
         module.smoke_run = fake_smoke
@@ -190,8 +190,8 @@ class TestRepairBudget:
     """
 
     async def test_an_exhausted_budget_keeps_the_code(self) -> None:
-        from workflow_builder.agents.coding_agent import WorkflowCodingAgent
-        from workflow_builder.core.exceptions import UsageLimitExceeded
+        from loom.agents.coding_agent import WorkflowCodingAgent
+        from loom.core.exceptions import UsageLimitExceeded
 
         code = "# a candidate that was already produced\n"
 
@@ -201,11 +201,11 @@ class TestRepairBudget:
         coder = WorkflowCodingAgent(object(), smoke_test=True)
 
         def fake_smoke(*_args, **_kwargs):
-            from workflow_builder.agents.smoke import SmokeResult
+            from loom.agents.smoke import SmokeResult
 
             return SmokeResult(ok=False, phase="run", error="TypeError: bad arity")
 
-        import workflow_builder.agents.coding_agent as module
+        import loom.agents.coding_agent as module
 
         original = module.smoke_run
         module.smoke_run = fake_smoke
@@ -234,7 +234,7 @@ class TestSmokeDerivesAnInput:
     """
 
     HEAD = (
-        "from workflow_builder import Context, step, workflow\n\n\n"
+        "from loom import Context, step, workflow\n\n\n"
         "@step\n"
         "async def shout(text: str) -> str:\n"
         '    """Upper-case it."""\n'
@@ -262,7 +262,7 @@ class TestSmokeDerivesAnInput:
     def test_a_declared_input_shape_is_supplied(
         self, signature: str, call: str
     ) -> None:
-        from workflow_builder.agents.smoke import smoke_run
+        from loom.agents.smoke import smoke_run
 
         result = smoke_run(self._code(signature, call))
 
@@ -270,7 +270,7 @@ class TestSmokeDerivesAnInput:
 
     def test_an_explicit_input_still_wins(self) -> None:
         """Deriving is the fallback, not an override."""
-        from workflow_builder.agents.smoke import smoke_run
+        from loom.agents.smoke import smoke_run
 
         code = self._code("ctx: Context, text: str", "text")
         result = smoke_run(code, workflow_input="explicit")

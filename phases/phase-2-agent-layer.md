@@ -394,7 +394,7 @@ Hook execution order: `pre_model → [model] → post_model → per tool: pre_to
 
 ### 3.10 Workflow Coding Agent (Basic)
 
-The builder is itself a session agent: `Agent("workflow-builder", persistence="session")`.
+The builder is itself a session agent: `Agent("loomflow", persistence="session")`.
 
 **Build Pipeline (5 Stages):**
 
@@ -590,7 +590,7 @@ def loom_test():
 7. Tests: full mock run workflow with agent + HITL + assertions
 
 ### Step 9: Workflow Coding Agent — Basic (4-6 hours)
-1. Define `AgentDefinition` for `workflow-builder` agent
+1. Define `AgentDefinition` for `loomflow` agent
 2. System prompt with SDK surface, rules, examples
 3. Build pipeline stages 1-4 (spec → pre-flight → code → verify)
 4. Authoring session storage (`AuthoringSession` model)

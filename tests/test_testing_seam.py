@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import pytest
 
-from workflow_builder import Context, ExecutionStatus, Runtime, step, workflow
-from workflow_builder.runtime.journal import EntryKind, EntryStatus
-from workflow_builder.state.memory import MemoryStore
-from workflow_builder.testing import assert_replays, given, run_with, seed
+from loom import Context, ExecutionStatus, Runtime, step, workflow
+from loom.runtime.journal import EntryKind, EntryStatus
+from loom.stores.memory import MemoryStore
+from loom.testing import assert_replays, given, run_with, seed
 
 executed: list[str] = []
 

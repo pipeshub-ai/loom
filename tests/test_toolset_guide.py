@@ -30,8 +30,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from workflow_builder.core.exceptions import ConfigurationError, NonRetryableError, WorkflowError
-from workflow_builder.toolsets.pagination import OffsetPaging, Results, page_through
+from loom.core.exceptions import ConfigurationError, NonRetryableError, WorkflowError
+from loom.toolsets.pagination import OffsetPaging, Results, page_through
 
 
 class MyApiError(WorkflowError):
@@ -90,8 +90,8 @@ TOOLS = '''
 """The callable surface: @step functions."""
 from __future__ import annotations
 
-from workflow_builder import Retry, step
-from workflow_builder.toolsets.pagination import Results
+from loom import Retry, step
+from loom.toolsets.pagination import Results
 
 
 @step(retry=Retry(max_attempts=3))
@@ -123,7 +123,7 @@ MANIFEST = '''
 """Pure data. Imports nothing heavy — the catalog loads this eagerly."""
 from __future__ import annotations
 
-from workflow_builder.toolsets.manifest import (
+from loom.toolsets.manifest import (
     EffectClass,
     OperationSpec,
     ToolsetManifest,
@@ -193,7 +193,7 @@ class TestTheGuideProducesAWorkingToolset:
         """Step 1. Not on the first request, five frames into a step."""
         import mysvc.client as client
 
-        from workflow_builder.core.exceptions import ConfigurationError
+        from loom.core.exceptions import ConfigurationError
 
         monkeypatch.delenv("MYSVC_URL", raising=False)
         with pytest.raises(ConfigurationError, match="MYSVC_URL is required"):
@@ -205,7 +205,7 @@ class TestTheGuideProducesAWorkingToolset:
         """Step 2. The flat two-base form has no MRO and fails at import."""
         import mysvc.client as client
 
-        from workflow_builder.core.exceptions import NonRetryableError
+        from loom.core.exceptions import NonRetryableError
 
         assert issubclass(client.MyPermanentError, NonRetryableError)
         assert issubclass(client.MyPermanentError, client.MyApiError)
@@ -246,7 +246,7 @@ class TestTheGuideProducesAWorkingToolset:
 
     def test_registration_makes_it_discoverable_and_callable(self, toolset) -> None:
         """Step 6."""
-        from workflow_builder.agents.tool_registry import Toolset, ToolsetRegistry
+        from loom.agents.tool_registry import Toolset, ToolsetRegistry
 
         _, tools = toolset
         registry = ToolsetRegistry()
@@ -262,7 +262,7 @@ class TestTheGuideProducesAWorkingToolset:
 
     def test_the_agent_is_told_what_it_needs(self, toolset) -> None:
         """Steps 3-5 reaching the model: paging, resolvers, effect classes."""
-        from workflow_builder.agents.tool_registry import ToolsetRegistry
+        from loom.agents.tool_registry import ToolsetRegistry
 
         manifest, _ = toolset
         registry = ToolsetRegistry()
@@ -292,7 +292,7 @@ class TestTheGuideProducesAWorkingToolset:
         """Coverage must outlive being returned from a step."""
         import mysvc.client as client
 
-        from workflow_builder.core.serde import decode, encode
+        from loom.core.serde import decode, encode
 
         found = await client.MyClient(base_url="https://x").search_records("q", 60)
         restored = decode(encode(found))
@@ -302,7 +302,7 @@ class TestTheGuideProducesAWorkingToolset:
 
     def test_fakes_come_from_the_declared_schema(self, toolset) -> None:
         """Step 7. Without these the sandbox reaches a 401 and proves nothing."""
-        from workflow_builder.agents.fakes import install_fakes, uninstall_fakes
+        from loom.agents.fakes import install_fakes, uninstall_fakes
 
         manifest, tools = toolset
         real = tools.mysvc_get_record
@@ -318,8 +318,8 @@ class TestTheGuideProducesAWorkingToolset:
         """The thing all of the above is for."""
         import mysvc.client as client
 
-        from workflow_builder import Context, Runtime, workflow
-        from workflow_builder.state import MemoryStore
+        from loom import Context, Runtime, workflow
+        from loom.stores import MemoryStore
 
         client._default_client = client.MyClient(base_url="https://x")
 

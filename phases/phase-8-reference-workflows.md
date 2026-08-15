@@ -72,7 +72,7 @@
 ```python
 # examples/reference/wf01_lead_outreach.py
 
-from workflow_builder import workflow, step, Context, Retry
+from loom import workflow, step, Context, Retry
 from pydantic import BaseModel
 import httpx
 
@@ -213,7 +213,7 @@ async def lead_outreach(ctx: Context, config: dict) -> OutreachResult:
 ```python
 # examples/reference/wf02_content_pipeline.py
 
-from workflow_builder import workflow, step, Context
+from loom import workflow, step, Context
 from pydantic import BaseModel
 
 class ContentPiece(BaseModel):
@@ -334,7 +334,7 @@ async def content_pipeline(ctx: Context, config: dict) -> dict:
 ```python
 # examples/reference/wf03_inbox_triage.py
 
-from workflow_builder import workflow, step, Context, Retry
+from loom import workflow, step, Context, Retry
 from pydantic import BaseModel
 from enum import StrEnum
 
@@ -486,7 +486,7 @@ async def inbox_triage(ctx: Context, config: dict) -> dict:
 ```python
 # examples/reference/wf04_crm_sync.py
 
-from workflow_builder import workflow, step, Context, Retry, OnError
+from loom import workflow, step, Context, Retry, OnError
 from pydantic import BaseModel
 
 class SyncResult(BaseModel):
@@ -580,7 +580,7 @@ async def crm_sync(ctx: Context, config: dict) -> SyncResult:
 ```python
 # examples/reference/wf05_social_publisher.py
 
-from workflow_builder import workflow, step, Context
+from loom import workflow, step, Context
 
 @step
 async def generate_posts(topic: str, count: int) -> list[str]:
@@ -648,7 +648,7 @@ async def social_publisher(ctx: Context, config: dict) -> dict:
 ```python
 # examples/reference/wf06_doc_extraction.py
 
-from workflow_builder import workflow, step, Context
+from loom import workflow, step, Context
 from pydantic import BaseModel
 
 class ExtractedDocument(BaseModel):
@@ -773,7 +773,7 @@ async def doc_extraction(ctx: Context, config: dict) -> ExtractedDocument:
 ```python
 # examples/reference/wf07_battle_cards.py
 
-from workflow_builder import workflow, step, Context
+from loom import workflow, step, Context
 from pydantic import BaseModel
 
 class BattleCard(BaseModel):
@@ -853,7 +853,7 @@ async def battle_card_generator(ctx: Context, config: dict) -> BattleCard:
 ```python
 # examples/reference/wf08_meeting_prep.py
 
-from workflow_builder import workflow, step, Context
+from loom import workflow, step, Context
 
 @step
 async def get_upcoming_meetings(hours_ahead: int) -> list[dict]:
@@ -961,7 +961,7 @@ async def meeting_lifecycle(ctx: Context, config: dict) -> dict:
 ```python
 # examples/reference/wf09_stripe_etl.py
 
-from workflow_builder import workflow, step, Context, Retry
+from loom import workflow, step, Context, Retry
 
 @step(retry=Retry(max_attempts=3))
 async def lookup_customer(email: str) -> dict | None:
@@ -1054,7 +1054,7 @@ async def stripe_to_quickbooks(ctx: Context, payment: dict) -> dict:
 ```python
 # examples/reference/wf10_pdf_chatbot.py
 
-from workflow_builder import workflow, step, Context
+from loom import workflow, step, Context
 
 @step
 async def extract_text(file_url: str) -> str:

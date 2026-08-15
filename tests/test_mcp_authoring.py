@@ -16,13 +16,13 @@ from pathlib import Path
 
 import pytest
 
-from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
-from workflow_builder.toolsets.registry import register_toolset
+from loom.toolsets.jira.manifest import JIRA_MANIFEST
+from loom.toolsets.registry import register_toolset
 
 pytest.importorskip("mcp", reason="needs the mcp extra")
 
 CLEAN_WORKFLOW = '''\
-from workflow_builder import Context, step, workflow
+from loom import Context, step, workflow
 
 
 @step
@@ -60,7 +60,7 @@ def jira_registered() -> None:
 
 class TestGetToolContract:
     async def test_returns_schema_and_import_line(self, jira_registered: None) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         result = parsed(await authoring.get_tool_contract("jira.issues.search"))
 
@@ -69,23 +69,23 @@ class TestGetToolContract:
         assert result["toolset_id"] == "jira"
         assert "input_schema" in result and "output_schema" in result
         assert "jira_search_issues" in result["import_line"]
-        assert result["import_line"].startswith("from workflow_builder.toolsets.jira.tools import")
+        assert result["import_line"].startswith("from loom.toolsets.jira.tools import")
 
     async def test_unknown_toolset_returns_error_not_raise(self) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         result = parsed(await authoring.get_tool_contract("nonexistent.op"))
         assert "error" in result
 
     async def test_malformed_path_returns_error_not_raise(self) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         result = parsed(await authoring.get_tool_contract("no_dot_here"))
         assert "error" in result
         assert "toolset_id.op_id" in result["error"]
 
     async def test_unknown_operation_on_known_toolset(self, jira_registered: None) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         result = parsed(await authoring.get_tool_contract("jira.nope.nope"))
         assert "error" in result
@@ -93,13 +93,13 @@ class TestGetToolContract:
 
 class TestGetToolDocs:
     async def test_returns_a_string_with_import_lines(self) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         result = await authoring.get_tool_docs("jira")
-        assert "jira_search_issues" in result or "from workflow_builder" in result
+        assert "jira_search_issues" in result or "from loom" in result
 
     async def test_unknown_toolset_lists_available(self) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         result = parsed(await authoring.get_tool_docs("nonexistent_xyz"))
         assert "error" in result
@@ -108,21 +108,21 @@ class TestGetToolDocs:
 
 class TestCallReadOperation:
     async def test_refuses_write_operation(self, jira_registered: None) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         result = parsed(await authoring.call_read_operation("jira.issues.create", "{}"))
         assert "error" in result
         assert "write" in result["error"]
 
     async def test_invalid_json_returns_error(self, jira_registered: None) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         result = parsed(await authoring.call_read_operation("jira.issues.search", "{not json"))
         assert "error" in result
         assert "JSON" in result["error"]
 
     async def test_unknown_op_returns_error(self, jira_registered: None) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         result = parsed(await authoring.call_read_operation("jira.nope.nope", "{}"))
         assert "error" in result
@@ -130,7 +130,7 @@ class TestCallReadOperation:
     async def test_repeat_limit_refuses_the_third_identical_call(
         self, jira_registered: None
     ) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         seen: dict[str, int] = {}
         args = json.dumps({"jql": "project = X"})
@@ -148,8 +148,8 @@ class TestCallReadOperation:
         assert "already called" in third["error"]
 
     async def test_response_is_capped(self, jira_registered: None) -> None:
-        from workflow_builder.agents import coding_tools
-        from workflow_builder.mcp_server import authoring
+        from loom.agents import coding_tools
+        from loom.mcp_server import authoring
 
         async def _huge(**kwargs: object) -> list[dict[str, str]]:
             return [{"key": "x" * 100} for _ in range(2000)]
@@ -174,33 +174,33 @@ class TestCallReadOperation:
 
 class TestValidateWorkflowCode:
     async def test_clean_code_is_valid(self) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         result = parsed(await authoring.validate_workflow_code(CLEAN_WORKFLOW))
         assert result["valid"] is True
         assert result["issues"] == []
 
     async def test_syntax_error_is_invalid(self) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         result = parsed(await authoring.validate_workflow_code("def ("))
         assert result["valid"] is False
         assert result["issues"][0]["category"] == "syntax"
 
     async def test_missing_workflow_decorator_is_flagged(self) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
-        code = "from workflow_builder import step\n\n@step\nasync def f() -> int:\n    return 1\n"
+        code = "from loom import step\n\n@step\nasync def f() -> int:\n    return 1\n"
         result = parsed(await authoring.validate_workflow_code(code))
         assert result["valid"] is False
         assert any(i["category"] == "structure" for i in result["issues"])
 
     async def test_nondeterminism_in_workflow_body_is_flagged(self) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         code = (
             "from datetime import datetime\n"
-            "from workflow_builder import Context, workflow\n\n"
+            "from loom import Context, workflow\n\n"
             '@workflow(name="bad")\n'
             "async def bad(ctx: Context, x: str) -> str:\n"
             "    return str(datetime.now())\n"
@@ -209,7 +209,7 @@ class TestValidateWorkflowCode:
         assert any(i["category"] == "determinism" for i in result["issues"])
 
     async def test_disallowed_import_is_flagged(self) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         code = CLEAN_WORKFLOW + "\nimport totally_not_a_real_package\n"
         result = parsed(
@@ -218,11 +218,11 @@ class TestValidateWorkflowCode:
         assert any(i["category"] == "imports" for i in result["issues"])
 
     async def test_registered_toolset_import_is_allowed(self, jira_registered: None) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         code = (
-            "from workflow_builder import Context, step, workflow\n"
-            "from workflow_builder.toolsets.jira.tools import jira_search_issues\n\n"
+            "from loom import Context, step, workflow\n"
+            "from loom.toolsets.jira.tools import jira_search_issues\n\n"
             "@step\n"
             "async def search(q: str) -> list:\n"
             "    return await jira_search_issues(q)\n\n"
@@ -237,11 +237,11 @@ class TestValidateWorkflowCode:
         """``register_available_toolsets()`` seeds every shipped toolset, so
         this needs one that genuinely is not registered anywhere — an
         invented module path rather than a real toolset like Jira."""
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         code = (
-            "from workflow_builder import Context, workflow\n"
-            "from workflow_builder.toolsets.not_a_real_toolset.tools import made_up\n\n"
+            "from loom import Context, workflow\n"
+            "from loom.toolsets.not_a_real_toolset.tools import made_up\n\n"
             '@workflow(name="x")\n'
             "async def x(ctx: Context, q: str) -> list:\n"
             "    return []\n"
@@ -252,7 +252,7 @@ class TestValidateWorkflowCode:
 
 class TestSmokeTestWorkflow:
     async def test_passes_a_clean_workflow(self) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         result = parsed(await authoring.smoke_test_workflow(CLEAN_WORKFLOW, "5"))
         assert result["ok"] is True
@@ -262,10 +262,10 @@ class TestSmokeTestWorkflow:
         assert result["environmental"] is False
 
     async def test_catches_a_step_that_raises(self) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         code = (
-            "from workflow_builder import Context, step, workflow\n\n"
+            "from loom import Context, step, workflow\n\n"
             "@step\n"
             "async def boom() -> str:\n"
             "    raise RuntimeError('nope')\n\n"
@@ -277,17 +277,17 @@ class TestSmokeTestWorkflow:
         assert result["ok"] is False
 
     async def test_invalid_input_json_is_an_error(self) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         result = parsed(await authoring.smoke_test_workflow(CLEAN_WORKFLOW, "{not json"))
         assert "error" in result
 
     async def test_uses_fakes_for_registered_toolsets(self, jira_registered: None) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         code = (
-            "from workflow_builder import Context, step, workflow\n"
-            "from workflow_builder.toolsets.jira.tools import jira_list_projects\n\n"
+            "from loom import Context, step, workflow\n"
+            "from loom.toolsets.jira.tools import jira_list_projects\n\n"
             "@step\n"
             "async def list_projects() -> list:\n"
             "    return await jira_list_projects()\n\n"
@@ -305,7 +305,7 @@ class TestSaveWorkflow:
     async def test_writes_the_file_and_finds_the_workflow(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         monkeypatch.chdir(tmp_path)
         result = parsed(await authoring.save_workflow(CLEAN_WORKFLOW, "flows/doubler.py"))
@@ -315,19 +315,19 @@ class TestSaveWorkflow:
         assert (tmp_path / "flows" / "doubler.py").read_text() == CLEAN_WORKFLOW
 
     async def test_refuses_absolute_path(self) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         result = parsed(await authoring.save_workflow(CLEAN_WORKFLOW, "/etc/evil.py"))
         assert "error" in result
 
     async def test_refuses_directory_traversal(self) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         result = parsed(await authoring.save_workflow(CLEAN_WORKFLOW, "../evil.py"))
         assert "error" in result
 
     async def test_refuses_non_python_extension(self) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         result = parsed(await authoring.save_workflow(CLEAN_WORKFLOW, "evil.js"))
         assert "error" in result
@@ -335,7 +335,7 @@ class TestSaveWorkflow:
     async def test_refuses_code_that_does_not_compile(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         monkeypatch.chdir(tmp_path)
         result = parsed(await authoring.save_workflow("def (", "flows/bad.py"))
@@ -346,7 +346,7 @@ class TestSaveWorkflow:
     async def test_creates_missing_parent_directories(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from workflow_builder.mcp_server import authoring
+        from loom.mcp_server import authoring
 
         monkeypatch.chdir(tmp_path)
         result = parsed(
@@ -363,16 +363,16 @@ class TestSaveWorkflow:
 
 @pytest.fixture
 def authoring_facade():
-    from workflow_builder.facade import LocalFacade
-    from workflow_builder.runtime.engine import Runtime
-    from workflow_builder.state.memory import MemoryStore
+    from loom.facade import LocalFacade
+    from loom.runtime.engine import Runtime
+    from loom.stores.memory import MemoryStore
 
     return LocalFacade(Runtime(store=MemoryStore()))
 
 
 @pytest.fixture
 def authoring_server(authoring_facade):
-    from workflow_builder.mcp_server import build_server
+    from loom.mcp_server import build_server
 
     return build_server(authoring_facade, name="loom-authoring-test")
 
@@ -392,8 +392,8 @@ class TestServerRegistration:
         assert len(names) == 22
 
     async def test_disabled_via_config_drops_to_16(self, authoring_facade) -> None:
-        from workflow_builder.mcp_server import build_server
-        from workflow_builder.mcp_server.authoring_config import AuthoringConfig
+        from loom.mcp_server import build_server
+        from loom.mcp_server.authoring_config import AuthoringConfig
 
         server = build_server(
             authoring_facade, name="off", authoring=AuthoringConfig(enabled=False)
@@ -406,7 +406,7 @@ class TestServerRegistration:
     async def test_disabled_via_env_var(
         self, authoring_facade, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from workflow_builder.mcp_server import build_server
+        from loom.mcp_server import build_server
 
         monkeypatch.setenv("LOOM_MCP_AUTHORING", "0")
         server = build_server(authoring_facade, name="off-env")
@@ -455,8 +455,8 @@ class TestServerRegistration:
         assert "save_workflow" in (authoring_server.instructions or "")
 
     async def test_instructions_omit_authoring_when_disabled(self, authoring_facade) -> None:
-        from workflow_builder.mcp_server import build_server
-        from workflow_builder.mcp_server.authoring_config import AuthoringConfig
+        from loom.mcp_server import build_server
+        from loom.mcp_server.authoring_config import AuthoringConfig
 
         server = build_server(
             authoring_facade, name="off2", authoring=AuthoringConfig(enabled=False)
@@ -507,7 +507,7 @@ class TestFullAuthoringLoop:
     async def test_search_contract_validate_smoke_save(
         self, jira_registered: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from workflow_builder.mcp_server import authoring, tools
+        from loom.mcp_server import authoring, tools
 
         monkeypatch.chdir(tmp_path)
 
@@ -518,8 +518,8 @@ class TestFullAuthoringLoop:
         assert contract["effect"] == "read"
 
         code = (
-            "from workflow_builder import Context, step, workflow\n"
-            "from workflow_builder.toolsets.jira.tools import jira_list_projects\n\n"
+            "from loom import Context, step, workflow\n"
+            "from loom.toolsets.jira.tools import jira_list_projects\n\n"
             "@step\n"
             "async def list_projects() -> list:\n"
             "    return await jira_list_projects()\n\n"

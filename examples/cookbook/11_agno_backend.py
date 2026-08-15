@@ -17,10 +17,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils import header, log, require_env
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.agents.backends.agno import AgnoBackend
-from workflow_builder.agents.tool_registry import Toolset
-from workflow_builder.state.memory import MemoryStore
+from loom import Context, Runtime, step, workflow
+from loom.agents.backends.agno import AgnoBackend
+from loom.agents.tool_registry import Toolset
+from loom.stores.memory import MemoryStore
 
 
 @step

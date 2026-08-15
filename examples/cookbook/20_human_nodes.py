@@ -20,16 +20,16 @@ from __future__ import annotations
 
 import asyncio
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.facade import LocalFacade
-from workflow_builder.nodes.human import (
+from loom import Context, Runtime, step, workflow
+from loom.facade import LocalFacade
+from loom.nodes.human import (
     ApprovalIn,
     ChoiceIn,
     DeliveryReceipt,
     HumanRequest,
     ReviewIn,
 )
-from workflow_builder.state.memory import MemoryStore
+from loom.stores.memory import MemoryStore
 
 
 @step

@@ -50,7 +50,7 @@ User Code          SDK Core               Storage
 Workflows park themselves by raising `Suspend`:
 
 ```python
-from workflow_builder import Context, step, workflow
+from loom import Context, step, workflow
 
 
 @step
@@ -111,10 +111,10 @@ Steps are classified by their side-effect profile:
 
 ## Public API Surface
 
-The package exports a small set of symbols from `workflow_builder.__init__`:
+The package exports a small set of symbols from `loom.__init__`:
 
 ```python
-from workflow_builder import (
+from loom import (
     Context, Runtime, workflow, step,          # Core
     pure, effect, node,                        # Step classes
     ExecutionResult, ExecutionStatus, Failure,  # Results

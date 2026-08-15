@@ -38,14 +38,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from utils import header, log
 
-from workflow_builder.agents.agent import Agent
-from workflow_builder.agents.bounds import BlobSpillStore, ResultBounds
-from workflow_builder.agents.executor import AgentContext
-from workflow_builder.agents.messages import ToolCall
-from workflow_builder.agents.tools import tool
-from workflow_builder.storage.blob import BlobService, LocalBlobBackend
-from workflow_builder.testing.mock import MockModelProvider, mock_response
-from workflow_builder.toolsets.pagination import Results
+from loom.agents.agent import Agent
+from loom.agents.bounds import BlobSpillStore, ResultBounds
+from loom.agents.executor import AgentContext
+from loom.agents.messages import ToolCall
+from loom.agents.tools import tool
+from loom.blobs.blob import BlobService, LocalBlobBackend
+from loom.testing.mock import MockModelProvider, mock_response
+from loom.toolsets.pagination import Results
 
 # ---------------------------------------------------------------------------
 # A tool that returns far more than anyone wants in a prompt

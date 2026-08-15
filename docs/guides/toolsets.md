@@ -11,17 +11,17 @@ Every example on this page assumes:
 ```python
 import os
 
-from workflow_builder import Retry, Runtime, step
-from workflow_builder.agents.tool_registry import Toolset, ToolsetRegistry
-from workflow_builder.core.exceptions import ConfigurationError, NonRetryableError
-from workflow_builder.core.exceptions import WorkflowError
-from workflow_builder.toolsets.jira.tools import jira_create_issue, jira_search_issues
-from workflow_builder.toolsets.manifest import (
+from loom import Retry, Runtime, step
+from loom.agents.tool_registry import Toolset, ToolsetRegistry
+from loom.core.exceptions import ConfigurationError, NonRetryableError
+from loom.core.exceptions import WorkflowError
+from loom.toolsets.jira.tools import jira_create_issue, jira_search_issues
+from loom.toolsets.manifest import (
     EffectClass,
     OperationSpec,
     ToolsetManifest,
 )
-from workflow_builder.toolsets.pagination import Page, Results, collect
+from loom.toolsets.pagination import Page, Results, collect
 
 rt = Runtime()
 
@@ -47,7 +47,7 @@ toolset = Toolset.from_steps("demo", [fetch_url])
 ```
 
 ```python
-from workflow_builder.agents.tool_registry import Toolset
+from loom.agents.tool_registry import Toolset
 
 toolset = Toolset.from_steps("jira", [jira_search_issues, jira_create_issue])
 rt.toolsets.register(toolset)
@@ -294,7 +294,7 @@ cannot promise a symbol that is not there.
 ### 6. Register it
 
 ```python
-from workflow_builder.toolsets.registry import register_toolset
+from loom.toolsets.registry import register_toolset
 
 register_toolset(Toolset.from_steps("mysvc", [mysvc_search_records]))
 ```

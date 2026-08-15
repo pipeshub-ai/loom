@@ -24,10 +24,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils import header, log
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.state.memory import MemoryStore
-from workflow_builder.storage.attachment import Attachment
-from workflow_builder.storage.blob import BlobService, LocalBlobBackend
+from loom import Context, Runtime, step, workflow
+from loom.blobs.attachment import Attachment
+from loom.blobs.blob import BlobService, LocalBlobBackend
+from loom.stores.memory import MemoryStore
 
 # ---------------------------------------------------------------------------
 # Steps that produce and consume files

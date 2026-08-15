@@ -20,7 +20,7 @@
 | CI pipeline runs in | <= 15 min | <= 8 min |
 | Error messages include fix suggestions | >= 50% | >= 80% |
 
-**"Done" means:** A new developer can go from `pip install workflow-builder` to running their first workflow in under 5 minutes, guided by interactive examples. The test suite includes property-based tests that catch edge cases unit tests miss. CI catches regressions across all phases. Error messages tell you what went wrong and how to fix it.
+**"Done" means:** A new developer can go from `pip install loomflow` to running their first workflow in under 5 minutes, guided by interactive examples. The test suite includes property-based tests that catch edge cases unit tests miss. CI catches regressions across all phases. Error messages tell you what went wrong and how to fix it.
 
 ---
 
@@ -71,7 +71,7 @@ Test invariants that must hold for any valid input, not just hand-picked cases.
 
 from hypothesis import given, strategies as st, assume, settings
 from hypothesis.stateful import RuleBasedStateMachine, rule, invariant
-from workflow_builder.runtime.journal import Journal, JournalEntry, EntryKind
+from loom.runtime.journal import Journal, JournalEntry, EntryKind
 
 class JournalStateMachine(RuleBasedStateMachine):
     """Property-based state machine test for Journal."""
@@ -158,9 +158,9 @@ Simulate crashes, slow stores, and resource exhaustion.
 
 import asyncio
 import pytest
-from workflow_builder import workflow, step, Context
-from workflow_builder.runtime.engine import Runtime
-from workflow_builder.state.memory import MemoryStore
+from loom import workflow, step, Context
+from loom.runtime.engine import Runtime
+from loom.stores.memory import MemoryStore
 
 class CrashingStore(MemoryStore):
     """Store that crashes after N operations for chaos testing."""
@@ -348,8 +348,8 @@ A REPL-like environment for experimenting with workflows.
 from __future__ import annotations
 import asyncio
 import sys
-from workflow_builder.runtime.engine import Runtime
-from workflow_builder.state.memory import MemoryStore
+from loom.runtime.engine import Runtime
+from loom.stores.memory import MemoryStore
 
 BANNER = """
 ╔══════════════════════════════════════════════════════╗
@@ -373,7 +373,7 @@ class Playground:
         exec(code, namespace)
 
         # Find the workflow function
-        from workflow_builder.runtime.workflow import WorkflowDefinition
+        from loom.runtime.workflow import WorkflowDefinition
         workflows = {
             k: v for k, v in namespace.items()
             if isinstance(v, WorkflowDefinition)
@@ -437,7 +437,7 @@ class Playground:
 
 QUICKSTART_TEMPLATE = '''"""My first LOOM workflow."""
 
-from workflow_builder import workflow, step, Context, Retry
+from loom import workflow, step, Context, Retry
 
 # Steps do the actual work — API calls, I/O, computation
 @step(retry=Retry(max_attempts=3))
@@ -479,8 +479,8 @@ def scaffold_project(directory: str):
         f.write('''"""Tests for my_workflow."""
 import pytest
 from workflows.my_workflow import my_workflow, fetch_data, process_data
-from workflow_builder import Runtime
-from workflow_builder.state.memory import MemoryStore
+from loom import Runtime
+from loom.stores.memory import MemoryStore
 
 @pytest.mark.asyncio
 async def test_workflow_runs():
@@ -493,7 +493,7 @@ async def test_workflow_runs():
         f.write('''[project]
 name = "my-loom-project"
 version = "0.1.0"
-dependencies = ["workflow-builder"]
+dependencies = ["loomflow"]
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio"]
@@ -608,7 +608,7 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - run: pip install -e ".[dev]"
-      - run: pytest --cov=workflow_builder --cov-report=xml tests/
+      - run: pytest --cov=loom --cov-report=xml tests/
       - uses: codecov/codecov-action@v4
 ```
 
@@ -617,7 +617,7 @@ jobs:
 ## 4. Directory Structure
 
 ```
-src/workflow_builder/
+src/loom/
 ├── core/
 │   └── diagnostics.py          # NEW: Actionable error messages
 ├── cli/

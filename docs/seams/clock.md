@@ -2,7 +2,7 @@
 
 *Every timestamp and every wait the engine takes.*
 
-Defined in `workflow_builder/runtime/clock.py`.
+Defined in `loom/runtime/clock.py`.
 
 <!-- BEGIN GENERATED — do not edit below this line -->
 

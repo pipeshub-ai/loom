@@ -8,18 +8,18 @@ from __future__ import annotations
 
 import pytest
 
-from workflow_builder.agents.capability import (
+from loom.agents.capability import (
     ModelTier,
     detect_capabilities,
     detect_tier,
 )
-from workflow_builder.agents.scaffolding import (
+from loom.agents.scaffolding import (
     ScaffoldingEngine,
     StepSkeleton,
     WorkflowSkeleton,
 )
-from workflow_builder.agents.schema_simplifier import SchemaSimplifier
-from workflow_builder.agents.validator import (
+from loom.agents.schema_simplifier import SchemaSimplifier
+from loom.agents.validator import (
     BARE_IO_CALLS,
     NONDETERMINISTIC_CALLS,
     CodeIssue,
@@ -212,7 +212,7 @@ class TestScaffoldingEngine:
     def test_build_skeleton_has_import(self) -> None:
         engine = ScaffoldingEngine()
         code = engine.build_skeleton("test", [])
-        assert "from workflow_builder import" in code
+        assert "from loom import" in code
 
     def test_step_skeleton_defaults(self) -> None:
         s = StepSkeleton(name="x", description="do x")
@@ -234,7 +234,7 @@ class TestScaffoldingEngine:
 
 class TestCodeValidator:
     _VALID_CODE = '''
-from workflow_builder import step, workflow, Context
+from loom import step, workflow, Context
 
 @step(name="fetch")
 async def fetch(ctx: Context) -> dict:
@@ -263,7 +263,7 @@ async def my_flow(ctx: Context) -> dict:
     def test_missing_workflow_decorator(self) -> None:
         v = CodeValidator()
         code = '''
-from workflow_builder import step, Context
+from loom import step, Context
 
 @step(name="s")
 async def s(ctx: Context) -> dict:
@@ -277,7 +277,7 @@ async def s(ctx: Context) -> dict:
     def test_missing_step_decorator(self) -> None:
         v = CodeValidator()
         code = '''
-from workflow_builder import workflow, Context
+from loom import workflow, Context
 
 @workflow(name="w")
 async def w(ctx: Context) -> dict:
@@ -292,7 +292,7 @@ async def w(ctx: Context) -> dict:
     def test_bare_io_detected(self) -> None:
         v = CodeValidator()
         code = '''
-from workflow_builder import workflow, step, Context
+from loom import workflow, step, Context
 
 @step(name="s")
 async def s(ctx: Context) -> dict:
@@ -309,7 +309,7 @@ async def w(ctx: Context) -> dict:
     def test_nondeterministic_call_detected(self) -> None:
         v = CodeValidator()
         code = '''
-from workflow_builder import workflow, step, Context
+from loom import workflow, step, Context
 
 @step(name="s")
 async def s(ctx: Context) -> dict:
@@ -366,7 +366,7 @@ async def run():
     def test_flow_decorator_also_accepted(self) -> None:
         v = CodeValidator()
         code = '''
-from workflow_builder import step, Context
+from loom import step, Context
 
 @step(name="s")
 async def s(ctx: Context) -> dict:

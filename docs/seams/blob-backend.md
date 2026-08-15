@@ -2,7 +2,7 @@
 
 *Content-addressed storage for oversized values.*
 
-Defined in `workflow_builder/storage/blob.py`.
+Defined in `loom/blobs/blob.py`.
 
 <!-- BEGIN GENERATED — do not edit below this line -->
 
@@ -28,13 +28,13 @@ Store *data* under the given *ref* with content type *mime*.
 
 ## Implementations
 
-- `storage.blob.LocalBlobBackend`
-- `storage.blob.S3BlobBackend`
-- `storage.blob_azure.AzureBlobBackend`
-- `storage.blob_gcs.GCSBlobBackend`
+- `blobs.blob.LocalBlobBackend`
+- `blobs.blob.S3BlobBackend`
+- `blobs.blob_azure.AzureBlobBackend`
+- `blobs.blob_gcs.GCSBlobBackend`
 
 ## Consumers
 
-- `storage.__init__`
+- `blobs.__init__`
 
 <!-- END GENERATED -->

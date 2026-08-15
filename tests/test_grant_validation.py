@@ -13,12 +13,12 @@ from typing import Any
 
 import pytest
 
-from workflow_builder import Context, Runtime, workflow
-from workflow_builder.agents.tool_registry import ToolsetRegistry
-from workflow_builder.core.exceptions import ConfigurationError
-from workflow_builder.security.grants import GrantSet
-from workflow_builder.state.memory import MemoryStore
-from workflow_builder.toolsets.manifest import EffectClass, OperationSpec, ToolsetManifest
+from loom import Context, Runtime, workflow
+from loom.agents.tool_registry import ToolsetRegistry
+from loom.core.exceptions import ConfigurationError
+from loom.security.grants import GrantSet
+from loom.stores.memory import MemoryStore
+from loom.toolsets.manifest import EffectClass, OperationSpec, ToolsetManifest
 
 
 def registry() -> ToolsetRegistry:
@@ -173,12 +173,12 @@ class TestRegistrationRefuses:
 class TestTheCodingAgentStage:
     @pytest.mark.asyncio
     async def test_it_flags_a_typo_in_generated_code(self) -> None:
-        from workflow_builder.agents.checks import CheckContext
-        from workflow_builder.agents.stages import GrantStage
+        from loom.agents.checks import CheckContext
+        from loom.agents.stages import GrantStage
 
         code = (
-            "from workflow_builder import workflow\n"
-            "from workflow_builder.security.grants import GrantSet\n"
+            "from loom import workflow\n"
+            "from loom.security.grants import GrantSet\n"
             '@workflow(name="f", grants=GrantSet(toolsets=["jira.issues:writ"]))\n'
             "async def f(ctx):\n    return 'x'\n"
         )
@@ -191,8 +191,8 @@ class TestTheCodingAgentStage:
     @pytest.mark.asyncio
     async def test_it_skips_rather_than_passing_without_a_registry(self) -> None:
         """A check that cannot run has found nothing, which is not passing."""
-        from workflow_builder.agents.checks import CheckContext
-        from workflow_builder.agents.stages import GrantStage
+        from loom.agents.checks import CheckContext
+        from loom.agents.stages import GrantStage
 
         result = await GrantStage(None).run("x = 1", CheckContext())
         assert result.skipped
@@ -201,14 +201,14 @@ class TestTheCodingAgentStage:
     @pytest.mark.asyncio
     async def test_unparsable_code_yields_nothing(self) -> None:
         """CompileStage owns syntax; this one must not double-report it."""
-        from workflow_builder.agents.checks import CheckContext
-        from workflow_builder.agents.stages import GrantStage
+        from loom.agents.checks import CheckContext
+        from loom.agents.stages import GrantStage
 
         result = await GrantStage(registry()).run("def (", CheckContext())
         assert result.issues == []
 
     def test_it_is_in_the_default_pipeline(self) -> None:
-        from workflow_builder.agents.stages import default_stages
+        from loom.agents.stages import default_stages
 
         names = [s.name for s in default_stages(smoke=False, registry=registry())]
         assert "grants" in names
@@ -232,8 +232,8 @@ class TestOnlyJournaledCallsAreGuarded:
 
     @pytest.mark.asyncio
     async def test_a_ctx_step_call_reaches_the_broker(self) -> None:
-        from workflow_builder import step
-        from workflow_builder.runtime.effects import DirectBroker
+        from loom import step
+        from loom.runtime.effects import DirectBroker
 
         seen: list[str] = []
 
@@ -258,8 +258,8 @@ class TestOnlyJournaledCallsAreGuarded:
 
     @pytest.mark.asyncio
     async def test_a_direct_call_inside_a_step_does_not(self) -> None:
-        from workflow_builder import step
-        from workflow_builder.runtime.effects import DirectBroker
+        from loom import step
+        from loom.runtime.effects import DirectBroker
 
         seen: list[str] = []
 
@@ -299,27 +299,27 @@ class TestThePromptTeachesTheGuardedForm:
     """
 
     def test_it_asks_for_ctx_step(self) -> None:
-        from workflow_builder.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
+        from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
 
         collapsed = " ".join(DEFAULT_SYSTEM_PROMPT.split())
         assert "Toolset tools ARE steps" in collapsed
         assert "call them with ctx.step(tool, ...)" in collapsed
 
     def test_it_says_what_a_direct_call_costs(self) -> None:
-        from workflow_builder.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
+        from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
 
         collapsed = " ".join(DEFAULT_SYSTEM_PROMPT.split())
         assert "skips the journal" in collapsed
         assert "grant check" in collapsed
 
     def test_the_old_backwards_rule_is_gone(self) -> None:
-        from workflow_builder.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
+        from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
 
         assert "not via ctx.step()" not in DEFAULT_SYSTEM_PROMPT
 
     def test_the_samples_agree_with_the_rule(self) -> None:
         """The contradiction was only visible by reading both at once."""
-        from workflow_builder.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
+        from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
 
         assert "await ctx.step(<search operation>" in DEFAULT_SYSTEM_PROMPT
 

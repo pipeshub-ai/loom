@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from workflow_builder.agents.bounds import (
+from loom.agents.bounds import (
     BlobSpillStore,
     NullSpillStore,
     ResultBounds,
@@ -20,9 +20,9 @@ from workflow_builder.agents.bounds import (
     bound_result,
     coverage_of,
 )
-from workflow_builder.agents.shape import describe_format, describe_shape
-from workflow_builder.storage.blob import BlobService, LocalBlobBackend
-from workflow_builder.toolsets.pagination import Results
+from loom.agents.shape import describe_format, describe_shape
+from loom.blobs.blob import BlobService, LocalBlobBackend
+from loom.toolsets.pagination import Results
 
 REF = SpillRef(
     locator="blob:" + "a" * 64,
@@ -181,7 +181,7 @@ class TestSpillStores:
 
     @pytest.mark.asyncio
     async def test_null_store_refuses_rather_than_pretending(self) -> None:
-        from workflow_builder.agents.bounds import SpillUnavailable
+        from loom.agents.bounds import SpillUnavailable
 
         with pytest.raises(SpillUnavailable):
             await NullSpillStore().save("x", run_id="r", tool="t", call_id="c")
@@ -261,12 +261,12 @@ class TestThroughTheAgentLoop:
 
     @pytest.mark.asyncio
     async def test_a_huge_tool_result_reaches_the_model_bounded(self, tmp_path) -> None:
-        from workflow_builder.agents.agent import Agent
-        from workflow_builder.agents.bounds import ResultBounds
-        from workflow_builder.agents.executor import AgentContext
-        from workflow_builder.agents.messages import ToolCall
-        from workflow_builder.agents.tools import tool
-        from workflow_builder.testing.mock import MockModelProvider, mock_response
+        from loom.agents.agent import Agent
+        from loom.agents.bounds import ResultBounds
+        from loom.agents.executor import AgentContext
+        from loom.agents.messages import ToolCall
+        from loom.agents.tools import tool
+        from loom.testing.mock import MockModelProvider, mock_response
 
         payload = rows(20_000)
 
@@ -313,10 +313,10 @@ class TestThroughTheAgentLoop:
     @pytest.mark.asyncio
     async def test_the_retrieval_tools_are_mounted_up_front(self, tmp_path) -> None:
         """Before the overflow, not after — the model plans from the tool list."""
-        from workflow_builder.agents.agent import Agent
-        from workflow_builder.agents.bounds import ResultBounds
-        from workflow_builder.agents.executor import AgentContext
-        from workflow_builder.testing.mock import MockModelProvider, mock_response
+        from loom.agents.agent import Agent
+        from loom.agents.bounds import ResultBounds
+        from loom.agents.executor import AgentContext
+        from loom.testing.mock import MockModelProvider, mock_response
 
         model = MockModelProvider(responses=[mock_response("ok")])
         store = BlobSpillStore(BlobService(LocalBlobBackend(tmp_path)))
@@ -329,9 +329,9 @@ class TestThroughTheAgentLoop:
 
     @pytest.mark.asyncio
     async def test_no_bounds_configured_changes_nothing(self) -> None:
-        from workflow_builder.agents.agent import Agent
-        from workflow_builder.agents.executor import AgentContext
-        from workflow_builder.testing.mock import MockModelProvider, mock_response
+        from loom.agents.agent import Agent
+        from loom.agents.executor import AgentContext
+        from loom.testing.mock import MockModelProvider, mock_response
 
         model = MockModelProvider(responses=[mock_response("ok")])
         agent = Agent(name="a", model=model)

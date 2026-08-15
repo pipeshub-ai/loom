@@ -21,10 +21,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils import header, log
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.state.memory import MemoryStore
-from workflow_builder.triggers.queue import InMemoryQueue, QueueConsumer
-from workflow_builder.triggers.specs import OnEvent
+from loom import Context, Runtime, step, workflow
+from loom.stores.memory import MemoryStore
+from loom.triggers.queue import InMemoryQueue, QueueConsumer
+from loom.triggers.specs import OnEvent
 
 # ---------------------------------------------------------------------------
 # The workflow each message starts

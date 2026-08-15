@@ -20,10 +20,10 @@ from typing import Any
 import httpx
 import pytest
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.core.exceptions import ConfigurationError
-from workflow_builder.identity.config import IdentitySettings
-from workflow_builder.state.memory import MemoryStore
+from loom import Context, Runtime, step, workflow
+from loom.core.exceptions import ConfigurationError
+from loom.identity.config import IdentitySettings
+from loom.stores.memory import MemoryStore
 
 pytest.importorskip("fastapi", reason="needs the api extra")
 
@@ -35,7 +35,7 @@ pytest.importorskip("fastapi", reason="needs the api extra")
 
 class TestResourceMetadataUrl:
     def test_inserts_the_well_known_segment_before_the_path(self) -> None:
-        from workflow_builder.server.auth import _resource_metadata_url
+        from loom.server.auth import _resource_metadata_url
 
         assert (
             _resource_metadata_url("https://loom.example.com/api")
@@ -43,7 +43,7 @@ class TestResourceMetadataUrl:
         )
 
     def test_a_bare_host_gets_no_trailing_path(self) -> None:
-        from workflow_builder.server.auth import _resource_metadata_url
+        from loom.server.auth import _resource_metadata_url
 
         assert (
             _resource_metadata_url("https://loom.example.com")
@@ -53,12 +53,12 @@ class TestResourceMetadataUrl:
 
 class TestBuildHttpAuth:
     def test_unconfigured_settings_yield_no_auth(self) -> None:
-        from workflow_builder.server.auth import build_http_auth
+        from loom.server.auth import build_http_auth
 
         assert build_http_auth(IdentitySettings()) is None
 
     def test_a_verifier_with_no_issuer_or_resource_is_refused(self, tmp_path: Any) -> None:
-        from workflow_builder.server.auth import build_http_auth
+        from loom.server.auth import build_http_auth
 
         path = tmp_path / "tokens.json"
         path.write_text(json.dumps({"tok": {"subject": "alice"}}))
@@ -68,7 +68,7 @@ class TestBuildHttpAuth:
             build_http_auth(settings)
 
     def test_a_fully_configured_settings_builds_everything(self, tmp_path: Any) -> None:
-        from workflow_builder.server.auth import build_http_auth
+        from loom.server.auth import build_http_auth
 
         path = tmp_path / "tokens.json"
         path.write_text(json.dumps({"tok": {"subject": "alice"}}))
@@ -89,8 +89,8 @@ class TestBuildHttpAuth:
 
 class TestPrincipalDependency:
     async def test_no_auth_configured_always_yields_anonymous(self) -> None:
-        from workflow_builder.identity.principal import ANONYMOUS
-        from workflow_builder.server.auth import build_principal_dependency
+        from loom.identity.principal import ANONYMOUS
+        from loom.server.auth import build_principal_dependency
 
         dependency = build_principal_dependency(None)
         assert await dependency(credentials=None) is ANONYMOUS
@@ -98,7 +98,7 @@ class TestPrincipalDependency:
     async def test_missing_credentials_is_a_401(self, tmp_path: Any) -> None:
         from fastapi import HTTPException
 
-        from workflow_builder.server.auth import build_http_auth, build_principal_dependency
+        from loom.server.auth import build_http_auth, build_principal_dependency
 
         path = tmp_path / "tokens.json"
         path.write_text(json.dumps({"tok": {"subject": "alice"}}))
@@ -120,7 +120,7 @@ class TestPrincipalDependency:
         from fastapi import HTTPException
         from fastapi.security import HTTPAuthorizationCredentials
 
-        from workflow_builder.server.auth import build_http_auth, build_principal_dependency
+        from loom.server.auth import build_http_auth, build_principal_dependency
 
         path = tmp_path / "tokens.json"
         path.write_text(json.dumps({"tok": {"subject": "alice"}}))
@@ -141,7 +141,7 @@ class TestPrincipalDependency:
     async def test_a_known_token_resolves_a_principal(self, tmp_path: Any) -> None:
         from fastapi.security import HTTPAuthorizationCredentials
 
-        from workflow_builder.server.auth import build_http_auth, build_principal_dependency
+        from loom.server.auth import build_http_auth, build_principal_dependency
 
         path = tmp_path / "tokens.json"
         path.write_text(
@@ -204,7 +204,7 @@ async def _double(n: int) -> int:
 
 
 def _client(app: Any, *, token: str | None = None) -> Any:
-    from workflow_builder.server import LoomClient
+    from loom.server import LoomClient
 
     transport = httpx.ASGITransport(app=app)
     http = httpx.AsyncClient(transport=transport, base_url="http://loom.test")
@@ -213,7 +213,7 @@ def _client(app: Any, *, token: str | None = None) -> Any:
 
 @pytest.fixture
 def authed_app(static_identity: IdentitySettings) -> Any:
-    from workflow_builder.server.app import create_app
+    from loom.server.app import create_app
 
     rt = Runtime(store=MemoryStore())
     rt.register(_doubler)
@@ -223,7 +223,7 @@ def authed_app(static_identity: IdentitySettings) -> Any:
 class TestCreateAppCompatibility:
     async def test_unconfigured_identity_behaves_exactly_as_before(self) -> None:
         """The compatibility contract: no LOOM_AUTH_* set, no auth at all."""
-        from workflow_builder.server.app import create_app
+        from loom.server.app import create_app
 
         rt = Runtime(store=MemoryStore())
         rt.register(_doubler)
@@ -236,7 +236,7 @@ class TestCreateAppCompatibility:
 
 class TestCreateAppAuthentication:
     async def test_no_token_is_401_with_resource_metadata(self, authed_app: Any) -> None:
-        from workflow_builder.server import LoomClientError
+        from loom.server import LoomClientError
 
         client = _client(authed_app)
         with pytest.raises(LoomClientError) as caught:
@@ -247,7 +247,7 @@ class TestCreateAppAuthentication:
         assert "resource_metadata" in (caught.value.www_authenticate or "")
 
     async def test_an_unknown_token_is_401(self, authed_app: Any) -> None:
-        from workflow_builder.server import LoomClientError
+        from loom.server import LoomClientError
 
         client = _client(authed_app, token="not-a-real-token")
         with pytest.raises(LoomClientError) as caught:
@@ -276,7 +276,7 @@ class TestCreateAppAuthentication:
 
 class TestCreateAppScopes:
     async def test_a_read_only_token_cannot_start_a_run(self, authed_app: Any) -> None:
-        from workflow_builder.server import LoomClientError
+        from loom.server import LoomClientError
 
         client = _client(authed_app, token="tok-viewer")
         with pytest.raises(LoomClientError) as caught:
@@ -311,7 +311,7 @@ class TestCreateAppOwnership:
         assert replayed["output"] is None
 
     async def test_journal_of_someone_elses_run_is_403(self, authed_app: Any) -> None:
-        from workflow_builder.server import LoomClientError
+        from loom.server import LoomClientError
 
         alice = _client(authed_app, token="tok-alice")
         bob = _client(authed_app, token="tok-bob")
@@ -358,7 +358,7 @@ class TestLoomClientBearerToken:
         return app
 
     async def test_a_fixed_token_is_sent_as_a_bearer_header(self) -> None:
-        from workflow_builder.server import LoomClient
+        from loom.server import LoomClient
 
         transport = httpx.ASGITransport(app=self._echo_app())
         http = httpx.AsyncClient(transport=transport, base_url="http://loom.test")
@@ -368,7 +368,7 @@ class TestLoomClientBearerToken:
         assert result["seen_authorization"] == "Bearer tok-123"
 
     async def test_no_token_sends_no_authorization_header(self) -> None:
-        from workflow_builder.server import LoomClient
+        from loom.server import LoomClient
 
         transport = httpx.ASGITransport(app=self._echo_app())
         http = httpx.AsyncClient(transport=transport, base_url="http://loom.test")
@@ -378,7 +378,7 @@ class TestLoomClientBearerToken:
         assert result["seen_authorization"] == ""
 
     def test_token_and_token_provider_together_is_rejected(self) -> None:
-        from workflow_builder.server import LoomClient
+        from loom.server import LoomClient
 
         async def provider(force_refresh: bool) -> str:
             return "x"
@@ -387,7 +387,7 @@ class TestLoomClientBearerToken:
             LoomClient(base_url="http://loom.test", token="a", token_provider=provider)
 
     async def test_a_401_triggers_exactly_one_forced_refresh_and_retries(self) -> None:
-        from workflow_builder.server import LoomClient
+        from loom.server import LoomClient
 
         calls: list[bool] = []
         tokens = {False: "stale", True: "fresh"}
@@ -426,7 +426,7 @@ class TestLoomClientBearerToken:
         assert result == {}
 
     async def test_a_persistent_401_raises_with_www_authenticate_captured(self) -> None:
-        from workflow_builder.server import LoomClient, LoomClientError
+        from loom.server import LoomClient, LoomClientError
 
         async def provider(force_refresh: bool) -> str:
             return "always-rejected"
@@ -460,7 +460,7 @@ class TestLoomClientBearerToken:
         assert str(caught.value) == "nope"
 
     async def test_structured_insufficient_scope_detail_is_unwrapped(self) -> None:
-        from workflow_builder.server import LoomClient, LoomClientError
+        from loom.server import LoomClient, LoomClientError
 
         async def app(scope, receive, send):
             body = json.dumps(
@@ -515,7 +515,7 @@ class TestCmdServeRefusesUnauthenticatedNetworkBinds:
     def test_a_public_bind_with_no_identity_is_refused(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from workflow_builder.cli import commands
+        from loom.cli import commands
 
         monkeypatch.delenv("LOOM_AUTH_JWKS_URI", raising=False)
         monkeypatch.delenv("LOOM_AUTH_STATIC_TOKENS_FILE", raising=False)
@@ -527,7 +527,7 @@ class TestCmdServeRefusesUnauthenticatedNetworkBinds:
     def test_loopback_is_fine_with_no_identity(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     ) -> None:
-        from workflow_builder.cli import commands
+        from loom.cli import commands
 
         monkeypatch.delenv("LOOM_AUTH_JWKS_URI", raising=False)
         monkeypatch.delenv("LOOM_AUTH_STATIC_TOKENS_FILE", raising=False)
@@ -550,8 +550,8 @@ class TestCmdServeRefusesUnauthenticatedNetworkBinds:
 
 
 def _fake_target() -> Any:
-    from workflow_builder.cli.targets import Target
-    from workflow_builder.facade import LocalFacade
+    from loom.cli.targets import Target
+    from loom.facade import LocalFacade
 
     rt = Runtime(store=MemoryStore())
     return Target(LocalFacade(rt), None)

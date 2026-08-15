@@ -5,29 +5,29 @@ from __future__ import annotations
 
 import pytest
 
-from workflow_builder.toolsets.catalog import (
+from loom.toolsets.catalog import (
     IndexCard,
     OpContract,
     OpTable,
     ToolsetCatalog,
 )
-from workflow_builder.toolsets.certify import (
+from loom.toolsets.certify import (
     CertificationResult,
     certify,
 )
-from workflow_builder.toolsets.connections import ConnectionBroker, Credential
-from workflow_builder.toolsets.gateway import RateLimitConfig, RateLimiter
-from workflow_builder.toolsets.lock import (
+from loom.toolsets.connections import ConnectionBroker, Credential
+from loom.toolsets.gateway import RateLimitConfig, RateLimiter
+from loom.toolsets.lock import (
     ToolsetLock,
     generate_lock,
     verify_lock,
 )
-from workflow_builder.toolsets.manifest import (
+from loom.toolsets.manifest import (
     EffectClass,
     OperationSpec,
     ToolsetManifest,
 )
-from workflow_builder.toolsets.registry import (
+from loom.toolsets.registry import (
     get_catalog,
     register_available_toolsets,
     register_toolset,
@@ -280,7 +280,7 @@ class TestConnectionBroker:
 
     @pytest.mark.asyncio
     async def test_resolve_missing(self) -> None:
-        from workflow_builder.core.exceptions import CredentialNotFound
+        from loom.core.exceptions import CredentialNotFound
 
         broker = ConnectionBroker()
         with pytest.raises(CredentialNotFound, match="No credential found"):
@@ -307,7 +307,7 @@ class TestConnectionBroker:
     def test_credential_expiry_uses_injected_clock(self) -> None:
         from datetime import UTC, datetime
 
-        from workflow_builder.runtime.clock import ManualClock
+        from loom.runtime.clock import ManualClock
 
         cred = Credential(
             token="test", expires_at=datetime(2026, 1, 1, tzinfo=UTC)
@@ -487,7 +487,7 @@ class TestBuiltInToolsetsReachEveryProcess:
 
     def test_a_named_toolset_resolves_with_nothing_registered(self) -> None:
         """The failing path, end to end."""
-        from workflow_builder import Runtime
+        from loom import Runtime
 
         tools = Runtime().toolsets.resolve_tools(["jira"])
         assert [t.name for t in tools][:1] == ["jira_search_issues"]
@@ -496,7 +496,7 @@ class TestBuiltInToolsetsReachEveryProcess:
         "toolset_id", ["jira", "confluence", "gmail", "google_calendar"]
     )
     def test_every_shipped_toolset_is_reachable(self, toolset_id: str) -> None:
-        from workflow_builder.toolsets.registry import builtin_toolset
+        from loom.toolsets.registry import builtin_toolset
 
         toolset = builtin_toolset(toolset_id)
         assert toolset is not None
@@ -508,7 +508,7 @@ class TestBuiltInToolsetsReachEveryProcess:
         An agent that named no integration must not acquire four of them, and
         certainly not their destructive operations.
         """
-        from workflow_builder import Runtime
+        from loom import Runtime
 
         registry = Runtime().toolsets
         assert registry.resolve_tools() == []
@@ -516,8 +516,8 @@ class TestBuiltInToolsetsReachEveryProcess:
 
     def test_a_hosts_own_toolset_wins(self) -> None:
         """A different Jira — another account, another base URL — is not shadowed."""
-        from workflow_builder.agents.tool_registry import Toolset, ToolsetRegistry
-        from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
+        from loom.agents.tool_registry import Toolset, ToolsetRegistry
+        from loom.toolsets.jira.manifest import JIRA_MANIFEST
 
         registry = ToolsetRegistry()
         mine = Toolset(manifest=JIRA_MANIFEST, _resolver=lambda op: f"mine:{op}")
@@ -526,7 +526,7 @@ class TestBuiltInToolsetsReachEveryProcess:
         assert registry.get_toolset("jira") is mine
 
     def test_an_unknown_toolset_is_still_unknown(self) -> None:
-        from workflow_builder.toolsets.registry import builtin_toolset
+        from loom.toolsets.registry import builtin_toolset
 
         assert builtin_toolset("not_a_real_toolset") is None
 
@@ -539,10 +539,10 @@ class TestBuiltInToolsetsReachEveryProcess:
         import subprocess
         import sys
 
-        module = "workflow_builder.toolsets.jira.tools"
+        module = "loom.toolsets.jira.tools"
         probe = (
             "import sys;"
-            "from workflow_builder import Runtime;"
+            "from loom import Runtime;"
             "rt = Runtime();"
             f"before = '{module}' in sys.modules;"
             "rt.toolsets.resolve_tools(['jira']);"
@@ -554,7 +554,7 @@ class TestBuiltInToolsetsReachEveryProcess:
         assert done.stdout.strip() == "False True", done.stdout
 
     def test_an_unknown_operation_says_what_exists(self) -> None:
-        from workflow_builder.toolsets.registry import builtin_toolset
+        from loom.toolsets.registry import builtin_toolset
 
         with pytest.raises(KeyError, match="known:"):
             builtin_toolset("jira").resolve("issues.telepathy")
@@ -579,8 +579,8 @@ class TestRegisterAvailableToolsets:
         assert get_catalog().get_toolset("jira") is jira
 
     def test_does_not_overwrite_a_host_registration(self) -> None:
-        from workflow_builder.agents.tool_registry import Toolset
-        from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
+        from loom.agents.tool_registry import Toolset
+        from loom.toolsets.jira.manifest import JIRA_MANIFEST
 
         mine = Toolset(manifest=JIRA_MANIFEST, _resolver=lambda op: f"mine:{op}")
         register_toolset(mine)
@@ -597,11 +597,11 @@ class TestAwaitingADurableCallIsTyped:
     type stage, because the claim is about what mypy says.
     """
 
-    HEAD = "from workflow_builder import Context, workflow\n\n\n"
+    HEAD = "from loom import Context, workflow\n\n\n"
 
     async def _types(self, body: str) -> list[str]:
-        from workflow_builder.agents.checks import CheckContext
-        from workflow_builder.agents.stages import TypeStage
+        from loom.agents.checks import CheckContext
+        from loom.agents.stages import TypeStage
 
         code = (
             f'{self.HEAD}@workflow(name="w")\n'

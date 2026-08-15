@@ -6,8 +6,8 @@ from collections.abc import Iterator
 
 import pytest
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.state.memory import MemoryStore
+from loom import Context, Runtime, step, workflow
+from loom.stores.memory import MemoryStore
 
 
 @pytest.fixture(autouse=True)
@@ -18,7 +18,7 @@ def isolated_catalog() -> Iterator[object]:
     test that registers a manifest changes what every later test sees — the
     kind of ordering dependency that only shows up in a full-suite run.
     """
-    from workflow_builder.toolsets.registry import get_catalog
+    from loom.toolsets.registry import get_catalog
 
     catalog = get_catalog()
     saved = dict(catalog._manifests)
@@ -79,6 +79,6 @@ def _no_fakes_leak_between_tests():
     disagreeing about what a function returns.
     """
     yield
-    from workflow_builder.agents.fakes import uninstall_fakes
+    from loom.agents.fakes import uninstall_fakes
 
     uninstall_fakes()

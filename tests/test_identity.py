@@ -12,10 +12,10 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from workflow_builder.core.exceptions import InsufficientScope
-from workflow_builder.identity.principal import ANONYMOUS, Principal, ServicePrincipal
-from workflow_builder.identity.scopes import Scope, scopes_to_grant
-from workflow_builder.security.grants import GrantSet
+from loom.core.exceptions import InsufficientScope
+from loom.identity.principal import ANONYMOUS, Principal, ServicePrincipal
+from loom.identity.scopes import Scope, scopes_to_grant
+from loom.security.grants import GrantSet
 
 
 class TestPrincipal:

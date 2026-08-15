@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import pytest
 
-from workflow_builder.core.exceptions import SerializationError
-from workflow_builder.core.secret import Secret
-from workflow_builder.core.serde import encode
+from loom.core.exceptions import SerializationError
+from loom.core.secret import Secret
+from loom.core.serde import encode
 
 
 def test_reveal_returns_the_wrapped_value() -> None:

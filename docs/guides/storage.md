@@ -9,12 +9,12 @@ Every example on this page assumes:
 ```python
 import os
 
-from workflow_builder import Runtime
-from workflow_builder.runtime.journal import Journal
-from workflow_builder.state.memory import MemoryStore
-from workflow_builder.state.mongo import MongoStore
-from workflow_builder.state.postgres import PostgresStore
-from workflow_builder.state.sqlite import SQLiteStore
+from loom import Runtime
+from loom.runtime.journal import Journal
+from loom.stores.memory import MemoryStore
+from loom.stores.mongo import MongoStore
+from loom.stores.postgres import PostgresStore
+from loom.stores.sqlite import SQLiteStore
 ```
 
 ## MemoryStore
@@ -32,7 +32,7 @@ No dependencies. Data is lost when the process exits.
 File-based, single-process. Use for local development and CLIs.
 
 ```python
-from workflow_builder.state.sqlite import SQLiteStore
+from loom.stores.sqlite import SQLiteStore
 
 runtime = Runtime(store=SQLiteStore("workflows.db"))
 ```
@@ -44,12 +44,12 @@ No extra dependencies (uses Python's built-in `sqlite3`). Data survives restarts
 Production storage with MongoDB. Use for multi-process deployments.
 
 ```python
-from workflow_builder.state.mongo import MongoStore
+from loom.stores.mongo import MongoStore
 
 runtime = Runtime(store=MongoStore("mongodb://localhost:27017/workflows"))
 ```
 
-Install: `pip install workflow-builder[mongo]`
+Install: `pip install loomflow[mongo]`
 
 Requires a MongoDB 5.0+ instance. Supports:
 - Concurrent access from multiple workers
@@ -76,12 +76,12 @@ export MONGO_URI="mongodb://localhost:27017/workflows"
 Production storage with PostgreSQL. Use for multi-process deployments where you prefer a relational database.
 
 ```python
-from workflow_builder.state.postgres import PostgresStore
+from loom.stores.postgres import PostgresStore
 
 runtime = Runtime(store=PostgresStore("postgresql://user:pass@localhost:5432/workflows"))
 ```
 
-Install: `pip install workflow-builder[postgres]`
+Install: `pip install loomflow[postgres]`
 
 Requires PostgreSQL 14+. Supports:
 - Concurrent access with row-level locking
@@ -122,10 +122,10 @@ All `ExecutionStore` implementations share the same interface, so workflows, ste
 
 ## Implementing a Custom Store
 
-Implement the `ExecutionStore` protocol from `workflow_builder.state.base`:
+Implement the `ExecutionStore` protocol from `loom.stores.base`:
 
 ```python
-from workflow_builder.state.base import ExecutionStore, ExecutionRecord
+from loom.stores.base import ExecutionStore, ExecutionRecord
 
 class MyStore(ExecutionStore):
     async def save_execution(self, record: ExecutionRecord) -> None: ...
@@ -136,4 +136,4 @@ class MyStore(ExecutionStore):
     async def load_journal(self, run_id: str) -> Journal | None: ...
 ```
 
-See `src/workflow_builder/state/memory.py` for the simplest reference implementation.
+See `src/loom/stores/memory.py` for the simplest reference implementation.

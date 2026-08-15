@@ -6,23 +6,23 @@ import asyncio
 
 import pytest
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.agents.agent import Agent
-from workflow_builder.agents.interaction import CallbackUserInteraction, UserQuestion, UserResponse
-from workflow_builder.agents.messages import ToolCall
-from workflow_builder.connectors.credentials import (
+from loom import Context, Runtime, step, workflow
+from loom.agents.agent import Agent
+from loom.agents.interaction import CallbackUserInteraction, UserQuestion, UserResponse
+from loom.agents.messages import ToolCall
+from loom.connectors.credentials import (
     MemoryCredentialStore,
     StoredCredential,
     resolve_bearer_token,
 )
-from workflow_builder.core.exceptions import ConfigurationError
-from workflow_builder.core.models import ExecutionStatus
-from workflow_builder.core.secret import Secret
-from workflow_builder.facade import LocalFacade, RemoteFacade
-from workflow_builder.identity.facade import AuthorizedFacade
-from workflow_builder.identity.principal import Principal
-from workflow_builder.state import MemoryStore
-from workflow_builder.testing.mock import MockModelProvider, mock_response
+from loom.core.exceptions import ConfigurationError
+from loom.core.models import ExecutionStatus
+from loom.core.secret import Secret
+from loom.facade import LocalFacade, RemoteFacade
+from loom.identity.facade import AuthorizedFacade
+from loom.identity.principal import Principal
+from loom.stores import MemoryStore
+from loom.testing.mock import MockModelProvider, mock_response
 
 
 @step

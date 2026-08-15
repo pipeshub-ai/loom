@@ -30,10 +30,10 @@ from utils import load_dotenv, require_env
 # then — load .env before that rather than inside main().
 load_dotenv()
 
-from workflow_builder import Context, Retry, Runtime, step, workflow  # noqa: E402
-from workflow_builder.agents.agent import Agent, PersistenceClass  # noqa: E402
-from workflow_builder.agents.providers.anthropic_provider import AnthropicProvider  # noqa: E402
-from workflow_builder.state.memory import MemoryStore  # noqa: E402
+from loom import Context, Retry, Runtime, step, workflow  # noqa: E402
+from loom.agents.agent import Agent, PersistenceClass  # noqa: E402
+from loom.agents.providers.anthropic_provider import AnthropicProvider  # noqa: E402
+from loom.stores.memory import MemoryStore  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Define the summariser agent (created once, reused across runs)

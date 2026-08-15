@@ -1,4 +1,4 @@
-# workflow-builder
+# loomflow
 
 [License: MIT](LICENSE)
 [Python 3.11+](https://www.python.org/downloads/)
@@ -42,10 +42,10 @@ then run it.
 ```python
 import asyncio
 
-from workflow_builder import Runtime
-from workflow_builder.agents.coding_agent import WorkflowCodingAgent
-from workflow_builder.agents.providers import AnthropicProvider
-from workflow_builder.state.memory import MemoryStore
+from loom import Runtime
+from loom.agents.coding_agent import WorkflowCodingAgent
+from loom.agents.providers import AnthropicProvider
+from loom.stores.memory import MemoryStore
 
 
 async def main():
@@ -86,8 +86,8 @@ booking fails, and the retry must not charge the card again.
 ```python
 import asyncio
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.state.sqlite import SQLiteStore
+from loom import Context, Runtime, step, workflow
+from loom.stores.sqlite import SQLiteStore
 
 attempts = 0
 
@@ -148,32 +148,32 @@ between the two runs and the second one still picks up where the first stopped.
 
 ```bash
 # Core (MemoryStore + SQLite, zero infra)
-pip install workflow-builder
+pip install loomflow
 
 # With storage backends
-pip install workflow-builder[mongo]        # MongoDB (motor)
-pip install workflow-builder[postgres]     # PostgreSQL (asyncpg)
+pip install loomflow[mongo]        # MongoDB (motor)
+pip install loomflow[postgres]     # PostgreSQL (asyncpg)
 
 # With agent framework backends
-pip install workflow-builder[langchain]    # LangChain / LangGraph
-pip install workflow-builder[agno]         # Agno
-pip install workflow-builder[pydantic-ai]  # Pydantic AI
+pip install loomflow[langchain]    # LangChain / LangGraph
+pip install loomflow[agno]         # Agno
+pip install loomflow[pydantic-ai]  # Pydantic AI
 
 # Google Workspace service-account auth (Gmail/Calendar work without it)
-pip install workflow-builder[google]
+pip install loomflow[google]
 
 # With FastAPI webhook server
-pip install workflow-builder[api]
+pip install loomflow[api]
 
 # Command line and terminal UI
-pip install workflow-builder[cli]          # rich output
-pip install workflow-builder[tui]          # loom ui
+pip install loomflow[cli]          # rich output
+pip install loomflow[tui]          # loom ui
 
 # MCP server — drive workflows from Claude Code, Claude Desktop, Cursor
-pip install workflow-builder[mcp]
+pip install loomflow[mcp]
 
 # Everything
-pip install workflow-builder[all]
+pip install loomflow[all]
 
 # Development
 pip install -e ".[dev]"
@@ -264,10 +264,10 @@ with the name beside it in a comment, and where a name is genuinely ambiguous
 emits a `ctx.agent()` node to decide at run time rather than guessing.
 
 ```python
-from workflow_builder import Runtime
-from workflow_builder.agents.coding_agent import WorkflowCodingAgent
-from workflow_builder.agents.providers import AnthropicProvider, OpenAIProvider
-from workflow_builder.agents.supervisor import CodeSupervisor
+from loom import Runtime
+from loom.agents.coding_agent import WorkflowCodingAgent
+from loom.agents.providers import AnthropicProvider, OpenAIProvider
+from loom.agents.supervisor import CodeSupervisor
 
 rt = Runtime()
 
@@ -305,9 +305,9 @@ call for, and check before anyone runs it.
 ```python
 import asyncio
 
-from workflow_builder import Context, Runtime, workflow
-from workflow_builder.nodes.human import ApprovalIn, LogChannel
-from workflow_builder.state import MemoryStore
+from loom import Context, Runtime, workflow
+from loom.nodes.human import ApprovalIn, LogChannel
+from loom.stores import MemoryStore
 
 
 @workflow(name="refund")
@@ -447,7 +447,7 @@ instead:
 $ loom node human.approval
 # human.approval  v1.0.0  [human]   suspends: yes   effect: write   requires: human_channel
 
-from workflow_builder.nodes.human import ApprovalIn, ApprovalOut
+from loom.nodes.human import ApprovalIn, ApprovalOut
 
 result: ApprovalOut = await ctx.node(
     'human.approval',
@@ -479,9 +479,9 @@ A search returns an ordinary list that also knows whether it saw everything:
 ```python
 import asyncio
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.state import MemoryStore
-from workflow_builder.toolsets.pagination import Page, Results, collect
+from loom import Context, Runtime, step, workflow
+from loom.stores import MemoryStore
+from loom.toolsets.pagination import Page, Results, collect
 
 ROWS = [f"BUG-{i}" for i in range(312)]
 
@@ -551,10 +551,10 @@ everything that reads time — `ctx.sleep`, cron schedules, retry backoff:
 import asyncio
 from datetime import UTC, datetime
 
-from workflow_builder import Context, Runtime, workflow
-from workflow_builder.runtime.clock import ManualClock
-from workflow_builder.state import MemoryStore
-from workflow_builder.testing import advance
+from loom import Context, Runtime, workflow
+from loom.runtime.clock import ManualClock
+from loom.stores import MemoryStore
+from loom.testing import advance
 
 
 @workflow(name="reminder")
@@ -587,8 +587,8 @@ ask it to:
 ```python
 import asyncio
 
-from workflow_builder import Context, Runtime, workflow
-from workflow_builder.state import MemoryStore
+from loom import Context, Runtime, workflow
+from loom.stores import MemoryStore
 
 
 @workflow(name="indexer")
@@ -618,7 +618,7 @@ asyncio.run(main())
 ## Command Line
 
 ```bash
-pip install "workflow-builder[cli]"
+pip install "loomflow[cli]"
 ```
 
 ```bash
@@ -647,7 +647,7 @@ remote LOOM instead of importing locally.
 Drive workflows from Claude Code, Claude Desktop, or Cursor.
 
 ```bash
-pip install "workflow-builder[mcp]"
+pip install "loomflow[mcp]"
 claude mcp add loom -- loom mcp --module flows.py
 ```
 
@@ -671,9 +671,9 @@ import asyncio
 
 from langchain_anthropic import ChatAnthropic
 
-from workflow_builder import Context, Runtime, workflow
-from workflow_builder.agents.backends.langchain import LangChainBackend
-from workflow_builder.state.memory import MemoryStore
+from loom import Context, Runtime, workflow
+from loom.agents.backends.langchain import LangChainBackend
+from loom.stores.memory import MemoryStore
 
 rt = Runtime(
     store=MemoryStore(),
@@ -709,18 +709,18 @@ Available backends: `LangChainBackend`, `AgnoBackend`, `PydanticAIBackend`, `Bui
 ## Storage Backends
 
 ```python
-from workflow_builder import Runtime
+from loom import Runtime
 
 # Development (zero infra)
-from workflow_builder.state.memory import MemoryStore
+from loom.stores.memory import MemoryStore
 rt = Runtime(store=MemoryStore())
 
 # Local persistence
-from workflow_builder.state.sqlite import SQLiteStore
+from loom.stores.sqlite import SQLiteStore
 rt = Runtime(store=SQLiteStore("workflows.db"))
 
 # Production (MongoDB) — connecting is async, so inside an async function
-from workflow_builder.state.mongo import MongoStore
+from loom.stores.mongo import MongoStore
 
 async def mongo_runtime() -> Runtime:
     store = MongoStore("mongodb://localhost:27017", database="workflows")
@@ -728,7 +728,7 @@ async def mongo_runtime() -> Runtime:
     return Runtime(store=store)
 
 # Production (PostgreSQL)
-from workflow_builder.state.postgres import PostgresStore
+from loom.stores.postgres import PostgresStore
 
 async def postgres_runtime() -> Runtime:
     store = PostgresStore("postgresql://user:pass@localhost/workflows")
@@ -754,10 +754,10 @@ SQLiteStore
 import asyncio
 from datetime import UTC, datetime
 
-from workflow_builder import Context, Runtime, workflow
-from workflow_builder.runtime.dispatcher import TriggerDispatcher
-from workflow_builder.state.memory import MemoryStore
-from workflow_builder.triggers.specs import Schedule
+from loom import Context, Runtime, workflow
+from loom.runtime.dispatcher import TriggerDispatcher
+from loom.stores.memory import MemoryStore
+from loom.triggers.specs import Schedule
 
 
 @workflow(name="daily_report", triggers=[Schedule("0 9 * * 1-5")])
@@ -826,8 +826,8 @@ than papering over the gaps:
 | Workflow Coding Agent: 7-stage verification, entity resolution, code-or-judgement classification | **Shipped, tested** |
 | Typed toolsets (Gmail, Calendar, Jira, Confluence), pluggable agent backends | **Shipped, tested** |
 | CLI, TUI, MCP server, HTTP API over one `RuntimeFacade` | **Shipped, tested** |
-| Sandboxed execution (generated code runs with no ambient credentials) | **Designed, not built** — `ExecutionBackend` port, see [implementation plan](docs/implementation-plan.md) §3.1 |
-| Versioned, activatable workflow source (commit/rollback, not just a code hash) | **Designed, not built** — `SourceStore`/`VersionStore`, see [implementation plan](docs/implementation-plan.md) §4 |
+| Sandboxed execution (generated code runs with no ambient credentials) | **Designed, not built** — `ExecutionBackend` port, see [implementation plan](docs/design/implementation-plan.md) §3.1 |
+| Versioned, activatable workflow source (commit/rollback, not just a code hash) | **Designed, not built** — `SourceStore`/`VersionStore`, see [implementation plan](docs/design/implementation-plan.md) §4 |
 | Session-shaped execution traces for debugging | **Designed, not built** — `TraceView`, same doc |
 | Agent-rendered visualization, verified against the extracted graph | **Designed, not built** — see [`phases/phase-4-visualization.md`](phases/phase-4-visualization.md) |
 
@@ -839,7 +839,7 @@ untrusted input without `ExecutionBackend` landing first.
 
 **This is where the community makes the difference.** The gaps above are
 scoped, written down, and ordered by dependency (see
-[`docs/implementation-plan.md`](docs/implementation-plan.md) §4 — each phase
+[`docs/design/implementation-plan.md`](docs/design/implementation-plan.md) §4 — each phase
 lists its own exit criteria as tests) precisely so they're contributable, not
 just aspirational. If any of this is what you need, a PR against one of those
 phases is the fastest way to get it. See [Contributing](CONTRIBUTING.md).

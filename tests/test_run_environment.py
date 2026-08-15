@@ -6,9 +6,9 @@ import logging
 
 import pytest
 
-from workflow_builder.core.exceptions import ConfigurationError
-from workflow_builder.facade import describe_record
-from workflow_builder.runtime.environment import (
+from loom.core.exceptions import ConfigurationError
+from loom.facade import describe_record
+from loom.runtime.environment import (
     MAX_ENV_BYTES,
     MAX_ENV_KEYS,
     RunEnvironment,
@@ -50,7 +50,7 @@ class TestRunEnvironment:
 
 class TestValidateRunEnv:
     def test_secret_looking_keys_warn_once(self, caplog: pytest.LogCaptureFixture) -> None:
-        from workflow_builder.runtime import environment as env_mod
+        from loom.runtime import environment as env_mod
 
         env_mod._warned_keys.clear()
         with caplog.at_level(logging.WARNING, logger="workflow.environment"):
@@ -76,7 +76,7 @@ class TestValidateRunEnv:
 
 class TestEnvOnARun:
     async def test_env_is_readable_from_the_workflow_body(self) -> None:
-        from workflow_builder import Context, Runtime, workflow
+        from loom import Context, Runtime, workflow
 
         @workflow(name="echo_region")
         async def echo_region(ctx: Context, _: None = None) -> str:
@@ -90,7 +90,7 @@ class TestEnvOnARun:
         assert record.metadata["loom.env"] == {"REGION": "eu-west"}
 
     async def test_env_is_restored_on_replay(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from workflow_builder import Context, Runtime, workflow
+        from loom import Context, Runtime, workflow
 
         @workflow(name="echo_region_replay")
         async def echo_region(ctx: Context, _: None = None) -> str:
@@ -103,7 +103,7 @@ class TestEnvOnARun:
         assert replayed.output == "original"
 
     async def test_describe_record_redacts_loom_env(self) -> None:
-        from workflow_builder import Context, Runtime, workflow
+        from loom import Context, Runtime, workflow
 
         @workflow(name="redact_env")
         async def redact_env(ctx: Context, _: None = None) -> str:
@@ -118,7 +118,7 @@ class TestEnvOnARun:
         assert "s3cret-value" not in str(view)
 
     async def test_reserved_metadata_keys_are_stripped(self) -> None:
-        from workflow_builder import Context, Runtime, workflow
+        from loom import Context, Runtime, workflow
 
         @workflow(name="strip_reserved")
         async def strip_reserved(ctx: Context, _: None = None) -> str:
@@ -139,7 +139,7 @@ class TestEnvOnARun:
 
 class TestStartRunRequestStripsReserved:
     def test_http_body_drops_loom_env(self) -> None:
-        from workflow_builder.server.app import StartRunRequest
+        from loom.server.app import StartRunRequest
 
         body = StartRunRequest(
             workflow="x",

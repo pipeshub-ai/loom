@@ -14,10 +14,20 @@ from pathlib import Path
 
 import pytest
 
-from workflow_builder import ExecutionStatus, Runtime, step, workflow
-from workflow_builder.core.exceptions import ContinueAsNew, ControlSignal
-from workflow_builder.core.serde import decode
-from workflow_builder.runtime.flowcontrol import (
+from loom import ExecutionStatus, Runtime, step, workflow
+from loom.blobs.blob import (
+    BlobNotFoundError,
+    BlobService,
+    LocalBlobBackend,
+)
+from loom.blobs.retention import (
+    CompactionResult,
+    RetentionManager,
+    RetentionPolicy,
+)
+from loom.core.exceptions import ContinueAsNew, ControlSignal
+from loom.core.serde import decode
+from loom.runtime.flowcontrol import (
     AdmissionController,
     AdmissionDecision,
     BatchPolicy,
@@ -26,30 +36,20 @@ from workflow_builder.runtime.flowcontrol import (
     RateLimitPolicy,
     SingletonPolicy,
 )
-from workflow_builder.runtime.leader import InMemoryLockProvider, LeaderElector
-from workflow_builder.runtime.structural_replay import (
+from loom.runtime.leader import InMemoryLockProvider, LeaderElector
+from loom.runtime.structural_replay import (
     ReplayStatus,
     StepIdentity,
     plan_structural_replay,
 )
-from workflow_builder.security.rbac import (
+from loom.security.rbac import (
     AuthorizationError,
     Permission,
     Role,
     authorize,
     require,
 )
-from workflow_builder.state.memory import MemoryStore
-from workflow_builder.storage.blob import (
-    BlobNotFoundError,
-    BlobService,
-    LocalBlobBackend,
-)
-from workflow_builder.storage.retention import (
-    CompactionResult,
-    RetentionManager,
-    RetentionPolicy,
-)
+from loom.stores.memory import MemoryStore
 
 # ---------------------------------------------------------------------------
 # Blob Service
@@ -518,21 +518,21 @@ class TestLeaderElector:
 
 class TestOTelTracer:
     def test_import_without_otel_sdk(self) -> None:
-        from workflow_builder.observability import otel
+        from loom.observability import otel
         assert hasattr(otel, "OTelTracer")
 
     def test_attribute_mapping(self) -> None:
-        from workflow_builder.observability.otel import LOOM_ATTRS
+        from loom.observability.otel import LOOM_ATTRS
         assert LOOM_ATTRS["run_id"] == "loom.run_id"
         assert LOOM_ATTRS["model"] == "gen_ai.request.model"
 
     def test_map_attributes(self) -> None:
-        from workflow_builder.observability.otel import _map_attributes
+        from loom.observability.otel import _map_attributes
         mapped = _map_attributes({"run_id": "abc", "custom": "val"})
         assert mapped == {"loom.run_id": "abc", "custom": "val"}
 
     def test_map_attributes_none(self) -> None:
-        from workflow_builder.observability.otel import _map_attributes
+        from loom.observability.otel import _map_attributes
         assert _map_attributes(None) == {}
 
 
@@ -550,21 +550,21 @@ class TestContinueAsNewSignal:
 
 class TestContextExtensions:
     def test_context_has_compensate(self) -> None:
-        from workflow_builder.runtime.context import Context
+        from loom.runtime.context import Context
         assert hasattr(Context, "compensate")
         assert asyncio.iscoroutinefunction(Context.compensate)
 
     def test_context_has_run_compensations(self) -> None:
-        from workflow_builder.runtime.context import Context
+        from loom.runtime.context import Context
         assert hasattr(Context, "run_compensations")
         assert asyncio.iscoroutinefunction(Context.run_compensations)
 
     def test_context_has_patched(self) -> None:
-        from workflow_builder.runtime.context import Context
+        from loom.runtime.context import Context
         assert hasattr(Context, "patched")
 
     def test_context_has_continue_as_new(self) -> None:
-        from workflow_builder.runtime.context import Context
+        from loom.runtime.context import Context
         assert hasattr(Context, "continue_as_new")
         assert asyncio.iscoroutinefunction(Context.continue_as_new)
 

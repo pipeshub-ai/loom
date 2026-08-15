@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from workflow_builder.cli import build_parser
-from workflow_builder.cli.mcp_setup import (
+from loom.cli import build_parser
+from loom.cli.mcp_setup import (
     CLIENTS,
     build_entry,
     cmd_setup,
@@ -41,7 +41,7 @@ def _args(tmp_path: Path, client: str, **overrides):
 
 
 def _is_loom_command(command: str) -> bool:
-    return Path(command).name in {"loom", "workflow-builder"}
+    return Path(command).name in {"loom", "loomflow"}
 
 
 class TestBuildEntry:
@@ -221,7 +221,7 @@ class TestDryRun:
 
 class TestAllClients:
     def test_all_rejects_an_explicit_path(self, tmp_path: Path) -> None:
-        from workflow_builder.cli.output import Exit
+        from loom.cli.output import Exit
 
         args = _args(tmp_path, "all", path=str(tmp_path / "x"))
         assert cmd_setup(args) == Exit.USAGE
@@ -231,7 +231,7 @@ class TestAllClients:
     ) -> None:
         """Redirect the global-only clients' paths into tmp_path first — 'all'
         must never touch a developer's real Claude Desktop/Codex config."""
-        import workflow_builder.cli.mcp_setup as mcp_setup
+        import loom.cli.mcp_setup as mcp_setup
 
         patched = {
             client_id: dataclasses.replace(

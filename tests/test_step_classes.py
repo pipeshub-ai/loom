@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from workflow_builder.core.exceptions import ConfigurationError
-from workflow_builder.core.retry import DEFAULT_RETRY, NO_RETRY
-from workflow_builder.steps.definition import (
+from loom.core.exceptions import ConfigurationError
+from loom.core.retry import DEFAULT_RETRY, NO_RETRY
+from loom.steps.definition import (
     StepClass,
     StepDefinition,
     effect,

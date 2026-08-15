@@ -2,7 +2,7 @@
 
 *What every durable operation is weighed against.*
 
-Defined in `workflow_builder/runtime/effects.py`.
+Defined in `loom/runtime/effects.py`.
 
 <!-- BEGIN GENERATED — do not edit below this line -->
 

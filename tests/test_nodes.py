@@ -13,9 +13,9 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, Field
 
-from workflow_builder import Context, Runtime, workflow
-from workflow_builder.core.exceptions import GuardrailTripwire
-from workflow_builder.nodes import (
+from loom import Context, Runtime, workflow
+from loom.core.exceptions import GuardrailTripwire
+from loom.nodes import (
     HumanChannelMissing,
     Node,
     NodeCategory,
@@ -27,15 +27,15 @@ from workflow_builder.nodes import (
     get_node_catalog,
     load_builtin_nodes,
 )
-from workflow_builder.nodes.guard import GuardInput, GuardVerdict
-from workflow_builder.nodes.human import (
+from loom.nodes.guard import GuardInput, GuardVerdict
+from loom.nodes.human import (
     ApprovalIn,
     AutoRespondChannel,
     ChoiceIn,
     LogChannel,
     ReviewIn,
 )
-from workflow_builder.state import MemoryStore
+from loom.stores import MemoryStore
 
 load_builtin_nodes()
 
@@ -186,13 +186,13 @@ class TestTheCatalogScales:
         vacuous, which is worse than not checking.
         """
         probe = (
-            "NODE = 'workflow_builder.nodes.human.nodes:ApprovalNode';"
+            "NODE = 'loom.nodes.human.nodes:ApprovalNode';"
             "import sys;"
-            "from workflow_builder.nodes import NodeRegistry, NodeSpec;"
+            "from loom.nodes import NodeRegistry, NodeSpec;"
             "r = NodeRegistry();"
             "r.register(NodeSpec(id='x.y', node_class=NODE));"
             "r.search('y');"
-            "print('workflow_builder.nodes.human.nodes' in sys.modules)"
+            "print('loom.nodes.human.nodes' in sys.modules)"
         )
         done = subprocess.run(
             [sys.executable, "-c", probe], capture_output=True, text=True, check=True
@@ -201,13 +201,13 @@ class TestTheCatalogScales:
 
     def test_resolution_is_what_imports(self) -> None:
         probe = (
-            "NODE = 'workflow_builder.nodes.human.nodes:ApprovalNode';"
+            "NODE = 'loom.nodes.human.nodes:ApprovalNode';"
             "import sys;"
-            "from workflow_builder.nodes import NodeRegistry, NodeSpec;"
+            "from loom.nodes import NodeRegistry, NodeSpec;"
             "r = NodeRegistry();"
             "r.register(NodeSpec(id='x.y', node_class=NODE));"
             "r.resolve('x.y');"
-            "print('workflow_builder.nodes.human.nodes' in sys.modules)"
+            "print('loom.nodes.human.nodes' in sys.modules)"
         )
         done = subprocess.run(
             [sys.executable, "-c", probe], capture_output=True, text=True, check=True
@@ -262,7 +262,7 @@ class TestTheAgentGetsCode:
         to write code against one invents an import to match.
         """
         contract = get_node_catalog().contract("human.approval")
-        assert "from workflow_builder.nodes.human import ApprovalIn, ApprovalOut" in contract
+        assert "from loom.nodes.human import ApprovalIn, ApprovalOut" in contract
 
     def test_it_says_what_a_schema_cannot(self) -> None:
         contract = get_node_catalog().contract("human.approval")
@@ -292,14 +292,14 @@ class TestTheAgentGetsCode:
             compile(f"async def _():\n{body}", f"<{node_id}>", "exec")
 
     def test_the_agent_tools_are_present_and_bound(self) -> None:
-        from workflow_builder.agents.coding_tools import build_coding_tools
+        from loom.agents.coding_tools import build_coding_tools
 
         names = {t.name for t in build_coding_tools()}
         assert {"search_nodes", "show_node", "node_contract"} <= names
 
     async def test_search_reports_the_catalog_when_nothing_matches(self) -> None:
         """A dead end must hand back the next move, not just a negative."""
-        from workflow_builder.agents.coding_tools import search_nodes
+        from loom.agents.coding_tools import search_nodes
 
         answer = await search_nodes.fn("wobbulator")
         assert "categories" in answer and "human" in answer
@@ -406,7 +406,7 @@ class TestGuards:
     async def test_allow_passes_the_value_through(self, guarded_runtime: Runtime) -> None:
         @workflow(name="g_allow")
         async def flow(ctx: Context, text: str) -> Any:
-            from workflow_builder.nodes.guard import PolicyIn
+            from loom.nodes.guard import PolicyIn
 
             return await ctx.guard("guard.policy", PolicyIn(value=text, deny_if=["nope"]))
 
@@ -426,7 +426,7 @@ class TestGuards:
 
         @workflow(name="g_reject")
         async def flow(ctx: Context, text: str) -> Any:
-            from workflow_builder.nodes.guard import PolicyIn
+            from loom.nodes.guard import PolicyIn
 
             return await ctx.guard(
                 "guard.policy", PolicyIn(value=text, deny_if=["DROP TABLE"])
@@ -442,7 +442,7 @@ class TestGuards:
     ) -> None:
         @workflow(name="g_replace")
         async def flow(ctx: Context, text: str) -> Any:
-            from workflow_builder.nodes.guard import PiiIn
+            from loom.nodes.guard import PiiIn
 
             return await ctx.guard(
                 "guard.pii", PiiIn(value=text, kinds=["api_key"], redact=True)
@@ -455,14 +455,14 @@ class TestGuards:
         assert "sk-abcdefghijklmnop1234" not in result.output
 
     async def test_tripwire_fails_the_run(self, guarded_runtime: Runtime) -> None:
-        from workflow_builder.nodes.guard import enforce
+        from loom.nodes.guard import enforce
 
         with pytest.raises(GuardrailTripwire):
             enforce(GuardVerdict.tripwire("policy"), guard="g", value=1)
 
     async def test_a_guard_that_raises_is_a_tripwire_not_an_allow(self) -> None:
         """A check that cannot run has found nothing, so it must not open the gate."""
-        from workflow_builder.nodes.guard import apply_guards
+        from loom.nodes.guard import apply_guards
 
         def explode(_: Any) -> Any:
             raise RuntimeError("the policy service is down")
@@ -507,8 +507,8 @@ class TestGuards:
         assert Recorder.ran is False, "the guard ran after the body"
 
     async def test_the_agent_guardrail_abstraction_is_reused_not_forked(self) -> None:
-        from workflow_builder.agents.guardrails import reject as agent_reject
-        from workflow_builder.nodes.guard import as_verdict
+        from loom.agents.guardrails import reject as agent_reject
+        from loom.nodes.guard import as_verdict
 
         verdict = as_verdict(agent_reject("no"))
         assert verdict.blocked and verdict.message == "no"
@@ -657,6 +657,24 @@ class TestHumanInTheLoop:
 
 
 class TestTheStandardLibrary:
+    def test_every_category_is_actually_populated(self) -> None:
+        """A regression guard with a specific history.
+
+        Flattening ``nodes/stdlib/`` collapsed the loader's module list to the
+        ``loom.nodes`` *package*, which imports fine — so nothing raised, and
+        the catalog came back with 10 nodes in two categories instead of 26 in
+        six. The loud loader cannot help when the import succeeds and simply
+        registers nothing, so the count is asserted directly.
+        """
+        counts = {c.value: n for c, n in get_node_catalog().categories().items()}
+        assert counts.get("human", 0) >= 5, counts
+        assert counts.get("guard", 0) >= 5, counts
+        assert counts.get("control", 0) >= 5, counts
+        assert counts.get("transform", 0) >= 5, counts
+        assert counts.get("io", 0) >= 2, counts
+        assert counts.get("agent", 0) >= 4, counts
+        assert sum(counts.values()) >= 26, counts
+
     def test_every_builtin_declares_what_the_agent_needs(self) -> None:
         catalog = get_node_catalog()
         assert len(catalog.node_ids()) >= 20
@@ -800,7 +818,7 @@ class TestCustomNodes:
         A third-party node runs inside somebody's workflow. It may do durable
         work; it may not end the run, spawn children, or publish as the parent.
         """
-        from workflow_builder.nodes.base import NodeContext
+        from loom.nodes.base import NodeContext
 
         for forbidden in ("continue_as_new", "child", "publish", "signal", "state",
                           "put_artifact", "compensate"):
@@ -835,7 +853,7 @@ class TestPendingRequestsAreFindable:
 
     @pytest.fixture
     async def parked(self) -> Any:
-        from workflow_builder.facade import LocalFacade
+        from loom.facade import LocalFacade
 
         runtime = Runtime(store=MemoryStore(), human=LogChannel())
         runtime.register(refund_flow)
@@ -889,7 +907,7 @@ class TestPendingRequestsAreFindable:
         assert await facade.pending() == []
 
     async def test_a_completed_run_is_not_listed(self) -> None:
-        from workflow_builder.facade import LocalFacade
+        from loom.facade import LocalFacade
 
         channel = AutoRespondChannel(approve=True)
         runtime = Runtime(store=MemoryStore(), human=channel)
@@ -901,7 +919,7 @@ class TestPendingRequestsAreFindable:
     async def test_the_older_wait_for_approval_is_listed_too(self) -> None:
         """It has no ticket, so the node fields are empty — but it is waiting on
         a person, and omitting it would make the queue quietly incomplete."""
-        from workflow_builder.facade import LocalFacade
+        from loom.facade import LocalFacade
 
         @workflow(name="old_style_pending")
         async def old(ctx: Context, _: Any = None) -> str:
@@ -917,7 +935,7 @@ class TestPendingRequestsAreFindable:
         assert waiting[0]["prompt"] == ""
 
     async def test_the_node_catalog_is_reachable_through_the_facade(self) -> None:
-        from workflow_builder.facade import LocalFacade
+        from loom.facade import LocalFacade
 
         facade = LocalFacade(Runtime(store=MemoryStore()))
         assert {row["id"] for row in await facade.nodes(category="human")} >= {
@@ -929,8 +947,8 @@ class TestPendingRequestsAreFindable:
     def test_every_facade_adapter_carries_the_new_capabilities(self) -> None:
         """One port, every surface. The parity suite already asserts the whole
         port; this names the four so a failure says which."""
-        from workflow_builder.facade import LocalFacade, RemoteFacade
-        from workflow_builder.identity.facade import AuthorizedFacade
+        from loom.facade import LocalFacade, RemoteFacade
+        from loom.identity.facade import AuthorizedFacade
 
         for adapter in (LocalFacade, RemoteFacade, AuthorizedFacade):
             for method in ("pending", "respond", "nodes", "node"):
@@ -954,7 +972,7 @@ class TestAGuardReturnsWhatTheRunShouldUse:
     async def test_allow_returns_the_subject_not_the_wrapper(
         self, runtime: Runtime
     ) -> None:
-        from workflow_builder.nodes.guard import PiiIn
+        from loom.nodes.guard import PiiIn
 
         @workflow(name="guard_allow_type")
         async def flow(ctx: Context, draft: str) -> Any:
@@ -968,7 +986,7 @@ class TestAGuardReturnsWhatTheRunShouldUse:
     async def test_replace_returns_the_same_type_as_allow(
         self, runtime: Runtime
     ) -> None:
-        from workflow_builder.nodes.guard import PiiIn
+        from loom.nodes.guard import PiiIn
 
         @workflow(name="guard_replace_type")
         async def flow(ctx: Context, draft: str) -> Any:

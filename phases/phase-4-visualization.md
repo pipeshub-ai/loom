@@ -13,7 +13,7 @@ a live React app, as PipesHub does) builds it as a consumer of WGIR, not a
 replacement for it: render however you like, then verify the render's
 node/edge set against WGIR before showing it to a user, the same way
 `Explainer._verify_completeness` (§3.7) already checks a narration against the
-skeleton. See [`docs/pipeshub-integration.md`](../docs/pipeshub-integration.md)
+skeleton. See [`docs/design/pipeshub-integration.md`](../docs/design/pipeshub-integration.md)
 §9.2 for the full reconciliation and why an agent-only render (no
 verification step) is a regression from what this phase guarantees.
 
@@ -812,7 +812,7 @@ flowchart LR
 
 | Gap | Impact | Mitigation |
 |-----|--------|------------|
-| **libcst dependency** | Adds ~5MB to package | Make it optional (`pip install workflow-builder[viz]`) |
+| **libcst dependency** | Adds ~5MB to package | Make it optional (`pip install loomflow[viz]`) |
 | **Symbolic execution failures** | Sentinel values may cause unexpected errors | Wrap in try/except, fall back to registry + AST only |
 | **Model narration quality** | Depends on LLM quality; may degrade on model swap | Golden set CI catches quality drops |
 | **GraphPatch completeness** | Only 6 ops — complex edits rejected | "Edit in IDE" fallback + coding agent |

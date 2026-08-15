@@ -1,0 +1,505 @@
+"""Jira step functions for use inside LOOM workflows.
+
+Each function is decorated with @step so it can be called via ctx.step().
+The JiraClient is instantiated lazily on first call — credentials come from
+JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN environment variables.
+
+All functions return typed Pydantic models from ``models.py``.
+
+Usage in a generated workflow::
+
+    from loom.toolsets.jira.tools import (
+        jira_search_issues,
+        jira_create_issue,
+    )
+
+    issues = await ctx.step(jira_search_issues, "project = XYZ AND status = Open")
+    new    = await ctx.step(jira_create_issue, "XYZ", "Fix login bug")
+"""
+
+from __future__ import annotations
+
+from loom import Retry, step
+from loom.toolsets.jira.models import (
+    Comment,
+    CreatedIssue,
+    JiraIssue,
+    JiraProject,
+    JiraProjectDetail,
+    JiraUser,
+    ProjectMetadata,
+    Transition,
+    UserLookup,
+)
+from loom.toolsets.pagination import Results
+
+
+@step(retry=Retry(max_attempts=3, initial_delay=1.0))
+async def jira_search_issues(
+    jql: str,
+    max_results: int = 20,
+) -> Results[JiraIssue]:
+    """Search Jira issues using JQL.
+
+    Args:
+        jql: JQL query string, e.g. ``"project = XYZ AND status = Open"``.
+        max_results: Maximum number of issues to return (default 20).
+
+    Returns:
+        List of JiraIssue models with: key, summary, status, assignee,
+        priority, issue_type, project, labels, created, updated, url.
+    """
+    from loom.toolsets.jira.client import get_default_client
+
+    return await get_default_client().search_issues(jql, max_results)
+
+
+@step(retry=Retry(max_attempts=3, initial_delay=1.0))
+async def jira_get_issue(issue_key: str) -> JiraIssue:
+    """Fetch a single Jira issue by key.
+
+    Args:
+        issue_key: Issue key, e.g. ``"PROJ-123"``.
+
+    Returns:
+        JiraIssue with key, summary, status, assignee, priority, url, etc.
+    """
+    from loom.toolsets.jira.client import get_default_client
+
+    return await get_default_client().get_issue(issue_key)
+
+
+@step(retry=Retry(max_attempts=2, initial_delay=1.0))
+async def jira_create_issue(
+    project_key: str,
+    summary: str,
+    description: str = "",
+    issue_type: str = "Story",
+    priority: str = "Medium",
+    labels: list[str] | None = None,
+) -> CreatedIssue:
+    """Create a new Jira issue.
+
+    Args:
+        project_key: Project key, e.g. ``"XYZ"``.
+        summary: Issue title / summary.
+        description: Longer description (plain text).
+        issue_type: ``"Story"``, ``"Bug"``, ``"Task"``, ``"Epic"``, etc.
+        priority: ``"Highest"``, ``"High"``, ``"Medium"``, ``"Low"``.
+        labels: Optional list of label strings.
+
+    Returns:
+        CreatedIssue with key, id, and browse url.
+    """
+    from loom.toolsets.jira.client import get_default_client
+
+    return await get_default_client().create_issue(
+        project_key, summary, description, issue_type, priority, labels
+    )
+
+
+@step(retry=Retry(max_attempts=2, initial_delay=1.0))
+async def jira_update_issue(
+    issue_key: str,
+    fields: dict,
+) -> JiraIssue:
+    """Update fields on an existing Jira issue.
+
+    Args:
+        issue_key: Issue key, e.g. ``"PROJ-123"``.
+        fields: Dict of Jira field names to new values,
+                e.g. ``{"priority": {"name": "High"}}``.
+
+    Returns:
+        Updated JiraIssue.
+    """
+    from loom.toolsets.jira.client import get_default_client
+
+    return await get_default_client().update_issue(issue_key, fields)
+
+
+@step(retry=Retry(max_attempts=2, initial_delay=1.0))
+async def jira_add_comment(
+    issue_key: str, comment: str
+) -> Comment:
+    """Add a comment to a Jira issue.
+
+    Args:
+        issue_key: Issue key, e.g. ``"PROJ-123"``.
+        comment: Plain-text comment body.
+
+    Returns:
+        Comment with id, author, and created timestamp.
+    """
+    from loom.toolsets.jira.client import get_default_client
+
+    return await get_default_client().add_comment(issue_key, comment)
+
+
+@step(retry=Retry(max_attempts=3, initial_delay=1.0))
+async def jira_get_transitions(
+    issue_key: str,
+) -> list[Transition]:
+    """Get available status transitions for a Jira issue.
+
+    Args:
+        issue_key: Issue key, e.g. ``"PROJ-123"``.
+
+    Returns:
+        List of Transition models with id and name.
+    """
+    from loom.toolsets.jira.client import get_default_client
+
+    return await get_default_client().get_transitions(issue_key)
+
+
+@step(retry=Retry(max_attempts=2, initial_delay=1.0))
+async def jira_transition_issue(
+    issue_key: str,
+    transition_name: str,
+) -> JiraIssue:
+    """Transition a Jira issue to a new status by transition name.
+
+    Fetches available transitions first and matches by name
+    (case-insensitive).
+
+    Args:
+        issue_key: Issue key, e.g. ``"PROJ-123"``.
+        transition_name: Name of the transition, e.g. ``"In Progress"``.
+
+    Returns:
+        Updated JiraIssue after the transition.
+    """
+    from loom.toolsets.jira.client import get_default_client
+
+    client = get_default_client()
+    transitions = await client.get_transitions(issue_key)
+    match = next(
+        (t for t in transitions if t.name.lower() == transition_name.lower()),
+        None,
+    )
+    if match is None:
+        available = [t.name for t in transitions]
+        msg = (
+            f"No transition '{transition_name}' on {issue_key}. "
+            f"Available: {available}"
+        )
+        raise ValueError(msg)
+    return await client.transition_issue(issue_key, match.id)
+
+
+@step(retry=Retry(max_attempts=3, initial_delay=1.0))
+async def jira_list_projects() -> list[JiraProject]:
+    """List all accessible Jira projects.
+
+    Returns:
+        List of JiraProject models with key, name, and id.
+    """
+    from loom.toolsets.jira.client import get_default_client
+
+    return await get_default_client().list_projects()
+
+
+@step(retry=Retry(max_attempts=3, initial_delay=1.0))
+async def jira_search_users(
+    query: str,
+    max_results: int = 10,
+) -> Results[JiraUser]:
+    """Find Jira users by display name or email address.
+
+    Use this before writing a JQL clause about a person. JQL addresses people by
+    accountId; a display name works until two people share one or somebody is
+    renamed, and then it silently matches nothing rather than failing.
+
+    Args:
+        query: Part of a display name or email, e.g. ``"Vishwjeet"``.
+        max_results: Maximum users to return (default 10).
+
+    Returns:
+        List of JiraUser with account_id, display_name, email, active.
+        Empty when nobody matches — which is worth distinguishing from
+        "the person exists but has no matching issues".
+    """
+    from loom.toolsets.jira.client import get_default_client
+
+    return await get_default_client().search_users(query, max_results)
+
+
+@step(retry=Retry(max_attempts=3, initial_delay=1.0))
+async def jira_get_myself() -> JiraUser:
+    """Get the authenticated Jira user's profile.
+
+    Returns:
+        JiraUser with account_id, display_name, and email.
+    """
+    from loom.toolsets.jira.client import get_default_client
+
+    return await get_default_client().get_myself()
+
+
+@step(retry=Retry(max_attempts=3, initial_delay=1.0))
+async def jira_resolve_user(name: str) -> UserLookup:
+    """Find a person by name, tolerating a misspelling.
+
+    Prefer this over jira_search_users when the name came from a human. Jira's
+    search is a substring match, so one wrong letter returns nothing at all and
+    an empty result reads as "no such person" instead of "check the spelling".
+
+    Args:
+        name: A display name or part of one, possibly misspelled.
+
+    Returns:
+        UserLookup with matches, exact (False when it is a near-miss guess),
+        and note. Check ``exact`` before acting on a write: resolving a typo to
+        the nearest human is fine for a read and reckless for an assignment.
+    """
+    from loom.toolsets.jira.client import get_default_client
+
+    return await get_default_client().resolve_user(name)
+
+
+@step(retry=Retry(max_attempts=3, initial_delay=1.0))
+async def jira_get_project_metadata(project_key: str) -> ProjectMetadata:
+    """List the status, priority, and issue-type names a project actually uses.
+
+    Call this before filtering a search on either. Status and priority names are
+    per-project configuration — "In Progress" and "High" are common defaults,
+    not guarantees — and a JQL filter naming one the board does not have returns
+    zero rows with no error, which reads as "no such work".
+
+    Args:
+        project_key: Project key, e.g. ``"QUES"``.
+
+    Returns:
+        ProjectMetadata with statuses, priorities, and issue_types.
+    """
+    from loom.toolsets.jira.client import get_default_client
+
+    return await get_default_client().get_metadata(project_key)
+
+
+@step(retry=Retry(max_attempts=3, initial_delay=1.0))
+async def jira_get_project(project_key: str) -> JiraProjectDetail:
+    """Get one project's details.
+
+    Args:
+        project_key: Project key, e.g. ``"QUES"``.
+
+    Returns:
+        JiraProjectDetail with key, name, id, description, lead.
+    """
+    from loom.toolsets.jira.client import get_default_client
+
+    return await get_default_client().get_project(project_key)
+
+
+@step(retry=Retry(max_attempts=3, initial_delay=1.0))
+async def jira_get_comments(issue_key: str, max_results: int = 20) -> Results[Comment]:
+    """Read an issue's comments.
+
+    Args:
+        issue_key: Issue key, e.g. ``"PROJ-123"``.
+        max_results: Maximum comments to return (default 20).
+
+    Returns:
+        List of Comment with id, author, created, and body as plain text.
+    """
+    from loom.toolsets.jira.client import get_default_client
+
+    return await get_default_client().get_comments(issue_key, max_results)
+
+
+@step(retry=Retry(max_attempts=2, initial_delay=1.0))
+async def jira_assign_issue(issue_key: str, account_id: str | None) -> JiraIssue:
+    """Assign an issue, or unassign it.
+
+    Args:
+        issue_key: Issue key, e.g. ``"PROJ-123"``.
+        account_id: The assignee's accountId, from jira_resolve_user. Pass None
+            to unassign. A display name will not work here.
+
+    Returns:
+        The updated JiraIssue.
+    """
+    from loom.toolsets.jira.client import get_default_client
+
+    return await get_default_client().assign_issue(issue_key, account_id)
+
+
+@step(retry=Retry(max_attempts=1))
+async def jira_delete_issue(issue_key: str, delete_subtasks: bool = False) -> str:
+    """Permanently delete an issue. There is no undo, and no retry.
+
+    Args:
+        issue_key: Issue key, e.g. ``"PROJ-123"``.
+        delete_subtasks: Delete its subtasks too. Jira refuses otherwise when
+            the issue has any.
+
+    Returns:
+        The key that was deleted, so the journal records what went.
+    """
+    from loom.toolsets.jira.client import get_default_client
+
+    return await get_default_client().delete_issue(issue_key, delete_subtasks)
+
+
+# ---------------------------------------------------------------------------
+# Auto-generated tool documentation
+# ---------------------------------------------------------------------------
+
+
+def _build_tool_docs() -> str:
+    """Build JIRA_TOOL_DOCS from model schemas and function signatures.
+
+    This keeps the docs DRY — they are derived from the actual
+    Pydantic models and function signatures, not hand-written.
+    """
+    from loom.toolsets.jira.models import (
+        Comment as _Comment,
+    )
+    from loom.toolsets.jira.models import (
+        CreatedIssue as _CreatedIssue,
+    )
+    from loom.toolsets.jira.models import (
+        JiraIssue as _JiraIssue,
+    )
+    from loom.toolsets.jira.models import (
+        JiraProject as _JiraProject,
+    )
+    from loom.toolsets.jira.models import (
+        JiraUser as _JiraUser,
+    )
+    from loom.toolsets.jira.models import (
+        Transition as _Transition,
+    )
+
+    def _fields(model: type) -> str:
+        props = model.model_json_schema().get("properties", {})
+        return ", ".join(props)
+
+    return f"""\
+## Available Jira Tools
+
+Import: from loom.toolsets.jira.tools import <tool_name>
+Usage:  result = await ctx.step(<tool_name>, arg1, arg2, ...)
+
+Credentials are read automatically from env vars:
+  JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN
+
+All tools return typed Pydantic models (not plain dicts).
+Use attribute access: issue.key, issue.status, project.name, etc.
+
+Two things that make a JQL query return nothing rather than fail:
+
+  - Status and priority names differ per project. "In Progress" and "High"
+    are common defaults, not guarantees — a board may use "Blocked",
+    "Highest", or names in another language. When a filtered search comes
+    back empty, search without the filter and report the values that do
+    exist, so an empty result can be told apart from a wrong guess.
+  - People are addressed by accountId. Resolve a name with
+    jira_search_users first.
+
+### Tools
+
+jira_search_issues(jql: str, max_results: int = 20) -> Results[JiraIssue]
+  Search using a JQL string. Returns a Results list — a list subclass with
+  .complete (bool: False when the source had more and max_results cut it off),
+  .total (int | None: how many matched in all), and .summary() (str).
+  Always check .complete when the set could be large; raise max_results or
+  loop with the cursor to fetch everything.
+  JiraIssue fields: {_fields(_JiraIssue)}
+  Examples:
+    issues = await ctx.step(jira_search_issues, \
+"project = XYZ AND status = \\"To Do\\"")
+    issues = await ctx.step(jira_search_issues, \
+"assignee = currentUser() AND sprint in openSprints()")
+    issues = await ctx.step(jira_search_issues, \
+"issuetype = Bug AND priority = High", 50)
+    # Check coverage:
+    if not issues.complete:
+        n, t = len(issues), issues.total
+        await ctx.report(f"showing {{n}} of {{t}}")
+
+jira_get_issue(issue_key: str) -> JiraIssue
+  Fetch a single issue by key.
+    issue = await ctx.step(jira_get_issue, "PROJ-123")
+    print(issue.summary, issue.status)
+
+jira_create_issue(project_key, summary, description="", \
+issue_type="Story", priority="Medium", labels=None) -> CreatedIssue
+  Create an issue.
+  CreatedIssue fields: {_fields(_CreatedIssue)}
+    created = await ctx.step(jira_create_issue, "XYZ", "Add login", \
+"SSO support", "Story", "High")
+    print(created.key, created.url)
+
+jira_update_issue(issue_key: str, fields: dict) -> JiraIssue
+  Update Jira fields. Returns updated issue.
+    updated = await ctx.step(jira_update_issue, "PROJ-123", \
+{{"priority": {{"name": "High"}}}})
+
+jira_add_comment(issue_key: str, comment: str) -> Comment
+  Add a plain-text comment.
+  Comment fields: {_fields(_Comment)}
+    c = await ctx.step(jira_add_comment, "PROJ-123", "Fixed in v2")
+    print(c.id, c.author)
+
+jira_get_transitions(issue_key: str) -> list[Transition]
+  List available transitions.
+  Transition fields: {_fields(_Transition)}
+
+jira_transition_issue(issue_key: str, transition_name: str) -> JiraIssue
+  Move issue to new status by name (case-insensitive).
+    updated = await ctx.step(jira_transition_issue, "PROJ-123", \
+"In Progress")
+
+jira_list_projects() -> list[JiraProject]
+  List all accessible projects.
+  JiraProject fields: {_fields(_JiraProject)}
+    projects = await ctx.step(jira_list_projects)
+    for p in projects: print(p.key, p.name)
+
+jira_resolve_user(name: str) -> UserLookup
+  Find a person by name, tolerating a misspelling. Prefer this when the
+  name came from a human — Jira's search is a substring match, so one
+  wrong letter returns nothing and reads as "no such person".
+    found = await ctx.step(jira_resolve_user, "Viswajeet")
+    if found.matches and found.exact:
+        aid = found.matches[0].account_id
+    elif found.matches:
+        # A guess. Fine to read with, confirm before writing.
+        aid = found.matches[0].account_id
+
+jira_get_project_metadata(project_key: str) -> ProjectMetadata
+  The status, priority, and issue-type names this project actually uses.
+  Call before filtering: a JQL filter naming a status the board does not
+  have returns zero rows with no error.
+    meta = await ctx.step(jira_get_project_metadata, "QUES")
+    print(meta.statuses, meta.priorities)
+
+jira_get_project(project_key: str) -> JiraProjectDetail
+jira_get_comments(issue_key: str, max_results: int = 20) -> Results[Comment]
+  Returns a Results list (.complete, .total, .summary()).
+jira_assign_issue(issue_key: str, account_id: str | None) -> JiraIssue
+  Takes an accountId, not a name. None unassigns.
+jira_delete_issue(issue_key: str, delete_subtasks: bool = False) -> str
+  Permanent. Not retried.
+
+jira_search_users(query: str, max_results: int = 10) -> Results[JiraUser]
+  Resolve a person's name to an accountId before using them in JQL.
+  Returns a Results list (.complete, .total, .summary()).
+  JiraUser fields: {_fields(_JiraUser)}
+    users = await ctx.step(jira_search_users, "Vishwjeet")
+    if users:
+        jql = f'assignee = "{{users[0].account_id}}" AND status = "In Progress"'
+        issues = await ctx.step(jira_search_issues, jql)
+
+jira_get_myself() -> JiraUser
+  Get authenticated user.
+  JiraUser fields: {_fields(_JiraUser)}
+    me = await ctx.step(jira_get_myself)
+    print(me.display_name, me.email)
+"""
+
+
+JIRA_TOOL_DOCS: str = _build_tool_docs()

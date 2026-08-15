@@ -12,11 +12,11 @@ import json
 
 import pytest
 
-from workflow_builder.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
-from workflow_builder.agents.coding_tools import call_read_operation
-from workflow_builder.agents.tool_registry import ToolsetRegistry
-from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
-from workflow_builder.toolsets.manifest import (
+from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
+from loom.agents.coding_tools import call_read_operation
+from loom.agents.tool_registry import ToolsetRegistry
+from loom.toolsets.jira.manifest import JIRA_MANIFEST
+from loom.toolsets.manifest import (
     OperationSpec,
     ToolsetManifest,
 )
@@ -25,7 +25,7 @@ from workflow_builder.toolsets.manifest import (
 @pytest.fixture(autouse=True)
 def _jira_registered():
     """The global catalog is reset between tests; these need Jira in it."""
-    from workflow_builder.toolsets.registry import get_catalog, register_toolset
+    from loom.toolsets.registry import get_catalog, register_toolset
 
     register_toolset(JIRA_MANIFEST)
     yield
@@ -45,7 +45,7 @@ class TestResolversAreDeclarative:
         assert JIRA_MANIFEST.resolvers()["user"].function == "jira_resolve_user"
 
     def test_a_toolset_with_none_reports_none(self) -> None:
-        from workflow_builder.toolsets.google import GMAIL_MANIFEST
+        from loom.toolsets.google import GMAIL_MANIFEST
 
         assert GMAIL_MANIFEST.resolvers() == {}
 
@@ -135,7 +135,7 @@ class TestAuthoringMayOnlyRead:
         monkeypatch.delenv("JIRA_URL", raising=False)
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
 
-        import workflow_builder.toolsets.jira.client as client_module
+        import loom.toolsets.jira.client as client_module
 
         monkeypatch.setattr(client_module, "_default_client", None)
 
@@ -150,7 +150,7 @@ def prompt_text() -> str:
     Assertions on wrapped prose otherwise break the moment a line is rewrapped,
     which says nothing about whether the instruction is still there.
     """
-    from workflow_builder.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
+    from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
 
     return " ".join(DEFAULT_SYSTEM_PROMPT.split())
 
@@ -159,7 +159,7 @@ class TestThePromptStaysGeneric:
     """No toolset or person should be named in instructions every spec pays for."""
 
     def test_it_names_no_specific_toolset_or_person(self) -> None:
-        from workflow_builder.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
+        from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
 
         for specific in ("jira", "Jira", "slack", "Slack", "github", "Vishwjeet"):
             assert specific not in DEFAULT_SYSTEM_PROMPT, specific
@@ -202,7 +202,7 @@ class TestThePromptTeachesTheLadder:
         assert "re-answers it, differently, on every run" in prompt
 
     def test_the_tool_is_offered_to_the_agent(self) -> None:
-        from workflow_builder.agents.coding_tools import build_coding_tools
+        from loom.agents.coding_tools import build_coding_tools
 
         names = {t.name for t in build_coding_tools()}
         assert "call_read_operation" in names
@@ -220,8 +220,8 @@ class TestToolsetsLoadOnDemand:
     """
 
     def _registry(self) -> ToolsetRegistry:
-        from workflow_builder.toolsets.confluence.manifest import CONFLUENCE_MANIFEST
-        from workflow_builder.toolsets.google import (
+        from loom.toolsets.confluence.manifest import CONFLUENCE_MANIFEST
+        from loom.toolsets.google import (
             GMAIL_MANIFEST,
             GOOGLE_CALENDAR_MANIFEST,
         )
@@ -247,7 +247,7 @@ class TestToolsetsLoadOnDemand:
         A ratio alone would pass while the index still carried per-operation
         detail; this compares a small toolset against a large one.
         """
-        from workflow_builder.toolsets.manifest import OperationSpec, ToolsetManifest
+        from loom.toolsets.manifest import OperationSpec, ToolsetManifest
 
         def manifest(op_count: int) -> ToolsetManifest:
             return ToolsetManifest(
@@ -298,7 +298,7 @@ class TestToolsetsLoadOnDemand:
     def test_the_index_keeps_the_import_line(self) -> None:
         """The one line that stops an import being invented."""
         index = self._registry().describe(detail="index")
-        assert "from workflow_builder.toolsets.jira.tools import" in index
+        assert "from loom.toolsets.jira.tools import" in index
 
     def test_the_index_says_how_to_get_the_detail(self) -> None:
         index = self._registry().describe(detail="index")
@@ -306,7 +306,7 @@ class TestToolsetsLoadOnDemand:
         assert 'get_tool_docs("jira")' in index
 
     def test_the_system_prompt_uses_the_index(self) -> None:
-        from workflow_builder.agents.coding_agent import WorkflowCodingAgent
+        from loom.agents.coding_agent import WorkflowCodingAgent
 
         prompt = WorkflowCodingAgent(
             object(), tool_registry=self._registry()
@@ -330,10 +330,10 @@ class TestUnregisteredToolsetsAreRefused:
     """
 
     def test_an_unavailable_toolset_is_an_error(self) -> None:
-        from workflow_builder.agents.validator import CodeValidator
+        from loom.agents.validator import CodeValidator
 
         issues = CodeValidator(available_toolsets={"jira"}).validate(
-            "from workflow_builder.toolsets.slack.tools import slack_post\n"
+            "from loom.toolsets.slack.tools import slack_post\n"
         )
         toolset_issues = [i for i in issues if i.category == "toolset"]
 
@@ -343,42 +343,42 @@ class TestUnregisteredToolsetsAreRefused:
         assert "jira" in toolset_issues[0].message, "must name what IS available"
 
     def test_an_available_toolset_passes(self) -> None:
-        from workflow_builder.agents.validator import CodeValidator
+        from loom.agents.validator import CodeValidator
 
         issues = CodeValidator(available_toolsets={"jira"}).validate(
-            "from workflow_builder.toolsets.jira.tools import jira_get_issue\n"
+            "from loom.toolsets.jira.tools import jira_get_issue\n"
         )
         assert not [i for i in issues if i.category == "toolset"]
 
     def test_google_toolsets_are_matched_at_the_right_depth(self) -> None:
         """Their modules nest one deeper than the others."""
-        from workflow_builder.agents.validator import CodeValidator
+        from loom.agents.validator import CodeValidator
 
         issues = CodeValidator(available_toolsets={"gmail"}).validate(
-            "from workflow_builder.toolsets.google.gmail.tools import gmail_get_message\n"
+            "from loom.toolsets.google.gmail.tools import gmail_get_message\n"
         )
         assert not [i for i in issues if i.category == "toolset"]
 
     def test_each_missing_toolset_is_reported_once(self) -> None:
-        from workflow_builder.agents.validator import CodeValidator
+        from loom.agents.validator import CodeValidator
 
         issues = CodeValidator(available_toolsets=set()).validate(
-            "from workflow_builder.toolsets.slack.tools import a\n"
-            "from workflow_builder.toolsets.slack.client import b\n"
+            "from loom.toolsets.slack.tools import a\n"
+            "from loom.toolsets.slack.client import b\n"
         )
         assert len([i for i in issues if i.category == "toolset"]) == 1
 
     def test_the_check_is_off_by_default(self) -> None:
         """A caller who never said what exists should not be second-guessed."""
-        from workflow_builder.agents.validator import CodeValidator
+        from loom.agents.validator import CodeValidator
 
         issues = CodeValidator().validate(
-            "from workflow_builder.toolsets.slack.tools import slack_post\n"
+            "from loom.toolsets.slack.tools import slack_post\n"
         )
         assert not [i for i in issues if i.category == "toolset"]
 
     def test_the_agent_wires_the_registry_into_the_validator(self) -> None:
-        from workflow_builder.agents.coding_agent import WorkflowCodingAgent
+        from loom.agents.coding_agent import WorkflowCodingAgent
 
         registry = ToolsetRegistry()
         registry.register(JIRA_MANIFEST)
@@ -401,7 +401,7 @@ class TestARefusalIsLegible:
     """
 
     async def test_an_empty_result_reports_the_reason(self) -> None:
-        from workflow_builder.agents.coding_agent import (
+        from loom.agents.coding_agent import (
             CodingOutput,
             WorkflowCodingAgent,
         )
@@ -418,7 +418,7 @@ class TestARefusalIsLegible:
 
         agent = WorkflowCodingAgent(FakeModel(), smoke_test=False)
 
-        import workflow_builder.agents.agent as agent_module
+        import loom.agents.agent as agent_module
 
         class FakeAgent:
             def __init__(self, *a, **k) -> None: ...
@@ -513,7 +513,7 @@ class TestMarkdownByDefault:
         The margin above the current length is about one sentence wide on
         purpose, so the next addition has to run this search too.
         """
-        from workflow_builder.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
+        from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
 
         assert len(DEFAULT_SYSTEM_PROMPT) < 9000, "the prompt is drifting long"
 
@@ -528,7 +528,7 @@ class TestRepeatedLookupsAreStopped:
     """
 
     async def test_the_third_identical_call_is_refused(self) -> None:
-        from workflow_builder.agents.coding_tools import _call_read_operation
+        from loom.agents.coding_tools import _call_read_operation
 
         seen: dict[str, int] = {}
         results = [
@@ -547,7 +547,7 @@ class TestRepeatedLookupsAreStopped:
 
     async def test_every_encoding_counts_as_the_same_call(self) -> None:
         """The encodings the model actually cycled through."""
-        from workflow_builder.agents.coding_tools import _call_read_operation
+        from loom.agents.coding_tools import _call_read_operation
 
         seen: dict[str, int] = {}
         for arguments in ({}, None, "{}", ""):
@@ -560,7 +560,7 @@ class TestRepeatedLookupsAreStopped:
 
     async def test_the_refusal_says_what_to_do_instead(self) -> None:
         """Stopping a loop is only useful if it also names the way forward."""
-        from workflow_builder.agents.coding_tools import _call_read_operation
+        from loom.agents.coding_tools import _call_read_operation
 
         seen: dict[str, int] = {}
         for _ in range(3):
@@ -573,7 +573,7 @@ class TestRepeatedLookupsAreStopped:
         assert "return the workflow" in message
 
     async def test_different_calls_are_counted_apart(self) -> None:
-        from workflow_builder.agents.coding_tools import _call_read_operation
+        from loom.agents.coding_tools import _call_read_operation
 
         seen: dict[str, int] = {}
         for _ in range(3):
@@ -588,7 +588,7 @@ class TestRepeatedLookupsAreStopped:
 
     async def test_counting_is_off_when_no_ledger_is_passed(self) -> None:
         """The module-level tool is stateless; only a bound one counts."""
-        from workflow_builder.agents.coding_tools import _call_read_operation
+        from loom.agents.coding_tools import _call_read_operation
 
         for _ in range(5):
             out = await _call_read_operation(
@@ -609,12 +609,12 @@ class TestBoundAndUnboundToolsAgree:
     """
 
     def _by_name(self, **kwargs):
-        from workflow_builder.agents.coding_tools import build_coding_tools
+        from loom.agents.coding_tools import build_coding_tools
 
         return {tool.name: tool for tool in build_coding_tools(**kwargs)}
 
     def test_every_tool_keeps_its_schema_when_bound(self) -> None:
-        from workflow_builder.agents.validator import CodeValidator
+        from loom.agents.validator import CodeValidator
 
         unbound = self._by_name()
         bound = self._by_name(
@@ -629,7 +629,7 @@ class TestBoundAndUnboundToolsAgree:
         """The schema is a promise about the call signature; check it holds."""
         import inspect
 
-        from workflow_builder.agents.validator import CodeValidator
+        from loom.agents.validator import CodeValidator
 
         bound = self._by_name(registry=ToolsetRegistry(), validator=CodeValidator())
         for name, tool in bound.items():
@@ -640,7 +640,7 @@ class TestBoundAndUnboundToolsAgree:
 
     async def test_the_bound_lookup_tool_actually_runs(self) -> None:
         """Calling it the way the model does, through its advertised schema."""
-        from workflow_builder.agents.validator import CodeValidator
+        from loom.agents.validator import CodeValidator
 
         registry = ToolsetRegistry()
         registry.register(JIRA_MANIFEST)
@@ -657,22 +657,22 @@ class TestBoundAndUnboundToolsAgree:
 class TestInventedModulePaths:
     """A toolset's id is not its module name.
 
-    ``google_calendar`` lives at ``workflow_builder.toolsets.google.calendar``.
+    ``google_calendar`` lives at ``loom.toolsets.google.calendar``.
     A model that knows only the id builds the import from it, which resolves as
     a plausible path and passes an id-based check — then fails at import, deep
     inside the smoke run, long after the cheap stage that should have caught it.
     """
 
     MODULES = {  # noqa: RUF012 - test data
-        "gmail": "workflow_builder.toolsets.google.gmail.tools",
-        "google_calendar": "workflow_builder.toolsets.google.calendar.tools",
+        "gmail": "loom.toolsets.google.gmail.tools",
+        "google_calendar": "loom.toolsets.google.calendar.tools",
     }
 
     def test_a_path_built_from_the_id_is_rejected(self) -> None:
-        from workflow_builder.agents.validator import CodeValidator
+        from loom.agents.validator import CodeValidator
 
         issues = CodeValidator(toolset_modules=self.MODULES).validate(
-            "from workflow_builder.toolsets.google_calendar import x\n"
+            "from loom.toolsets.google_calendar import x\n"
         )
         errors = [i for i in issues if i.category == "toolset"]
 
@@ -681,24 +681,24 @@ class TestInventedModulePaths:
         assert "google.calendar.tools" in errors[0].message, "must name the real one"
 
     def test_the_real_path_is_accepted(self) -> None:
-        from workflow_builder.agents.validator import CodeValidator
+        from loom.agents.validator import CodeValidator
 
         issues = CodeValidator(toolset_modules=self.MODULES).validate(
-            "from workflow_builder.toolsets.google.calendar.tools import x\n"
+            "from loom.toolsets.google.calendar.tools import x\n"
         )
         assert not [i for i in issues if i.category == "toolset"]
 
     def test_a_submodule_of_a_known_module_is_accepted(self) -> None:
-        from workflow_builder.agents.validator import CodeValidator
+        from loom.agents.validator import CodeValidator
 
         issues = CodeValidator(toolset_modules=self.MODULES).validate(
-            "from workflow_builder.toolsets.google.gmail.tools.extra import x\n"
+            "from loom.toolsets.google.gmail.tools.extra import x\n"
         )
         assert not [i for i in issues if i.category == "toolset"]
 
     def test_the_agent_supplies_the_real_paths(self) -> None:
-        from workflow_builder.agents.coding_agent import WorkflowCodingAgent
-        from workflow_builder.toolsets.google import (
+        from loom.agents.coding_agent import WorkflowCodingAgent
+        from loom.toolsets.google import (
             GMAIL_MANIFEST,
             GOOGLE_CALENDAR_MANIFEST,
         )
@@ -786,14 +786,14 @@ class TestCodeOrJudgement:
 
     def test_the_plan_is_asked_for_in_the_structured_output(self) -> None:
         """A rule followed silently is a rule nobody can check was followed."""
-        from workflow_builder.agents.coding_agent import CodingOutput
+        from loom.agents.coding_agent import CodingOutput
 
         assert "plan" in CodingOutput.model_fields
         described = CodingOutput.model_json_schema()["properties"]["plan"]
         assert "step/agent" in str(described)
 
     def test_a_plan_survives_onto_the_result(self) -> None:
-        from workflow_builder.agents.coding_agent import CodingResult, NodePlan
+        from loom.agents.coding_agent import CodingResult, NodePlan
 
         result = CodingResult(
             code="x = 1",
@@ -810,7 +810,7 @@ class TestCodeOrJudgement:
 
     def test_no_plan_is_not_a_claim_that_nothing_is_probabilistic(self) -> None:
         """An absent plan means unreported, not "all deterministic"."""
-        from workflow_builder.agents.coding_agent import CodingResult
+        from loom.agents.coding_agent import CodingResult
 
         assert CodingResult(code="x = 1").plan == []
         assert CodingResult(code="x = 1").judgement_nodes == []
@@ -822,7 +822,7 @@ class TestCodeOrJudgement:
         floor because it arrived as dicts would make the field look unused and
         get deleted.
         """
-        from workflow_builder.agents.coding_agent import NodePlan
+        from loom.agents.coding_agent import NodePlan
 
         parsed = [
             NodePlan.model_validate(entry)
@@ -841,7 +841,7 @@ class TestResolutionStage:
     """
 
     GUESSED = (
-        "from workflow_builder.toolsets.jira.tools import jira_search_issues\n"
+        "from loom.toolsets.jira.tools import jira_search_issues\n"
         "async def fetch() -> list:\n"
         "    return await jira_search_issues(\n"
         "        'issuetype = Story AND text ~ \"saas\" ORDER BY created DESC'\n"
@@ -850,8 +850,8 @@ class TestResolutionStage:
     SPEC = "show all the stories in sas work"
 
     async def _run(self, code: str, spec: str = SPEC):
-        from workflow_builder.agents.checks import CheckContext
-        from workflow_builder.agents.stages import ResolutionStage
+        from loom.agents.checks import CheckContext
+        from loom.agents.stages import ResolutionStage
 
         return await ResolutionStage().run(code, CheckContext(spec=spec))
 
@@ -927,7 +927,7 @@ class TestResolutionStage:
         assert len((await self._run(many)).issues) <= 3
 
     async def test_it_is_a_warning_and_runs_before_the_expensive_stages(self) -> None:
-        from workflow_builder.agents.stages import ResolutionStage, default_stages
+        from loom.agents.stages import ResolutionStage, default_stages
 
         assert ResolutionStage().blocking is False
         names = [stage.name for stage in default_stages()]

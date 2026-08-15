@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from workflow_builder.agents.validator import CodeValidator
+from loom.agents.validator import CodeValidator
 
 COOKBOOK = Path(__file__).resolve().parents[1] / "examples" / "cookbook"
 

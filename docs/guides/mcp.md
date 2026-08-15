@@ -5,7 +5,7 @@ so an assistant — Claude Code, Claude Desktop, Cursor — can list your workfl
 run them, read a run's journal, and unpark a run waiting on a human.
 
 ```bash
-pip install "workflow-builder[mcp]"
+pip install "loomflow[mcp]"
 ```
 
 ## Connect it
@@ -146,16 +146,16 @@ side effect. The server tells the model so.
 ## Extending it
 
 Tools are plain coroutines — no `mcp` import — in
-`workflow_builder/mcp_server/tools.py` (run management) and
-`workflow_builder/mcp_server/authoring.py` (code generation), registered in
+`loom/mcp_server/tools.py` (run management) and
+`loom/mcp_server/authoring.py` (code generation), registered in
 `server.py`. Add a capability by writing the coroutine and registering it
 with a `ToolAnnotations`; it is then testable without a protocol in the
 picture.
 
 ```python
-from workflow_builder import Runtime
-from workflow_builder.facade import LocalFacade
-from workflow_builder.mcp_server import build_server, serve
+from loom import Runtime
+from loom.facade import LocalFacade
+from loom.mcp_server import build_server, serve
 
 runtime = Runtime()
 

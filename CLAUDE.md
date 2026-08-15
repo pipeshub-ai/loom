@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**workflow-builder** ("LOOM") is a pip-installable, **library-first** durable execution SDK for AI-powered workflows. The primary deliverable is a **Workflow Coding Agent**: an LLM-powered agent that _authors_ workflow code — mixing third-party SDK calls, workflow constructs (`@workflow`, `@step`, `ctx.*`), and raw Python — so that users describe what they want and receive a ready-to-run workflow.
+**Loom** — `pip install loomflow`, `import loom` — is a **library-first** durable execution SDK for AI-powered workflows. The primary deliverable is a **Workflow Coding Agent**: an LLM-powered agent that _authors_ workflow code — mixing third-party SDK calls, workflow constructs (`@workflow`, `@step`, `ctx.*`), and raw Python — so that users describe what they want and receive a ready-to-run workflow.
 
 Generated workflows are execution-portable: they run embedded (SQLite store, no infra), in a user-supplied sandbox, or against an external durable backend (Temporal, DBOS, Restate). The SDK never forces a specific runtime.
 
@@ -12,7 +12,7 @@ The SDK's core engine design is **deterministic re-entry**: workflow bodies can 
 
 ## CLI
 
-Installed as both `loom` and `workflow-builder`.
+Installed as both `loom` and `loomflow`.
 
 ```bash
 # authoring
@@ -79,7 +79,7 @@ so status goes to stderr.
 claude mcp add loom -- loom mcp --module flows.py
 ```
 
-**One port, two clients.** `workflow_builder/facade.py` defines `RuntimeFacade`,
+**One port, two clients.** `loom/facade.py` defines `RuntimeFacade`,
 the protocol the CLI and the MCP server both depend on, with `LocalFacade`
 (in-process Runtime) and `RemoteFacade` (`LoomClient`) implementing it. Add a
 capability there and both surfaces get it. `RuntimeBridge` is a deprecated alias
@@ -158,10 +158,24 @@ a clean journal, linked by `root_run_id` and `metadata["continued_as"]`.
 | **Journal** | `runtime/journal.py` | Per-run log of durable operations; provides deterministic replay |
 | **Workflow** | `runtime/workflow.py` | `WorkflowDefinition` wrapper + `@workflow` decorator |
 | **Steps** | `steps/definition.py` | `@step` decorator — wraps async functions with retry, timeout, fallback |
-| **State** | `state/` | Pluggable persistence: `ExecutionStore` protocol, `MemoryStore`, `SQLiteStore`, `MongoStore`, `PostgresStore` |
+| **Stores** | `stores/` | Pluggable persistence: `ExecutionStore` protocol, `MemoryStore`, `SQLiteStore`, `MongoStore`, `PostgresStore` |
 | **Agents** | `agents/` | `ModelProvider` protocol, `Tool` abstraction (steps/workflows-as-tools), guardrails, memory |
 | **Triggers** | `triggers/` | Entry points: `Webhook`, `Schedule`, `Manual`, `Poll`, `Event`, `Chat`, `Email`, `SubWorkflow` |
 | **Observability** | `observability/tracing.py` | `Tracer` protocol + `NoopTracer`; plug in OTel/Datadog/Honeycomb |
+
+### Where things live
+
+Two renames worth knowing, both because the old names read as the same thing:
+
+| Was | Is | Holds |
+|---|---|---|
+| `state/` | `stores/` | the journal — `ExecutionStore` and its backends |
+| `storage/` | `blobs/` | bytes — blobs, artifacts, attachments, staging, retention |
+
+`state/` also collided with `runtime/state.py`, which is `ctx.state` — a
+different thing entirely. `nodes/stdlib/` is gone: a node category is a module
+(`nodes/control.py`) or a package (`nodes/human/`) depending on its size, and
+burying four of them one level deeper only hid them.
 
 ### Suspension Model
 
@@ -169,7 +183,7 @@ Workflows park themselves by raising `Suspend(wake_at=datetime)` or `Suspend(awa
 
 ### Public API Surface
 
-`src/workflow_builder/__init__.py` re-exports ~10 symbols that form the user-facing API:
+`src/loom/__init__.py` re-exports ~10 symbols that form the user-facing API:
 `Context`, `ExecutionResult`, `ExecutionStatus`, `Failure`, `OnError`, `Retry`, `Usage`, `Runtime`, `StepContext`, `step`, `workflow`.
 
 All internal modules (~200+ classes) are implementation details.
@@ -182,12 +196,12 @@ The agent is the primary user-facing feature. It takes a natural-language descri
 - **Tools available to the coding agent:** Any `@step` or `WorkflowDefinition` can be surfaced as a `Tool` via `tool_from_step()` / `tool_from_workflow()` / `coerce_tool()` in `agents/tools.py`. The agent's toolset is therefore the SDK itself — it can call steps and sub-workflows as tools to introspect capabilities.
 - **Configuring it:** `WorkflowCodingAgent(instructions=...)` replaces `DEFAULT_SYSTEM_PROMPT` outright; `extra_instructions=` appends house rules; `allowed_packages={...}` states what the target environment has installed, which both goes into the prompt and is enforced by `CodeValidator` against imports. Pass `tool_registry=rt.toolsets` so the agent discovers exactly the toolsets the generated workflow can call.
 - **Schema derivation:** Tool schemas are derived from function signatures + docstring `Args:` sections (`agents/tools.py::build_parameter_schema`). Keep docstrings accurate — they are the source of truth for the model.
-- **Execution target:** Generated code must be runnable with just `pip install workflow-builder` and `MemoryStore` (no external infra). Sandbox or cloud execution is a deployment detail, not a code change.
+- **Execution target:** Generated code must be runnable with just `pip install loomflow` and `MemoryStore` (no external infra). Sandbox or cloud execution is a deployment detail, not a code change.
 - **Agent persistence:** Coding sessions are durable artifacts. The authoring session (spec, decision log, diagnostics) is itself a workflow run that can be resumed — use `session`/`persistent` agent classes, not ephemeral.
 
 ### Extension Points
 
-- **Custom persistence:** Implement `state/base.py::ExecutionStore`
+- **Custom persistence:** Implement `stores/base.py::ExecutionStore`
 - **Custom tracing:** Implement `observability/tracing.py::Tracer`
 - **Custom model providers:** Implement `agents/models.py::ModelProvider` (pricing table in `agents/models.py::PRICING`)
 
@@ -200,13 +214,13 @@ The agent is the primary user-facing feature. It takes a natural-language descri
 | `GeminiProvider` | `[gemini]` | `gemini-2.5-pro` |
 
 ```python
-from workflow_builder.agents.providers import OpenAIProvider
+from loom.agents.providers import OpenAIProvider
 agent = Agent(name="x", model=OpenAIProvider())          # gpt-5.6-luna
 agent = Agent(name="x", model=OpenAIProvider("gpt-4.1")) # or name one
 ```
 
 All three implement one method, `complete()`, so swapping vendors is a one-line
-change at the `Agent`. `workflow_builder.agents.providers` imports them lazily —
+change at the `Agent`. `loom.agents.providers` imports them lazily —
 the extras are optional and importing the package pulls in no vendor SDK.
 
 `OpenAIProvider` takes `base_url`, so it also serves OpenAI-compatible endpoints
@@ -306,7 +320,7 @@ result = await ctx.node("human.approval", ApprovalIn(subject="refund", timeout=8
 mechanism.** Everything durable a node does goes through `Context`; the body's
 own calls journal beneath the node's path via `ctx.nested()`, and a node that
 parks raises `Suspend` exactly as `ctx.wait_for_approval` does. Deleting
-`workflow_builder/nodes/` could not change how an existing workflow replays.
+`loom/nodes/` could not change how an existing workflow replays.
 
 Seven categories, and the split between `control`/`transform` and `agent` is the
 "code or judgement" rule made structural: `control.switch` is a rule you can
@@ -331,12 +345,12 @@ by `loom_node` entry point, the same shape as `loom_toolset`.
 the process-global catalog, so `@register_node` and entry points reach every
 Runtime while `rt.nodes.register(...)` stays local.
 
-**Imported from `workflow_builder.nodes`, never re-exported at top level.**
-`workflow_builder.node` is already the `@node` *step* decorator — a `StepClass`
+**Imported from `loom.nodes`, never re-exported at top level.**
+`loom.node` is already the `@node` *step* decorator — a `StepClass`
 that behaves exactly like `@effect` and differs only in WGIR colour. Putting
 `Node` beside `node` in one namespace would make two unrelated things one
 autocomplete apart, so the package boundary is the disambiguator, as it is for
-`workflow_builder.toolsets`.
+`loom.toolsets`.
 
 **Replay across a node upgrade is refused, not guessed.** Each call journals
 `node_id`, `node_version`, and a hash of the two schemas; a mismatch on replay
@@ -515,7 +529,7 @@ parked = await rt.run(reminder)             # parks on a timer
 await advance(rt, minutes=5)                # move, tick, and settle
 ```
 
-`workflow_builder.testing.advance` / `advance_to` do all three steps —
+`loom.testing.advance` / `advance_to` do all three steps —
 advancing alone leaves a parked run parked, because nothing is driving the
 scheduler in a test. The lease heartbeat deliberately stays on the real clock:
 a lease is a claim against other processes, and a ManualClock would spin it.
@@ -578,7 +592,7 @@ must never be reused for a different change.
 
 ### Testing With The Journal
 
-`workflow_builder.testing`. The replay engine already prefers a recorded entry
+`loom.testing`. The replay engine already prefers a recorded entry
 to running anything, so a test can state what happened instead of substituting
 a stand-in for the step that would have:
 
@@ -853,7 +867,7 @@ compiles it, executes it in a subprocess against `MemoryStore` and
 `MockModelProvider`, and feeds any traceback back into the repair loop. Disable
 with `smoke_test=False`.
 
-`CodeValidator` also resolves imported symbols, so `from workflow_builder import
+`CodeValidator` also resolves imported symbols, so `from loom import
 Retryy` is caught with a suggestion rather than failing on the user's machine.
 
 Optionally add a **supervisor**: `WorkflowCodingAgent(supervisor=CodeSupervisor(model))`
@@ -880,7 +894,7 @@ is a recorded failure and is not.
 
 ### HTTP Surface
 
-`workflow_builder.server.create_app(runtime)` (needs the `api` extra) serves
+`loom.server.create_app(runtime)` (needs the `api` extra) serves
 workflows, runs, journals, events, cancel, and replay. `LoomClient` is the async
 client. Errors map to status codes: 403 authorization, 404 unknown workflow/run,
 429 retryable admission rejection, 409 permanent one.
@@ -903,8 +917,8 @@ runs and delivering approvals are ordinary HTTP requests.
 |-------|-----|--------|---------|
 | `MemoryStore` | `memory://` | in-process | default |
 | `SQLiteStore` | `sqlite:///runs.db` | sqlite3 | default |
-| `MongoStore` | `mongodb://…` | motor | `pip install workflow-builder[mongo]` |
-| `PostgresStore` | `postgres://…` | asyncpg | `pip install workflow-builder[postgres]` |
+| `MongoStore` | `mongodb://…` | motor | `pip install loomflow[mongo]` |
+| `PostgresStore` | `postgres://…` | asyncpg | `pip install loomflow[postgres]` |
 
 All implement: `ExecutionStore + TriggerStore + CacheStore + LockProvider`.
 
@@ -916,7 +930,7 @@ declares steps and workflows and nothing else; the host supplies the store:
 ```python
 Runtime(store=PostgresStore(dsn))   # explicit
 Runtime.from_env()                  # from $LOOM_STORE, defaults to memory://
-from_url("sqlite:///runs.db")       # workflow_builder.state.from_url
+from_url("sqlite:///runs.db")       # loom.stores.from_url
 ```
 
 `CodeValidator` warns when a generated module constructs a store at import time.
@@ -930,11 +944,11 @@ the library.
 ### Pip Extras
 
 ```bash
-pip install workflow-builder              # core
-pip install workflow-builder[mongo]       # + MongoDB
-pip install workflow-builder[postgres]    # + PostgreSQL
-pip install workflow-builder[langchain]   # + LangChain/LangGraph
-pip install workflow-builder[agno]        # + Agno
-pip install workflow-builder[pydantic-ai] # + Pydantic AI
-pip install workflow-builder[all]         # everything
+pip install loomflow              # core
+pip install loomflow[mongo]       # + MongoDB
+pip install loomflow[postgres]    # + PostgreSQL
+pip install loomflow[langchain]   # + LangChain/LangGraph
+pip install loomflow[agno]        # + Agno
+pip install loomflow[pydantic-ai] # + Pydantic AI
+pip install loomflow[all]         # everything
 ```

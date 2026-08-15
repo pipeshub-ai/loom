@@ -15,19 +15,19 @@ from typing import Any, ClassVar
 import httpx
 import pytest
 
-from workflow_builder import Context, Runtime, workflow
-from workflow_builder.core.retry import PERMANENT_ERRORS, Retry
-from workflow_builder.state.memory import MemoryStore
-from workflow_builder.toolsets.google.auth import GoogleAuth, GoogleCredentials
-from workflow_builder.toolsets.google.calendar.client import CalendarClient
-from workflow_builder.toolsets.google.errors import (
+from loom import Context, Runtime, workflow
+from loom.core.retry import PERMANENT_ERRORS, Retry
+from loom.stores.memory import MemoryStore
+from loom.toolsets.google.auth import GoogleAuth, GoogleCredentials
+from loom.toolsets.google.calendar.client import CalendarClient
+from loom.toolsets.google.errors import (
     GoogleAPIError,
     GoogleAuthError,
     GooglePermanentError,
     GoogleRateLimited,
     classify,
 )
-from workflow_builder.toolsets.google.gmail.client import (
+from loom.toolsets.google.gmail.client import (
     GmailClient,
     build_mime,
     flatten_message,
@@ -223,7 +223,7 @@ class TestAuth:
         except ImportError:
             with pytest.raises(GoogleAuthError) as exc:
                 auth._signed_assertion()
-            assert "workflow-builder[google]" in str(exc.value)
+            assert "loomflow[google]" in str(exc.value)
 
 
 def _patch_token_transport(
@@ -758,7 +758,7 @@ class TestSetupHelper:
     def test_missing_client_explains_where_to_get_one(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        from workflow_builder.toolsets.google import setup
+        from loom.toolsets.google import setup
 
         monkeypatch.delenv("GOOGLE_CLIENT_ID", raising=False)
         monkeypatch.delenv("GOOGLE_CLIENT_SECRET", raising=False)
@@ -775,7 +775,7 @@ class TestSetupHelper:
         import urllib.parse
         import urllib.request
 
-        from workflow_builder.toolsets.google import setup
+        from loom.toolsets.google import setup
 
         seen: dict[str, list[str]] = {}
 
@@ -829,7 +829,7 @@ class TestSetupHelper:
         import urllib.parse
         import urllib.request
 
-        from workflow_builder.toolsets.google import setup
+        from loom.toolsets.google import setup
 
         def fake_browser(url: str) -> bool:
             params = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
@@ -853,7 +853,7 @@ class TestSetupHelper:
     ) -> None:
         """A port that changes each run means re-registering the redirect URI
         each run, for anyone on a Web application client."""
-        from workflow_builder.toolsets.google import setup
+        from loom.toolsets.google import setup
 
         ports = [self._run(monkeypatch, capsys)[0] for _ in range(2)]
         assert ports == [setup.DEFAULT_PORT, setup.DEFAULT_PORT]
@@ -864,7 +864,7 @@ class TestSetupHelper:
         """Silently moving would produce a mismatch the user cannot explain."""
         import http.server
 
-        from workflow_builder.toolsets.google import setup
+        from loom.toolsets.google import setup
 
         squatter = http.server.HTTPServer(
             ("127.0.0.1", setup.DEFAULT_PORT), http.server.BaseHTTPRequestHandler
@@ -883,7 +883,7 @@ class TestSetupHelper:
         """--port names the one Google was told about; moving off it is useless."""
         import http.server
 
-        from workflow_builder.toolsets.google import setup
+        from loom.toolsets.google import setup
 
         monkeypatch.setattr(setup.webbrowser, "open", lambda _: True)
         squatter = http.server.HTTPServer(
@@ -916,7 +916,7 @@ class TestSetupHelper:
         """
         import socket
 
-        from workflow_builder.toolsets.google import setup
+        from loom.toolsets.google import setup
 
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
@@ -938,7 +938,7 @@ class TestSetupHelper:
         import urllib.parse
         import urllib.request
 
-        from workflow_builder.toolsets.google import setup
+        from loom.toolsets.google import setup
 
         def fake_browser(url: str) -> bool:
             query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
@@ -967,7 +967,7 @@ class TestSetupHelper:
         return int(listening.group(1)), out
 
     def test_scope_sets_cover_what_the_tools_need(self) -> None:
-        from workflow_builder.toolsets.google import setup
+        from loom.toolsets.google import setup
 
         assert set(setup.SCOPE_SETS) == {"read", "write", "gmail", "calendar"}
         assert all(
@@ -986,8 +986,8 @@ class TestSetupHelper:
 
 class TestManifests:
     def test_both_register_and_stay_distinguishable(self) -> None:
-        from workflow_builder.agents.tool_registry import ToolsetRegistry
-        from workflow_builder.toolsets.google import (
+        from loom.agents.tool_registry import ToolsetRegistry
+        from loom.toolsets.google import (
             GMAIL_MANIFEST,
             GOOGLE_CALENDAR_MANIFEST,
         )
@@ -1022,8 +1022,8 @@ class TestManifests:
     ) -> None:
         """Tier-1 search scores manifest prose. Vocabulary the caller does not
         use is vocabulary that makes the toolset undiscoverable."""
-        from workflow_builder.agents.tool_registry import ToolsetRegistry
-        from workflow_builder.toolsets.google import (
+        from loom.agents.tool_registry import ToolsetRegistry
+        from loom.toolsets.google import (
             GMAIL_MANIFEST,
             GOOGLE_CALENDAR_MANIFEST,
         )
@@ -1036,11 +1036,11 @@ class TestManifests:
 
     def test_destructive_operations_are_marked_destructive(self) -> None:
         """Effect class is what a read-only grant filters on."""
-        from workflow_builder.toolsets.google import (
+        from loom.toolsets.google import (
             GMAIL_MANIFEST,
             GOOGLE_CALENDAR_MANIFEST,
         )
-        from workflow_builder.toolsets.manifest import EffectClass
+        from loom.toolsets.manifest import EffectClass
 
         trash = GMAIL_MANIFEST.find_operation("messages.trash")
         delete = GOOGLE_CALENDAR_MANIFEST.find_operation("events.delete")
@@ -1048,8 +1048,8 @@ class TestManifests:
         assert delete is not None and delete.effect is EffectClass.DESTRUCTIVE
 
     def test_send_is_a_write_and_search_is_a_read(self) -> None:
-        from workflow_builder.toolsets.google import GMAIL_MANIFEST
-        from workflow_builder.toolsets.manifest import EffectClass
+        from loom.toolsets.google import GMAIL_MANIFEST
+        from loom.toolsets.manifest import EffectClass
 
         send = GMAIL_MANIFEST.find_operation("messages.send")
         search = GMAIL_MANIFEST.find_operation("messages.search")
@@ -1057,7 +1057,7 @@ class TestManifests:
         assert search is not None and search.effect is EffectClass.READ
 
     def test_every_operation_declares_a_scope_and_a_summary(self) -> None:
-        from workflow_builder.toolsets.google import (
+        from loom.toolsets.google import (
             GMAIL_MANIFEST,
             GOOGLE_CALENDAR_MANIFEST,
         )
@@ -1069,8 +1069,8 @@ class TestManifests:
 
     def test_tool_docs_name_every_step(self) -> None:
         """The docs are what the coding agent reads; a missing tool is invisible."""
-        from workflow_builder.toolsets.google.calendar import tools as cal_tools
-        from workflow_builder.toolsets.google.gmail import tools as gmail_tools
+        from loom.toolsets.google.calendar import tools as cal_tools
+        from loom.toolsets.google.gmail import tools as gmail_tools
 
         for module, docs in (
             (gmail_tools, gmail_tools.GMAIL_TOOL_DOCS),
@@ -1098,7 +1098,7 @@ class TestThroughAWorkflow:
         )
         client = GmailClient(token_auth(), transport=recorder.transport())
 
-        from workflow_builder import step
+        from loom import step
 
         @step
         async def triage() -> list[str]:
@@ -1136,7 +1136,7 @@ class TestThroughAWorkflow:
 
         client = GmailClient(token_auth(), transport=httpx.MockTransport(handler))
 
-        from workflow_builder import step
+        from loom import step
 
         @step(retry=Retry(max_attempts=3, initial_delay=0.01))
         async def search() -> list[Any]:
@@ -1159,8 +1159,8 @@ class TestThroughAWorkflow:
         recorder = Recorder({"/messages/m1": MESSAGE})
         client = GmailClient(token_auth(), transport=recorder.transport())
 
-        from workflow_builder import step
-        from workflow_builder.toolsets.google.gmail.models import EmailMessage
+        from loom import step
+        from loom.toolsets.google.gmail.models import EmailMessage
 
         @step
         async def fetch() -> EmailMessage:

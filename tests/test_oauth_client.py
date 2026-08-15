@@ -18,16 +18,16 @@ from typing import Any
 import httpx
 import pytest
 
-from workflow_builder.connectors.credentials import MemoryCredentialStore, StoredCredential
-from workflow_builder.connectors.oauth_client import (
+from loom.connectors.credentials import MemoryCredentialStore, StoredCredential
+from loom.connectors.oauth_client import (
     OAuthClient,
     OAuthTokenError,
     generate_pkce_pair,
 )
-from workflow_builder.core.exceptions import AuthExpired, ConfigurationError
-from workflow_builder.core.secret import Secret
-from workflow_builder.runtime.clock import ManualClock
-from workflow_builder.state.memory import MemoryStore
+from loom.core.exceptions import AuthExpired, ConfigurationError
+from loom.core.secret import Secret
+from loom.runtime.clock import ManualClock
+from loom.stores.memory import MemoryStore
 
 _DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 

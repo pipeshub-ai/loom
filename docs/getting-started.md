@@ -3,23 +3,23 @@
 ## Installation
 
 ```bash
-pip install workflow-builder
+pip install loomflow
 ```
 
 Optional extras for specific backends:
 
 ```bash
 # MongoDB storage
-pip install workflow-builder[mongo]
+pip install loomflow[mongo]
 
 # PostgreSQL storage
-pip install workflow-builder[postgres]
+pip install loomflow[postgres]
 
 # LangChain agent backend
-pip install workflow-builder[langchain]
+pip install loomflow[langchain]
 
 # Everything
-pip install workflow-builder[all]
+pip install loomflow[all]
 ```
 
 ## Your First Workflow
@@ -31,14 +31,14 @@ Create a file `hello.py`:
 Every example on this page assumes:
 
 ```python
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.state.memory import MemoryStore
+from loom import Context, Runtime, step, workflow
+from loom.stores.memory import MemoryStore
 ```
 
 ```python
 import asyncio
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.state.memory import MemoryStore
+from loom import Context, Runtime, step, workflow
+from loom.stores.memory import MemoryStore
 
 
 @step
@@ -86,7 +86,7 @@ python hello.py
 ## Adding Retry
 
 ```python
-from workflow_builder import Retry
+from loom import Retry
 
 @step(retry=Retry(max_attempts=3, initial_delay=1.0, multiplier=2.0))
 async def call_api(url: str) -> dict:
@@ -109,8 +109,8 @@ async def ai_workflow(ctx: Context) -> str:
 Configure the agent backend on the runtime:
 
 ```python
-from workflow_builder.agents.backend import BuiltInBackend
-from workflow_builder.agents.providers.anthropic_provider import AnthropicProvider
+from loom.agents.backend import BuiltInBackend
+from loom.agents.providers.anthropic_provider import AnthropicProvider
 
 runtime = Runtime(
     store=MemoryStore(),

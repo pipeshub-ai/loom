@@ -27,8 +27,8 @@ from typing import Any
 
 import pytest
 
-from workflow_builder import Context, Runtime, workflow
-from workflow_builder.state import MemoryStore
+from loom import Context, Runtime, workflow
+from loom.stores import MemoryStore
 
 # --- the file, as the guide lays it out ------------------------------------
 
@@ -38,8 +38,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from workflow_builder import step
-from workflow_builder.nodes import (
+from loom import step
+from loom.nodes import (
     Node,
     NodeCategory,
     NodeExample,
@@ -109,7 +109,7 @@ def guide_node(tmp_path_factory: Any) -> Any:
     finally:
         sys.path.remove(str(root))
         sys.modules.pop("my_nodes", None)
-        from workflow_builder.nodes import get_node_catalog
+        from loom.nodes import get_node_catalog
 
         get_node_catalog().unregister("custom.lead_score")
 
@@ -122,7 +122,7 @@ class TestTheGuideProducesAWorkingNode:
         self, guide_node: Any
     ) -> None:
         """Step 2: "no second declaration anywhere"."""
-        from workflow_builder.nodes import get_node_catalog
+        from loom.nodes import get_node_catalog
 
         spec = get_node_catalog().get("custom.lead_score")
         assert spec is not None, "@register_node did not reach the catalog"
@@ -132,7 +132,7 @@ class TestTheGuideProducesAWorkingNode:
 
     def test_a_flat_id_is_refused(self, guide_node: Any) -> None:
         """Step 2's rule, mutation-verified: break the id, registration fails."""
-        from workflow_builder.nodes import NodeContractError, NodeSpec, get_node_catalog
+        from loom.nodes import NodeContractError, NodeSpec, get_node_catalog
 
         flat = type(
             "Flat",
@@ -146,7 +146,7 @@ class TestTheGuideProducesAWorkingNode:
         self, guide_node: Any
     ) -> None:
         """Step 0: `loom nodes --category transform`."""
-        from workflow_builder.nodes import NodeCategory, get_node_catalog
+        from loom.nodes import NodeCategory, get_node_catalog
 
         catalog = get_node_catalog()
         assert "custom.lead_score" in {c.id for c in catalog.search("lead blurb")}
@@ -157,7 +157,7 @@ class TestTheGuideProducesAWorkingNode:
     def test_the_rendered_contract_is_what_step_4_shows(self, guide_node: Any) -> None:
         """The contract is what the coding agent writes from, so it is checked
         as code rather than as prose."""
-        from workflow_builder.nodes import get_node_catalog
+        from loom.nodes import get_node_catalog
 
         contract = get_node_catalog().contract("custom.lead_score")
 
@@ -218,7 +218,7 @@ class TestTheGuideProducesAWorkingNode:
     async def test_its_own_example_runs(self, guide_node: Any) -> None:
         """Step 7. An untested node is a missing example, and the example is in
         the docs the agent reads — so it cannot rot unnoticed."""
-        from workflow_builder.nodes import get_node_catalog
+        from loom.nodes import get_node_catalog
 
         spec = get_node_catalog().get("custom.lead_score")
         assert spec.examples
@@ -257,7 +257,7 @@ class TestTheGuideProducesAWorkingNode:
         """
         from pydantic import BaseModel
 
-        from workflow_builder.nodes import NodeSpec
+        from loom.nodes import NodeSpec
 
         class ScoreOutV2(BaseModel):
             score: float
@@ -281,7 +281,7 @@ class TestTheGuideProducesAWorkingNode:
         so a typo here is a node nobody can install."""
         import inspect
 
-        from workflow_builder.nodes import registry
+        from loom.nodes import registry
 
         assert 'group="loom_node"' in inspect.getsource(registry.load_node_entry_points)
         assert "loom_node" in (Path("docs/guides/nodes.md").read_text())
@@ -300,7 +300,7 @@ class TestTheGuideProducesAWorkingNode:
         """`loom node custom.lead_score` — step 4's command."""
         import asyncio
 
-        from workflow_builder.facade import LocalFacade
+        from loom.facade import LocalFacade
 
         facade = LocalFacade(Runtime(store=MemoryStore()))
         detail = asyncio.run(facade.node("custom.lead_score"))
@@ -309,7 +309,7 @@ class TestTheGuideProducesAWorkingNode:
 
 
 def _bare_registry() -> Any:
-    from workflow_builder.nodes import NodeRegistry
+    from loom.nodes import NodeRegistry
 
     return NodeRegistry()
 

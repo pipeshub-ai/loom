@@ -259,7 +259,7 @@ Defined in `observability/tracing.py`. `NoopTracer` ships in Phase 1. `OTelTrace
 ## File Layout (Canonical, All Phases)
 
 ```
-src/workflow_builder/
+src/loom/
 ├── core/                   # Phase 1: Foundation
 │   ├── models.py           # ExecutionRecord, StepRecord, Usage, Status enums
 │   ├── types.py            # Duration, JSONDict, JSONValue, StepKey

@@ -17,13 +17,13 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
+from loom.cli import auth_commands
+from loom.cli.output import Exit, Printer
+from loom.connectors.credentials import MemoryCredentialStore, StoredCredential
+from loom.connectors.oauth_client import MetadataRefresher
+from loom.core.exceptions import AuthExpired, ConfigurationError
+from loom.core.secret import Secret
 from test_oauth_client import FakeAuthServer, _patch_transport
-from workflow_builder.cli import auth_commands
-from workflow_builder.cli.output import Exit, Printer
-from workflow_builder.connectors.credentials import MemoryCredentialStore, StoredCredential
-from workflow_builder.connectors.oauth_client import MetadataRefresher
-from workflow_builder.core.exceptions import AuthExpired, ConfigurationError
-from workflow_builder.core.secret import Secret
 
 
 def _args(**overrides: Any) -> argparse.Namespace:
@@ -386,7 +386,7 @@ class TestRunDeviceFlow:
     async def test_completes_once_approved(
         self, server: FakeAuthServer, out: Printer
     ) -> None:
-        from workflow_builder.connectors.oauth_client import OAuthClient
+        from loom.connectors.oauth_client import OAuthClient
 
         client = OAuthClient(
             client_id="loom-cli",
@@ -844,7 +844,7 @@ class TestServerTokenProvider:
     async def test_wires_into_loom_client_as_a_bearer_header(
         self, store: MemoryCredentialStore
     ) -> None:
-        from workflow_builder.server.client import LoomClient
+        from loom.server.client import LoomClient
 
         await store.put("loom:http://x", _stored())
         client = LoomClient(
@@ -854,7 +854,7 @@ class TestServerTokenProvider:
         assert header == {"Authorization": "Bearer super-secret-access-token"}
 
     async def test_an_unauthenticated_server_gets_no_header(self) -> None:
-        from workflow_builder.server.client import LoomClient
+        from loom.server.client import LoomClient
 
         client = LoomClient(
             base_url="http://x", token_provider=auth_commands.server_token_provider("http://x")
@@ -870,8 +870,8 @@ class TestServerTokenProvider:
 
 class TestTargetsResolveWiresTokenProvider:
     def test_a_server_target_gets_a_loom_client_with_a_token_provider(self) -> None:
-        from workflow_builder.cli.targets import resolve
-        from workflow_builder.facade import RemoteFacade
+        from loom.cli.targets import resolve
+        from loom.facade import RemoteFacade
 
         target = resolve(None, server="http://example.test:8000")
 
@@ -881,7 +881,7 @@ class TestTargetsResolveWiresTokenProvider:
 
 class TestCliWiring:
     def test_connect_accepts_redirect_port(self) -> None:
-        from workflow_builder.cli import build_parser
+        from loom.cli import build_parser
 
         args = build_parser().parse_args(
             ["connect", "jira", "--redirect-port", "4321"]
@@ -890,7 +890,7 @@ class TestCliWiring:
         assert args.name == "jira"
 
     def test_connect_accepts_provider(self) -> None:
-        from workflow_builder.cli import build_parser
+        from loom.cli import build_parser
 
         args = build_parser().parse_args(
             ["connect", "my-google", "--provider", "google"]
@@ -899,7 +899,7 @@ class TestCliWiring:
         assert args.provider == "google"
 
     def test_login_has_no_provider_flag(self) -> None:
-        from workflow_builder.cli import build_parser
+        from loom.cli import build_parser
 
         args = build_parser().parse_args(["login"])
         assert not hasattr(args, "provider")
@@ -911,13 +911,13 @@ class TestCliWiring:
         assert "authorization_endpoint" in printed
 
     def test_disconnect_is_wired_into_the_parser(self) -> None:
-        from workflow_builder.cli import build_parser
+        from loom.cli import build_parser
 
         args = build_parser().parse_args(["disconnect", "jira"])
         assert args.name == "jira"
         assert args.command == "disconnect"
 
     def test_disconnect_dispatches_to_cmd_disconnect(self) -> None:
-        from workflow_builder.cli import _HANDLERS
+        from loom.cli import _HANDLERS
 
         assert _HANDLERS["disconnect"] is auth_commands.cmd_disconnect

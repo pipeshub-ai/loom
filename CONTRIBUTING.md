@@ -1,11 +1,11 @@
-# Contributing to workflow-builder
+# Contributing to loomflow
 
 LOOM is a work in progress, not a finished product — the core (durable
 execution, the coding agent, toolsets) is shipped and tested; larger pieces of
 the design (sandboxed execution, versioned source, session traces,
 agent-rendered visualization) are written down but not yet built. See the
 [README's Project Status](README.md#project-status) for exactly which is
-which, and [`docs/implementation-plan.md`](docs/implementation-plan.md) for
+which, and [`docs/design/implementation-plan.md`](docs/design/implementation-plan.md) for
 each gap scoped as its own phase with its own exit criteria.
 
 That gap is the point of contributing here: this is meant to get to
@@ -51,7 +51,7 @@ pytest tests/test_runtime.py
 pytest tests/test_runtime.py::test_basic_workflow
 
 # Run with coverage
-pytest --cov=workflow_builder --cov-report=term-missing
+pytest --cov=loom --cov-report=term-missing
 
 # Lint
 ruff check src tests
@@ -71,11 +71,11 @@ mypy
 
 ## Adding a New Agent Backend
 
-Implement the `AgentBackend` protocol from `workflow_builder.agents.backend`:
+Implement the `AgentBackend` protocol from `loom.agents.backend`:
 
 ```python
-from workflow_builder.agents.backend import AgentBackend
-from workflow_builder.agents.result import AgentResult
+from loom.agents.backend import AgentBackend
+from loom.agents.result import AgentResult
 
 class MyBackend:
     async def run(
@@ -90,14 +90,14 @@ class MyBackend:
         ...
 ```
 
-See `src/workflow_builder/agents/backends/` for examples (LangChain, Agno, PydanticAI).
+See `src/loom/agents/backends/` for examples (LangChain, Agno, PydanticAI).
 
 ## Adding a New Storage Backend
 
-Implement the `ExecutionStore` protocol from `workflow_builder.state.base`:
+Implement the `ExecutionStore` protocol from `loom.stores.base`:
 
 ```python
-from workflow_builder.state.base import ExecutionStore
+from loom.stores.base import ExecutionStore
 
 class MyStore(ExecutionStore):
     async def save_execution(self, record: ExecutionRecord) -> None: ...
@@ -106,14 +106,14 @@ class MyStore(ExecutionStore):
     # ... see base.py for the full protocol
 ```
 
-See `src/workflow_builder/state/` for implementations (MemoryStore, SQLiteStore, MongoStore, PostgresStore).
+See `src/loom/stores/` for implementations (MemoryStore, SQLiteStore, MongoStore, PostgresStore).
 
 ## Adding a New Toolset
 
 1. Create a `ToolsetManifest` describing operations:
 
 ```python
-from workflow_builder.toolsets.manifest import ToolsetManifest, OperationSpec
+from loom.toolsets.manifest import ToolsetManifest, OperationSpec
 
 manifest = ToolsetManifest(
     id="my_service",
@@ -131,13 +131,13 @@ manifest = ToolsetManifest(
 2. Register it:
 
 ```python
-from workflow_builder.toolsets.registry import register_toolset
+from loom.toolsets.registry import register_toolset
 register_toolset(manifest)
 ```
 
 3. Implement tool functions as `@step`-decorated async functions.
 
-See `src/workflow_builder/toolsets/jira/` and `src/workflow_builder/toolsets/confluence/` for examples.
+See `src/loom/toolsets/jira/` and `src/loom/toolsets/confluence/` for examples.
 
 ## Pull Request Process
 

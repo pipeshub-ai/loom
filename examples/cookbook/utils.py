@@ -136,7 +136,7 @@ def run_generated_code(code: str, timeout: int = 60) -> int:
 
 def load_workflow(code: str) -> Any:
     """Load generated code as a module and return the WorkflowDefinition."""
-    from workflow_builder.runtime.workflow import WorkflowDefinition
+    from loom.runtime.workflow import WorkflowDefinition
 
     with tempfile.NamedTemporaryFile(
         suffix=".py", mode="w", delete=False, dir="/tmp"

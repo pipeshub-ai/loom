@@ -18,11 +18,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import httpx
 from utils import header, log, require_env
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.agents.backends.pydantic_ai import PydanticAIBackend
-from workflow_builder.agents.tool_registry import Toolset
-from workflow_builder.agents.tools import tool
-from workflow_builder.state.memory import MemoryStore
+from loom import Context, Runtime, step, workflow
+from loom.agents.backends.pydantic_ai import PydanticAIBackend
+from loom.agents.tool_registry import Toolset
+from loom.agents.tools import tool
+from loom.stores.memory import MemoryStore
 
 # ---------------------------------------------------------------------------
 # Custom tools (defined as LOOM Tools, auto-converted to Pydantic AI tools)

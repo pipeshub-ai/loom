@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
-SRC = ROOT / "src" / "workflow_builder"
+SRC = ROOT / "src" / "loom"
 DOCS = ROOT / "docs" / "seams"
 
 #: Protocol name → (module path relative to the package, one-line purpose).
@@ -40,10 +40,10 @@ DOCS = ROOT / "docs" / "seams"
 #: names neither — which is the property that makes swapping one a
 #: configuration change rather than a fork.
 SEAMS: dict[str, tuple[str, str]] = {
-    "ExecutionStore": ("state/base.py", "Where runs and journals are persisted"),
+    "ExecutionStore": ("stores/base.py", "Where runs and journals are persisted"),
     "StateStore": ("runtime/state.py", "The KV space shared by every run of a workflow"),
     "Clock": ("runtime/clock.py", "Every timestamp and every wait the engine takes"),
-    "BlobBackend": ("storage/blob.py", "Content-addressed storage for oversized values"),
+    "BlobBackend": ("blobs/blob.py", "Content-addressed storage for oversized values"),
     "ModelProvider": ("agents/models.py", "One model vendor behind one method"),
     "AgentBackend": ("agents/backend.py", "Which agent framework runs ctx.agent()"),
     "QueueBackend": ("triggers/queue.py", "Where at-least-once messages come from"),
@@ -116,7 +116,7 @@ def collect(name: str, module: str, purpose: str) -> Seam:
 
     return Seam(
         name=name,
-        module=f"workflow_builder/{module}",
+        module=f"loom/{module}",
         purpose=purpose,
         doc=inspect.getdoc(protocol) or "",
         methods=sorted(methods),
@@ -128,7 +128,7 @@ def collect(name: str, module: str, purpose: str) -> Seam:
 def _import(module: str) -> Any:
     import importlib
 
-    dotted = "workflow_builder." + module.removesuffix(".py").replace("/", ".")
+    dotted = "loom." + module.removesuffix(".py").replace("/", ".")
     return importlib.import_module(dotted)
 
 

@@ -3,7 +3,7 @@ requires = ["setuptools>=75.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "workflow-builder"
+name = "loomflow"
 version = "0.11.0"
 description = "Library-first durable execution SDK for AI-powered workflows"
 readme = "README.md"
@@ -88,7 +88,7 @@ cli = ["rich>=13.0"]
 mcp = ["mcp>=1.2"]
 
 # Terminal UI (`loom ui`)
-tui = ["workflow-builder[cli]", "textual>=0.80"]
+tui = ["loomflow[cli]", "textual>=0.80"]
 
 # Development
 dev = [
@@ -113,7 +113,7 @@ dev = [
 
 # Install everything
 all = [
-    "workflow-builder[mongo,postgres,s3,azure,gcs,google,identity,credentials,anthropic,openai,gemini,langchain,api,cli,tui,mcp]"
+    "loomflow[mongo,postgres,s3,azure,gcs,google,identity,credentials,anthropic,openai,gemini,langchain,api,cli,tui,mcp]"
 ]
 
 [project.urls]
@@ -124,14 +124,14 @@ Changelog = "https://github.com/pipeshub-ai/workflow/blob/main/CHANGELOG.md"
 Issues = "https://github.com/pipeshub-ai/workflow/issues"
 
 [project.scripts]
-loom = "workflow_builder.cli:main"
-workflow-builder = "workflow_builder.cli:main"
+loom = "loom.cli:main"
+loomflow = "loom.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-workflow_builder = ["py.typed"]
+loom = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -151,7 +151,7 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF"]
 python_version = "3.11"
 strict = true
 mypy_path = "src"
-packages = ["workflow_builder"]
+packages = ["loom"]
 
 # Local `loom mcp` / `loom run <name>` without --module. Cookbook examples that
 # talk to a real service (Jira, Gmail) stay off this list so a bare server

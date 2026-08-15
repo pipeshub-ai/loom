@@ -2,7 +2,7 @@
 
 *Where at-least-once messages come from.*
 
-Defined in `workflow_builder/triggers/queue.py`.
+Defined in `loom/triggers/queue.py`.
 
 <!-- BEGIN GENERATED — do not edit below this line -->
 

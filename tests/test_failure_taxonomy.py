@@ -11,14 +11,14 @@ from __future__ import annotations
 
 import pytest
 
-from workflow_builder import Context, ExecutionStatus, Retry, Runtime, step, workflow
-from workflow_builder.runtime.journal import (
+from loom import Context, ExecutionStatus, Retry, Runtime, step, workflow
+from loom.runtime.journal import (
     CompatibilityMode,
     EntryKind,
     EntryStatus,
     JournalEntry,
 )
-from workflow_builder.state.memory import MemoryStore
+from loom.stores.memory import MemoryStore
 
 
 class TestTheStatusItself:

@@ -18,12 +18,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils import header, log
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.runtime.clock import ManualClock
-from workflow_builder.runtime.dispatcher import TriggerDispatcher
-from workflow_builder.state.memory import MemoryStore
-from workflow_builder.testing import advance
-from workflow_builder.triggers.specs import Schedule
+from loom import Context, Runtime, step, workflow
+from loom.runtime.clock import ManualClock
+from loom.runtime.dispatcher import TriggerDispatcher
+from loom.stores.memory import MemoryStore
+from loom.testing import advance
+from loom.triggers.specs import Schedule
 
 #: A fixed moment, so the run is reproducible rather than "whenever you ran it".
 START = datetime(2026, 3, 2, 8, 59, tzinfo=UTC)

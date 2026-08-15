@@ -2,7 +2,7 @@
 
 *The KV space shared by every run of a workflow.*
 
-Defined in `workflow_builder/runtime/state.py`.
+Defined in `loom/runtime/state.py`.
 
 <!-- BEGIN GENERATED — do not edit below this line -->
 

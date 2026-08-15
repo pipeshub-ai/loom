@@ -15,12 +15,12 @@ from cryptography.fernet import Fernet
 from keyring.backend import KeyringBackend
 from keyring.errors import KeyringLocked
 
-from workflow_builder.connectors.credentials import (
+from loom.connectors.credentials import (
     EncryptedFileCredentialStore,
     KeyringCredentialStore,
     StoredCredential,
 )
-from workflow_builder.connectors.encryption import (
+from loom.connectors.encryption import (
     DecryptionError,
     Envelope,
     EnvKeyProvider,
@@ -29,7 +29,7 @@ from workflow_builder.connectors.encryption import (
     atomic_write_bytes,
     default_key_provider,
 )
-from workflow_builder.core.secret import Secret
+from loom.core.secret import Secret
 
 
 def _cred(token: str = "tok") -> StoredCredential:

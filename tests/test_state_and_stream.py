@@ -16,17 +16,17 @@ from typing import Any
 
 import pytest
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.core.exceptions import RegistryError
-from workflow_builder.facade import LocalFacade
-from workflow_builder.runtime.state import (
+from loom import Context, Runtime, step, workflow
+from loom.core.exceptions import RegistryError
+from loom.facade import LocalFacade
+from loom.runtime.state import (
     InMemoryRunStream,
     Report,
     RunStream,
     StateStore,
     StoreBackedState,
 )
-from workflow_builder.state import MemoryStore, SQLiteStore
+from loom.stores import MemoryStore, SQLiteStore
 
 
 @workflow(name="state_counter")
@@ -262,9 +262,9 @@ async def test_progress_is_visible_over_http_and_mcp() -> None:
 
     httpx = pytest.importorskip("httpx")
     pytest.importorskip("fastapi")
-    from workflow_builder.mcp_server import tools
-    from workflow_builder.server import LoomClient
-    from workflow_builder.server.app import create_app
+    from loom.mcp_server import tools
+    from loom.server import LoomClient
+    from loom.server.app import create_app
 
     rt = Runtime(store=MemoryStore())
     rt.register(state_talker)
@@ -292,8 +292,8 @@ async def test_progress_is_visible_over_http_and_mcp() -> None:
 
 async def test_loom_watch_shows_what_a_run_narrated(capsys) -> None:
     """The exit criterion, through the code ``loom watch`` actually runs."""
-    from workflow_builder.cli.commands import follow
-    from workflow_builder.cli.output import Printer
+    from loom.cli.commands import follow
+    from loom.cli.output import Printer
 
     rt = Runtime(store=MemoryStore())
     rt.register(state_talker)

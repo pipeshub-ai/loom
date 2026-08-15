@@ -1,6 +1,6 @@
 # Phase 1 — Core Library
 
-**Goal:** `pip install workflow-builder` delivers a working durable execution engine with all one-way-door decisions baked in.
+**Goal:** `pip install loomflow` delivers a working durable execution engine with all one-way-door decisions baked in.
 
 **Prerequisites:** None (this is the foundation).
 
@@ -18,7 +18,7 @@
 | All Phase 1 unit tests pass | 100% | 100% |
 | `loom check` catches LOOM-D001 through LOOM-D005 | All | All |
 
-**"Done" means:** A user can `pip install workflow-builder`, write a workflow with `@pure`/`@effect` steps, run it with `SQLiteStore`, crash mid-step, resume with zero duplicate effects, and suspend/resume on timer or event.
+**"Done" means:** A user can `pip install loomflow`, write a workflow with `@pure`/`@effect` steps, run it with `SQLiteStore`, crash mid-step, resume with zero duplicate effects, and suspend/resume on timer or event.
 
 ---
 
@@ -850,7 +850,7 @@ flowchart LR
 - `steps.lock` is TOML — human-readable, diffable, mergeable.
 
 ### User Perspective
-- **Time to hello-world:** `pip install workflow-builder && loom run my_flow.py` — under 5 minutes.
+- **Time to hello-world:** `pip install loomflow && loom run my_flow.py` — under 5 minutes.
 - **Error messages:** `NondeterminismError` shows expected vs actual step + source line.
 - **Debugging:** `loom status <run_id>` shows current state, journal entries, suspension reason.
 

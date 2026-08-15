@@ -286,7 +286,7 @@ Rules: All I/O in @step. Workflow body is deterministic. Use ctx.now() not datet
 MINIMAL_SYSTEM_PROMPT = """Generate a LOOM workflow. Fill in the template below.
 
 ```python
-from workflow_builder import workflow, step, Context
+from loom import workflow, step, Context
 
 @step
 async def STEP_NAME(ARG: TYPE) -> RETURN_TYPE:
@@ -433,7 +433,7 @@ class ScaffoldingEngine:
     def build_skeleton(self, intent: str, steps: list[dict[str, str]]) -> str:
         """Build a fill-in-the-blank skeleton from parsed intent."""
         parts = [
-            'from workflow_builder import workflow, step, Context\n',
+            'from loom import workflow, step, Context\n',
         ]
         for i, s in enumerate(steps):
             parts.append(f'''
@@ -610,14 +610,14 @@ class CodeValidator:
                                 ))
 
     def _check_imports(self, tree: ast.Module, code: str, errors: list):
-        """Check that workflow_builder imports are present."""
+        """Check that loom imports are present."""
         has_wb_import = any(
-            (isinstance(n, ast.ImportFrom) and n.module and "workflow_builder" in n.module)
-            or (isinstance(n, ast.Import) and any("workflow_builder" in a.name for a in n.names))
+            (isinstance(n, ast.ImportFrom) and n.module and "loom" in n.module)
+            or (isinstance(n, ast.Import) and any("loom" in a.name for a in n.names))
             for n in ast.iter_child_nodes(tree)
         )
         if not has_wb_import:
-            errors.append(ValidationError("imports", "Missing workflow_builder import", "error"))
+            errors.append(ValidationError("imports", "Missing loom import", "error"))
 
     def _call_name(self, node: ast.Call) -> str:
         if isinstance(node.func, ast.Name):
@@ -680,8 +680,8 @@ class RepairPipeline:
         # Fix missing imports
         import_errors = [e for e in errors if e.category == "imports"]
         if import_errors:
-            if "from workflow_builder import" not in code:
-                code = "from workflow_builder import workflow, step, Context\n\n" + code
+            if "from loom import" not in code:
+                code = "from loom import workflow, step, Context\n\n" + code
                 repairs.append("added_workflow_builder_import")
 
         # Fix common nondeterminism patterns
@@ -724,7 +724,7 @@ Curated examples that small models can pattern-match against. Each example demon
 CORE_EXAMPLES: list[dict[str, str]] = [
     {
         "description": "Simple two-step workflow: fetch and notify",
-        "code": '''from workflow_builder import workflow, step, Context
+        "code": '''from loom import workflow, step, Context
 import httpx
 
 @step
@@ -750,7 +750,7 @@ async def fetch_and_notify(ctx: Context, url: str) -> bool:
     },
     {
         "description": "Parallel execution with gather",
-        "code": '''from workflow_builder import workflow, step, Context
+        "code": '''from loom import workflow, step, Context
 
 @step
 async def fetch_page(url: str) -> str:
@@ -768,7 +768,7 @@ async def scrape_multiple(ctx: Context, urls: list[str]) -> list[str]:
     },
     {
         "description": "Wait for human approval",
-        "code": '''from workflow_builder import workflow, step, Context
+        "code": '''from loom import workflow, step, Context
 
 @step
 async def create_order(items: list[str]) -> dict:
@@ -786,8 +786,8 @@ async def order_with_approval(ctx: Context, items: list[str]) -> dict:
     },
     {
         "description": "Scheduled workflow with retry",
-        "code": '''from workflow_builder import workflow, step, Context
-from workflow_builder import Retry
+        "code": '''from loom import workflow, step, Context
+from loom import Retry
 
 @step(retry=Retry(max_attempts=3, backoff=2.0))
 async def sync_records(source: str) -> int:
@@ -902,7 +902,7 @@ class ModelEvalRunner:
 ## 4. Directory Structure
 
 ```
-src/workflow_builder/
+src/loom/
 ├── agents/
 │   ├── capability.py        # NEW: ModelTier, detect_tier(), detect_capabilities()
 │   ├── prompts.py           # NEW: PromptLibrary, tiered system/tool prompts

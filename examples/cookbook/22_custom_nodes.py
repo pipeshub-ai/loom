@@ -23,8 +23,8 @@ import asyncio
 
 from pydantic import BaseModel, Field
 
-from workflow_builder import Context, Runtime, step, workflow
-from workflow_builder.nodes import (
+from loom import Context, Runtime, step, workflow
+from loom.nodes import (
     Node,
     NodeCategory,
     NodeExample,
@@ -32,7 +32,7 @@ from workflow_builder.nodes import (
     NodeSpec,
     register_node,
 )
-from workflow_builder.state.memory import MemoryStore
+from loom.stores.memory import MemoryStore
 
 # ---------------------------------------------------------------------------
 # The two models are the contract.
@@ -109,7 +109,7 @@ async def triage_ticket(ctx: Context, age_hours: float) -> str:
 
 
 async def main() -> None:
-    from workflow_builder.nodes import get_node_catalog
+    from loom.nodes import get_node_catalog
 
     catalog = get_node_catalog()
 

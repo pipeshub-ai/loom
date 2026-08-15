@@ -15,7 +15,7 @@ from pathlib import Path
 
 class TestDiagnostics:
     def test_diagnostic_dataclass(self) -> None:
-        from workflow_builder.core.diagnostics import Diagnostic
+        from loom.core.diagnostics import Diagnostic
 
         d = Diagnostic(
             code="TEST-001",
@@ -27,7 +27,7 @@ class TestDiagnostics:
         assert d.docs_url == ""
 
     def test_diagnostics_registry(self) -> None:
-        from workflow_builder.core.diagnostics import DIAGNOSTICS
+        from loom.core.diagnostics import DIAGNOSTICS
 
         assert "LOOM-D001" in DIAGNOSTICS
         assert "LOOM-D002" in DIAGNOSTICS
@@ -40,26 +40,26 @@ class TestDiagnostics:
         assert "LOOM-A001" in DIAGNOSTICS
 
     def test_all_diagnostics_have_fix(self) -> None:
-        from workflow_builder.core.diagnostics import DIAGNOSTICS
+        from loom.core.diagnostics import DIAGNOSTICS
 
         for code, diag in DIAGNOSTICS.items():
             assert diag.fix, f"{code} missing fix suggestion"
 
     def test_format_error_known_code(self) -> None:
-        from workflow_builder.core.diagnostics import format_error
+        from loom.core.diagnostics import format_error
 
         result = format_error("LOOM-D001")
         assert "LOOM-D001" in result
         assert "datetime.now" in result.lower() or "ctx.now" in result.lower()
 
     def test_format_error_unknown_code(self) -> None:
-        from workflow_builder.core.diagnostics import format_error
+        from loom.core.diagnostics import format_error
 
         result = format_error("UNKNOWN-999")
         assert "Unknown" in result or "UNKNOWN-999" in result
 
     def test_format_error_with_context(self) -> None:
-        from workflow_builder.core.diagnostics import format_error
+        from loom.core.diagnostics import format_error
 
         result = format_error(
             "LOOM-D001", location="myfile.py:42"
@@ -67,7 +67,7 @@ class TestDiagnostics:
         assert "myfile.py:42" in result
 
     def test_lookup_diagnostic(self) -> None:
-        from workflow_builder.core.diagnostics import (
+        from loom.core.diagnostics import (
             lookup_diagnostic,
         )
 
@@ -76,7 +76,7 @@ class TestDiagnostics:
         assert d.code == "LOOM-D001"
 
     def test_lookup_diagnostic_unknown(self) -> None:
-        from workflow_builder.core.diagnostics import (
+        from loom.core.diagnostics import (
             lookup_diagnostic,
         )
 
@@ -90,7 +90,7 @@ class TestDiagnostics:
 
 class TestScaffolding:
     def test_quickstart_workflow_template(self) -> None:
-        from workflow_builder.cli.scaffold import (
+        from loom.cli.scaffold import (
             QUICKSTART_WORKFLOW,
         )
 
@@ -99,35 +99,35 @@ class TestScaffolding:
         assert "ctx.step" in QUICKSTART_WORKFLOW
 
     def test_quickstart_workflow_compiles(self) -> None:
-        from workflow_builder.cli.scaffold import (
+        from loom.cli.scaffold import (
             QUICKSTART_WORKFLOW,
         )
 
         compile(QUICKSTART_WORKFLOW, "<quickstart>", "exec")
 
     def test_quickstart_test_template(self) -> None:
-        from workflow_builder.cli.scaffold import QUICKSTART_TEST
+        from loom.cli.scaffold import QUICKSTART_TEST
 
         assert "pytest" in QUICKSTART_TEST
         assert "async" in QUICKSTART_TEST
 
     def test_quickstart_pyproject_template(self) -> None:
-        from workflow_builder.cli.scaffold import (
+        from loom.cli.scaffold import (
             QUICKSTART_PYPROJECT,
         )
 
-        assert "workflow-builder" in QUICKSTART_PYPROJECT
+        assert "loomflow" in QUICKSTART_PYPROJECT
         assert "[project]" in QUICKSTART_PYPROJECT
 
     def test_scaffold_project_returns_paths(self) -> None:
-        from workflow_builder.cli.scaffold import scaffold_project
+        from loom.cli.scaffold import scaffold_project
 
         paths = scaffold_project("/tmp/test-project")
         assert len(paths) >= 3
         assert any("workflow" in p for p in paths)
 
     def test_get_template(self) -> None:
-        from workflow_builder.cli.scaffold import get_template
+        from loom.cli.scaffold import get_template
 
         assert get_template("workflow") is not None
         assert get_template("test") is not None
@@ -182,7 +182,7 @@ class TestCrossPhaseIntegration:
     """Quick smoke tests that key modules from all phases import."""
 
     def test_phase1_core(self) -> None:
-        from workflow_builder import (
+        from loom import (
             Context,
             Runtime,
             step,
@@ -192,79 +192,79 @@ class TestCrossPhaseIntegration:
         assert all([Context, Runtime, step, workflow])
 
     def test_phase2_agents(self) -> None:
-        from workflow_builder.agents.tools import Tool
+        from loom.agents.tools import Tool
 
         assert Tool is not None
 
     def test_phase3_toolsets(self) -> None:
-        from workflow_builder.toolsets.manifest import (
+        from loom.toolsets.manifest import (
             ToolsetManifest,
         )
-        from workflow_builder.toolsets.registry import (
+        from loom.toolsets.registry import (
             register_toolset,
         )
 
         assert all([ToolsetManifest, register_toolset])
 
     def test_phase4_graph(self) -> None:
-        from workflow_builder.graph.extractor import (
+        from loom.graph.extractor import (
             ASTExtractor,
         )
-        from workflow_builder.graph.wgir import WGIRGraph
+        from loom.graph.wgir import WGIRGraph
 
         assert all([WGIRGraph, ASTExtractor])
 
     def test_phase5_storage(self) -> None:
-        from workflow_builder.storage.blob import BlobService
+        from loom.blobs.blob import BlobService
 
         assert BlobService is not None
 
     def test_phase5_flowcontrol(self) -> None:
-        from workflow_builder.runtime.flowcontrol import (
+        from loom.runtime.flowcontrol import (
             AdmissionController,
         )
 
         assert AdmissionController is not None
 
     def test_phase6_importers(self) -> None:
-        from workflow_builder.importers.n8n import N8nImporter
+        from loom.importers.n8n import N8nImporter
 
         assert N8nImporter is not None
 
     def test_phase6_templates(self) -> None:
-        from workflow_builder.templates.template import (
+        from loom.templates.template import (
             TemplateEngine,
         )
 
         assert TemplateEngine is not None
 
     def test_phase7_capability(self) -> None:
-        from workflow_builder.agents.capability import (
+        from loom.agents.capability import (
             detect_tier,
         )
-        from workflow_builder.agents.validator import (
+        from loom.agents.validator import (
             CodeValidator,
         )
 
         assert all([detect_tier, CodeValidator])
 
     def test_phase9_mcp(self) -> None:
-        from workflow_builder.mcp_server.bridge import (
+        from loom.mcp_server.bridge import (
             RuntimeBridge,
         )
 
         assert RuntimeBridge is not None
 
     def test_phase10_integrations(self) -> None:
-        from workflow_builder.integrations.base import (
+        from loom.integrations.base import (
             AgentExecutor,
         )
 
         assert AgentExecutor is not None
 
     def test_version_is_current(self) -> None:
-        import workflow_builder
+        import loom
 
-        assert workflow_builder.__version__ is not None
-        parts = workflow_builder.__version__.split(".")
+        assert loom.__version__ is not None
+        parts = loom.__version__.split(".")
         assert len(parts) >= 2

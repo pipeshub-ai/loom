@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from workflow_builder import Context, ExecutionStatus, Runtime, workflow
-from workflow_builder.facade import LocalFacade
-from workflow_builder.state.memory import MemoryStore
-from workflow_builder.storage.blob import BlobService, LocalBlobBackend
+from loom import Context, ExecutionStatus, Runtime, workflow
+from loom.blobs.blob import BlobService, LocalBlobBackend
+from loom.facade import LocalFacade
+from loom.stores.memory import MemoryStore
 
 
 @pytest.fixture
@@ -60,7 +60,7 @@ def _http_app(facade: LocalFacade):
     """Build the FastAPI app, or skip when the extra's Starlette is too new."""
     httpx = pytest.importorskip("httpx")
     pytest.importorskip("fastapi")
-    from workflow_builder.server.app import create_app
+    from loom.server.app import create_app
 
     try:
         return create_app(facade), httpx
@@ -83,7 +83,7 @@ class TestFacadeAndHttp:
         assert len(history) == 1
 
     async def test_http_list_and_content(self, runtime: Runtime) -> None:
-        from workflow_builder.server import LoomClient
+        from loom.server import LoomClient
 
         runtime.register(e2e_stage)
         await runtime.run(e2e_stage, "via-http")
@@ -157,7 +157,7 @@ class TestFacadeAndHttp:
             assert await runtime.artifacts.read("uploaded.txt") == b"from-client"
 
     async def test_same_answer_local_and_http(self, runtime: Runtime) -> None:
-        from workflow_builder.server import LoomClient
+        from loom.server import LoomClient
 
         runtime.register(e2e_stage)
         await runtime.run(e2e_stage, "parity")
@@ -178,7 +178,7 @@ class TestFacadeAndHttp:
 
 class TestMcpArtifacts:
     async def test_list_and_put_tools(self, runtime: Runtime) -> None:
-        from workflow_builder.mcp_server import tools
+        from loom.mcp_server import tools
 
         runtime.register(e2e_stage)
         await runtime.run(e2e_stage, "mcp")

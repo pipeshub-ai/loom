@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from workflow_builder.agents.fakes import fake_value, install_fakes
-from workflow_builder.toolsets.manifest import OperationSpec, ToolsetManifest
+from loom.agents.fakes import fake_value, install_fakes
+from loom.toolsets.manifest import OperationSpec, ToolsetManifest
 
 
 class TestFakeValue:
@@ -68,7 +68,7 @@ class TestFakeValue:
         assert built[0]["name"] == "sample"
 
     def test_a_real_model_schema_round_trips(self) -> None:
-        from workflow_builder.toolsets.jira.models import JiraIssue
+        from loom.toolsets.jira.models import JiraIssue
 
         built = fake_value(JiraIssue.model_json_schema())
         assert JiraIssue(**built).key  # constructs without error
@@ -89,8 +89,8 @@ class TestFakeValue:
 
 class TestInstallFakes:
     def test_it_replaces_the_declared_operations(self) -> None:
-        from workflow_builder.toolsets.jira import tools
-        from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
+        from loom.toolsets.jira import tools
+        from loom.toolsets.jira.manifest import JIRA_MANIFEST
 
         original = tools.jira_search_issues
         try:
@@ -101,8 +101,8 @@ class TestInstallFakes:
             tools.jira_search_issues = original
 
     async def test_the_stub_returns_the_declared_shape(self) -> None:
-        from workflow_builder.toolsets.jira import tools
-        from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
+        from loom.toolsets.jira import tools
+        from loom.toolsets.jira.manifest import JIRA_MANIFEST
 
         originals = {
             op.function: getattr(tools, op.function)
@@ -142,11 +142,11 @@ class TestSmokeRunsAgainstFakes:
     """The point of all of it: an integration workflow that actually executes."""
 
     def test_a_toolset_workflow_completes_without_credentials(self) -> None:
-        from workflow_builder.agents.smoke import smoke_run
+        from loom.agents.smoke import smoke_run
 
         code = '''
-from workflow_builder import Context, step, workflow
-from workflow_builder.toolsets.jira.tools import jira_search_issues
+from loom import Context, step, workflow
+from loom.toolsets.jira.tools import jira_search_issues
 
 @step
 async def find(jql: str) -> list:
@@ -163,8 +163,8 @@ async def report(ctx: Context, jql: str) -> str:
             code,
             workflow_input="project = X",
             fakes=[(
-                "workflow_builder.toolsets.jira.tools",
-                "workflow_builder.toolsets.jira.manifest.JIRA_MANIFEST",
+                "loom.toolsets.jira.tools",
+                "loom.toolsets.jira.manifest.JIRA_MANIFEST",
             )],
         )
 
@@ -176,11 +176,11 @@ async def report(ctx: Context, jql: str) -> str:
     def test_the_run_uses_fake_data_rather_than_the_service(self) -> None:
         """Asserting on the data proves the substitution, without depending on
         whether this machine happens to hold credentials."""
-        from workflow_builder.agents.smoke import smoke_run
+        from loom.agents.smoke import smoke_run
 
         code = '''
-from workflow_builder import Context, step, workflow
-from workflow_builder.toolsets.jira.tools import jira_search_issues
+from loom import Context, step, workflow
+from loom.toolsets.jira.tools import jira_search_issues
 
 @step
 async def find(jql: str) -> list:
@@ -196,8 +196,8 @@ async def keys(ctx: Context, jql: str) -> str:
             code,
             workflow_input="project = X",
             fakes=[(
-                "workflow_builder.toolsets.jira.tools",
-                "workflow_builder.toolsets.jira.manifest.JIRA_MANIFEST",
+                "loom.toolsets.jira.tools",
+                "loom.toolsets.jira.manifest.JIRA_MANIFEST",
             )],
         )
 
@@ -224,14 +224,14 @@ class TestBothWaysIntoAToolsetAreFaked:
 
     FAKES: ClassVar[list[tuple[str, str]]] = [
         (
-            "workflow_builder.toolsets.jira.tools",
-            "workflow_builder.toolsets.jira.manifest.JIRA_MANIFEST",
+            "loom.toolsets.jira.tools",
+            "loom.toolsets.jira.manifest.JIRA_MANIFEST",
         )
     ]
 
     DIRECT = (
-        "from workflow_builder import Context, step, workflow\n"
-        "from workflow_builder.toolsets.jira.tools import jira_search_issues\n\n"
+        "from loom import Context, step, workflow\n"
+        "from loom.toolsets.jira.tools import jira_search_issues\n\n"
         "@step\n"
         "async def fetch() -> list:\n"
         '    """Fetch."""\n'
@@ -244,7 +244,7 @@ class TestBothWaysIntoAToolsetAreFaked:
     )
 
     VIA_AGENT = (
-        "from workflow_builder import Context, workflow\n\n"
+        "from loom import Context, workflow\n\n"
         '@workflow(name="via_agent")\n'
         "async def via_agent(ctx: Context, _=None) -> str:\n"
         '    """What the ladder emits for an ambiguous entity."""\n'
@@ -255,7 +255,7 @@ class TestBothWaysIntoAToolsetAreFaked:
     )
 
     def test_a_direct_call_inside_a_step_is_faked(self) -> None:
-        from workflow_builder.agents.smoke import smoke_run
+        from loom.agents.smoke import smoke_run
 
         result = smoke_run(self.DIRECT, fakes=self.FAKES)
         assert result.ok, result.error
@@ -263,7 +263,7 @@ class TestBothWaysIntoAToolsetAreFaked:
     def test_an_agent_node_resolves_the_toolset_too(self) -> None:
         """The regression. Without the executable toolset this is the failure
         the cookbook hit: "no executable toolset 'jira' is registered"."""
-        from workflow_builder.agents.smoke import smoke_run
+        from loom.agents.smoke import smoke_run
 
         result = smoke_run(self.VIA_AGENT, fakes=self.FAKES)
         assert result.ok, result.error
@@ -277,13 +277,13 @@ class TestBothWaysIntoAToolsetAreFaked:
         What matters is that it answers with fake data instead of reaching for
         a credential.
         """
-        from workflow_builder.agents.fakes import (
+        from loom.agents.fakes import (
             executable_fake_toolset,
             install_fakes,
             uninstall_fakes,
         )
-        from workflow_builder.agents.tools import ToolContext
-        from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
+        from loom.agents.tools import ToolContext
+        from loom.toolsets.jira.manifest import JIRA_MANIFEST
 
         try:
             install_fakes(JIRA_MANIFEST)
@@ -304,13 +304,13 @@ class TestBothWaysIntoAToolsetAreFaked:
         the sandbox would quietly go to the network for whichever path was
         registered first.
         """
-        from workflow_builder.agents.fakes import (
+        from loom.agents.fakes import (
             executable_fake_toolset,
             install_fakes,
             uninstall_fakes,
         )
-        from workflow_builder.toolsets.jira import tools
-        from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
+        from loom.toolsets.jira import tools
+        from loom.toolsets.jira.manifest import JIRA_MANIFEST
 
         toolset = executable_fake_toolset(JIRA_MANIFEST)   # before faking
         real = tools.jira_search_issues
@@ -324,8 +324,8 @@ class TestBothWaysIntoAToolsetAreFaked:
 
     def test_the_real_manifest_is_preserved(self) -> None:
         """Not a rebuilt one: pagination, resolvers, and effects must survive."""
-        from workflow_builder.agents.fakes import executable_fake_toolset
-        from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
+        from loom.agents.fakes import executable_fake_toolset
+        from loom.toolsets.jira.manifest import JIRA_MANIFEST
 
         toolset = executable_fake_toolset(JIRA_MANIFEST)
 
@@ -335,8 +335,8 @@ class TestBothWaysIntoAToolsetAreFaked:
 
     def test_a_manifest_with_no_module_yields_nothing(self) -> None:
         """Same condition under which install_fakes does nothing."""
-        from workflow_builder.agents.fakes import executable_fake_toolset
-        from workflow_builder.toolsets.manifest import ToolsetManifest
+        from loom.agents.fakes import executable_fake_toolset
+        from loom.toolsets.manifest import ToolsetManifest
 
         bare = ToolsetManifest(id="bare", version="1", summary="no module")
         assert executable_fake_toolset(bare) is None

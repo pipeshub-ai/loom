@@ -7,15 +7,15 @@ from pathlib import Path
 
 import pytest
 
-from workflow_builder.core.exceptions import ConfigurationError
-from workflow_builder.state.memory import MemoryStore
-from workflow_builder.storage.artifact import ArtifactService, StoreBackedArtifactStore
-from workflow_builder.storage.blob import BlobService, LocalBlobBackend
-from workflow_builder.storage.signed_urls import (
+from loom.blobs.artifact import ArtifactService, StoreBackedArtifactStore
+from loom.blobs.blob import BlobService, LocalBlobBackend
+from loom.blobs.signed_urls import (
     SignedUrlService,
     UploadNotFound,
     UploadTooLarge,
 )
+from loom.core.exceptions import ConfigurationError
+from loom.stores.memory import MemoryStore
 
 
 @pytest.fixture
@@ -52,7 +52,7 @@ class TestDownloadUrl:
         assert first.expires_at <= second.expires_at or first.url != second.url
 
     async def test_expires_capped_at_a_day(self, urls: SignedUrlService) -> None:
-        from workflow_builder.storage.signed_urls import MAX_EXPIRES_IN
+        from loom.blobs.signed_urls import MAX_EXPIRES_IN
 
         assert urls._clamp(999_999, 3600) == MAX_EXPIRES_IN
 

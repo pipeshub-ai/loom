@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 import pytest
 from keyring.backend import KeyringBackend
 
-from workflow_builder.connectors.credentials import (
+from loom.connectors.credentials import (
     CredentialStore,
     EncryptedFileCredentialStore,
     KeyringCredentialStore,
@@ -22,10 +22,10 @@ from workflow_builder.connectors.credentials import (
     Refresher,
     StoredCredential,
 )
-from workflow_builder.connectors.encryption import EnvKeyProvider
-from workflow_builder.core.exceptions import AuthExpired, CredentialNotFound
-from workflow_builder.core.secret import Secret
-from workflow_builder.runtime.clock import ManualClock
+from loom.connectors.encryption import EnvKeyProvider
+from loom.core.exceptions import AuthExpired, CredentialNotFound
+from loom.core.secret import Secret
+from loom.runtime.clock import ManualClock
 
 
 class _FakeKeyring(KeyringBackend):
@@ -264,7 +264,7 @@ class TestLayeredCredentialStore:
     ``clock`` on the store itself."""
 
     async def test_it_satisfies_the_protocol(self) -> None:
-        from workflow_builder.connectors.credentials import LayeredCredentialStore
+        from loom.connectors.credentials import LayeredCredentialStore
 
         layered = LayeredCredentialStore(MemoryCredentialStore())
         assert isinstance(layered, CredentialStore)
@@ -272,7 +272,7 @@ class TestLayeredCredentialStore:
     async def test_get_delegates_to_the_layer_so_refresh_still_runs(self) -> None:
         from datetime import UTC, datetime
 
-        from workflow_builder.connectors.credentials import LayeredCredentialStore
+        from loom.connectors.credentials import LayeredCredentialStore
 
         inner = MemoryCredentialStore()
         clock = ManualClock(datetime(2030, 1, 1, tzinfo=UTC))
@@ -290,7 +290,7 @@ class TestLayeredCredentialStore:
         assert refresher.calls == 1
 
     async def test_credential_not_found_falls_through(self) -> None:
-        from workflow_builder.connectors.credentials import LayeredCredentialStore
+        from loom.connectors.credentials import LayeredCredentialStore
 
         first = MemoryCredentialStore()
         second = MemoryCredentialStore()
@@ -301,7 +301,7 @@ class TestLayeredCredentialStore:
     async def test_auth_expired_does_not_fall_through(self) -> None:
         from datetime import UTC, datetime
 
-        from workflow_builder.connectors.credentials import LayeredCredentialStore
+        from loom.connectors.credentials import LayeredCredentialStore
 
         first = MemoryCredentialStore()
         first.clock = ManualClock(datetime(2030, 1, 1, tzinfo=UTC))
@@ -316,7 +316,7 @@ class TestLayeredCredentialStore:
             await layered.get("jira")
 
     async def test_required_name_raises_auth_expired_before_ambient(self) -> None:
-        from workflow_builder.connectors.credentials import LayeredCredentialStore
+        from loom.connectors.credentials import LayeredCredentialStore
 
         ambient = MemoryCredentialStore()
         await ambient.put("jira", _cred("ambient"))
@@ -327,7 +327,7 @@ class TestLayeredCredentialStore:
             await layered.get("jira")
 
     async def test_unrequired_name_uses_ambient(self) -> None:
-        from workflow_builder.connectors.credentials import LayeredCredentialStore
+        from loom.connectors.credentials import LayeredCredentialStore
 
         ambient = MemoryCredentialStore()
         await ambient.put("google", _cred("ambient-google"))
@@ -337,7 +337,7 @@ class TestLayeredCredentialStore:
         assert (await layered.get("google")).reveal() == "ambient-google"
 
     async def test_peek_finds_the_first_layer_with_a_record(self) -> None:
-        from workflow_builder.connectors.credentials import LayeredCredentialStore
+        from loom.connectors.credentials import LayeredCredentialStore
 
         first = MemoryCredentialStore()
         second = MemoryCredentialStore()
@@ -348,7 +348,7 @@ class TestLayeredCredentialStore:
         assert found.token.reveal() == "hidden"
 
     def test_repr_reports_layer_count_only(self) -> None:
-        from workflow_builder.connectors.credentials import LayeredCredentialStore
+        from loom.connectors.credentials import LayeredCredentialStore
 
         layered = LayeredCredentialStore(MemoryCredentialStore(), MemoryCredentialStore())
         assert repr(layered) == "<LayeredCredentialStore layers=2>"

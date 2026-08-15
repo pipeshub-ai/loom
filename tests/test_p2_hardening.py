@@ -14,23 +14,23 @@ import inspect
 
 import pytest
 
-from workflow_builder import Context, ExecutionStatus, Runtime, step, workflow
-from workflow_builder.agents.result import AgentResult
-from workflow_builder.agents.supervisor import (
+from loom import Context, ExecutionStatus, Runtime, step, workflow
+from loom.agents.result import AgentResult
+from loom.agents.supervisor import (
     CodeSupervisor,
     Finding,
     SupervisorVerdict,
 )
-from workflow_builder.agents.validator import CodeValidator
-from workflow_builder.core.exceptions import BudgetExceeded
-from workflow_builder.runtime.registry import (
+from loom.agents.validator import CodeValidator
+from loom.core.exceptions import BudgetExceeded
+from loom.runtime.registry import (
     InMemoryWorkflowRegistry,
     StoreBackedWorkflowRegistry,
     WorkflowRecord,
     record_for,
 )
-from workflow_builder.state.memory import MemoryStore
-from workflow_builder.state.sqlite import SQLiteStore
+from loom.stores.memory import MemoryStore
+from loom.stores.sqlite import SQLiteStore
 
 # ---------------------------------------------------------------------------
 # Journal growth guard
@@ -158,7 +158,7 @@ class TestEmit:
         such method — it was reading an API that did not exist. This fails the
         moment that happens again.
         """
-        from workflow_builder.graph.extractor import _CTX_CALL_MAP
+        from loom.graph.extractor import _CTX_CALL_MAP
 
         missing = [name for name in _CTX_CALL_MAP if not hasattr(Context, name)]
         assert missing == [], f"extractor references non-existent ctx.{missing}"
@@ -170,7 +170,7 @@ class TestEmit:
         `set_metadata` has no visual meaning — but a durable operation that the
         extractor does not know about is invisible on the canvas.
         """
-        from workflow_builder.graph.extractor import _CTX_CALL_MAP
+        from loom.graph.extractor import _CTX_CALL_MAP
 
         durable = {
             "step", "map", "gather", "sleep", "sleep_until", "wait_for_event",
@@ -185,7 +185,7 @@ class TestEmit:
 
 
 _VALID = '''
-from workflow_builder import Context, Retry, step, workflow
+from loom import Context, Retry, step, workflow
 
 @step(retry=Retry(max_attempts=2))
 async def s() -> int:
@@ -215,19 +215,19 @@ class TestSymbolValidation:
         assert "did you mean 'Retry'" in message
 
     def test_submodules_are_not_flagged(self) -> None:
-        """`from workflow_builder import state` is valid even though `state` is
+        """`from loom import stores` is valid even though `stores` is
         not an attribute until it has been imported."""
-        code = "from workflow_builder import state\n" + _VALID
+        code = "from loom import stores\n" + _VALID
         issues = CodeValidator().validate(code)
 
-        assert not any("state" in i.message for i in issues if i.category == "imports")
+        assert not any("stores" in i.message for i in issues if i.category == "imports")
 
     def test_deep_module_paths_resolve(self) -> None:
-        code = _VALID + "\nfrom workflow_builder.state.memory import MemoryStore\n"
+        code = _VALID + "\nfrom loom.stores.memory import MemoryStore\n"
         assert not [i for i in CodeValidator().validate(code) if i.category == "imports"]
 
     def test_a_bad_symbol_in_a_deep_path_is_caught(self) -> None:
-        code = _VALID + "\nfrom workflow_builder.state.memory import MemoryStorage\n"
+        code = _VALID + "\nfrom loom.stores.memory import MemoryStorage\n"
         issues = CodeValidator().validate(code)
 
         assert any("MemoryStorage" in i.message for i in issues)
@@ -241,7 +241,7 @@ class TestSymbolValidation:
         assert not any("Thing" in i.message for i in issues)
 
     def test_star_imports_are_skipped(self) -> None:
-        code = "from workflow_builder import *\n" + _VALID
+        code = "from loom import *\n" + _VALID
         assert not [i for i in CodeValidator().validate(code) if i.category == "imports"]
 
     def test_relative_imports_are_skipped(self) -> None:
@@ -331,7 +331,7 @@ class TestSupervisorVerdict:
         assert "unavailable" in verdict.summary
 
     def test_instructions_are_customizable(self) -> None:
-        from workflow_builder.agents.supervisor import DEFAULT_SUPERVISOR_PROMPT
+        from loom.agents.supervisor import DEFAULT_SUPERVISOR_PROMPT
 
         replaced = CodeSupervisor(object(), instructions="Only check for typos.")
         assert replaced.build_prompt() == "Only check for typos."
@@ -438,7 +438,7 @@ class TestRecordFor:
         assert record_for(catalogued).input_schema.get("type") == "integer"
 
     def test_captures_triggers(self) -> None:
-        from workflow_builder.triggers.specs import OnEvent
+        from loom.triggers.specs import OnEvent
 
         @workflow(name="triggered", triggers=[OnEvent(topic="orders")])
         async def triggered(ctx: Context, _n: int) -> int:
@@ -503,8 +503,8 @@ class TestPublishedOverHttp:
     async def test_published_but_unimported_workflows_are_listed(self) -> None:
         import httpx
 
-        from workflow_builder.server import LoomClient
-        from workflow_builder.server.app import create_app
+        from loom.server import LoomClient
+        from loom.server.app import create_app
 
         store = MemoryStore()
         await Runtime(store=store).publish(catalogued)
@@ -526,8 +526,8 @@ class TestPublishedOverHttp:
     async def test_imported_workflows_are_marked_executable(self) -> None:
         import httpx
 
-        from workflow_builder.server import LoomClient
-        from workflow_builder.server.app import create_app
+        from loom.server import LoomClient
+        from loom.server.app import create_app
 
         rt = Runtime(store=MemoryStore())
         rt.register(catalogued)
