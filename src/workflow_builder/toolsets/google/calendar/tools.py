@@ -20,6 +20,7 @@ from workflow_builder.toolsets.google.calendar.models import (
     CalendarEvent,
     CalendarSummary,
 )
+from workflow_builder.toolsets.pagination import Results
 
 __all__ = [
     "CALENDAR_TOOL_DOCS",
@@ -42,7 +43,7 @@ _WRITE = Retry(max_attempts=2, initial_delay=1.0)
 
 
 @step(retry=_READ)
-async def calendar_list_calendars() -> list[CalendarSummary]:
+async def calendar_list_calendars() -> Results[CalendarSummary]:
     """List the calendars this account can see.
 
     Returns:
@@ -61,7 +62,7 @@ async def calendar_list_events(
     time_max: str = "",
     query: str = "",
     max_results: int = 25,
-) -> list[CalendarEvent]:
+) -> Results[CalendarEvent]:
     """List events in a time window, recurring series expanded to instances.
 
     Args:

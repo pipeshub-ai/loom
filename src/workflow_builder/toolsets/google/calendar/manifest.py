@@ -208,6 +208,7 @@ GOOGLE_CALENDAR_MANIFEST = ToolsetManifest(
                 function="calendar_list_calendars",
                 summary="List the calendars this account can see.",
                 effect=EffectClass.READ,
+                pagination=True,
                 output_schema={
                     "type": "array",
                     "items": CalendarSummary.model_json_schema(),

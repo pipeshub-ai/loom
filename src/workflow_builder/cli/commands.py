@@ -113,6 +113,7 @@ async def follow(
     granularity is steps rather than tokens.
     """
     seen = 0
+    said = 0
     waited = 0.0
     run: dict[str, Any] = {}
 
@@ -124,6 +125,14 @@ async def follow(
             name = entry.get("step_id", "")
             out.line(f"  [dim]{entry.get('seq', ''):>3}[/dim]  {name:<24} {status}")
         seen = len(entries)
+
+        # Anything the run narrated since the last poll. A step that takes four
+        # minutes is one journal line and no news; this is where it says what it
+        # is actually doing.
+        fresh = await backend.reports(run_id, said)
+        for report in fresh:
+            out.line(f"       [dim]{report.get('message', '')}[/dim]")
+        said += len(fresh)
 
         status = str(run.get("status", ""))
         if status in ("completed", "failed", "cancelled", "suspended"):
@@ -522,12 +531,23 @@ def cmd_serve(args: argparse.Namespace) -> int:
         out.error("serving needs the api extra: pip install 'workflow-builder[api]'")
         return Exit.USAGE
 
+    from workflow_builder.identity.config import LOOPBACK_HOSTS, IdentitySettings
     from workflow_builder.server.app import create_app
 
     try:
         target = resolve(None, modules=getattr(args, "module", None) or None)
     except (ConfigurationError, RegistryError) as exc:
         out.error(str(exc))
+        return Exit.USAGE
+
+    identity = IdentitySettings()
+    if not identity.is_configured() and args.host not in LOOPBACK_HOSTS:
+        out.error(
+            f"refusing to bind {args.host}:{args.port} with no identity configured "
+            "— that serves every workflow to anyone who can reach this port. Set "
+            "LOOM_AUTH_JWKS_URI (or another LOOM_AUTH_* verifier config) or bind "
+            "to a loopback host."
+        )
         return Exit.USAGE
 
     runtime = target.backend.runtime  # type: ignore[union-attr]
@@ -538,11 +558,11 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if not registered:
         out.line(
             "  [yellow]no workflows imported — list them under "
-            "[tool.loom] modules, or pass --module[/yellow]"
+            "[[tool.loom]] modules, or pass --module[/yellow]"
         )
 
     uvicorn.run(
-        create_app(runtime),
+        create_app(runtime, identity=identity),
         host=args.host,
         port=args.port,
         log_level=args.log_level,
@@ -573,6 +593,10 @@ def cmd_mcp(args: argparse.Namespace) -> int:
     runtime = getattr(target.backend, "runtime", None)
     workflows = sorted(runtime.workflows) if runtime is not None else []
 
+    from workflow_builder.toolsets.registry import register_available_toolsets
+
+    toolsets = register_available_toolsets()
+
     # stdio *is* the protocol channel, so anything written to stdout would
     # corrupt the stream. Status goes to stderr.
     if args.transport == "stdio":
@@ -580,10 +604,12 @@ def cmd_mcp(args: argparse.Namespace) -> int:
             f"loom mcp: serving {len(workflows)} workflow(s) over stdio"
             + (f" ({', '.join(workflows)})" if workflows else "")
         )
+        if toolsets:
+            out.error(f"  toolsets: {', '.join(toolsets)}")
         if not workflows and not args.server:
             out.error(
                 "  no workflows imported — pass --module <file.py>, or list "
-                "modules under [tool.loom] in pyproject.toml"
+                "modules under [[tool.loom]] in pyproject.toml"
             )
     else:
         out.line(

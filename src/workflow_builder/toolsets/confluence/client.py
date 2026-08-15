@@ -17,6 +17,7 @@ import base64
 import os
 from typing import Any
 
+from workflow_builder.connectors.credentials import current_credential_store, resolve_bearer_token
 from workflow_builder.toolsets.confluence.models import (
     ConfluenceComment,
     ConfluencePage,
@@ -26,6 +27,32 @@ from workflow_builder.toolsets.confluence.models import (
     PageBody,
     SearchResult,
 )
+from workflow_builder.toolsets.pagination import (
+    CursorPaging,
+    OffsetPaging,
+    Results,
+    page_through,
+)
+
+#: Confluence caps a page here whatever ``limit`` asks for.
+CONFLUENCE_PAGE_CAP = 250
+
+
+def _to_space(s: dict[str, Any]) -> ConfluenceSpace:
+    """One v2 space row, flattened."""
+    description = s.get("description")
+    return ConfluenceSpace(
+        id=s["id"],
+        key=s.get("key", ""),
+        name=s.get("name", ""),
+        type=s.get("type", ""),
+        status=s.get("status", ""),
+        description=(
+            description.get("plain", {}).get("value", "")
+            if isinstance(description, dict)
+            else str(description or "")
+        ),
+    )
 
 
 class ConfluenceClient:
@@ -47,28 +74,48 @@ class ConfluenceClient:
         base_url: str | None = None,
         email: str | None = None,
         api_token: str | None = None,
+        *,
+        credential_name: str = "confluence",
     ) -> None:
         self._base_url = (
             base_url or os.environ.get("CONFLUENCE_URL", "")
         ).rstrip("/")
         self._email = email or os.environ.get("CONFLUENCE_EMAIL", "")
         self._token = api_token or os.environ.get("CONFLUENCE_API_TOKEN", "")
+        self._credential_name = credential_name
 
         if not self._base_url:
             msg = "CONFLUENCE_URL is required (env var or base_url argument)"
             raise ValueError(msg)
-        if not self._email or not self._token:
+        # See JiraClient.__init__: deferred to _headers() at first call when
+        # a CredentialStore is bound, since checking it needs an await.
+        if (not self._email or not self._token) and current_credential_store() is None:
             msg = "CONFLUENCE_EMAIL and CONFLUENCE_API_TOKEN are required"
             raise ValueError(msg)
 
-        credentials = base64.b64encode(
-            f"{self._email}:{self._token}".encode()
-        ).decode()
-        self._headers = {
-            "Authorization": f"Basic {credentials}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
+    async def _headers(self) -> dict[str, str]:
+        """Basic auth from email/token, or a CredentialStore-issued bearer token.
+
+        See ``JiraClient._headers`` — same reasoning, same fallback order.
+        """
+        token = await resolve_bearer_token(self._credential_name)
+        if token:
+            return {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+        if self._email and self._token:
+            credentials = base64.b64encode(f"{self._email}:{self._token}".encode()).decode()
+            return {
+                "Authorization": f"Basic {credentials}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+        raise ValueError(
+            "CONFLUENCE_EMAIL and CONFLUENCE_API_TOKEN are required, or "
+            f"connect a '{self._credential_name}' credential via a CredentialStore"
+        )
 
     # ------------------------------------------------------------------
     # Low-level HTTP
@@ -78,9 +125,10 @@ class ConfluenceClient:
         import httpx
 
         url = f"{self._base_url}/wiki/api/v2/{path.lstrip('/')}"
+        headers = await self._headers()
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(
-                url, headers=self._headers, params=params
+                url, headers=headers, params=params
             )
             resp.raise_for_status()
             return resp.json()
@@ -90,9 +138,10 @@ class ConfluenceClient:
         import httpx
 
         url = f"{self._base_url}/wiki/rest/api/{path.lstrip('/')}"
+        headers = await self._headers()
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(
-                url, headers=self._headers, params=params
+                url, headers=headers, params=params
             )
             resp.raise_for_status()
             return resp.json()
@@ -101,9 +150,10 @@ class ConfluenceClient:
         import httpx
 
         url = f"{self._base_url}/wiki/api/v2/{path.lstrip('/')}"
+        headers = await self._headers()
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
-                url, headers=self._headers, json=json
+                url, headers=headers, json=json
             )
             resp.raise_for_status()
             return resp.json()
@@ -112,9 +162,10 @@ class ConfluenceClient:
         import httpx
 
         url = f"{self._base_url}/wiki/api/v2/{path.lstrip('/')}"
+        headers = await self._headers()
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.put(
-                url, headers=self._headers, json=json
+                url, headers=headers, json=json
             )
             resp.raise_for_status()
             return resp.json() if resp.content else {}
@@ -123,8 +174,9 @@ class ConfluenceClient:
         import httpx
 
         url = f"{self._base_url}/wiki/api/v2/{path.lstrip('/')}"
+        headers = await self._headers()
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.delete(url, headers=self._headers)
+            resp = await client.delete(url, headers=headers)
             resp.raise_for_status()
 
     # ------------------------------------------------------------------
@@ -135,37 +187,50 @@ class ConfluenceClient:
         self,
         cql: str,
         limit: int = 20,
-    ) -> list[SearchResult]:
+    ) -> Results:
         """Search content using CQL (Confluence Query Language).
 
-        Uses the v1 search endpoint since v2 does not have CQL search.
+        Uses the v1 search endpoint since v2 has no CQL search — and v1 pages
+        by ``start``/``limit`` with a server-side ceiling, so a large ``limit``
+        comes back short and says nothing about it.
+
+        The result is a list; check ``.complete`` to find out whether ``limit``
+        cut it off.
         """
-        data = await self._get_v1(
-            "search",
-            cql=cql,
+
+        return await page_through(
+            lambda params: self._get_v1("search", cql=cql, **params),
+            # v1 pages by offset and signals more with a next link; different
+            # Confluence versions send one or the other, so both are consulted.
+            style=OffsetPaging(
+                items="results",
+                start_param="start",
+                size_param="limit",
+                total_field="totalSize",
+                next_link=("_links", "next"),
+            ),
             limit=limit,
+            page_size=CONFLUENCE_PAGE_CAP,
+            row=self._to_search_result,
         )
-        results: list[SearchResult] = []
-        for item in data.get("results", []):
-            content = item.get("content", {})
-            excerpt = item.get("excerpt", "")
-            results.append(SearchResult(
-                content_id=content.get("id", ""),
-                title=content.get("title", ""),
-                type=content.get("type", ""),
-                space_key=(
-                    content.get("space", {}).get("key", "")
-                    if "space" in content else ""
-                ),
-                excerpt=excerpt.replace("<@hl>", "").replace(
-                    "</@hl>", ""
-                )[:200],
-                url=f"{self._base_url}/wiki{content.get('_links', {}).get('webui', '')}",
-                last_modified=content.get("history", {}).get(
-                    "lastUpdated", {}
-                ).get("when", ""),
-            ))
-        return results
+
+    def _to_search_result(self, item: dict[str, Any]) -> SearchResult:
+        """One v1 search row, flattened. Per row, so it composes with paging."""
+        content = item.get("content", {})
+        excerpt = item.get("excerpt", "")
+        return SearchResult(
+            content_id=content.get("id", ""),
+            title=content.get("title", ""),
+            type=content.get("type", ""),
+            space_key=(
+                content.get("space", {}).get("key", "") if "space" in content else ""
+            ),
+            excerpt=excerpt.replace("<@hl>", "").replace("</@hl>", "")[:200],
+            url=f"{self._base_url}/wiki{content.get('_links', {}).get('webui', '')}",
+            last_modified=content.get("history", {})
+            .get("lastUpdated", {})
+            .get("when", ""),
+        )
 
     async def get_page(self, page_id: str) -> ConfluencePage:
         """Fetch a page by its ID."""
@@ -274,25 +339,22 @@ class ConfluenceClient:
 
     async def get_page_comments(
         self, page_id: str, limit: int = 25
-    ) -> list[ConfluenceComment]:
-        """Fetch footer comments on a page."""
-        data = await self._get(
-            f"pages/{page_id}/footer-comments",
+    ) -> Results:
+        """Fetch footer comments on a page, following every page of them."""
+
+        return await page_through(
+            lambda params: self._get(f"pages/{page_id}/footer-comments", **params),
+            style=CursorPaging(),
             limit=limit,
-        )
-        comments: list[ConfluenceComment] = []
-        for c in data.get("results", []):
-            body_val = (
-                c.get("body", {}).get("storage", {}).get("value", "")
-            )
-            comments.append(ConfluenceComment(
+            page_size=CONFLUENCE_PAGE_CAP,
+            row=lambda c: ConfluenceComment(
                 id=c["id"],
-                body=body_val,
+                body=c.get("body", {}).get("storage", {}).get("value", ""),
                 author_id=c.get("authorId", ""),
                 created_at=c.get("createdAt", ""),
                 page_id=page_id,
-            ))
-        return comments
+            ),
+        )
 
     async def add_comment(
         self, page_id: str, body: str
@@ -318,28 +380,18 @@ class ConfluenceClient:
     # Spaces
     # ------------------------------------------------------------------
 
-    async def list_spaces(
-        self, limit: int = 25
-    ) -> list[ConfluenceSpace]:
-        """List all accessible spaces."""
-        data = await self._get("spaces", limit=limit)
-        return [
-            ConfluenceSpace(
-                id=s["id"],
-                key=s.get("key", ""),
-                name=s.get("name", ""),
-                type=s.get("type", ""),
-                status=s.get("status", ""),
-                description=(
-                    s.get("description", {}).get("plain", {}).get(
-                        "value", ""
-                    )
-                    if isinstance(s.get("description"), dict)
-                    else str(s.get("description", ""))
-                ),
-            )
-            for s in data.get("results", [])
-        ]
+    async def list_spaces(self, limit: int = 25) -> Results:
+        """List accessible spaces, following every page."""
+
+        return await page_through(
+            lambda params: self._get("spaces", **params),
+            style=CursorPaging(),
+            limit=limit,
+            page_size=CONFLUENCE_PAGE_CAP,
+            row=_to_space,
+        )
+
+
 
     async def get_space(self, space_id: str) -> ConfluenceSpace:
         """Get a space by its ID."""

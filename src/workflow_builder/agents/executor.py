@@ -46,6 +46,15 @@ class AgentContext(BaseModel):
     """Prior turns to seed the conversation with, oldest first."""
     deps: Any = None
 
+    broker: Any = None
+    """Optional :class:`EffectBroker`. Set when the agent runs inside a
+    workflow, so each tool call is mediated as it is made rather than only
+    filtered when the toolset was resolved — an agent holds its tools for the
+    length of the turn loop, and permission has to be checked where a tool is
+    used rather than where it was handed out."""
+    authority: Any = None
+    """What the broker weighs the tool call against."""
+
 
 @runtime_checkable
 class AgentExecutor(Protocol):

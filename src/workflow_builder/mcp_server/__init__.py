@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
 
     from workflow_builder.facade import RuntimeFacade
+    from workflow_builder.identity.config import IdentitySettings
 
 __all__ = ["build_server", "create_server", "serve"]
 
@@ -49,12 +50,29 @@ def build_server(
     host: str = "127.0.0.1",
     port: int = 8000,
     scheduler: bool = True,
+    identity: IdentitySettings | None = None,
+    transport: str = "stdio",
 ) -> FastMCP:
-    """Bind a :class:`RuntimeFacade` to a FastMCP server."""
+    """Bind a :class:`RuntimeFacade` to a FastMCP server.
+
+    ``identity`` defaults to reading ``LOOM_AUTH_*`` env vars; pass one
+    explicitly to test auth without touching the environment. Unset, an
+    install behaves exactly as it did before identity existed. ``transport``
+    matters here too: auth only ever applies over a networked transport,
+    never over ``stdio`` — see ``mcp_server/server.py::build_server`` for why.
+    """
     _require_mcp()
     from workflow_builder.mcp_server.server import build_server as _build
 
-    return _build(facade, name=name, host=host, port=port, scheduler=scheduler)
+    return _build(
+        facade,
+        name=name,
+        host=host,
+        port=port,
+        scheduler=scheduler,
+        identity=identity,
+        transport=transport,
+    )
 
 
 def create_server(store_url: str = "memory://", name: str = "loom") -> Any:
@@ -73,6 +91,7 @@ def serve(
     host: str = "127.0.0.1",
     port: int = 8000,
     scheduler: bool = True,
+    identity: IdentitySettings | None = None,
 ) -> None:
     """Run the server until the client disconnects.
 
@@ -80,9 +99,31 @@ def serve(
     speak; ``http`` (streamable HTTP) is for clients that connect over a network.
     ``host`` and ``port`` apply to those, and are ignored by stdio. ``scheduler``
     runs the timer loop while the server is up, so ``ctx.sleep()`` resumes.
+
+    Refuses to bind a non-loopback host over a networked transport with no
+    identity configured — that combination would serve every workflow this
+    process can run to anyone who can reach the port, with no auth at all.
+    stdio never opens a socket, so it is exempt regardless of ``host``.
     """
+    from workflow_builder.identity.config import LOOPBACK_HOSTS, IdentitySettings
+
+    identity = identity if identity is not None else IdentitySettings()
+    if transport != "stdio" and not identity.is_configured() and host not in LOOPBACK_HOSTS:
+        raise ValueError(
+            f"refusing to bind {host}:{port} over {transport} with no identity "
+            "configured — that serves every workflow to anyone who can reach "
+            "this port. Set LOOM_AUTH_JWKS_URI (or another LOOM_AUTH_* verifier "
+            "config) or bind to a loopback host."
+        )
+
     server = build_server(
-        facade, name=name, host=host, port=port, scheduler=scheduler
+        facade,
+        name=name,
+        host=host,
+        port=port,
+        scheduler=scheduler,
+        identity=identity,
+        transport=transport,
     )
     if transport == "stdio":
         server.run("stdio")

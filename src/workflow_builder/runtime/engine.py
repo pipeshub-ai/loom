@@ -18,6 +18,7 @@ from typing import Any
 
 from workflow_builder.core.exceptions import (
     AdmissionRejected,
+    AuthExpired,
     ConfigurationError,
     ContinueAsNew,
     RegistryError,
@@ -34,14 +35,24 @@ from workflow_builder.core.models import (
 )
 from workflow_builder.core.serde import decode, encode
 from workflow_builder.core.types import Duration, to_seconds
+from workflow_builder.identity.principal import ServicePrincipal
 from workflow_builder.observability.tracing import NoopTracer, Tracer
 from workflow_builder.runtime.backend import DurabilityBackend, EmbeddedBackend
+from workflow_builder.runtime.clock import Clock, SystemClock
 from workflow_builder.runtime.context import Context
+from workflow_builder.runtime.effects import DirectBroker, EffectBroker
 from workflow_builder.runtime.flowcontrol import AdmissionController, AdmissionDecision
 from workflow_builder.runtime.journal import CompatibilityMode, Journal
 from workflow_builder.runtime.leader import LeaderElector
 from workflow_builder.runtime.registry import WorkflowRecord
+from workflow_builder.runtime.state import (
+    InMemoryRunStream,
+    RunStream,
+    StateStore,
+    StoreBackedState,
+)
 from workflow_builder.runtime.workflow import WorkflowDefinition
+from workflow_builder.security.authority import Authority
 from workflow_builder.security.rbac import Permission, Role, require
 from workflow_builder.state.memory import MemoryStore
 
@@ -72,6 +83,7 @@ class Runtime:
         cache: Any | None = None,
         tracer: Tracer | None = None,
         credentials: Any | None = None,
+        service_principal: ServicePrincipal | None = None,
         deps: Any = None,
         agent_backend: Any | None = None,
         blobs: Any | None = None,
@@ -79,6 +91,11 @@ class Runtime:
         sessions: Any | None = None,
         admission: AdmissionController | None = None,
         role: Role | None = None,
+        authority: Authority | None = None,
+        broker: EffectBroker | None = None,
+        clock: Clock | None = None,
+        state: StateStore | None = None,
+        stream: RunStream | None = None,
         artifacts: Any | None = None,
         catalog: Any | None = None,
         node_id: str | None = None,
@@ -104,6 +121,11 @@ class Runtime:
         self.cache = cache if cache is not None else self.store
         self.tracer: Tracer = tracer or NoopTracer()
         self.credentials = credentials
+        self.service_principal = service_principal or ServicePrincipal(subject="scheduler")
+        """The identity a trigger-fired run submits under (``record.metadata``),
+        since a cron/interval trigger has no interactive caller to ask. Only
+        ``TriggerDispatcher`` reads this — a manually or MCP/HTTP-submitted run
+        keeps whatever principal (or none) its own caller pinned."""
         self.deps = deps
         self.agent_backend = agent_backend
         self.blobs = blobs
@@ -136,6 +158,35 @@ class Runtime:
         """Optional :class:`Role` this Runtime acts as. ``None`` means no
         authorization is enforced — checks are opt-in so embedded use stays
         ceremony-free, and a role that is set is always checked."""
+
+        self.authority = authority
+        """Optional default :class:`Authority` — what runs here may invoke, and
+        whether they are rehearsing. ``None`` restricts nothing, which is what
+        an embedded Runtime wants and what the effect broker's cheap path
+        assumes. A workflow's own ``grants=`` applies when this is unset."""
+
+        self.clock: Clock = clock or SystemClock()
+        """Where every timestamp and every in-memory wait comes from.
+
+        A :class:`ManualClock` makes timers and cron triggers testable without
+        waiting for them — see :func:`workflow_builder.testing.advance`. Runs
+        bind it when they start, so swapping it mid-run changes nothing."""
+
+        self.broker: EffectBroker = broker or DirectBroker()
+        """Mediates every durable operation. The default performs them and
+        checks nothing, so the seam exists without costing anything; swap in a
+        :class:`GuardedBroker` to enforce an authority's grant, a call ceiling,
+        or a dry run."""
+
+        self.state: StateStore = state or StoreBackedState(self.store)
+        """Backs ``ctx.state`` — workflow-scoped key-value state that outlives a
+        run. Defaults to the execution store, so it needs nothing new."""
+
+        self.stream: RunStream = stream or InMemoryRunStream()
+        """Where ``ctx.report`` goes. The default buffers in memory and is
+        readable through the facade, so ``loom watch`` shows progress with no
+        host involvement — and nothing crosses a process boundary until a host
+        supplies an adapter that does."""
 
         self.artifacts = artifacts
         """Optional :class:`ArtifactService`. When ``blobs`` is configured and
@@ -343,7 +394,7 @@ class Runtime:
             root_run_id=root_run_id or parent_run_id,
             idempotency_key=idempotency_key,
             code_hash=definition.code_hash,
-            created_at=datetime.now(UTC),
+            created_at=self.clock.now(),
             tags=list(tags),
             metadata=dict(metadata or {}),
         )
@@ -385,7 +436,7 @@ class Runtime:
             parent_run_id=kwargs.pop("parent_run_id", None),
             idempotency_key=idempotency_key,
             code_hash=definition.code_hash,
-            created_at=datetime.now(UTC),
+            created_at=self.clock.now(),
             tags=list(kwargs.pop("tags", ())),
             metadata=dict(kwargs.pop("metadata", None) or {}),
         )
@@ -462,7 +513,7 @@ class Runtime:
         if record is not None and not record.status.is_terminal:
             record.status = ExecutionStatus.CANCELLED
             record.error = ErrorInfo(type="WorkflowCancelled", message=reason, retryable=False)
-            record.finished_at = datetime.now(UTC)
+            record.finished_at = self.clock.now()
             await self.store.update_execution(record)
             self._signal_completion(run_id)
 
@@ -536,7 +587,7 @@ class Runtime:
 
     async def tick(self, now: datetime | None = None, *, limit: int = 100) -> list[str]:
         """Resume every run whose timer has expired. Call from a scheduler loop."""
-        due = await self.store.due_runs(now or datetime.now(UTC), limit=limit)
+        due = await self.store.due_runs(now or self.clock.now(), limit=limit)
         resumed: list[str] = []
         for run_id in due:
             if run_id in self._driving:
@@ -574,7 +625,7 @@ class Runtime:
                         await self.reclaim_orphans()
                 except Exception:
                     logger.exception("scheduler tick failed")
-                await asyncio.sleep(to_seconds(interval))
+                await self.clock.sleep(to_seconds(interval))
 
         self._scheduler_task = asyncio.create_task(loop())
 
@@ -643,11 +694,11 @@ class Runtime:
             )
             record.status = ExecutionStatus.RUNNING
             record.attempt += 1
-            record.started_at = record.started_at or datetime.now(UTC)
+            record.started_at = record.started_at or self.clock.now()
             record.wake_at = None
             record.awaiting_event = None
             record.lease_owner = self.node_id
-            record.lease_expires_at = datetime.now(UTC) + timedelta(seconds=self.lease_ttl)
+            record.lease_expires_at = self.clock.now() + timedelta(seconds=self.lease_ttl)
             await self.store.update_execution(record)
 
             ctx = Context(
@@ -670,6 +721,25 @@ class Runtime:
                 else:
                     output = await coro
             except Suspend as suspension:
+                await self.persist_journal(record, journal)
+                should_continue = await self._park(record, suspension, journal)
+                if should_continue:
+                    continue
+                span.set_status("suspended")
+                span.end()
+                return await self._result_for(record, journal)
+            except AuthExpired as expired:
+                # A toolset's CredentialStore lookup found an expired
+                # credential it cannot renew unattended — park exactly as a
+                # raised Suspend would, on an event named after the
+                # credential, so 'loom connect <name>' plus that event
+                # delivery is what resumes it (never a bare retry loop; see
+                # AuthExpired's presence in core/retry.py::PERMANENT_ERRORS).
+                suspension = Suspend(
+                    str(expired),
+                    path="",
+                    awaiting_event=f"credential:{expired.name}" if expired.name else None,
+                )
                 await self.persist_journal(record, journal)
                 should_continue = await self._park(record, suspension, journal)
                 if should_continue:
@@ -720,7 +790,7 @@ class Runtime:
             waiter.clear()
             budget = self.max_inline_wait
             if suspension.wake_at is not None:
-                remaining = (suspension.wake_at - datetime.now(UTC)).total_seconds()
+                remaining = (suspension.wake_at - self.clock.now()).total_seconds()
                 budget = max(budget, min(remaining, self.max_inline_wait))
             if budget <= 0:
                 return False
@@ -729,9 +799,9 @@ class Runtime:
             return True
 
         if suspension.wake_at is not None:
-            remaining = (suspension.wake_at - datetime.now(UTC)).total_seconds()
+            remaining = (suspension.wake_at - self.clock.now()).total_seconds()
             if remaining <= self.max_inline_wait:
-                await asyncio.sleep(max(0.0, remaining))
+                await self.clock.sleep(max(0.0, remaining))
                 return True
         return False
 
@@ -740,7 +810,7 @@ class Runtime:
     ) -> ExecutionResult:
         record.status = ExecutionStatus.COMPLETED
         record.output = encode(output)
-        record.finished_at = datetime.now(UTC)
+        record.finished_at = self.clock.now()
         record.usage = journal.total_usage()
         await self.store.update_execution(record)
         self._release_admission(record)
@@ -772,7 +842,7 @@ class Runtime:
             input=encode(rotation.seed),
             parent_run_id=record.run_id,
             root_run_id=root,
-            created_at=datetime.now(UTC),
+            created_at=self.clock.now(),
             tags=list(record.tags),
             metadata=dict(record.metadata),
         )
@@ -780,7 +850,7 @@ class Runtime:
 
         record.status = ExecutionStatus.COMPLETED
         record.root_run_id = root
-        record.finished_at = datetime.now(UTC)
+        record.finished_at = self.clock.now()
         record.usage = journal.total_usage()
         record.metadata["continued_as"] = successor.run_id
         await self.store.update_execution(record)
@@ -803,7 +873,7 @@ class Runtime:
     ) -> ExecutionResult:
         record.status = ExecutionStatus.FAILED
         record.error = ErrorInfo.from_exception(error)
-        record.finished_at = datetime.now(UTC)
+        record.finished_at = self.clock.now()
         record.usage = journal.total_usage()
         if compensation_failures:
             record.metadata["compensation_failures"] = list(compensation_failures)
@@ -822,7 +892,7 @@ class Runtime:
         compensation_failures: Sequence[str] = (),
     ) -> ExecutionResult:
         record.status = ExecutionStatus.CANCELLED
-        record.finished_at = datetime.now(UTC)
+        record.finished_at = self.clock.now()
         if compensation_failures:
             record.metadata["compensation_failures"] = list(compensation_failures)
         await self.store.update_execution(record)
@@ -885,6 +955,10 @@ class Runtime:
         """
         interval = max(1.0, self.lease_ttl / 3)
         while True:
+            # Deliberately the real clock, not self.clock. A lease is a claim
+            # against other processes, which are running on wall time whatever
+            # this one believes; and a ManualClock's sleep returns immediately,
+            # so heartbeating on it would spin.
             await asyncio.sleep(interval)
             record = await self.store.get_execution(run_id)
             if record is None or record.status.is_terminal:
@@ -892,7 +966,7 @@ class Runtime:
             if record.lease_owner != self.node_id:
                 # Someone else took over; stop touching their run.
                 return
-            record.lease_expires_at = datetime.now(UTC) + timedelta(seconds=self.lease_ttl)
+            record.lease_expires_at = self.clock.now() + timedelta(seconds=self.lease_ttl)
             await self.store.update_execution(record)
 
     async def _release_lease(self, run_id: str) -> None:
@@ -916,7 +990,7 @@ class Runtime:
 
         Call from a scheduler loop. Returns the run ids picked up.
         """
-        moment = now or datetime.now(UTC)
+        moment = now or self.clock.now()
         stale = [
             record
             for record in await self.store.list_executions(

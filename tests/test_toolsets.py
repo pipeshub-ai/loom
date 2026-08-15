@@ -29,6 +29,7 @@ from workflow_builder.toolsets.manifest import (
 )
 from workflow_builder.toolsets.registry import (
     get_catalog,
+    register_available_toolsets,
     register_toolset,
     unregister_toolset,
 )
@@ -279,8 +280,10 @@ class TestConnectionBroker:
 
     @pytest.mark.asyncio
     async def test_resolve_missing(self) -> None:
+        from workflow_builder.core.exceptions import CredentialNotFound
+
         broker = ConnectionBroker()
-        with pytest.raises(KeyError, match="No credential found"):
+        with pytest.raises(CredentialNotFound, match="No credential found"):
             await broker.resolve("nonexistent")
 
     def test_has_connection(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -299,7 +302,21 @@ class TestConnectionBroker:
 
     def test_credential_not_expired(self) -> None:
         cred = Credential(token="test")
-        assert cred.expired is False
+        assert cred.expired() is False
+
+    def test_credential_expiry_uses_injected_clock(self) -> None:
+        from datetime import UTC, datetime
+
+        from workflow_builder.runtime.clock import ManualClock
+
+        cred = Credential(
+            token="test", expires_at=datetime(2026, 1, 1, tzinfo=UTC)
+        )
+        clock = ManualClock(datetime(2025, 12, 31, tzinfo=UTC))
+        assert cred.expired(clock) is False
+
+        clock.set(datetime(2026, 1, 2, tzinfo=UTC))
+        assert cred.expired(clock) is True
 
 
 # ---------------------------------------------------------------------------
@@ -451,3 +468,163 @@ class TestCertification:
         result = await certify(m)
         failed_codes = [r.code for r in result.results if not r.passed]
         assert "CERT-07" in failed_codes
+
+
+class TestBuiltInToolsetsReachEveryProcess:
+    """A generated workflow is run by a process nobody wrote.
+
+    ``python generated_workflow.py`` builds ``Runtime.from_env()`` and calls
+    ``ctx.agent(toolsets=["jira"])``. Nothing in that file registers a toolset,
+    so the run died with "no executable toolset 'jira' is registered (known:
+    none)" — which reads as a broken library rather than a missing call.
+
+    They resolve **by name only**. Registering them eagerly was the first
+    attempt and it was wrong: ``resolve_tools()`` sweeps every registered
+    toolset when given no ids, so a prompt-only ``ctx.agent("summarise this")``
+    was handed 46 tools including ``jira_delete_issue``. The grant tests caught
+    it, correctly.
+    """
+
+    def test_a_named_toolset_resolves_with_nothing_registered(self) -> None:
+        """The failing path, end to end."""
+        from workflow_builder import Runtime
+
+        tools = Runtime().toolsets.resolve_tools(["jira"])
+        assert [t.name for t in tools][:1] == ["jira_search_issues"]
+
+    @pytest.mark.parametrize(
+        "toolset_id", ["jira", "confluence", "gmail", "google_calendar"]
+    )
+    def test_every_shipped_toolset_is_reachable(self, toolset_id: str) -> None:
+        from workflow_builder.toolsets.registry import builtin_toolset
+
+        toolset = builtin_toolset(toolset_id)
+        assert toolset is not None
+        assert toolset.manifest.id == toolset_id
+
+    def test_naming_none_still_grants_none(self) -> None:
+        """The regression the eager version introduced.
+
+        An agent that named no integration must not acquire four of them, and
+        certainly not their destructive operations.
+        """
+        from workflow_builder import Runtime
+
+        registry = Runtime().toolsets
+        assert registry.resolve_tools() == []
+        assert registry.list_toolsets() == []
+
+    def test_a_hosts_own_toolset_wins(self) -> None:
+        """A different Jira — another account, another base URL — is not shadowed."""
+        from workflow_builder.agents.tool_registry import Toolset, ToolsetRegistry
+        from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
+
+        registry = ToolsetRegistry()
+        mine = Toolset(manifest=JIRA_MANIFEST, _resolver=lambda op: f"mine:{op}")
+        registry.register(mine)
+
+        assert registry.get_toolset("jira") is mine
+
+    def test_an_unknown_toolset_is_still_unknown(self) -> None:
+        from workflow_builder.toolsets.registry import builtin_toolset
+
+        assert builtin_toolset("not_a_real_toolset") is None
+
+    def test_resolving_imports_no_toolset_code_until_asked(self) -> None:
+        """Four eager imports would undo the lazy catalog this lives beside.
+
+        Manifests are metadata; the client, its httpx, and its auth load on the
+        first resolve and not before.
+        """
+        import subprocess
+        import sys
+
+        module = "workflow_builder.toolsets.jira.tools"
+        probe = (
+            "import sys;"
+            "from workflow_builder import Runtime;"
+            "rt = Runtime();"
+            f"before = '{module}' in sys.modules;"
+            "rt.toolsets.resolve_tools(['jira']);"
+            f"print(before, '{module}' in sys.modules)"
+        )
+        done = subprocess.run(
+            [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+        )
+        assert done.stdout.strip() == "False True", done.stdout
+
+    def test_an_unknown_operation_says_what_exists(self) -> None:
+        from workflow_builder.toolsets.registry import builtin_toolset
+
+        with pytest.raises(KeyError, match="known:"):
+            builtin_toolset("jira").resolve("issues.telepathy")
+
+
+class TestRegisterAvailableToolsets:
+    """``loom mcp`` seeds the catalog; a bare Runtime does not."""
+
+    def test_seeds_every_shipped_toolset(self) -> None:
+        ids = register_available_toolsets()
+        assert ids == ["confluence", "gmail", "google_calendar", "jira"]
+        catalog = get_catalog()
+        for toolset_id in ids:
+            assert catalog.get(toolset_id) is not None
+            assert catalog.get_toolset(toolset_id) is not None
+
+    def test_a_second_call_does_not_duplicate_or_replace(self) -> None:
+        first = register_available_toolsets()
+        jira = get_catalog().get_toolset("jira")
+        second = register_available_toolsets()
+        assert second == first
+        assert get_catalog().get_toolset("jira") is jira
+
+    def test_does_not_overwrite_a_host_registration(self) -> None:
+        from workflow_builder.agents.tool_registry import Toolset
+        from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
+
+        mine = Toolset(manifest=JIRA_MANIFEST, _resolver=lambda op: f"mine:{op}")
+        register_toolset(mine)
+        register_available_toolsets()
+        assert get_catalog().get_toolset("jira") is mine
+
+
+class TestAwaitingADurableCallIsTyped:
+    """``__await__`` returned ``Any``, so every awaited call was untyped.
+
+    A workflow returning an agent's reply from a ``-> str`` body drew
+    ``no-any-return`` from mypy — on the exact pattern the coding agent is told
+    to write, in every generation that used an agent. Checked through the real
+    type stage, because the claim is about what mypy says.
+    """
+
+    HEAD = "from workflow_builder import Context, workflow\n\n\n"
+
+    async def _types(self, body: str) -> list[str]:
+        from workflow_builder.agents.checks import CheckContext
+        from workflow_builder.agents.stages import TypeStage
+
+        code = (
+            f'{self.HEAD}@workflow(name="w")\n'
+            f"async def w(ctx: Context, _=None) -> str:\n"
+            f'    """Report."""\n'
+            f"    r = await ctx.agent(\"hi\")\n"
+            f"    {body}\n"
+        )
+        result = await TypeStage().run(code, CheckContext())
+        return [issue.message for issue in result.issues]
+
+    async def test_returning_the_text_is_clean(self) -> None:
+        """What the prompt now teaches."""
+        assert await self._types("return r.text()") == []
+
+    async def test_returning_the_output_is_a_real_narrowing(self) -> None:
+        """Not silence — mypy is right that the output may be absent.
+
+        The old ``Any`` hid this. The complaint is now accurate, which is why
+        the prompt points at ``text()`` rather than the type being loosened
+        back until it stops talking.
+        """
+        problems = await self._types("return r.output")
+
+        assert problems, "output is Optional; mypy should say so"
+        assert "no-any-return" not in " ".join(problems), "should not be Any any more"

@@ -17,6 +17,7 @@ from workflow_builder.toolsets.google.calendar.models import (
     EventAttendee,
 )
 from workflow_builder.toolsets.google.http import GoogleSession
+from workflow_builder.toolsets.pagination import Results
 
 if TYPE_CHECKING:
     import httpx
@@ -49,13 +50,15 @@ class CalendarClient:
 
     # -- calendars -----------------------------------------------------------
 
-    async def list_calendars(self) -> list[CalendarSummary]:
-        """List calendars the authenticated user can see."""
+    async def list_calendars(
+        self, max_results: int = 250
+    ) -> Results[CalendarSummary]:
+        """List calendars the authenticated user can see, following every page."""
         items = await self._session.paginate(
-            "users/me/calendarList", items_key="items", limit=250
+            "users/me/calendarList", items_key="items", limit=max_results
         )
-        return [
-            CalendarSummary(
+        return items.mapped(
+            lambda item: CalendarSummary(
                 id=item.get("id", ""),
                 summary=item.get("summary", ""),
                 description=item.get("description", ""),
@@ -63,8 +66,7 @@ class CalendarClient:
                 primary=bool(item.get("primary", False)),
                 access_role=item.get("accessRole", ""),
             )
-            for item in items
-        ]
+        )
 
     # -- events --------------------------------------------------------------
 
@@ -76,7 +78,7 @@ class CalendarClient:
         query: str = "",
         max_results: int = 25,
         single_events: bool = True,
-    ) -> list[CalendarEvent]:
+    ) -> Results[CalendarEvent]:
         """List events in a window.
 
         ``time_min``/``time_max`` are RFC 3339 timestamps. In a workflow they
@@ -100,7 +102,7 @@ class CalendarClient:
             limit=max_results,
             params=params,
         )
-        return [flatten_event(item, calendar_id) for item in items]
+        return items.mapped(lambda item: flatten_event(item, calendar_id))
 
     async def get_event(
         self, event_id: str, calendar_id: str = "primary"

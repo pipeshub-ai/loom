@@ -153,6 +153,7 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
                 function="confluence_get_page_comments",
                 summary="Fetch comments on a page.",
                 effect=EffectClass.READ,
+                pagination=True,
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -190,6 +191,7 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
                 function="confluence_list_spaces",
                 summary="List all accessible spaces.",
                 effect=EffectClass.READ,
+                pagination=True,
                 output_schema={
                     "type": "array",
                     "items": ConfluenceSpace.model_json_schema(),

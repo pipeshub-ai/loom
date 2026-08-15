@@ -4,14 +4,34 @@
 [Python 3.11+](https://www.python.org/downloads/)
 [Tests](.github/workflows/ci.yml)
 
-**Library-first durable execution SDK for AI-powered workflows.**
+**There is no workflow builder. That's the point.**
 
-Describe a workflow in English and get runnable Python back — compiled, linted,
-type-checked, executed against fakes, and checked for determinism before you see
-it. Or write it yourself: either way it survives crashes, resumes where it
-stopped, and runs on a laptop or Postgres without a code change.
+LOOM is a library-first durable execution SDK for AI-powered workflows. You
+describe what you want in a sentence. A coding agent — with your tools,
+knowledge, and skills in front of it as one live capability catalog, not a
+static doc — writes real Python: `if`/`else`, loops, parallel branches,
+sub-agents, all of it. Every generation is compiled, linted, type-checked, run
+against fakes, and checked for determinism before you see it.
+
+The code *is* the workflow, and it's the only source of truth: it's saved for
+reuse, so you generate once and run for free forever; it survives crashes and
+resumes where it stopped, on a laptop or on Postgres, without a code change;
+and when you need to change a workflow, you change the code — the diagram you
+see is generated from it, not maintained beside it.
+
+Every other workflow tool makes you choose between the drag-and-drop canvas a
+non-engineer can use and the code a real system needs. LOOM gives you the
+code, and generates the picture from it — not the other way around.
 
 `pip install` and go — no infrastructure required.
+
+> **This is a work in progress, not a finished product.** The core — durable
+> execution, the coding agent, toolsets — is real, tested, and usable today.
+> Larger parts of the vision (sandboxed execution, versioned source, agent-
+> rendered visualization) are designed but not yet built; see
+> [Project Status](#project-status) for exactly what that split is. If you
+> want to help make this production-ready, that's what we're building it in
+> the open for — see [Contributing](CONTRIBUTING.md).
 
 ## Quick Start
 
@@ -165,6 +185,7 @@ pip install -e ".[dev]"
 
 | Feature                                    | Description                                                                                                 |
 | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| **No drag-and-drop, ever**                 | Workflows are generated code, not boxes and arrows. A model writes it; the verification pipeline is what makes that safe. |
 | **Durable execution**                      | Every side effect is journaled. Crash on step 9? Resume at step 9, not step 1.                              |
 | **Agent-native**                           | `ctx.agent("prompt")` calls any AI agent. LangChain, Agno, Pydantic AI — swap the backend, keep the code.   |
 | **Cron triggers**                          | `@workflow(triggers=[Schedule("0 9 * * *")])` — fires automatically via TriggerDispatcher.                  |
@@ -174,6 +195,8 @@ pip install -e ".[dev]"
 | **Workflow manager**                       | Agent-facing tools to list, run, schedule, and cancel workflows via natural language.                       |
 | **[CLI + TUI](#command-line)**             | `loom run`, `loom runs`, `loom approve`, `loom ui`. Exit codes distinguish suspended from failed.           |
 | **[MCP server](#mcp-server)**              | `loom mcp` — drive workflows from Claude Code, Claude Desktop, or Cursor.                                   |
+| **[Paged reads](#paged-reads)**            | Search operations follow the API's pages and tell you whether they saw everything, so a page is never reported as a total. |
+| **[Testable time](#testable-time)**        | A virtual clock — a four-minute timer or a 9am cron, tested in milliseconds.                                |
 
 
 
@@ -216,6 +239,20 @@ that it parsed. Anything a stage finds is handed back as a repair instruction
 carrying both the error and the spec, and a repair that doesn't reduce the error
 count is discarded rather than accepted.
 
+**It writes code for what's certain, and delegates what isn't.** Before
+generating each node, the agent asks one question: *can I write a rule today
+that is right for every input the spec allows?* Yes → plain Python and a
+toolset call, deterministic and journaled like any other step. No, or unsure →
+a `ctx.agent()` node — an invented constant is the tell that a rule shouldn't
+exist: a keyword list, a regex over prose, a threshold nobody supplied.
+`if "urgent" in subject.lower()` is a guess wearing the clothes of logic. The
+classification comes back on `CodingResult.plan` (node, kind, why) rather than
+staying in the prompt, so it's something you can check, not something you have
+to trust. And the agent behind `ctx.agent()` isn't locked to LOOM's own loop —
+swap in `BuiltInBackend`, or wrap LangChain, Agno, or Pydantic AI via
+`AgentBackend` (see [Agent Backends](#agent-backends)) — the generated
+workflow code reads identically either way.
+
 **It resolves what your words refer to before writing code.** You name a person
 and a status the way people do; the API matches account ids and its own
 per-project vocabulary. A query built from your words returns zero rows *and no
@@ -256,6 +293,154 @@ so adding integrations does not tax unrelated generations.
 
 See `examples/cookbook/07_coding_agent.py`, and `09_jira_cli.py --debug` to
 watch every tool call it makes while resolving.
+
+## Paged reads
+
+Hosted APIs cap a page below what you ask for, and none of them call it an
+error: ask Jira for 500 issues, get 100, with a 200 OK. A workflow reporting
+`f"{len(rows)} found"` on that is wrong in the way that survives review — the
+number is real and only the framing lies.
+
+A search returns an ordinary list that also knows whether it saw everything:
+
+```python
+import asyncio
+
+from workflow_builder import Context, Runtime, step, workflow
+from workflow_builder.state import MemoryStore
+from workflow_builder.toolsets.pagination import Page, Results, collect
+
+ROWS = [f"BUG-{i}" for i in range(312)]
+
+
+@step
+async def search_bugs(max_results: int = 200, cursor: str | None = None) -> Results[str]:
+    """A stand-in for jira_search_issues — same shape, no credentials."""
+    async def fetch(at: str | None, size: int) -> Page:
+        start = int(at or cursor or 0)
+        batch = ROWS[start : start + min(size, 100)]   # the server caps at 100
+        nxt = start + len(batch)
+        return Page(batch, str(nxt) if nxt < len(ROWS) else None, total=len(ROWS))
+    return await collect(fetch, limit=max_results, page_size=100)
+
+
+@workflow(name="open_bugs")
+async def open_bugs(ctx: Context, limit: int = 200) -> str:
+    """Bounded: one call, and say what it covers."""
+    issues = await ctx.step(search_bugs, max_results=limit)
+    if not issues.complete:
+        return f"showing {issues.summary()}"
+    return f"all {len(issues)}"
+
+
+@workflow(name="drain_bugs")
+async def drain_bugs(ctx: Context, _: object = None) -> str:
+    """Unbounded: one page per step, resuming where the last run stopped."""
+    cursor = await ctx.state.get("cursor")
+    page = await ctx.step(search_bugs, max_results=100, cursor=cursor)
+    await ctx.state.set("cursor", page.cursor)
+    return f"{len(page)} rows, next cursor {page.cursor}"
+
+
+async def main() -> None:
+    rt = Runtime(store=MemoryStore())
+    rt.register_all([open_bugs, drain_bugs])
+    print((await rt.run(open_bugs, 200)).output)   # showing 200 of 312
+    print((await rt.run(open_bugs, 400)).output)   # all 312
+    print((await rt.run(drain_bugs)).output)       # 100 rows, next cursor 100
+    print((await rt.run(drain_bugs)).output)       # 100 rows, next cursor 200
+
+
+asyncio.run(main())
+```
+
+`.complete` survives being returned from a step, so it reads the same on a
+replay. For a set with no natural bound — a mailbox, an audit log — raising the
+limit is the wrong answer: one call for 50,000 rows is a single journal entry
+that a crash refetches whole. One page per step is journaled per page, and the
+cursor in `ctx.state` outlives the run.
+
+Each page is its own journal entry, so a crash resumes at the page it died on.
+[`19_pagination.py`](examples/cookbook/19_pagination.py) runs both patterns end
+to end.
+
+Writing a toolset? Return `Results[T]` and you are done — the manifest flag, the
+docs the coding agent reads, and the build check all derive from that one
+annotation. See the [toolsets guide](docs/guides/toolsets.md).
+
+## Testable time
+
+A durable workflow is mostly a thing that waits, and the waiting is the part
+worth testing. `ManualClock` is the Runtime's clock, so moving it moves
+everything that reads time — `ctx.sleep`, cron schedules, retry backoff:
+
+```python
+import asyncio
+from datetime import UTC, datetime
+
+from workflow_builder import Context, Runtime, workflow
+from workflow_builder.runtime.clock import ManualClock
+from workflow_builder.state import MemoryStore
+from workflow_builder.testing import advance
+
+
+@workflow(name="reminder")
+async def reminder(ctx: Context, _: object = None) -> str:
+    """Wait four minutes, then act."""
+    await ctx.sleep(240)
+    return "reminded"
+
+
+async def main() -> None:
+    clock = ManualClock(datetime(2026, 3, 2, 9, 0, tzinfo=UTC))
+    rt = Runtime(store=MemoryStore(), clock=clock)
+    rt.register(reminder)
+    parked = await rt.run(reminder)      # parks on a four-minute timer
+    await advance(rt, minutes=5)         # ...which has now already happened
+    print((await rt.get(parked.run_id)).output)
+
+
+asyncio.run(main())
+```
+
+`advance()` moves the clock, ticks the schedulers, and waits for the runs it
+started — the three steps "let five minutes pass" has to mean.
+
+## Talking while it works
+
+A run that takes four minutes has nothing to say for four minutes unless you
+ask it to:
+
+```python
+import asyncio
+
+from workflow_builder import Context, Runtime, workflow
+from workflow_builder.state import MemoryStore
+
+
+@workflow(name="indexer")
+async def indexer(ctx: Context, _: object = None) -> str:
+    """Say what it is doing, and remember where it stopped."""
+    await ctx.report("fetching page 1")  # visible in loom watch, MCP, and HTTP
+    seen = await ctx.state.get("seen", default=0)  # survives across runs
+    await ctx.state.set("seen", seen + 1)
+    return f"run number {seen + 1}"
+
+
+async def main() -> None:
+    rt = Runtime(store=MemoryStore())
+    rt.register(indexer)
+    print((await rt.run(indexer)).output)          # run number 1
+    second = await rt.run(indexer)
+    print(second.output)                           # run number 2
+    print([r.message for r in rt.stream.since(second.run_id)])
+
+
+asyncio.run(main())
+```
+
+`ctx.publish(name, payload)` broadcasts an event to whoever is waiting.
+(`ctx.emit` did both jobs and is now a deprecated alias for `publish`.)
 
 ## Command Line
 
@@ -451,9 +636,66 @@ completed | report generated
 | 16  | [HTTP server](examples/cookbook/16_http_server.py)                 | create_app() + LoomClient                                |
 | 17  | [Files and artifacts](examples/cookbook/17_files_and_artifacts.py) | Attachment, blobs, versioned artifacts                   |
 | 18  | [Gmail and Calendar](examples/cookbook/18_gmail_calendar.py)       | Google toolsets, approval before send                    |
+| 19  | [Pagination](examples/cookbook/19_pagination.py)                   | Paged reads: bounded coverage, unbounded page-per-step   |
 
 
 
+
+## Project Status
+
+**LOOM is a work in progress.** It is a real, tested library today — not a
+demo — but it is not the finished thing, and it says so on purpose rather
+than papering over the gaps:
+
+| Area | Status |
+|---|---|
+| Durable execution: journal, replay, retry vs. replay, suspension | **Shipped, tested** |
+| Workflow Coding Agent: 7-stage verification, entity resolution, code-or-judgement classification | **Shipped, tested** |
+| Typed toolsets (Gmail, Calendar, Jira, Confluence), pluggable agent backends | **Shipped, tested** |
+| CLI, TUI, MCP server, HTTP API over one `RuntimeFacade` | **Shipped, tested** |
+| Sandboxed execution (generated code runs with no ambient credentials) | **Designed, not built** — `ExecutionBackend` port, see [implementation plan](docs/implementation-plan.md) §3.1 |
+| Versioned, activatable workflow source (commit/rollback, not just a code hash) | **Designed, not built** — `SourceStore`/`VersionStore`, see [implementation plan](docs/implementation-plan.md) §4 |
+| Session-shaped execution traces for debugging | **Designed, not built** — `TraceView`, same doc |
+| Agent-rendered visualization, verified against the extracted graph | **Designed, not built** — see [`phases/phase-4-visualization.md`](phases/phase-4-visualization.md) |
+
+The honest read: what's shipped is solid enough to build on for a laptop, a
+side project, or a non-adversarial internal tool. What's designed-but-not-built
+is exactly the part that matters most for running untrusted, model-generated
+code in production — isolation and per-call authority. Don't point this at
+untrusted input without `ExecutionBackend` landing first.
+
+**This is where the community makes the difference.** The gaps above are
+scoped, written down, and ordered by dependency (see
+[`docs/implementation-plan.md`](docs/implementation-plan.md) §4 — each phase
+lists its own exit criteria as tests) precisely so they're contributable, not
+just aspirational. If any of this is what you need, a PR against one of those
+phases is the fastest way to get it. See [Contributing](CONTRIBUTING.md).
+
+## FAQ
+
+**How is the Workflow Coding Agent different from a normal coding agent?**
+A normal coding agent writes code once for a human to commit and run by hand.
+This one writes code that runs inside a durable runtime: journaled and
+resumable (a crash retries the failed step, not the whole run), reusable by
+construction (it's a `@workflow`, callable forever), generated once and run
+free forever (the LLM call is at authoring time, not every run), and
+triggerable (`Schedule("0 9 * * *")`, a webhook, a new email) without extra
+infrastructure. A coding agent writes code for a human to run once; this one
+writes code for a runtime to run forever.
+
+**Why not use a no-code / drag-and-drop workflow builder?** No-code exists
+because people couldn't reliably write code — and a canvas is safe by
+construction because it can't do anything the palette didn't intend. Both
+premises are getting weaker: coding agents write correct, idiomatic code
+reliably for well-scoped tasks today, and improve every model generation. A
+loop, a few nested conditionals, a sub-workflow call, or mixing a rule and a
+judgement call in the same function is native to code and a fight on most
+canvases. You don't lose the picture — LOOM projects a verified graph from
+the code, so you get the diagram and the `for` loop instead of one at the
+cost of the other.
+
+More questions — production readiness, safety of generated code, vendor
+lock-in — are answered in the [full FAQ](docs/faq.md).
 
 ## Development
 

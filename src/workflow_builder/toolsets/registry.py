@@ -7,7 +7,7 @@ toolsets manually or via pip entry points (``loom_toolset`` group).
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from workflow_builder.toolsets.manifest import ToolsetManifest
 
@@ -21,6 +21,90 @@ logger = logging.getLogger("workflow.toolsets")
 # callable by ctx.agent() — the two used to be separate stores, and a toolset
 # registered in one was invisible to the other.
 _catalog: ToolsetRegistry | None = None
+
+
+#: The toolsets LOOM ships, as ``(manifest import path, tools module)``.
+#:
+#: Seeded rather than left to the caller because a *generated* workflow is run
+#: by a process nobody wrote — ``python generated_workflow.py`` — and
+#: ``ctx.agent(toolsets=["jira"])`` asks the global catalog for something no
+#: line in that file registers. It failed with "no executable toolset 'jira' is
+#: registered (known: none)", which reads as a broken library rather than a
+#: missing call.
+_TOOLSETS = "workflow_builder.toolsets"
+BUILTIN_TOOLSETS: tuple[tuple[str, str], ...] = (
+    (f"{_TOOLSETS}.jira.manifest.JIRA_MANIFEST", f"{_TOOLSETS}.jira.tools"),
+    (
+        f"{_TOOLSETS}.confluence.manifest.CONFLUENCE_MANIFEST",
+        f"{_TOOLSETS}.confluence.tools",
+    ),
+    (
+        f"{_TOOLSETS}.google.gmail.manifest.GMAIL_MANIFEST",
+        f"{_TOOLSETS}.google.gmail.tools",
+    ),
+    (
+        f"{_TOOLSETS}.google.calendar.manifest.GOOGLE_CALENDAR_MANIFEST",
+        f"{_TOOLSETS}.google.calendar.tools",
+    ),
+)
+
+
+def _lazy_toolset(manifest: Any, tools_module: str) -> Toolset:
+    """An executable toolset that imports its code only when resolved.
+
+    The three-layer contract in one function: the manifest is metadata and
+    costs nothing, and the module — with its httpx, its auth, its models —
+    loads on the first ``resolve``. Seeding four of these at import time would
+    otherwise undo the lazy catalog it is being added to.
+    """
+    from workflow_builder.agents.tool_registry import Toolset
+
+    by_operation = {op.id: op.function for op in manifest.all_operations() if op.function}
+
+    def resolve(op_id: str) -> Any:
+        import importlib
+
+        from workflow_builder.agents.tools import coerce_tool
+
+        name = by_operation.get(op_id)
+        if name is None:
+            known = ", ".join(sorted(by_operation)) or "none"
+            raise KeyError(f"unknown operation '{op_id}' in '{manifest.id}' (known: {known})")
+        # Read the attribute now, not at seed time: a test that installs fakes
+        # over the module must be what a later resolve sees.
+        return coerce_tool(getattr(importlib.import_module(tools_module), name))
+
+    return Toolset(manifest=manifest, _resolver=resolve)
+
+
+def builtin_toolset(toolset_id: str) -> Toolset | None:
+    """A toolset LOOM ships, by id, or ``None``.
+
+    A *fallback*, deliberately, rather than eager registration. Seeding the
+    four up front made ``resolve_tools()`` — which sweeps every registered
+    toolset when given no ids — hand 46 tools to any prompt-only
+    ``ctx.agent("summarise this")``, ``jira_delete_issue`` and
+    ``gmail_send_message`` among them. An agent that named no integration
+    should gain no integration, and the existing grant tests were right to say
+    so.
+
+    Resolving by name leaves that sweep untouched and answers the case that was
+    actually broken: a generated workflow saying ``toolsets=["jira"]``, run by
+    a process that registered nothing.
+    """
+    import importlib
+
+    for manifest_path, tools_module in BUILTIN_TOOLSETS:
+        module_path, attribute = manifest_path.rsplit(".", 1)
+        try:
+            manifest = getattr(importlib.import_module(module_path), attribute)
+        except Exception:
+            # A toolset whose module will not import is simply absent, exactly
+            # as it was before this existed.
+            continue
+        if manifest.id == toolset_id:
+            return _lazy_toolset(manifest, tools_module)
+    return None
 
 
 def get_catalog() -> ToolsetRegistry:
@@ -52,6 +136,35 @@ def register_toolset(manifest: ToolsetManifest | Toolset) -> None:
 def unregister_toolset(toolset_id: str) -> None:
     """Remove a toolset from the global registry."""
     get_catalog().unregister(toolset_id)
+
+
+def register_available_toolsets() -> list[str]:
+    """Put every toolset this process can see on the global catalog.
+
+    Called by ``loom mcp`` so ``search_toolsets`` / ``show_toolset`` list the
+    integrations LOOM ships (and any ``loom_toolset`` entry points) without
+    the operator having to register them by hand. Builtins stay lazy: the
+    tools module is imported on first resolve, not at registration.
+
+    Idempotent, and it never overwrites an id the caller already registered.
+    A bare ``Runtime()`` does *not* call this — seeding the four here would
+    put ``jira_delete_issue`` on every unscoped ``ctx.agent()``. MCP is an
+    integration surface; that default is the other way around.
+    """
+    import importlib
+
+    catalog = get_catalog()
+    for manifest_path, tools_module in BUILTIN_TOOLSETS:
+        module_path, attribute = manifest_path.rsplit(".", 1)
+        try:
+            manifest = getattr(importlib.import_module(module_path), attribute)
+        except Exception:
+            logger.debug("builtin toolset %s failed to import", manifest_path, exc_info=True)
+            continue
+        if catalog.get(manifest.id) is None:
+            register_toolset(_lazy_toolset(manifest, tools_module))
+    discover_entry_points()
+    return sorted(catalog.list_toolsets())
 
 
 def discover_entry_points() -> int:

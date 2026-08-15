@@ -27,6 +27,35 @@ from typing import Any
 DEFAULT_TIMEOUT_SECONDS = 30.0
 
 
+#: Failures that are about the machine rather than the code — no credential, no
+#: network, no service. Named once because three places need the distinction
+#: and each got it slightly wrong on its own: the smoke stage fed 401s into the
+#: repair loop until a workflow came back gutted, and ``generate`` told callers
+#: to raise ``max_discovery_turns`` when the real answer was to set an API key.
+ENVIRONMENTAL_MARKERS: tuple[str, ...] = (
+                "401", "403", "unauthorized", "forbidden",
+                "invalid authentication", "authentication_error",
+                "insufficient authentication scopes", "insufficient permissions",
+                "credential", "api key", "api_key", "access token",
+                "invalid_grant", "no google credentials",
+                "connection refused", "connecterror", "connecttimeout",
+                "getaddrinfo", "name or service not known",
+                "temporary failure in name resolution", "ssl", "timed out",
+            )
+
+
+def is_environmental(text: str) -> bool:
+    """True when *text* describes a missing credential, service, or network.
+
+    A missing import or a bad signature is deliberately **not** environmental:
+    those are the failures the checks exist to catch, and they stay repairable.
+    """
+    haystack = text.lower()
+    if "no module named" in haystack or "cannot import name" in haystack:
+        return False
+    return any(marker in haystack for marker in ENVIRONMENTAL_MARKERS)
+
+
 @dataclass
 class SmokeResult:
     """Outcome of executing generated code once."""
@@ -40,6 +69,8 @@ class SmokeResult:
     status: str = ""
     """Terminal status of the run, when one completed."""
     steps_executed: int = 0
+    synthetic_input: bool = False
+    """The input was derived from the workflow's declared type, not supplied."""
     """Journal entries the smoke run actually produced.
 
     The difference between "the code ran" and "the code was started". A workflow
@@ -48,6 +79,30 @@ class SmokeResult:
     """
     output_preview: str = ""
     workflows_found: list[str] = field(default_factory=list)
+
+    @property
+    def unverifiable(self) -> bool:
+        """True when *our* invented input caused the failure, not the code.
+
+        A workflow annotated ``input_data: dict`` gets ``{}`` from the schema
+        faker — there are no keys to invent — and a body that reads
+        ``input_data["url"]` then fails with ``KeyError: 'url'``. The code is
+        right; the harness could not supply an input it could run against.
+
+        Treating that as a defect is the same mistake as feeding a 401 to the
+        repair loop: it asks the model to fix something that is not broken, and
+        the cheapest way to satisfy it is to delete the input handling.
+
+        Narrow on purpose. It applies only when the input was *synthesised*, so
+        a caller who passed ``smoke_input`` still gets a genuine failure
+        reported as one.
+        """
+        if self.ok or not self.synthetic_input:
+            return False
+        return any(
+            marker in (self.error or "")
+            for marker in ("KeyError", "IndexError", "'", '"')
+        ) and self.steps_executed == 0
 
     @property
     def environmental(self) -> bool:
@@ -69,19 +124,7 @@ class SmokeResult:
         haystack = f"{self.error}\n{self.traceback}".lower()
         if "no module named" in haystack or "cannot import name" in haystack:
             return False
-        return any(
-            marker in haystack
-            for marker in (
-                "401", "403", "unauthorized", "forbidden",
-                "invalid authentication", "authentication_error",
-                "insufficient authentication scopes", "insufficient permissions",
-                "credential", "api key", "api_key", "access token",
-                "invalid_grant", "no google credentials",
-                "connection refused", "connecterror", "connecttimeout",
-                "getaddrinfo", "name or service not known",
-                "temporary failure in name resolution", "ssl", "timed out",
-            )
-        )
+        return is_environmental(haystack)
 
     def as_feedback(self, code: str = "") -> str:
         """Phrase the failure as a repair instruction for the coding agent.
@@ -229,13 +272,25 @@ _RUNNER = textwrap.dedent('''\
         except json.JSONDecodeError:
             return
 
-        from workflow_builder.agents.fakes import install_fakes
+        from workflow_builder.agents.fakes import (
+            executable_fake_toolset,
+            install_fakes,
+        )
+        from workflow_builder.toolsets.registry import register_toolset
 
         for entry in requested:
             try:
                 module_path, attribute = entry[1].rsplit(".", 1)
                 manifest = getattr(importlib.import_module(module_path), attribute)
                 install_fakes(manifest)
+                # Register it executable too. A direct call inside a @step
+                # binds to the module attribute the line above replaced;
+                # ctx.agent(toolsets=[...]) asks the registry instead, and
+                # without this it finds nothing — failing the very shape the
+                # resolution ladder tells the model to emit for an ambiguity.
+                faked = executable_fake_toolset(manifest)
+                if faked is not None:
+                    register_toolset(faked)
             except Exception:
                 # A toolset that cannot be faked simply is not faked; the run
                 # then fails the way it would have without this.
@@ -310,12 +365,31 @@ _RUNNER = textwrap.dedent('''\
             inline_timer_threshold=10**9,
         )
 
+        # A workflow annotated `text: str` handed None crashes on the first
+        # attribute access, and the repair loop then tries to "fix" code that
+        # was correct — the environmental-failure trap, in a new costume. Derive
+        # an input from the workflow's own declared type instead.
+        synthetic = False
+        if workflow_input is None:
+            try:
+                from workflow_builder.agents.fakes import fake_value
+
+                schema = flows[0].input_schema()
+                if schema:
+                    workflow_input = fake_value(schema)
+                    synthetic = True
+            except Exception:
+                # A shape we cannot build is not a reason to fail the run;
+                # None was what we had before.
+                pass
+
         try:
             result = asyncio.run(runtime.run(flows[0], workflow_input))
         except Exception as exc:
             report(
                 ok=False,
                 phase="run",
+                synthetic_input=synthetic,
                 error=f"{type(exc).__name__}: {exc}",
                 traceback=traceback.format_exc(),
                 workflows_found=names,
@@ -328,6 +402,7 @@ _RUNNER = textwrap.dedent('''\
             report(
                 ok=False,
                 phase="run",
+                synthetic_input=synthetic,
                 error=result.error.message if result.error else "workflow failed",
                 status=result.status.value,
                 workflows_found=names,
@@ -338,6 +413,7 @@ _RUNNER = textwrap.dedent('''\
             report(
                 ok=False,
                 phase="run",
+                synthetic_input=synthetic,
                 error=result.error.message if result.error else "workflow failed",
                 status=result.status.value,
                 workflows_found=names,

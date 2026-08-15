@@ -33,6 +33,7 @@ OFFLINE = [
     "15_queue_consumer.py",
     "16_http_server.py",
     "17_files_and_artifacts.py",
+    "19_pagination.py",
 ]
 
 #: Needs an API key. Exercised for structure, not executed.

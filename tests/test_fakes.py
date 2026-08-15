@@ -12,6 +12,8 @@ the drift that comes with it — never exists.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from workflow_builder.agents.fakes import fake_value, install_fakes
 from workflow_builder.toolsets.manifest import OperationSpec, ToolsetManifest
 
@@ -202,3 +204,139 @@ async def keys(ctx: Context, jql: str) -> str:
         assert result.ok, result.error
         # "sample" is what the schema-derived stub produces for a string field.
         assert "sample" in result.output_preview
+
+
+class TestBothWaysIntoAToolsetAreFaked:
+    """Generated code reaches a toolset two ways; the sandbox served one.
+
+    A direct call inside a ``@step`` binds to the module attribute, which
+    ``install_fakes`` replaces — that worked. ``ctx.agent(toolsets=["jira"])``
+    never touches the module: it asks the registry for an *executable* toolset,
+    and a subprocess registers none, so the run died with "no executable
+    toolset 'jira' is registered".
+
+    Which is the shape the coding agent's own resolution ladder tells the model
+    to emit when an entity stays ambiguous. The sandbox was rejecting the
+    pattern the prompt recommends — an incoherence between two parts of the
+    system, not a defect in the generated code, and the reason "adjust the
+    prompt" would have been the wrong fix.
+    """
+
+    FAKES: ClassVar[list[tuple[str, str]]] = [
+        (
+            "workflow_builder.toolsets.jira.tools",
+            "workflow_builder.toolsets.jira.manifest.JIRA_MANIFEST",
+        )
+    ]
+
+    DIRECT = (
+        "from workflow_builder import Context, step, workflow\n"
+        "from workflow_builder.toolsets.jira.tools import jira_search_issues\n\n"
+        "@step\n"
+        "async def fetch() -> list:\n"
+        '    """Fetch."""\n'
+        '    issues = await jira_search_issues("project = PA", max_results=10)\n'
+        "    return [i.key for i in issues]\n\n"
+        '@workflow(name="direct")\n'
+        "async def direct(ctx: Context, _=None) -> str:\n"
+        '    """Direct call inside a step."""\n'
+        "    return str(await ctx.step(fetch))\n"
+    )
+
+    VIA_AGENT = (
+        "from workflow_builder import Context, workflow\n\n"
+        '@workflow(name="via_agent")\n'
+        "async def via_agent(ctx: Context, _=None) -> str:\n"
+        '    """What the ladder emits for an ambiguous entity."""\n'
+        "    answer = await ctx.agent(\n"
+        "        \"Which epic is 'saas'?\", toolsets=[\"jira\"]\n"
+        "    )\n"
+        "    return str(answer.output)\n"
+    )
+
+    def test_a_direct_call_inside_a_step_is_faked(self) -> None:
+        from workflow_builder.agents.smoke import smoke_run
+
+        result = smoke_run(self.DIRECT, fakes=self.FAKES)
+        assert result.ok, result.error
+
+    def test_an_agent_node_resolves_the_toolset_too(self) -> None:
+        """The regression. Without the executable toolset this is the failure
+        the cookbook hit: "no executable toolset 'jira' is registered"."""
+        from workflow_builder.agents.smoke import smoke_run
+
+        result = smoke_run(self.VIA_AGENT, fakes=self.FAKES)
+        assert result.ok, result.error
+        assert "no executable toolset" not in (result.error or "")
+
+    async def test_both_paths_reach_the_same_stand_ins(self) -> None:
+        """One source of fakes. A second set would drift from the first.
+
+        Asserted by *calling* the resolved tool rather than comparing objects:
+        ``coerce_tool`` wraps a step in a ``Tool``, so identity says nothing.
+        What matters is that it answers with fake data instead of reaching for
+        a credential.
+        """
+        from workflow_builder.agents.fakes import (
+            executable_fake_toolset,
+            install_fakes,
+            uninstall_fakes,
+        )
+        from workflow_builder.agents.tools import ToolContext
+        from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
+
+        try:
+            install_fakes(JIRA_MANIFEST)
+            toolset = executable_fake_toolset(JIRA_MANIFEST)
+            assert toolset is not None
+
+            answer = await toolset.resolve("issues.search").invoke(
+                {"jql": "project = PA"}, ToolContext(agent_name="test")
+            )
+            assert answer is not None, "the fake produced nothing"
+        finally:
+            uninstall_fakes()
+
+    def test_resolution_reads_the_module_at_call_time(self) -> None:
+        """A toolset built before install_fakes must still resolve to the fake.
+
+        Binding the function at construction would capture the real one, and
+        the sandbox would quietly go to the network for whichever path was
+        registered first.
+        """
+        from workflow_builder.agents.fakes import (
+            executable_fake_toolset,
+            install_fakes,
+            uninstall_fakes,
+        )
+        from workflow_builder.toolsets.jira import tools
+        from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
+
+        toolset = executable_fake_toolset(JIRA_MANIFEST)   # before faking
+        real = tools.jira_search_issues
+        try:
+            install_fakes(JIRA_MANIFEST)
+            assert tools.jira_search_issues is not real, "install_fakes did nothing"
+            # Built earlier, yet it resolves through the module as it is now.
+            assert toolset.resolve("issues.search") is not None
+        finally:
+            uninstall_fakes()
+
+    def test_the_real_manifest_is_preserved(self) -> None:
+        """Not a rebuilt one: pagination, resolvers, and effects must survive."""
+        from workflow_builder.agents.fakes import executable_fake_toolset
+        from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
+
+        toolset = executable_fake_toolset(JIRA_MANIFEST)
+
+        assert toolset.manifest is JIRA_MANIFEST
+        assert [op.id for op in toolset.manifest.paginated()]
+        assert toolset.manifest.resolvers()
+
+    def test_a_manifest_with_no_module_yields_nothing(self) -> None:
+        """Same condition under which install_fakes does nothing."""
+        from workflow_builder.agents.fakes import executable_fake_toolset
+        from workflow_builder.toolsets.manifest import ToolsetManifest
+
+        bare = ToolsetManifest(id="bare", version="1", summary="no module")
+        assert executable_fake_toolset(bare) is None

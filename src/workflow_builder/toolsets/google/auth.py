@@ -27,6 +27,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from workflow_builder.connectors.credentials import current_credential_store, resolve_bearer_token
 from workflow_builder.toolsets.google.errors import GoogleAuthError, classify
 
 __all__ = ["GoogleAuth", "GoogleCredentials", "get_default_auth", "reset_default_auth"]
@@ -92,14 +93,22 @@ class GoogleAuth:
         credentials: GoogleCredentials | None = None,
         *,
         scopes: list[str] | None = None,
+        credential_name: str = "google",
     ) -> None:
         self._credentials = credentials or GoogleCredentials.from_env()
         self._scopes = scopes or []
+        self._credential_name = credential_name
         self._token = ""
         self._expires_at = 0.0
         self._lock = asyncio.Lock()
 
-        if not self._credentials.mode:
+        # A CredentialStore bound to the current run might supply what the
+        # environment did not — but that can only be checked with an await,
+        # so this raises only when nothing could possibly save it: no local
+        # credentials *and* no store bound at all. A store that turns out to
+        # have nothing under `credential_name` still surfaces this same
+        # error, just later, from _mint() at first actual use.
+        if not self._credentials.mode and current_credential_store() is None:
             raise GoogleAuthError(
                 "No Google credentials found. Set GOOGLE_ACCESS_TOKEN, or "
                 "GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET + GOOGLE_REFRESH_TOKEN, "
@@ -111,7 +120,20 @@ class GoogleAuth:
         return self._credentials.mode
 
     async def token(self) -> str:
-        """Return a valid access token, minting or refreshing if needed."""
+        """Return a valid access token, minting or refreshing if needed.
+
+        A run's bound ``CredentialStore`` is checked first, on every call —
+        never cached here, since the store already manages its own expiry
+        and refresh (see ``BaseCredentialStore.get``) and caching its answer
+        on top would mean this class serves a token an hour after the store
+        itself would have refreshed it. Falls through to the environment
+        credentials below when no store is bound, or one is bound but has
+        nothing under ``credential_name`` — both exactly today's behaviour.
+        """
+        token = await resolve_bearer_token(self._credential_name)
+        if token:
+            return token
+
         if self._token and time.monotonic() < self._expires_at - _SKEW:
             return self._token
 
@@ -141,6 +163,13 @@ class GoogleAuth:
 
     async def _mint(self) -> str:
         mode = self._credentials.mode
+        if not mode:
+            raise GoogleAuthError(
+                "No Google credentials found. Set GOOGLE_ACCESS_TOKEN, or "
+                "GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET + GOOGLE_REFRESH_TOKEN, "
+                "or GOOGLE_SERVICE_ACCOUNT_FILE, or connect a "
+                f"'{self._credential_name}' credential via a CredentialStore."
+            )
         if mode == "token":
             # Supplied ready-made. Its lifetime is the caller's problem; treat
             # it as valid and let a 401 surface rather than guessing an expiry.

@@ -200,6 +200,7 @@ JIRA_MANIFEST = ToolsetManifest(
                 function="jira_get_comments",
                 summary="Read an issue's comments.",
                 effect=EffectClass.READ,
+                pagination=True,
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -284,6 +285,7 @@ JIRA_MANIFEST = ToolsetManifest(
                     "nothing rather than failing."
                 ),
                 effect=EffectClass.READ,
+                pagination=True,
                 input_schema={
                     "type": "object",
                     "properties": {

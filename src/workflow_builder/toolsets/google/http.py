@@ -14,6 +14,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from workflow_builder.toolsets.google.errors import GoogleAuthError, classify
+from workflow_builder.toolsets.pagination import (
+    Results,
+    TokenPaging,
+    page_through,
+)
 
 if TYPE_CHECKING:
     import httpx
@@ -112,29 +117,25 @@ class GoogleSession:
         items_key: str,
         limit: int,
         params: dict[str, Any] | None = None,
-    ) -> list[Any]:
+    ) -> Results:
         """Follow ``nextPageToken`` until ``limit`` items are collected.
 
         Both APIs cap a page well below what a caller may ask for — Gmail at
         500, Calendar at 2500 — so "give me 600 messages" is several requests or
         it is silently 500. Doing it here keeps that off every call site.
+
+        Returns :class:`Results` rather than a list, so a caller can tell a
+        complete answer from a truncated one. Google, Jira, and Confluence page
+        in three different dialects and agree on this one return type; that is
+        what lets the coding agent learn the rule once.
         """
-        collected: list[Any] = []
-        token = ""
-        while len(collected) < limit:
-            page_params = dict(params or {})
-            page_params["maxResults"] = min(limit - len(collected), 500)
-            if token:
-                page_params["pageToken"] = token
 
-            data = await self.request("GET", path, params=page_params)
-            batch = (data or {}).get(items_key) or []
-            collected.extend(batch)
-
-            token = (data or {}).get("nextPageToken") or ""
-            if not token or not batch:
-                break
-        return collected[:limit]
+        return await page_through(
+            lambda asked: self.request("GET", path, params={**(params or {}), **asked}),
+            style=TokenPaging(items=items_key),
+            limit=limit,
+            page_size=500,
+        )
 
 
 def _body(response: httpx.Response) -> Any:

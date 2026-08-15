@@ -1,14 +1,22 @@
 """Workflow management tools for the ReAct agent.
 
-These tools let an agent manage workflows: list, run, schedule,
-cancel, get status. They operate on a ``Runtime`` instance and
-form a ``Toolset`` via the standard registration pattern.
+These tools let an agent manage workflows: list, run, schedule, cancel, get
+status. They take a :class:`~workflow_builder.facade.RuntimeFacade` — the same
+port the CLI, the MCP server, and the HTTP API hold — rather than a
+``Runtime``.
+
+That distinction is the point. A ``Runtime`` is the interpreter: it can execute
+a body in this process, and these tools reached into ``runtime._workflows``
+and set ``runtime._dispatcher`` to do their work. A facade is data in and data
+out, so an assistant that manages workflows can be handed one without being
+handed the ability to run arbitrary code in the host process.
 
 Usage::
 
     from workflow_builder.agents.workflow_tools import build_workflow_tools
+    from workflow_builder.facade import LocalFacade
 
-    tools = build_workflow_tools(rt)
+    tools = build_workflow_tools(LocalFacade(rt))
     rt.toolsets.register(Toolset.from_callables("workflow_manager", tools))
 """
 
@@ -18,30 +26,37 @@ import json
 from typing import Any
 
 
-def build_workflow_tools(runtime: Any) -> list[Any]:
-    """Build workflow management tools bound to a Runtime.
+def build_workflow_tools(facade: Any) -> list[Any]:
+    """Build workflow management tools bound to a :class:`RuntimeFacade`.
 
-    Each tool is a plain async callable that can be registered
-    via ``Toolset.from_callables()``.
+    Each tool is a plain async callable that can be registered via
+    ``Toolset.from_callables()``. Accepts a ``Runtime`` too, wrapping it, so
+    existing callers keep working — but a facade is what to pass.
     """
+    from workflow_builder.facade import LocalFacade, RuntimeFacade
+
+    if not isinstance(facade, RuntimeFacade):
+        facade = LocalFacade(facade)
 
     async def list_workflows() -> str:
         """List all registered workflows with their trigger info.
 
         Returns JSON array of workflow names and trigger summaries.
         """
-        workflows = []
-        for name, defn in runtime._workflows.items():
-            triggers = []
-            for t in defn.triggers:
-                triggers.append(t.describe())
-            workflows.append({
-                "name": name,
-                "description": defn.description or "",
-                "triggers": triggers,
-                "version": defn.version,
-            })
-        return json.dumps(workflows, indent=2, default=str)
+        listed = await facade.workflows(published=False)
+        return json.dumps(
+            [
+                {
+                    "name": entry["name"],
+                    "description": entry.get("description") or "",
+                    "triggers": entry.get("triggers") or [],
+                    "version": entry.get("version"),
+                }
+                for entry in listed
+            ],
+            indent=2,
+            default=str,
+        )
 
     async def get_workflow_info(name: str) -> str:
         """Get detailed info about a workflow.
@@ -49,15 +64,18 @@ def build_workflow_tools(runtime: Any) -> list[Any]:
         Args:
             name: Workflow name.
         """
-        defn = runtime._workflows.get(name)
-        if defn is None:
+        found = next(
+            (e for e in await facade.workflows(published=False) if e["name"] == name),
+            None,
+        )
+        if found is None:
             return json.dumps({"error": f"Workflow '{name}' not found"})
         return json.dumps({
-            "name": defn.name,
-            "description": defn.description or "",
-            "version": defn.version,
-            "triggers": [t.describe() for t in defn.triggers],
-            "tags": list(defn.tags),
+            "name": found["name"],
+            "description": found.get("description") or "",
+            "version": found.get("version"),
+            "triggers": found.get("triggers") or [],
+            "input_schema": found.get("input_schema"),
         }, indent=2, default=str)
 
     async def run_workflow(name: str, input_json: str = "null") -> str:
@@ -69,11 +87,11 @@ def build_workflow_tools(runtime: Any) -> list[Any]:
         """
         input_data = json.loads(input_json)
         try:
-            result = await runtime.run(name, input_data)
+            result = await facade.start(name, input_data)
             return json.dumps({
-                "run_id": result.run_id,
-                "status": result.status.value,
-                "output": str(result.output)[:500] if result.output else None,
+                "run_id": result["run_id"],
+                "status": result["status"],
+                "output": str(result["output"])[:500] if result.get("output") else None,
             }, indent=2, default=str)
         except Exception as exc:
             return json.dumps({"error": str(exc)})
@@ -88,15 +106,13 @@ def build_workflow_tools(runtime: Any) -> list[Any]:
             limit: Max runs to return.
         """
         try:
-            runs = await runtime.list_runs(
-                workflow=name or None, limit=limit
-            )
+            runs = await facade.list_runs(workflow=name or None, limit=limit)
             return json.dumps([
                 {
-                    "run_id": r.run_id,
-                    "workflow": r.workflow,
-                    "status": r.status.value,
-                    "created_at": str(r.created_at),
+                    "run_id": r["run_id"],
+                    "workflow": r["workflow"],
+                    "status": r["status"],
+                    "created_at": r.get("created_at"),
                 }
                 for r in runs
             ], indent=2, default=str)
@@ -110,17 +126,17 @@ def build_workflow_tools(runtime: Any) -> list[Any]:
             run_id: Run ID to check.
         """
         try:
-            record = await runtime.get(run_id)
+            record = await facade.get(run_id)
             if record is None:
                 return json.dumps({"error": f"Run '{run_id}' not found"})
             return json.dumps({
-                "run_id": record.run_id,
-                "workflow": record.workflow,
-                "status": record.status.value,
-                "output": str(record.output)[:500] if record.output else None,
-                "error": record.error.message if record.error else None,
-                "created_at": str(record.created_at),
-                "finished_at": str(record.finished_at),
+                "run_id": record["run_id"],
+                "workflow": record["workflow"],
+                "status": record["status"],
+                "output": str(record["output"])[:500] if record.get("output") else None,
+                "error": record.get("error"),
+                "created_at": record.get("created_at"),
+                "finished_at": record.get("finished_at"),
             }, indent=2, default=str)
         except Exception as exc:
             return json.dumps({"error": str(exc)})
@@ -132,7 +148,7 @@ def build_workflow_tools(runtime: Any) -> list[Any]:
             run_id: Run ID to cancel.
         """
         try:
-            await runtime.cancel(run_id)
+            await facade.cancel(run_id)
             return json.dumps({"cancelled": run_id})
         except Exception as exc:
             return json.dumps({"error": str(exc)})
@@ -149,44 +165,17 @@ def build_workflow_tools(runtime: Any) -> list[Any]:
             cron_expression: Cron expression (e.g. "0 9 * * 1-5").
             timezone: Timezone for cron (default UTC).
         """
-        from workflow_builder.runtime.dispatcher import TriggerDispatcher
-        from workflow_builder.triggers.specs import Schedule
-
-        defn = runtime._workflows.get(name)
-        if defn is None:
-            return json.dumps({"error": f"Workflow '{name}' not found"})
-
         try:
-            sched = Schedule(cron_expression, timezone=timezone)
+            made = await facade.schedule(name, cron_expression, timezone=timezone)
         except Exception as exc:
-            return json.dumps({"error": f"Invalid cron: {exc}"})
-
-        dispatcher = getattr(runtime, "_dispatcher", None)
-        if dispatcher is None:
-            dispatcher = TriggerDispatcher(runtime)
-            runtime._dispatcher = dispatcher
-
-        from datetime import UTC, datetime
-
-        from workflow_builder.core.ids import new_id
-        from workflow_builder.core.models import TriggerKind, TriggerRecord
-
-        trigger = TriggerRecord(
-            trigger_id=new_id("trg"),
-            workflow=name,
-            kind=TriggerKind.SCHEDULE,
-            spec=sched.describe(),
-            next_fire_at=sched.next_fire(datetime.now(UTC)),
-            timezone=timezone,
-        )
-        await dispatcher._store.save_trigger(trigger)
+            return json.dumps({"error": str(exc)})
 
         return json.dumps({
-            "scheduled": name,
+            "scheduled": made["workflow"],
             "cron": cron_expression,
             "timezone": timezone,
-            "trigger_id": trigger.trigger_id,
-            "next_fire": str(trigger.next_fire_at),
+            "trigger_id": made["trigger_id"],
+            "next_fire": made.get("next_fire_at"),
         }, indent=2, default=str)
 
     return [
@@ -198,3 +187,70 @@ def build_workflow_tools(runtime: Any) -> list[Any]:
         cancel_run,
         schedule_workflow,
     ]
+
+
+class WorkflowManagerAgent:
+    """An agent that manages workflows: list, run, schedule, inspect, cancel.
+
+    Shipped because it was previously a cookbook — every user rebuilt it, and
+    each rebuild reached into the Runtime differently.
+
+    It holds a :class:`RuntimeFacade`, never a ``Runtime``, so it can start a
+    run and read a journal but has no path to executing arbitrary code in the
+    host process. That is the whole reason the tools moved to the facade.
+
+    ``executor`` swaps the turn loop for LangGraph, Agno, Pydantic AI, or a
+    host's own; ``None`` uses LOOM's built-in ReAct loop.
+
+        from workflow_builder.agents.workflow_tools import WorkflowManagerAgent
+        from workflow_builder.facade import LocalFacade
+
+        manager = WorkflowManagerAgent(LocalFacade(runtime), model=provider)
+        print(await manager.chat("what ran today?"))
+    """
+
+    INSTRUCTIONS = (
+        "You manage workflows. You can list them, inspect one, start a run, "
+        "check or cancel a run, and schedule a workflow with a cron "
+        "expression.\n\n"
+        "Answer from the tools, never from memory: workflow names, run ids, "
+        "and statuses change between questions. Report ids verbatim — they are "
+        "what the person acts on. When something fails, say what you tried."
+    )
+
+    def __init__(
+        self,
+        facade: Any,
+        *,
+        model: Any,
+        executor: Any = None,
+        instructions: str | None = None,
+        max_turns: int = 12,
+    ) -> None:
+        from workflow_builder.facade import LocalFacade, RuntimeFacade
+
+        self.facade = facade if isinstance(facade, RuntimeFacade) else LocalFacade(facade)
+        self._model = model
+        self._executor = executor
+        self._instructions = instructions or self.INSTRUCTIONS
+        self._max_turns = max_turns
+
+    def build_agent(self) -> Any:
+        """The underlying :class:`Agent`, for callers that want to configure it."""
+        from workflow_builder.agents.agent import Agent
+        from workflow_builder.agents.limits import UsageLimits
+        from workflow_builder.agents.tools import tool
+
+        return Agent(
+            name="workflow_manager",
+            instructions=self._instructions,
+            model=self._model,
+            executor=self._executor,
+            tools=[tool(fn) for fn in build_workflow_tools(self.facade)],
+            limits=UsageLimits(max_turns=self._max_turns),
+        )
+
+    async def chat(self, message: str) -> str:
+        """Answer one question, using the tools as needed."""
+        result = await self.build_agent()(message)
+        return result.text()

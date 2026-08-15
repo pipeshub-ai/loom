@@ -12,6 +12,7 @@ import json
 
 import pytest
 
+from workflow_builder.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
 from workflow_builder.agents.coding_tools import call_read_operation
 from workflow_builder.agents.tool_registry import ToolsetRegistry
 from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
@@ -472,10 +473,20 @@ class TestMarkdownByDefault:
             assert rule in prompt, rule
 
     def test_the_prompt_stays_lean(self) -> None:
-        """Every line is paid on every turn of every generation."""
+        """Every line is paid on every turn of every generation.
+
+        A drift guard, not a physical limit — so it moves when a genuinely new
+        required behaviour lands, and only then. It has moved once, from 8000,
+        to pay for three rules added after real generations went wrong:
+        classifying each node as code or judgement, reporting what a capped
+        list covers, and refusing a fuzzy text match as a substitute for
+        resolution. The space was earned first by deleting a duplicated
+        ``ctx.agent()`` section and three restated paragraphs; raise it again
+        only after looking for the same.
+        """
         from workflow_builder.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
 
-        assert len(DEFAULT_SYSTEM_PROMPT) < 8000, "the prompt is drifting long"
+        assert len(DEFAULT_SYSTEM_PROMPT) < 8500, "the prompt is drifting long"
 
 
 class TestRepeatedLookupsAreStopped:
@@ -673,3 +684,228 @@ class TestInventedModulePaths:
 
         assert agent._validator.toolset_modules == self.MODULES
         assert agent._check_context("spec").toolset_modules == self.MODULES
+
+
+class TestCodeOrJudgement:
+    """Every node is either a rule or a judgement, and the choice is stated.
+
+    The failure this guards against is the quiet one: a model asked to decide
+    which emails "need attention" writes ``if "urgent" in subject.lower()``,
+    which compiles, runs, passes a smoke test, and is wrong on exactly the
+    email that mattered. A keyword list is a rule the spec never gave.
+
+    So the prompt has to say three things — how to tell the cases apart, which
+    way to fall when unsure, and that the choice must be reported — and the
+    result has to carry the answer somewhere a reviewer can read it.
+    """
+
+    def test_the_prompt_gives_one_test_for_the_decision(self) -> None:
+        prompt = DEFAULT_SYSTEM_PROMPT
+
+        assert "Code or judgement" in prompt
+        assert "right for every" in prompt and "input the spec allows" in prompt
+
+    def test_doubt_resolves_toward_the_agent(self) -> None:
+        """The instruction that decides the ambiguous half of the cases."""
+        prompt = DEFAULT_SYSTEM_PROMPT
+
+        assert "When in doubt, use the agent" in prompt
+        assert "unsure → `ctx.agent()`" in prompt
+
+    def test_the_prompt_names_the_tell_for_an_invented_rule(self) -> None:
+        """Abstract advice does not survive contact with a concrete spec."""
+        prompt = DEFAULT_SYSTEM_PROMPT
+
+        assert "keyword list" in prompt
+        assert 'if "urgent" in subject.lower()' in prompt
+        assert "invented the constant" in prompt
+
+    def test_judgement_without_a_stated_threshold_goes_to_the_agent(self) -> None:
+        prompt = DEFAULT_SYSTEM_PROMPT
+
+        for phrase in ("needs attention", "important", "relevant"):
+            assert phrase in prompt, phrase
+        assert "no stated threshold" in prompt
+
+    def test_a_lookup_is_still_not_judgement(self) -> None:
+        """"When in doubt use the agent" must not undo entity resolution.
+
+        These two rules pull opposite ways and the prompt carries both, so the
+        boundary between them is the thing worth pinning: doubt about whether a
+        *rule* fits sends you to the agent; doubt about *what something is*
+        sends you to a lookup at authoring time.
+        """
+        prompt = DEFAULT_SYSTEM_PROMPT
+
+        assert "is a query, not judgement" in prompt
+        assert "not about facts you can go and find" in prompt
+        assert "re-answers it, differently, on every run" in prompt
+
+    def test_hybrid_nodes_are_split_rather_than_forced(self) -> None:
+        prompt = DEFAULT_SYSTEM_PROMPT
+
+        assert "Part rule, part judgement" in prompt
+        assert "fetches and narrows" in prompt
+
+    def test_resolution_and_planning_precede_generation(self) -> None:
+        """Ordering is the requirement, not just the presence of the steps."""
+        prompt = DEFAULT_SYSTEM_PROMPT
+
+        assert prompt.index("4. RESOLVE") < prompt.index("6. GENERATE")
+        assert prompt.index("5. PLAN") < prompt.index("6. GENERATE")
+        assert "RESOLVE and PLAN come before GENERATE" in prompt
+
+    def test_the_plan_is_asked_for_in_the_structured_output(self) -> None:
+        """A rule followed silently is a rule nobody can check was followed."""
+        from workflow_builder.agents.coding_agent import CodingOutput
+
+        assert "plan" in CodingOutput.model_fields
+        described = CodingOutput.model_json_schema()["properties"]["plan"]
+        assert "step/agent" in str(described)
+
+    def test_a_plan_survives_onto_the_result(self) -> None:
+        from workflow_builder.agents.coding_agent import CodingResult, NodePlan
+
+        result = CodingResult(
+            code="x = 1",
+            plan=[
+                NodePlan(node="fetch unread mail", kind="step", why="an API call"),
+                NodePlan(node="pick what needs a reply", kind="agent", why="judgement"),
+                NodePlan(node="send the summary", kind="step", why="an API call"),
+            ],
+        )
+
+        assert [node.node for node in result.judgement_nodes] == [
+            "pick what needs a reply"
+        ]
+
+    def test_no_plan_is_not_a_claim_that_nothing_is_probabilistic(self) -> None:
+        """An absent plan means unreported, not "all deterministic"."""
+        from workflow_builder.agents.coding_agent import CodingResult
+
+        assert CodingResult(code="x = 1").plan == []
+        assert CodingResult(code="x = 1").judgement_nodes == []
+
+    def test_a_plan_arriving_as_plain_dicts_is_still_read(self) -> None:
+        """Small models return the shape without the type.
+
+        The structured-output layer coerces where it can; a plan dropped on the
+        floor because it arrived as dicts would make the field look unused and
+        get deleted.
+        """
+        from workflow_builder.agents.coding_agent import NodePlan
+
+        parsed = [
+            NodePlan.model_validate(entry)
+            for entry in [{"node": "summarise", "kind": "agent", "why": "open-ended"}]
+        ]
+        assert parsed[0].kind == "agent"
+
+
+class TestResolutionStage:
+    """Catching the guess that looks like a search.
+
+    From a real generation. Asked for "all the stories in **sas work**", the
+    agent wrote ``text ~ "saas"`` — it corrected the spelling on its own and
+    fuzzy-matched free text rather than resolving "sas work" to a project or an
+    epic. The prompt already forbade this; nothing checked it.
+    """
+
+    GUESSED = (
+        "from workflow_builder.toolsets.jira.tools import jira_search_issues\n"
+        "async def fetch() -> list:\n"
+        "    return await jira_search_issues(\n"
+        "        'issuetype = Story AND text ~ \"saas\" ORDER BY created DESC'\n"
+        "    )\n"
+    )
+    SPEC = "show all the stories in sas work"
+
+    async def _run(self, code: str, spec: str = SPEC):
+        from workflow_builder.agents.checks import CheckContext
+        from workflow_builder.agents.stages import ResolutionStage
+
+        return await ResolutionStage().run(code, CheckContext(spec=spec))
+
+    async def test_it_catches_the_generation_that_prompted_it(self) -> None:
+        issues = (await self._run(self.GUESSED)).issues
+
+        assert len(issues) == 1
+        assert issues[0].category == "resolution"
+        assert "respelled" in issues[0].message, "the silent correction is the tell"
+        assert "call_read_operation" in issues[0].message, "name the fix"
+
+    async def test_a_resolved_id_passes(self) -> None:
+        """The shape the prompt asks for: an id, the name in a comment."""
+        resolved = (
+            "async def fetch() -> list:\n"
+            '    # PA-1844 = "sas work"\n'
+            "    return await jira_search_issues('parent = PA-1844')\n"
+        )
+        assert not (await self._run(resolved)).issues
+
+    async def test_an_exact_comparison_is_left_alone(self) -> None:
+        """``status = "In Progress"`` is a plausible resolved value.
+
+        Only a *match* operator is evidence of a guess. Flagging equality would
+        fire on every correctly-resolved workflow and get the check ignored.
+        """
+        exact = (
+            "async def fetch() -> list:\n"
+            "    return await jira_search_issues('status = \"In Progress\"')\n"
+        )
+        assert not (await self._run(exact, "tickets in progress")).issues
+
+    async def test_the_spec_s_word_used_verbatim_is_caught_too(self) -> None:
+        """Not only respellings — the exact word is the plainer version."""
+        verbatim = (
+            "async def fetch() -> list:\n"
+            "    return await jira_search_issues('text ~ \"onboarding\"')\n"
+        )
+        issues = (await self._run(verbatim, "show the onboarding stories")).issues
+
+        assert len(issues) == 1
+        assert "the spec's 'onboarding'" in issues[0].message
+
+    async def test_words_the_spec_uses_about_the_task_are_not_entities(self) -> None:
+        """"show all the stories" names nothing; it describes the request."""
+        about = (
+            "async def fetch() -> list:\n"
+            "    return await jira_search_issues('text ~ \"stories\"')\n"
+        )
+        assert not (await self._run(about, "show all the stories")).issues
+
+    async def test_a_fuzzy_match_on_something_not_in_the_spec_passes(self) -> None:
+        """A term the author chose deliberately is not a guess about the spec."""
+        deliberate = (
+            "async def fetch() -> list:\n"
+            "    return await jira_search_issues('text ~ \"regression\"')\n"
+        )
+        assert not (await self._run(deliberate, "show all the stories in sas work")).issues
+
+    async def test_a_tilde_outside_a_string_is_not_a_query(self) -> None:
+        """Parsed, not grepped — a comment is not code."""
+        commented = "# text ~ \"saas\" would be wrong here\nx = 1\n"
+        assert not (await self._run(commented)).issues
+
+    async def test_unparseable_code_is_not_this_stage_s_problem(self) -> None:
+        assert not (await self._run("def (")).issues
+
+    async def test_it_reports_at_most_a_few(self) -> None:
+        """A wall of near-identical warnings is one warning nobody reads."""
+        many = "\n".join(
+            f"q{i} = 'text ~ \"saas\"'" for i in range(10)
+        )
+        assert len((await self._run(many)).issues) <= 3
+
+    async def test_it_is_a_warning_and_runs_before_the_expensive_stages(self) -> None:
+        from workflow_builder.agents.stages import ResolutionStage, default_stages
+
+        assert ResolutionStage().blocking is False
+        names = [stage.name for stage in default_stages()]
+        assert names.index("resolution") < names.index("smoke")
+
+    def test_the_prompt_names_the_disguise(self) -> None:
+        assert "fuzzy text search is not a resolution" in DEFAULT_SYSTEM_PROMPT
+        flat = " ".join(DEFAULT_SYSTEM_PROMPT.split())
+        assert "Nor may you quietly fix a spelling" in flat
+        assert '"sas" becoming "saas" is a guess' in flat

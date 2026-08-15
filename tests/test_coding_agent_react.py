@@ -136,3 +136,61 @@ class TestManifestUsesModelSchemas:
         assert "properties" in schema
         assert "account_id" in schema["properties"]
         assert "display_name" in schema["properties"]
+
+
+class TestAFailureIsDiagnosedNotGuessed:
+    """Advice that cannot help is worse than none.
+
+    Every agent-loop failure got the same line — "raise max_discovery_turns or
+    narrow the spec" — including a missing API key, where no turn budget helps
+    and the spec was never the problem. Someone hitting it goes and rewrites a
+    spec that was fine.
+
+    Third place this distinction was needed: the smoke stage fed 401s into the
+    repair loop until a workflow came back gutted, the docs runner grew its own
+    marker list, and this. It now has one definition.
+    """
+
+    async def _issue(self, exc: Exception) -> str:
+        from workflow_builder.agents.coding_agent import WorkflowCodingAgent
+
+        class Exploding:
+            model_name = "boom"
+
+            async def complete(self, *args: object, **kwargs: object) -> object:
+                raise exc
+
+        result = await WorkflowCodingAgent(Exploding()).generate("do a thing")
+        assert result.code == ""
+        return result.issues[0].message
+
+    async def test_a_missing_credential_points_at_the_credential(self) -> None:
+        message = await self._issue(
+            RuntimeError("Could not resolve authentication method. Expected api_key")
+        )
+
+        assert "environment, not the spec" in message
+        assert "ANTHROPIC_API_KEY" in message
+        assert "max_discovery_turns" not in message, "unhelpable advice"
+
+    async def test_a_real_loop_failure_still_gets_the_turn_advice(self) -> None:
+        """The original message is right for the case it was written for."""
+        message = await self._issue(RuntimeError("agent exceeded max turns"))
+
+        assert "max_discovery_turns" in message
+        assert "environment, not the spec" not in message
+
+    async def test_a_broken_import_is_not_called_environmental(self) -> None:
+        """The failures the checks exist to catch stay repairable."""
+        message = await self._issue(
+            RuntimeError("cannot import name 'Retryy' from 'workflow_builder'")
+        )
+
+        assert "max_discovery_turns" in message
+
+    def test_the_markers_live_in_one_place(self) -> None:
+        from workflow_builder.agents.smoke import ENVIRONMENTAL_MARKERS, is_environmental
+
+        assert "api key" in ENVIRONMENTAL_MARKERS
+        assert is_environmental("HTTP 401 Unauthorized")
+        assert not is_environmental("SyntaxError: invalid syntax")

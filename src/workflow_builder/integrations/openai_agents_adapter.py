@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from workflow_builder.integrations.base import AgentExecutor
+from workflow_builder.integrations.structured import coerce_output
 
 
 def _build_tool_schema(
@@ -66,7 +67,7 @@ class OpenAIAgentsExecutor:
         result = await Runner.run(
             self._agent, input=input
         )
-        return result.final_output
+        return coerce_output(result.final_output, output_type)
 
 
 # -- static protocol check ---------------------------------------------------

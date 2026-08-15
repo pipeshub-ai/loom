@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from workflow_builder.integrations.base import AgentExecutor
+from workflow_builder.integrations.structured import coerce_output
 
 
 def _build_tool_schema(
@@ -130,7 +131,7 @@ class ClaudeExecutor:
             )
 
         # Exhausted turns -- return last response text.
-        return str(response.content)
+        return coerce_output(str(response.content), output_type)
 
 
 # -- static protocol check ---------------------------------------------------

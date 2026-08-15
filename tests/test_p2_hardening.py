@@ -174,7 +174,7 @@ class TestEmit:
 
         durable = {
             "step", "map", "gather", "sleep", "sleep_until", "wait_for_event",
-            "wait_for_approval", "child", "agent", "emit", "signal",
+            "wait_for_approval", "child", "agent", "publish", "emit", "signal",
         }
         assert durable <= set(_CTX_CALL_MAP)
 

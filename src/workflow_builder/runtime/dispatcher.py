@@ -22,9 +22,10 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from workflow_builder.core.exceptions import ConfigurationError
 from workflow_builder.core.ids import new_id
 from workflow_builder.core.models import TriggerKind, TriggerRecord
-from workflow_builder.state.memory import MemoryStore
+from workflow_builder.identity.facade import PRINCIPAL_KEY
 
 if TYPE_CHECKING:
     from workflow_builder.runtime.engine import Runtime
@@ -56,6 +57,10 @@ class TriggerDispatcher:
         trigger_store: TriggerStore | None = None,
     ) -> None:
         self._runtime = runtime
+        # The Runtime's clock, so a ManualClock moves cron triggers too — a
+        # dispatcher on wall time while the runtime is on virtual time would
+        # be the one component a time-travel test could not reach.
+        self._clock = runtime.clock
         self._store: Any = trigger_store or _resolve_store(runtime)
         self._task: asyncio.Task[None] | None = None
 
@@ -76,7 +81,7 @@ class TriggerDispatcher:
             if spec.kind not in _DISPATCHABLE_KINDS:
                 continue
 
-            next_fire = _next_fire_from_spec(spec, datetime.now(UTC))
+            next_fire = _next_fire_from_spec(spec, self._clock.now())
             if next_fire is None:
                 continue
 
@@ -109,7 +114,7 @@ class TriggerDispatcher:
         self, now: datetime | None = None
     ) -> list[str]:
         """Fire due triggers. Returns list of created run IDs."""
-        now = now or datetime.now(UTC)
+        now = now or self._clock.now()
         if now.tzinfo is None:
             now = now.replace(tzinfo=UTC)
 
@@ -136,6 +141,12 @@ class TriggerDispatcher:
                 run_id = await self._runtime.submit(
                     trigger.workflow,
                     trigger=TriggerKind.SCHEDULE,
+                    # No interactive caller to pin as owner — stamp the
+                    # runtime's service identity so an authenticated facade
+                    # (AuthorizedFacade) attributes this run to the scheduler
+                    # rather than leaving it ownerless (which today reads as
+                    # "everyone's", per identity/facade.py::PRINCIPAL_KEY).
+                    metadata={PRINCIPAL_KEY: self._runtime.service_principal.subject},
                 )
                 run_ids.append(run_id)
                 logger.info(
@@ -175,7 +186,7 @@ class TriggerDispatcher:
                     await self.tick()
                 except Exception:
                     logger.exception("Dispatcher tick failed")
-                await asyncio.sleep(interval)
+                await self._clock.sleep(interval)
 
         self._task = asyncio.create_task(loop())
         logger.info("TriggerDispatcher started (interval=%.1fs)", interval)
@@ -195,12 +206,40 @@ class TriggerDispatcher:
 # ---------------------------------------------------------------------------
 
 
+#: Every method a store must carry to hold schedules durably.
+TRIGGER_STORE_METHODS = (
+    "save_trigger",
+    "get_trigger",
+    "list_triggers",
+    "due_triggers",
+    "update_after_fire",
+    "delete_trigger",
+)
+
+
 def _resolve_store(runtime: Runtime) -> Any:
-    """Get a TriggerStore from the runtime's store, or create one."""
+    """The runtime's store, once it is established that it can hold schedules.
+
+    This used to fall back to an in-memory store for anything that could not,
+    which meant a durable deployment kept its runs in Postgres and its
+    schedules in RAM — and lost every cron trigger on restart, with no error
+    and no log line. A silent downgrade is worse than a refusal: the refusal is
+    read once, the downgrade is discovered in production.
+
+    Pass ``trigger_store=`` explicitly to opt into a non-durable one; a test
+    that wants ephemeral schedules should have to say so.
+    """
     store = getattr(runtime, "store", None)
-    if store is not None and hasattr(store, "save_trigger"):
-        return store
-    return MemoryStore()
+    missing = [m for m in TRIGGER_STORE_METHODS if not hasattr(store, m)]
+    if store is None or missing:
+        raise ConfigurationError(
+            f"{type(store).__name__} cannot persist schedules (missing "
+            f"{', '.join(missing) or 'everything'}). Use a store that "
+            "implements TriggerStore — Memory, SQLite, Postgres, or Mongo — or "
+            "pass TriggerDispatcher(runtime, trigger_store=...) to choose one "
+            "explicitly."
+        )
+    return store
 
 
 def _next_fire_from_spec(

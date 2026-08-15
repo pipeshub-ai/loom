@@ -8,18 +8,37 @@ the point of having the boundary at all.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from workflow_builder.core.models import ExecutionStatus
 from workflow_builder.core.types import Duration, to_seconds
 
+TokenProvider = Callable[[bool], Awaitable["str | None"]]
+"""Called with ``force_refresh`` before a request (``False``) and, once, again
+after a 401 (``True``). A caller backed by a
+:class:`~workflow_builder.connectors.credentials.CredentialStore` can wire
+this straight to ``credentials.get(name)`` — ``force_refresh`` exists for a
+401 that arrives *before* the stored credential's own ``expires_at``
+(revocation, clock skew), which a plain ``get()`` would not otherwise retry."""
+
 
 class LoomClientError(Exception):
     """A LOOM server returned an error response."""
 
-    def __init__(self, message: str, *, status_code: int) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int,
+        www_authenticate: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.www_authenticate = www_authenticate
+        """The ``WWW-Authenticate`` header from a 401, if any — carries the
+        ``resource_metadata`` URL a caller needs to start a fresh login
+        rather than just retry the same rejected token."""
 
     @property
     def retryable(self) -> bool:
@@ -28,6 +47,12 @@ class LoomClientError(Exception):
         429 is flow control asking for patience; 5xx is usually transient.
         """
         return self.status_code == 429 or self.status_code >= 500
+
+    @property
+    def requires_reauth(self) -> bool:
+        """401 (bad/expired/missing token) or 403 ``insufficient_scope`` — both
+        mean "log in again with more", never "try the exact same call again"."""
+        return self.status_code in (401, 403)
 
 
 class LoomClient:
@@ -39,6 +64,11 @@ class LoomClient:
         async with LoomClient(base_url="http://localhost:8000") as loom:
             run = await loom.start("nightly_report", {"day": "monday"})
             final = await loom.wait(run["run_id"])
+
+    Pass ``token`` for a fixed bearer token, or ``token_provider`` for one
+    that can be refreshed — see :data:`TokenProvider`. Neither is required:
+    an unauthenticated server needs neither, and gets exactly the requests
+    this client always sent before either existed.
     """
 
     def __init__(
@@ -47,6 +77,8 @@ class LoomClient:
         *,
         http: Any | None = None,
         timeout: float = 30.0,
+        token: str | None = None,
+        token_provider: TokenProvider | None = None,
     ) -> None:
         if http is None:
             import httpx
@@ -58,6 +90,16 @@ class LoomClient:
         else:
             self._owns_http = False
         self._http = http
+        if token is not None and token_provider is not None:
+            raise ValueError("pass token or token_provider, not both")
+        self._token_provider: TokenProvider | None = token_provider
+        if token is not None:
+
+            async def _fixed(force_refresh: bool) -> str | None:
+                del force_refresh  # a fixed token has nothing to refresh to
+                return token
+
+            self._token_provider = _fixed
 
     async def __aenter__(self) -> LoomClient:
         return self
@@ -72,23 +114,58 @@ class LoomClient:
 
     # -- requests ------------------------------------------------------------
 
+    async def _authorization_header(self, *, force_refresh: bool) -> dict[str, str]:
+        if self._token_provider is None:
+            return {}
+        token = await self._token_provider(force_refresh)
+        return {"Authorization": f"Bearer {token}"} if token else {}
+
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
-        response = await self._http.request(method, path, **kwargs)
+        headers = dict(kwargs.pop("headers", None) or {})
+        headers.update(await self._authorization_header(force_refresh=False))
+        response = await self._http.request(method, path, headers=headers, **kwargs)
+
+        # One retry, only on 401, only when a provider exists to refresh —
+        # a fixed `token=` retries with the same rejected value and falls
+        # through to the error below, which is correct: there is nothing
+        # else to try.
+        if response.status_code == 401 and self._token_provider is not None:
+            refreshed = await self._authorization_header(force_refresh=True)
+            if refreshed:
+                headers.update(refreshed)
+                response = await self._http.request(method, path, headers=headers, **kwargs)
+
         if response.status_code >= 400:
             try:
                 detail = response.json().get("detail", response.text)
             except Exception:
                 detail = response.text
-            raise LoomClientError(str(detail), status_code=response.status_code)
+            # Structured error bodies (`server/app.py`'s `insufficient_scope`,
+            # `server/auth.py`'s 401s) nest the human sentence under `detail`
+            # or `error_description` rather than being a bare string —
+            # surface that, not a dict repr.
+            if isinstance(detail, dict):
+                detail = detail.get("detail") or detail.get("error_description") or detail
+            raise LoomClientError(
+                str(detail),
+                status_code=response.status_code,
+                www_authenticate=response.headers.get("WWW-Authenticate"),
+            )
         if response.status_code == 204 or not response.content:
             return None
         return response.json()
 
     # -- workflows -----------------------------------------------------------
 
-    async def workflows(self) -> list[dict[str, Any]]:
-        """Every workflow the server has registered, with input schemas."""
-        return await self._request("GET", "/workflows")
+    async def workflows(self, *, published: bool = True) -> list[dict[str, Any]]:
+        """Every workflow the server has registered, with input schemas.
+
+        ``published=False`` narrows it to what the serving process can actually
+        start, rather than everything in the catalog.
+        """
+        return await self._request(
+            "GET", "/workflows", params={"published": str(published).lower()}
+        )
 
     # -- runs ----------------------------------------------------------------
 
@@ -140,6 +217,12 @@ class LoomClient:
     async def journal(self, run_id: str) -> list[dict[str, Any]]:
         """Durable operations recorded for a run, in order."""
         return await self._request("GET", f"/runs/{run_id}/journal")
+
+    async def reports(self, run_id: str, *, offset: int = 0) -> list[dict[str, Any]]:
+        """Progress a run has reported, from *offset* onward."""
+        return await self._request(
+            "GET", f"/runs/{run_id}/reports", params={"offset": offset}
+        )
 
     async def send_event(self, run_id: str, name: str, payload: Any = None) -> dict[str, Any]:
         """Deliver an event, resuming the run if it was parked on it."""

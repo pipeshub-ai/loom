@@ -154,7 +154,7 @@ a clean journal, linked by `root_run_id` and `metadata["continued_as"]`.
 | Layer | Path | Purpose |
 |-------|------|---------|
 | **Runtime** | `runtime/engine.py` | Re-entry loop, lifecycle (run/resume/retry/replay/cancel), scheduler tick |
-| **Context** | `runtime/context.py` | The only legal API from workflow code to the outside world (`step`, `sleep`, `wait_for_event`, `call_agent`, `spawn`, `gather`) |
+| **Context** | `runtime/context.py` | The only legal API from workflow code to the outside world (`step`, `sleep`, `wait_for_event`, `agent`, `child`, `gather`, `publish`, `report`, `state`) |
 | **Journal** | `runtime/journal.py` | Per-run log of durable operations; provides deterministic replay |
 | **Workflow** | `runtime/workflow.py` | `WorkflowDefinition` wrapper + `@workflow` decorator |
 | **Steps** | `steps/definition.py` | `@step` decorator — wraps async functions with retry, timeout, fallback |
@@ -291,6 +291,14 @@ Outside a workflow, `agent.session(key=...)` returns an `AgentSession` that does
 the same load/append around direct calls. It requires `persistence` to be
 `SESSION` or `PERSISTENT`.
 
+### Adding a toolset
+
+`docs/guides/toolsets.md` is the end-to-end walkthrough — three files (client,
+tools, manifest), credentials, error classification, effect classes,
+`resolves`, registration, pagination, fakes, and the contract test. Every
+snippet on that page executes in CI. The sections below are the reference
+layer; start there if you are writing one.
+
 ### Three-Layer Lazy Tool System
 
 Tools are managed via `ToolsetRegistry` on the Runtime:
@@ -361,10 +369,72 @@ All opt-in — constructing a bare `Runtime()` enforces none of it.
 | Capability | Wiring |
 |---|---|
 | **Flow control** | `@workflow(flow_control=FlowControlPolicy(...))` + `Runtime(admission=AdmissionController())`. Evaluated before the record is created, so a rejected trigger leaves no run behind. Raises `AdmissionRejected`; `.retryable` separates "later" from "never". Slots release on terminal transitions. |
+| **Effect broker** | `Runtime(broker=GuardedBroker(max_calls=…), authority=Authority(grant=…, dry_run=…))`. Mediates every durable operation. `DirectBroker` is the default and checks nothing (~2µs/dispatch). Grants are checked **per dispatch**, not when tools are resolved — a tool an agent is holding cannot outlive its grant. |
 | **RBAC** | `Runtime(role=Role.OPERATOR)`. Checks `flow:run`, `flow:cancel`, `run:view`, `run:replay`. `role=None` enforces nothing. |
 | **Leader election** | `await rt.start_scheduler(elector=LeaderElector(lock_provider, node_id))`. Only the lease holder ticks, so many processes can share one store. |
 | **Retention** | `await RetentionManager(policy).compact(store)`. Drops journals past the warm cutoff, deletes records past `run_record_days`, never touches suspended runs. |
 | **Grants** | `@workflow(grants=GrantSet(toolsets=["jira.issues:read"]))` narrows what `ctx.agent()` resolves. Denied toolset by name → `GrantDenied`. |
+
+### Events, Output, and Workflow State
+
+`ctx.publish(name, payload)` broadcasts an **event**; `ctx.report(message)`
+streams a run's **output**. `ctx.emit` was both — the ambiguity that produces
+code reading correctly and doing the other thing — and is now a deprecated
+alias for `publish` that warns once. Journals keep the `emit:` entry prefix so
+runs already in flight stay replayable.
+
+`ctx.state` is a KV space shared by every run of one workflow, over a
+`StateStore` port (`runtime/state.py`), backed by the execution store. Mutable
+and current, where an artifact is immutable and versioned.
+
+Neither state nor reports are journaled, and both consequences are load-bearing:
+a workflow branching on state does **not** replay identically (put the read in a
+step when that matters), and a replay reports again under its own run id.
+
+`Runtime(state=…, stream=…)` swaps either. `RunStream`'s reference adapter is a
+bounded in-memory ring surfaced through the facade, so `loom watch` and the MCP
+`get_run_progress` tool show progress with no host involvement.
+
+### Time
+
+`Runtime(clock=…)` — a `Clock` port with `SystemClock` (default) and
+`ManualClock`. Every timestamp and every in-memory wait in the engine, the
+context, and the trigger dispatcher reads it, so a four-minute timer or a 9am
+cron is testable in milliseconds:
+
+```python
+rt = Runtime(store=MemoryStore(), clock=ManualClock(NINE_AM))
+parked = await rt.run(reminder)             # parks on a timer
+await advance(rt, minutes=5)                # move, tick, and settle
+```
+
+`workflow_builder.testing.advance` / `advance_to` do all three steps —
+advancing alone leaves a parked run parked, because nothing is driving the
+scheduler in a test. The lease heartbeat deliberately stays on the real clock:
+a lease is a claim against other processes, and a ManualClock would spin it.
+
+### Pagination
+
+`toolsets/pagination.py`. **The return type is the declaration**: a read that
+returns `Results[T]` is paged, one that returns `list[T]` is not. `paginates()`
+derives `OperationSpec.pagination` from it, so a toolset author writes it once
+and nothing is maintained in parallel — the only version of this that survives
+a thousand toolsets.
+
+`page_through(request, style=…, limit=…, page_size=…)` owns the loop; a
+`PagingStyle` — `TokenPaging`, `CursorPaging`, `OffsetPaging` — owns the
+dialect. A style knows a wire format and nothing about the service; the client
+knows the service and nothing about looping. A fourth dialect is a new class,
+not an edit to `collect`.
+`Results` is a `list` subclass carrying `.complete`, `.total`, `.cursor` and
+`.summary()` — and it round-trips through the journal via `SelfEncoding`
+(`core/serde.py`), so `.complete` survives being returned from a step. Map rows
+with `.mapped()`, never a comprehension: a comprehension yields a plain list and
+discards the coverage.
+
+`tests/test_manifest_imports.py` checks three ways — client pages ⟹ tool returns
+`Results` ⟹ manifest declares it. The client is ground truth; that check found
+six drifts on its first run.
 
 ### Files and Artifacts
 
@@ -430,8 +500,28 @@ The ladder in `DEFAULT_SYSTEM_PROMPT`: named in the spec → resolve now, bake t
 id with the human name in a comment; comes from input → resolve at runtime;
 ambiguous → report it for a read, `ctx.wait_for_approval()` for a write; nothing
 found → error naming what was tried. `ctx.agent()` is for **judgement**, not
-lookup — an agent node answering "who is Vishwjeet" puts a nondeterministic call
-into every run to re-answer a question settled once at authoring time.
+lookup — an agent node answering "who is X" puts a nondeterministic call into
+every run to re-answer a question settled once at authoring time.
+
+A **fuzzy text search is not a resolution**. `text ~ "..."`, `contains`, `LIKE`
+is the raw-string fallback in disguise, and silently correcting a spelling is a
+guess about what someone meant. `ResolutionStage` catches both by flagging a
+match operator whose operand came from the spec; an exact comparison is left
+alone, because `status = "In Progress"` is a plausible resolved value.
+
+### Code or judgement
+
+Before writing anything the agent classifies each node: *can I write a rule
+today that is right for every input the spec allows?* Yes → `@step`. **No, or
+unsure → `ctx.agent()`** — when in doubt, the agent. The tell for a rule that
+should not be written is an invented constant: a keyword list, a regex over
+prose, a threshold nobody supplied. `if "urgent" in subject.lower()` is a guess
+wearing the clothes of logic.
+
+The classification comes back on `CodingResult.plan` (`node`, `kind`, `why`)
+rather than staying in the prompt, because a rule the model is asked to follow
+silently is a rule nobody can check it followed. An empty plan means
+*unreported*, not "all deterministic".
 
 **Only registered toolsets exist.** The prompt carries index cards (names +
 import line), not every operation, so it grows with the number of integrations
@@ -449,6 +539,8 @@ the stages. They run cheapest-first and stop at the first blocking error:
 |---|---|---|---|
 | `compile` | 0 | yes | `compile()` — everything after assumes it |
 | `static` | 10 | yes | the AST rules, toolset availability, store choice |
+| `coverage` | 15 | no | the spec asked for *all* and the code caps a fetch |
+| `resolution` | 16 | no | a fuzzy match on a word the spec supplied |
 | `lint` | 20 | no | ruff `F,E9` only; skips when absent |
 | `types` | 30 | no | mypy; warnings, not errors |
 | `smoke` | 50 | yes | runs it against fakes, faked clock |

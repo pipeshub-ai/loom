@@ -48,6 +48,16 @@ s3 = ["aioboto3>=13.0"]
 # The refresh-token and access-token flows need nothing but httpx.
 google = ["google-auth>=2.0"]
 
+# Inbound identity — verifying a bearer token presented to the MCP/HTTP
+# surfaces. Outbound credential storage (below) is a separate extra: a
+# deployment that only ever runs `loom mcp` with no auth needs neither.
+identity = ["pyjwt[crypto]>=2.9"]
+
+# Outbound credential storage — encrypted-file and OS-keyring backed
+# `CredentialStore` implementations. `MemoryCredentialStore` needs neither
+# and works with the core install alone.
+credentials = ["keyring>=25", "cryptography>=43"]
+
 # Model providers
 anthropic = ["anthropic>=0.40"]
 openai = ["openai>=1.60"]
@@ -89,11 +99,19 @@ dev = [
     # The HTTP surface ships in-tree, so its tests should run by default rather
     # than silently skipping on a machine without the api extra.
     "fastapi>=0.115",
+    # Same reasoning: the credential-store conformance suite covers the
+    # encrypted-file and keyring-backed implementations, not only Memory.
+    "keyring>=25",
+    "cryptography>=43",
+    # Property-based tests for the scope-narrowing invariant identity relies on.
+    "hypothesis>=6.100",
+    # JWKS/JWT verification tests for the MCP/HTTP token verifiers.
+    "pyjwt[crypto]>=2.9",
 ]
 
 # Install everything
 all = [
-    "workflow-builder[mongo,postgres,s3,google,anthropic,openai,gemini,langchain,api,cli,tui,mcp]"
+    "workflow-builder[mongo,postgres,s3,google,identity,credentials,anthropic,openai,gemini,langchain,api,cli,tui,mcp]"
 ]
 
 [project.urls]
@@ -132,3 +150,9 @@ python_version = "3.11"
 strict = true
 mypy_path = "src"
 packages = ["workflow_builder"]
+
+# Local `loom mcp` / `loom run <name>` without --module. Cookbook examples that
+# talk to a real service (Jira, Gmail) stay off this list so a bare server
+# does not fail at import for missing credentials.
+[tool.loom]
+modules = ["examples/cookbook/01_sequential.py"]

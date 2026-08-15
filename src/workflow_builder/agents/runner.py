@@ -42,6 +42,7 @@ from workflow_builder.core.exceptions import (
     ModelRetry,
 )
 from workflow_builder.core.models import Usage
+from workflow_builder.runtime.effects import EffectCall, EffectDenied
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -270,11 +271,20 @@ class BuiltInAgentRuntime:
                     outcome = "ok"
                     try:
                         tool_ctx = ToolContext(
+                            run_id=context.run_id if context else "",
                             agent_name=agent.name,
                             tool_call_id=call.id,
                         )
-                        result = await tool.invoke(call.arguments, tool_ctx)
+                        result = await _dispatch_tool(tool, call, tool_ctx, context)
                         result_str = tool.render_result(result)
+                    except EffectDenied as denied:
+                        # Answered rather than raised: an agent told what it may
+                        # not do can pick another route, where a raised denial
+                        # ends the run and loses the turn's work. The refusal
+                        # names the grant, so the message is actionable to
+                        # whoever reads the transcript too.
+                        result_str = str(denied)
+                        outcome = "denied"
                     except ModelRetry as retry:
                         result_str = str(retry)
                         outcome = "retry"
@@ -351,6 +361,52 @@ class BuiltInAgentRuntime:
             )
 
 
+async def _dispatch_tool(
+    tool: Tool,
+    call: ToolCall,
+    tool_ctx: ToolContext,
+    context: AgentContext | None,
+) -> Any:
+    """Invoke a tool, through the broker when one is in play.
+
+    Outside a workflow there is no broker and no authority, and the call runs
+    exactly as it always has — an agent used directly is not a durable run, and
+    inventing a policy for it would be inventing one nobody set.
+    """
+    broker = getattr(context, "broker", None)
+    if broker is None:
+        return await tool.invoke(call.arguments, tool_ctx)
+
+    from workflow_builder.security.authority import Authority
+    from workflow_builder.toolsets.manifest import EffectClass
+
+    metadata = tool.metadata or {}
+    toolset = metadata.get("toolset", "")
+    operation = metadata.get("operation", tool.name)
+
+    async def perform() -> Any:
+        return await tool.invoke(call.arguments, tool_ctx)
+
+    outcome = await broker.dispatch(
+        EffectCall(
+            kind="tool",
+            target=f"{toolset}.{operation}" if toolset else operation,
+            arguments=dict(call.arguments or {}),
+            effect=metadata.get("effect") or EffectClass.WRITE,
+            run_id=getattr(context, "run_id", ""),
+            perform=perform,
+        ),
+        getattr(context, "authority", None) or Authority(),
+    )
+    if outcome.ok:
+        return outcome.value
+    raise EffectDenied(
+        outcome.error or f"tool '{tool.name}' denied",
+        call=EffectCall(kind="tool", target=tool.name),
+        needs=outcome.needs,
+    )
+
+
 def _find_final_output(calls: list[ToolCall]) -> ToolCall | None:
     """Find a final_output tool call if one exists."""
     for call in calls:
@@ -381,5 +437,7 @@ async def run_agent_durably(
         run_id=ctx.run_id,
         workflow=ctx.workflow,
         session_id=session_id,
+        broker=ctx._runtime.broker,
+        authority=ctx._authority,
     )
     return await agent(input, settings=settings, context=context)

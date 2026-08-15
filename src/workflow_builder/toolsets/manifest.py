@@ -49,7 +49,18 @@ class OperationSpec(BaseModel):
     scopes: list[str] = Field(default_factory=list)
     """Required OAuth / API scopes."""
     pagination: bool = False
-    """Whether this op returns ``Page[T]``."""
+    """Whether this operation returns a page of a larger result set.
+
+    Set it on every read that can return more rows than one request carries.
+    The toolset client follows the pages to fill the caller's limit and hands
+    back a :class:`~workflow_builder.toolsets.pagination.Results`, which knows
+    whether it saw everything — but a caller only asks that question if it
+    knows there was a question, so this is what puts "may be capped" in front
+    of whoever is writing the call.
+
+    A read that returns one object, or a naturally bounded list, leaves it
+    ``False``. Declaring pagination that does not happen is as misleading as
+    omitting it."""
     rate_limit_group: str = ""
     """Shared rate-limit key across ops that share a quota."""
     idempotent: bool = False
@@ -110,6 +121,16 @@ class ToolsetManifest(BaseModel):
         return {
             op.resolves: op for op in self.all_operations() if op.resolves
         }
+
+    def paginated(self) -> list[OperationSpec]:
+        """Operations whose result may be a page of something larger.
+
+        The counterpart to :meth:`resolvers`, and there for the same reason:
+        the manifest knows something the caller needs and cannot infer from a
+        signature. ``max_results: int`` looks identical whether it caps a
+        complete answer or truncates a partial one.
+        """
+        return [op for op in self.all_operations() if op.pagination]
 
     def import_line(self) -> str:
         """The import a workflow needs to call this toolset, or ``""``.

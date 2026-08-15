@@ -1,3 +1,4 @@
+import pytest
 
 
 class TestWaitsDoNotHideDefects:
@@ -216,3 +217,63 @@ class TestRepairBudget:
         assert result_code == code, "the candidate was discarded"
         assert not smoke.ok
         assert rounds == 1
+
+
+class TestSmokeDerivesAnInput:
+    """A typed input must not make correct code look broken.
+
+    The smoke runner passed ``None`` unless a caller supplied ``smoke_input``,
+    so a generated workflow annotated ``text: str`` crashed on its first
+    attribute access. That marks the run failed, `is_clean` goes False, and the
+    repair loop sets about "fixing" code that was right — the same
+    environmental-failure trap that once returned a gutted stub, wearing a new
+    costume.
+
+    The fix reuses the fake generator that already builds values from a schema,
+    so there is one answer to "what does a value of this shape look like".
+    """
+
+    HEAD = (
+        "from workflow_builder import Context, step, workflow\n\n\n"
+        "@step\n"
+        "async def shout(text: str) -> str:\n"
+        '    """Upper-case it."""\n'
+        "    return text.upper()\n\n\n"
+    )
+
+    def _code(self, signature: str, call: str) -> str:
+        return (
+            f'{self.HEAD}@workflow(name="derived")\n'
+            f"async def derived({signature}) -> str:\n"
+            f'    """Shout it."""\n'
+            f"    return await ctx.step(shout, {call})\n"
+        )
+
+    @pytest.mark.parametrize(
+        ("signature", "call"),
+        [
+            ("ctx: Context, text: str", "text"),
+            ("ctx: Context, n: int", "str(n)"),
+            ("ctx: Context, data: dict", "str(data)"),
+            ("ctx: Context", "'x'"),
+        ],
+        ids=["str", "int", "dict", "none"],
+    )
+    def test_a_declared_input_shape_is_supplied(
+        self, signature: str, call: str
+    ) -> None:
+        from workflow_builder.agents.smoke import smoke_run
+
+        result = smoke_run(self._code(signature, call))
+
+        assert result.ok, f"{signature}: {result.error}"
+
+    def test_an_explicit_input_still_wins(self) -> None:
+        """Deriving is the fallback, not an override."""
+        from workflow_builder.agents.smoke import smoke_run
+
+        code = self._code("ctx: Context, text: str", "text")
+        result = smoke_run(code, workflow_input="explicit")
+
+        assert result.ok
+        assert "EXPLICIT" in (result.output_preview or "")

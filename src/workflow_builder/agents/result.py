@@ -58,7 +58,18 @@ class AgentResult(BaseModel, Generic[OutputT]):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    output: Any = None
+    output: OutputT | None = None
+    """What the agent produced, typed by the agent's declared output.
+
+    ``None`` only when there is genuinely nothing — a run that was interrupted
+    for approval, or one that ended without producing an answer. The class was
+    declared ``Generic[OutputT]`` and then annotated this ``Any``, so the type
+    parameter did no work and every caller returning it from a typed function
+    got a ``no-any-return`` from mypy.
+
+    For the common case — an agent asked for prose, a workflow returning
+    markdown — reach for :attr:`text`, which is always a ``str``.
+    """
     agent: str = ""
     messages: list[Message] = Field(default_factory=list)
     """The full conversation, ready to seed the next turn."""
@@ -78,6 +89,17 @@ class AgentResult(BaseModel, Generic[OutputT]):
         return self.messages[-1] if self.messages else None
 
     def text(self) -> str:
+        """The answer as text, never ``None``.
+
+        The shape almost every workflow wants: an agent asked something in
+        prose, inside a body that returns markdown. ``return result.output`` is
+        what everyone reaches for and what mypy objects to — the output is
+        typed by the agent's declared output and may legitimately be absent, so
+        returning it from a ``-> str`` function is a real narrowing.
+
+        This says the same thing and is true. Use :attr:`output` when the type
+        matters; that is what it is for.
+        """
         if isinstance(self.output, str):
             return self.output
         message = self.last_message()

@@ -7,6 +7,12 @@ history are ordinary requests. Putting them behind HTTP is what lets a Go
 service start a workflow or a TypeScript UI watch one, without either of them
 embedding a Python interpreter.
 
+Every route here delegates to a :class:`~workflow_builder.facade.RuntimeFacade`,
+the same port the CLI and the MCP server hold. That is not indirection for its
+own sake: three surfaces over one Runtime is three places to add each new
+capability unless they share an abstraction, and the drift shows up as an
+operation that works in the CLI and 404s over HTTP.
+
 Requires the ``api`` extra::
 
     pip install workflow-builder[api]
@@ -16,19 +22,26 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from workflow_builder.core.exceptions import (
     AdmissionRejected,
+    InsufficientScope,
     RegistryError,
 )
 from workflow_builder.core.models import ExecutionStatus
-from workflow_builder.core.serde import decode, encode
+from workflow_builder.facade import LocalFacade, RuntimeFacade
+from workflow_builder.identity.principal import Principal
 from workflow_builder.security.rbac import AuthorizationError
+from workflow_builder.server.auth import (
+    build_http_auth,
+    build_principal_dependency,
+    mount_protected_resource_metadata,
+)
 
 if TYPE_CHECKING:
-    from fastapi import FastAPI
-
+    from workflow_builder.identity.config import IdentitySettings
     from workflow_builder.runtime.engine import Runtime
 
 
@@ -64,6 +77,11 @@ class RunView(BaseModel):
     error: str | None = None
     created_at: str | None = None
     finished_at: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    """Round-tripped so an ``AuthorizedFacade`` (identity/facade.py) can read
+    a run's pinned owner the same way over HTTP as it does in-process —
+    without this, ownership checks would only work when wrapping a
+    ``LocalFacade`` directly."""
 
 
 class WorkflowView(BaseModel):
@@ -72,7 +90,11 @@ class WorkflowView(BaseModel):
     name: str
     version: str
     description: str = ""
-    input_schema: dict[str, Any] = Field(default_factory=dict)
+    input_schema: dict[str, Any] | None = None
+    """``None`` when no schema can be derived — a workflow that takes no input,
+    or one whose annotation is not expressible as JSON Schema. Distinct from
+    ``{}``, which would claim a shape with no fields; a caller that cannot tell
+    those apart has to guess, which is the thing publishing a schema prevents."""
     triggers: list[str] = Field(default_factory=list)
     executable: bool = True
     """Whether *this* process can run it. A published workflow that the serving
@@ -82,32 +104,96 @@ class WorkflowView(BaseModel):
     source_file: str = ""
 
 
-def _view(record: Any) -> RunView:
-    return RunView(
-        run_id=record.run_id,
-        workflow=record.workflow,
-        status=record.status,
-        input=decode(record.input),
-        output=decode(record.output),
-        error=record.error.message if record.error else None,
-        created_at=record.created_at.isoformat() if record.created_at else None,
-        finished_at=record.finished_at.isoformat() if record.finished_at else None,
-    )
+def _view(run: dict[str, Any]) -> RunView:
+    """A facade run dict as the HTTP view.
+
+    ``RunView`` names a subset of the facade's keys, so this is a projection
+    rather than a translation — nothing is renamed on the way through.
+    """
+    return RunView.model_validate(run)
 
 
-def create_app(runtime: Runtime, *, title: str = "LOOM") -> FastAPI:
+def create_app(
+    runtime: Runtime | RuntimeFacade,
+    *,
+    title: str = "LOOM",
+    identity: IdentitySettings | None = None,
+) -> FastAPI:
     """Build a FastAPI app serving *runtime*.
 
-    The app owns no state of its own — every route delegates to the Runtime, so
+    Accepts a :class:`Runtime` (wrapped in a :class:`LocalFacade`) or any
+    :class:`RuntimeFacade` — including a :class:`RemoteFacade`, which makes this
+    app a proxy in front of another LOOM server.
+
+    The app owns no state of its own — every route delegates to the facade, so
     what a client sees over HTTP and what embedded Python sees are the same
     execution history rather than two views that can drift.
+
+    *identity* defaults to ``IdentitySettings()`` (read from ``LOOM_AUTH_*``
+    env vars). With none set, ``is_configured()`` is ``False``,
+    :func:`~workflow_builder.server.auth.build_http_auth` returns ``None``,
+    and every request is served by *base* directly — the compatibility
+    contract: an install that sets no ``LOOM_AUTH_*`` var gets exactly the
+    same unauthenticated app this function built before this parameter
+    existed.
     """
-    from fastapi import FastAPI, HTTPException
+    from workflow_builder.identity.config import IdentitySettings as _IdentitySettings
+    from workflow_builder.runtime.engine import Runtime as _Runtime
+
+    # Tested against the concrete class rather than the protocol: RuntimeFacade
+    # is runtime_checkable, which compares attribute *names* only, and a Runtime
+    # shares enough of them for that check to be a coin toss.
+    base: RuntimeFacade = (
+        LocalFacade(runtime) if isinstance(runtime, _Runtime) else runtime
+    )
+    identity = identity if identity is not None else _IdentitySettings()
+    http_auth = build_http_auth(identity)
+    principal_dependency = build_principal_dependency(http_auth)
 
     app = FastAPI(title=title)
+    if http_auth is not None:
+        mount_protected_resource_metadata(app, http_auth)
+
+    #: Assigned once, for the same B008 reason as `injected` below.
+    principal_injected = Depends(principal_dependency)
+
+    async def _facade(principal: Principal = principal_injected) -> RuntimeFacade:
+        """The facade a request acts through.
+
+        A dependency rather than a closure so a host subclassing this app — or
+        overriding it with ``app.dependency_overrides`` — has one place to
+        change what a request is served by. Wrapped in an ``AuthorizedFacade``
+        only when identity is configured, per the compatibility contract above
+        — every route below asks for this and needs no other change to gain
+        (or not gain) authorization.
+        """
+        if http_auth is None:
+            return base
+        from workflow_builder.identity.facade import AuthorizedFacade
+
+        return AuthorizedFacade(base, principal)
+
+    #: What every route asks for instead of closing over one shared facade.
+    #: Spelled as a default rather than ``Annotated``: this module uses
+    #: postponed annotations, and FastAPI resolves those against the *module*
+    #: namespace, so an alias defined inside this function would never be found
+    #: and the parameter would silently become a query string instead.
+    injected = Depends(_facade)
 
     def _fail(exc: Exception) -> HTTPException:
         """Translate SDK errors into the status codes they actually mean."""
+        if isinstance(exc, InsufficientScope):
+            # 403, not 401: the caller authenticated fine, this token just
+            # never held enough to do this — retrying the same login again
+            # would not help, which is what 401 would otherwise imply.
+            return HTTPException(
+                status_code=403,
+                detail={
+                    "error": "insufficient_scope",
+                    "detail": str(exc),
+                    "required": exc.required,
+                },
+            )
         if isinstance(exc, AuthorizationError):
             return HTTPException(status_code=403, detail=str(exc))
         if isinstance(exc, RegistryError):
@@ -122,182 +208,127 @@ def create_app(runtime: Runtime, *, title: str = "LOOM") -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    async def _require(facade: RuntimeFacade, run_id: str) -> dict[str, Any]:
+        """The run, or a 404. Every run-scoped route starts here."""
+        try:
+            found = await facade.get(run_id)
+        except Exception as exc:
+            raise _fail(exc) from exc
+        if found is None:
+            raise HTTPException(status_code=404, detail=f"no run '{run_id}'")
+        return found
+
     @app.get("/workflows", response_model=list[WorkflowView])
-    async def list_workflows(published: bool = True) -> list[WorkflowView]:
+    async def list_workflows(
+        published: bool = True, facade: RuntimeFacade = injected
+    ) -> list[WorkflowView]:
         """Workflows this process imported, plus published ones when asked.
 
         Set ``published=false`` to see only what can be started here.
         """
-        from workflow_builder.core.serde import json_schema_for
-
-        views: dict[str, WorkflowView] = {}
-        for definition in runtime.workflows.values():
-            schema: dict[str, Any] = {}
-            if definition.input_type is not None:
-                try:
-                    schema = json_schema_for(definition.input_type)
-                except Exception:
-                    schema = {}
-            views[definition.name] = WorkflowView(
-                name=definition.name,
-                version=definition.version,
-                description=definition.description,
-                input_schema=schema,
-                triggers=[spec.name for spec in definition.triggers],
-                executable=True,
-                code_hash=definition.code_hash,
-            )
-
-        if published:
-            for record in await runtime.published():
-                # An imported definition wins: it is the one that would run.
-                if record.name in views:
-                    views[record.name].source_file = record.source_file
-                    continue
-                views[record.name] = WorkflowView(
-                    name=record.name,
-                    version=record.version,
-                    description=record.description,
-                    input_schema=record.input_schema,
-                    triggers=record.triggers,
-                    executable=False,
-                    code_hash=record.code_hash,
-                    source_file=record.source_file,
-                )
-        return sorted(views.values(), key=lambda v: v.name)
-
-    @app.post("/runs", response_model=RunView, status_code=202)
-    async def start_run(body: StartRunRequest) -> RunView:
         try:
-            if body.wait:
-                result = await runtime.run(
-                    body.workflow,
-                    body.input,
-                    idempotency_key=body.idempotency_key,
-                    tags=body.tags,
-                    metadata=body.metadata,
-                )
-                run_id = result.run_id
-            else:
-                run_id = await runtime.submit(
-                    body.workflow,
-                    body.input,
-                    idempotency_key=body.idempotency_key,
-                    metadata=body.metadata,
-                )
+            entries = await facade.workflows(published=published)
         except Exception as exc:
             raise _fail(exc) from exc
+        return [WorkflowView.model_validate(entry) for entry in entries]
 
-        record = await runtime.get(run_id)
-        if record is None:  # pragma: no cover - would mean the store lost it
-            raise HTTPException(status_code=500, detail=f"run {run_id} vanished")
-        return _view(record)
+    @app.post("/runs", response_model=RunView, status_code=202)
+    async def start_run(body: StartRunRequest, facade: RuntimeFacade = injected) -> RunView:
+        try:
+            run = await facade.start(
+                body.workflow,
+                body.input,
+                idempotency_key=body.idempotency_key,
+                tags=body.tags,
+                metadata=body.metadata,
+                wait=body.wait,
+            )
+        except Exception as exc:
+            raise _fail(exc) from exc
+        return _view(run)
 
     @app.get("/runs", response_model=list[RunView])
     async def list_runs(
         workflow: str | None = None,
         status: ExecutionStatus | None = None,
         limit: int = 50,
+        facade: RuntimeFacade = injected,
     ) -> list[RunView]:
         try:
-            records = await runtime.list_runs(
-                workflow=workflow, status=status, limit=limit
+            runs = await facade.list_runs(
+                workflow=workflow,
+                status=status.value if status else None,
+                limit=limit,
             )
         except Exception as exc:
             raise _fail(exc) from exc
-        return [_view(record) for record in records]
+        return [_view(run) for run in runs]
 
     @app.get("/runs/{run_id}", response_model=RunView)
-    async def get_run(run_id: str) -> RunView:
-        try:
-            record = await runtime.get(run_id)
-        except Exception as exc:
-            raise _fail(exc) from exc
-        if record is None:
-            raise HTTPException(status_code=404, detail=f"no run '{run_id}'")
-        return _view(record)
+    async def get_run(run_id: str, facade: RuntimeFacade = injected) -> RunView:
+        return _view(await _require(facade, run_id))
 
     @app.get("/runs/{run_id}/journal")
-    async def get_journal(run_id: str) -> list[dict[str, Any]]:
+    async def get_journal(run_id: str, facade: RuntimeFacade = injected) -> list[dict[str, Any]]:
+        await _require(facade, run_id)
         try:
-            if await runtime.get(run_id) is None:
-                raise HTTPException(status_code=404, detail=f"no run '{run_id}'")
-            entries = await runtime.history(run_id)
-        except HTTPException:
-            raise
+            return await facade.journal(run_id)
         except Exception as exc:
             raise _fail(exc) from exc
-        return [
-            {
-                "seq": entry.seq,
-                "name": entry.name,
-                "kind": entry.kind,
-                "status": entry.status.value,
-                "attempts": entry.attempts,
-                "output": encode(entry.output),
-                "error": entry.error.message if entry.error else None,
-            }
-            for entry in entries
-        ]
+
+    @app.get("/runs/{run_id}/reports")
+    async def get_reports(
+        run_id: str, offset: int = 0, facade: RuntimeFacade = injected
+    ) -> list[dict[str, Any]]:
+        """What the run has said about itself while running."""
+        await _require(facade, run_id)
+        try:
+            return await facade.reports(run_id, offset)
+        except Exception as exc:
+            raise _fail(exc) from exc
 
     @app.post("/runs/{run_id}/events", status_code=202)
-    async def send_event(run_id: str, body: EventRequest) -> dict[str, Any]:
+    async def send_event(
+        run_id: str, body: EventRequest, facade: RuntimeFacade = injected
+    ) -> dict[str, Any]:
+        await _require(facade, run_id)
         try:
-            if await runtime.get(run_id) is None:
-                raise HTTPException(status_code=404, detail=f"no run '{run_id}'")
-            await runtime.send_event(run_id, body.name, body.payload)
-        except HTTPException:
-            raise
+            await facade.send_event(run_id, body.name, body.payload)
         except Exception as exc:
             raise _fail(exc) from exc
         return {"run_id": run_id, "event": body.name, "delivered": True}
 
     @app.post("/runs/{run_id}/cancel", response_model=RunView)
-    async def cancel_run(run_id: str) -> RunView:
+    async def cancel_run(run_id: str, facade: RuntimeFacade = injected) -> RunView:
+        await _require(facade, run_id)
         try:
-            if await runtime.get(run_id) is None:
-                raise HTTPException(status_code=404, detail=f"no run '{run_id}'")
-            await runtime.cancel(run_id)
-            record = await runtime.get(run_id)
-        except HTTPException:
-            raise
+            return _view(await facade.cancel(run_id))
         except Exception as exc:
             raise _fail(exc) from exc
-        assert record is not None
-        return _view(record)
 
     @app.post("/runs/{run_id}/retry", response_model=RunView)
-    async def retry_run(run_id: str) -> RunView:
+    async def retry_run(run_id: str, facade: RuntimeFacade = injected) -> RunView:
         """Re-run a failed execution from its first failed step.
 
         Distinct from replay: replay rehearses against the recorded journal and
         repeats nothing, while this prunes the failure and does the work again
         against current code.
         """
+        await _require(facade, run_id)
         try:
-            if await runtime.get(run_id) is None:
-                raise HTTPException(status_code=404, detail=f"no run '{run_id}'")
-            await runtime.retry(run_id)
-            record = await runtime.get(run_id)
-        except HTTPException:
-            raise
+            await facade.retry(run_id)
         except Exception as exc:
             raise _fail(exc) from exc
-        assert record is not None
-        return _view(record)
+        return _view(await _require(facade, run_id))
 
     @app.post("/runs/{run_id}/replay", response_model=RunView)
-    async def replay_run(run_id: str) -> RunView:
+    async def replay_run(run_id: str, facade: RuntimeFacade = injected) -> RunView:
+        await _require(facade, run_id)
         try:
-            if await runtime.get(run_id) is None:
-                raise HTTPException(status_code=404, detail=f"no run '{run_id}'")
-            result = await runtime.replay(run_id)
-            record = await runtime.get(result.run_id)
-        except HTTPException:
-            raise
+            replayed = await facade.replay(run_id)
         except Exception as exc:
             raise _fail(exc) from exc
-        assert record is not None
-        return _view(record)
+        # Replay starts a *new* run; report that one, not the original.
+        return _view(await _require(facade, replayed["run_id"]))
 
     return app

@@ -1,5 +1,19 @@
 # Contributing to workflow-builder
 
+LOOM is a work in progress, not a finished product — the core (durable
+execution, the coding agent, toolsets) is shipped and tested; larger pieces of
+the design (sandboxed execution, versioned source, session traces,
+agent-rendered visualization) are written down but not yet built. See the
+[README's Project Status](README.md#project-status) for exactly which is
+which, and [`docs/implementation-plan.md`](docs/implementation-plan.md) for
+each gap scoped as its own phase with its own exit criteria.
+
+That gap is the point of contributing here: this is meant to get to
+production-ready with the community's help, and a phase in that plan is a
+concrete, bounded place to start rather than an open-ended "help wanted."
+Questions about which phase makes sense to pick up are welcome as a GitHub
+issue before you write code.
+
 ## Development Setup
 
 ```bash

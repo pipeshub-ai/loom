@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from workflow_builder.facade import RuntimeFacade
 
 __all__ = [
+    "MAX_RESPONSE_CHARS",
     "approve_run",
     "cancel_run",
     "get_run_journal",
@@ -28,8 +29,23 @@ __all__ = [
     "replay_run",
     "retry_run",
     "run_workflow",
+    "search_toolsets",
     "send_event",
+    "show_toolset",
 ]
+
+MAX_RESPONSE_CHARS = 8_000
+"""Ceiling on one tool's serialized response.
+
+Not a client-side limit — a discipline on this server. An MCP client pays in
+tokens for whatever a tool returns, and an unbounded ``list_runs`` or
+``get_run_journal`` on a long-lived install would size a single tool call by
+how much history exists rather than by what the caller asked to see. Every
+list-shaped response below is capped to this and pages via ``next_offset``
+instead; that also caps the total schema+response surface a model has to
+reason over per turn, which is the same budget ``tests/test_mcp_server.py``
+enforces on the *schemas* themselves.
+"""
 
 
 def _json(payload: Any) -> str:
@@ -38,6 +54,79 @@ def _json(payload: Any) -> str:
 
 def _missing(run_id: str) -> str:
     return _json({"error": f"No run '{run_id}'."})
+
+
+def _run_json(run: dict[str, Any]) -> str:
+    """A single run response, annotated and capped.
+
+    Every tool that hands back one run's state (as opposed to a list of
+    them) funnels through here, so an oversized ``output`` gets the same
+    ``MAX_RESPONSE_CHARS`` treatment ``list_runs``/``get_run_journal`` give
+    an oversized list.
+    """
+    return _json(_cap_text(_annotate(run)))
+
+
+def _cap_list(payload: dict[str, Any], list_key: str, offset: int) -> dict[str, Any]:
+    """Shrink ``payload[list_key]`` until the response fits ``MAX_RESPONSE_CHARS``.
+
+    Halves the list rather than trimming one item at a time — O(log n) calls
+    to the JSON encoder instead of O(n) for a list that starts far over
+    budget. Leaves the payload untouched when it already fits, so this costs
+    one extra ``json.dumps`` on the common case rather than a rebuild.
+    """
+    items = payload.get(list_key)
+    if not isinstance(items, list) or len(_json(payload)) <= MAX_RESPONSE_CHARS:
+        return payload
+
+    kept = items
+    while len(kept) > 1:
+        kept = kept[: (len(kept) + 1) // 2]
+        if len(_json({**payload, list_key: kept})) <= MAX_RESPONSE_CHARS:
+            break
+
+    result = dict(payload)
+    result[list_key] = kept
+    result["truncated"] = True
+    result["next_offset"] = offset + len(kept)
+    return result
+
+
+def _cap_text(payload: dict[str, Any]) -> dict[str, Any]:
+    """Fallback cap for a single-object response with nothing to page.
+
+    Only ``run_workflow``/``get_run_status`` and friends can hit this — an
+    oversized ``output`` or error traceback is the one way a run-shaped
+    response blows the budget with no list to trim. Replaces the body with a
+    bounded preview rather than truncating the JSON text itself, which would
+    hand the caller a string that fails to parse.
+    """
+    text = _json(payload)
+    if len(text) <= MAX_RESPONSE_CHARS:
+        return payload
+    keys = list(payload)
+    envelope = {
+        "truncated": True,
+        "total_chars": len(text),
+        "note": "Full response exceeded the size budget; showing a preview. "
+        "Fields present: " + ", ".join(keys),
+        "preview": "",
+    }
+    # Room left for the preview once the envelope's own JSON is accounted
+    # for, so the *whole* returned document — not just this one field —
+    # respects the budget. The preview is a slice of *encoded* JSON text, so
+    # it can itself contain quotes or backslashes that need re-escaping once
+    # embedded as a string value — the trim loop accounts for that, rather
+    # than assuming a 1:1 length budget.
+    room = max(0, MAX_RESPONSE_CHARS - len(_json(envelope)))
+    preview = text[:room]
+    envelope["preview"] = preview
+    overage = len(_json(envelope)) - MAX_RESPONSE_CHARS
+    while overage > 0 and preview:
+        preview = preview[: max(0, len(preview) - overage)]
+        envelope["preview"] = preview
+        overage = len(_json(envelope)) - MAX_RESPONSE_CHARS
+    return envelope
 
 
 async def list_workflows(facade: RuntimeFacade) -> str:
@@ -52,7 +141,7 @@ async def list_workflows(facade: RuntimeFacade) -> str:
                 "pyproject.toml.",
             }
         )
-    return _json({"workflows": workflows})
+    return _json(_cap_list({"workflows": workflows}, "workflows", 0))
 
 
 async def run_workflow(
@@ -84,13 +173,13 @@ async def run_workflow(
         return _json(mismatch)
 
     run = await facade.start(workflow, payload, idempotency_key=idempotency_key)
-    return _json(_annotate(run))
+    return _run_json(run)
 
 
 async def get_run_status(facade: RuntimeFacade, run_id: str) -> str:
     """Status, input, output, and error for one run."""
     run = await facade.get(run_id)
-    return _missing(run_id) if run is None else _json(_annotate(run))
+    return _missing(run_id) if run is None else _run_json(run)
 
 
 async def list_runs(
@@ -101,19 +190,49 @@ async def list_runs(
 ) -> str:
     """Recent runs, optionally filtered by workflow or status."""
     runs = await facade.list_runs(workflow=workflow, status=status, limit=limit)
-    return _json({"runs": [_annotate(run) for run in runs], "count": len(runs)})
+    payload = {"runs": [_annotate(run) for run in runs], "count": len(runs)}
+    return _json(_cap_list(payload, "runs", 0))
 
 
-async def get_run_journal(facade: RuntimeFacade, run_id: str) -> str:
+async def get_run_journal(facade: RuntimeFacade, run_id: str, offset: int = 0) -> str:
     """The durable operations a run recorded, in order.
 
     This is the artifact to read when asked why a run behaved as it did — each
     entry is a step that actually executed, with its status and attempt count.
+
+    Pass ``offset`` to page through a long journal; a capped response's
+    ``next_offset`` names where the next call should resume.
     """
     if await facade.get(run_id) is None:
         return _missing(run_id)
     entries = await facade.journal(run_id)
-    return _json({"run_id": run_id, "journal": entries, "count": len(entries)})
+    page = entries[offset:]
+    payload = {"run_id": run_id, "journal": page, "count": len(entries)}
+    return _json(_cap_list(payload, "journal", offset))
+
+
+async def get_run_progress(
+    facade: RuntimeFacade, run_id: str, offset: int = 0
+) -> str:
+    """What a run has said about itself while running.
+
+    Distinct from the journal: the journal is what a run durably did, this is
+    what it narrated along the way. Read it to answer "what is it doing right
+    now?" about a run that is still going — a step that takes minutes is one
+    journal entry and can be many reports.
+
+    Pass ``offset`` to get only what is new since the last read.
+    """
+    if await facade.get(run_id) is None:
+        return _missing(run_id)
+    reports = await facade.reports(run_id, offset)
+    payload = {
+        "run_id": run_id,
+        "reports": reports,
+        "count": len(reports),
+        "next_offset": offset + len(reports),
+    }
+    return _json(_cap_list(payload, "reports", offset))
 
 
 async def approve_run(
@@ -135,7 +254,7 @@ async def approve_run(
         )
 
     await facade.send_event(run_id, f"approval:{subject}", {"approved": approved})
-    return _json(_annotate(await facade.get(run_id) or {}))
+    return _run_json(await facade.get(run_id) or {})
 
 
 async def send_event(
@@ -150,28 +269,78 @@ async def send_event(
         payload = payload_json
 
     await facade.send_event(run_id, event, payload)
-    return _json(_annotate(await facade.get(run_id) or {}))
+    return _run_json(await facade.get(run_id) or {})
 
 
 async def cancel_run(facade: RuntimeFacade, run_id: str) -> str:
     """Cancel a run. Already-finished runs are left alone."""
     if await facade.get(run_id) is None:
         return _missing(run_id)
-    return _json(_annotate(await facade.cancel(run_id)))
+    return _run_json(await facade.cancel(run_id))
 
 
 async def retry_run(facade: RuntimeFacade, run_id: str) -> str:
     """Re-run a failed execution from its first failed step, against current code."""
     if await facade.get(run_id) is None:
         return _missing(run_id)
-    return _json(_annotate(await facade.retry(run_id)))
+    return _run_json(await facade.retry(run_id))
 
 
 async def replay_run(facade: RuntimeFacade, run_id: str) -> str:
     """Re-execute from the journal without repeating any side effect."""
     if await facade.get(run_id) is None:
         return _missing(run_id)
-    return _json(_annotate(await facade.replay(run_id)))
+    return _run_json(await facade.replay(run_id))
+
+
+def _catalog() -> Any:
+    """The process-global toolset catalog these two tools browse.
+
+    Not facade-scoped: which toolsets *exist* is server-wide metadata, not
+    per-run data, and it is the same registry
+    ``agents/coding_tools.py::search_toolsets``/``show_toolset`` already
+    browse for the coding agent's own ReAct loop — one catalog, browsed by
+    two different callers, rather than two copies that can drift.
+
+    MCP seeds the shipped toolsets (and ``loom_toolset`` entry points) so a
+    client searching for "jira" finds it without an extra register call.
+    """
+    from workflow_builder.toolsets.registry import (
+        get_catalog,
+        register_available_toolsets,
+    )
+
+    register_available_toolsets()
+    return get_catalog()
+
+
+async def search_toolsets(query: str) -> str:
+    """Search registered toolsets (Jira, Gmail, Slack, ...) by keyword.
+
+    Args:
+        query: Keywords to search for, e.g. "jira" or "calendar".
+
+    Pull integration detail on demand with this and show_toolset instead of
+    preloading every toolset's operations into context up front.
+    """
+    cards = _catalog().search(query)
+    payload = {"toolsets": [c.model_dump() for c in cards]}
+    return _json(_cap_list(payload, "toolsets", 0))
+
+
+async def show_toolset(toolset_id: str, group: str | None = None) -> str:
+    """List the operations one toolset exposes, optionally filtered to a group.
+
+    Args:
+        toolset_id: A toolset id from search_toolsets, e.g. "jira".
+        group: Only this operation group, e.g. "issues".
+    """
+    try:
+        table = _catalog().show(toolset_id, group)
+    except KeyError as exc:
+        return _json({"error": str(exc)})
+    payload = table.model_dump()
+    return _json(_cap_list(payload, "ops", 0))
 
 
 _JSON_TYPES: dict[str, tuple[type, ...]] = {

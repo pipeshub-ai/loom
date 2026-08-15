@@ -29,6 +29,7 @@ from workflow_builder.core.models import (
     Usage,
 )
 from workflow_builder.core.retry import DEFAULT_RETRY, NO_RETRY, Failure, OnError, Retry
+from workflow_builder.core.secret import Secret
 from workflow_builder.core.types import Duration, JSONDict, JSONValue, to_seconds
 
 __all__ = [
@@ -53,6 +54,7 @@ __all__ = [
     "OnError",
     "RetriesExhausted",
     "Retry",
+    "Secret",
     "StepError",
     "StepRecord",
     "StepStatus",

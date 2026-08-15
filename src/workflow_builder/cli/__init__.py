@@ -24,7 +24,7 @@ import argparse
 import sys
 
 from workflow_builder import __version__
-from workflow_builder.cli import commands
+from workflow_builder.cli import auth_commands, commands, mcp_setup
 from workflow_builder.cli.output import Exit
 
 __all__ = ["main"]
@@ -48,6 +48,11 @@ _HANDLERS = {
     "serve": commands.cmd_serve,
     "mcp": commands.cmd_mcp,
     "ui": commands.cmd_ui,
+    "login": auth_commands.cmd_login,
+    "logout": auth_commands.cmd_logout,
+    "whoami": auth_commands.cmd_whoami,
+    "connect": auth_commands.cmd_connect,
+    "setup": mcp_setup.cmd_setup,
 }
 
 
@@ -75,6 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     _running(sub)
     _acting(sub)
     _serving(sub)
+    _authenticating(sub)
     return parser
 
 
@@ -285,6 +291,124 @@ def _serving(sub: argparse._SubParsersAction) -> None:
     ui = sub.add_parser("ui", help="Launch the terminal UI")
     _add_backend(ui)
     _add_output(ui)
+
+    setup = sub.add_parser(
+        "setup",
+        help="Write this install into Claude/Cursor/Codex's MCP config",
+    )
+    setup.add_argument(
+        "client", choices=("claude", "cursor", "codex", "all"), help="Which client to configure"
+    )
+    setup.add_argument(
+        "--module",
+        "-m",
+        action="append",
+        metavar="MOD",
+        help="Workflow module to load (repeatable). Omit to let the client "
+        "read [tool.loom] modules from pyproject.toml itself",
+    )
+    setup.add_argument(
+        "--server",
+        metavar="URL",
+        help="Point at a running LOOM server instead of importing locally",
+    )
+    setup.add_argument("--name", default="loom", help="Server name in the client config")
+    setup.add_argument(
+        "--global",
+        dest="global_",
+        action="store_true",
+        help="Write the client's global config instead of the project-local one "
+        "(Claude Desktop and Codex are always global)",
+    )
+    setup.add_argument(
+        "--project",
+        metavar="DIR",
+        help="Project directory for project-scoped configs (default: cwd)",
+    )
+    setup.add_argument(
+        "--path", metavar="FILE", help="Write to this exact file instead of the client's default"
+    )
+    setup.add_argument(
+        "--dry-run", action="store_true", help="Print the config without writing it"
+    )
+    _add_output(setup)
+
+
+def _authenticating(sub: argparse._SubParsersAction) -> None:
+    login = sub.add_parser(
+        "login", help="Authenticate this CLI with a LOOM server (browser PKCE by default)"
+    )
+    login.add_argument(
+        "--server",
+        metavar="URL",
+        help=f"Server to log in to (default: {auth_commands.DEFAULT_SERVER})",
+    )
+    _add_oauth_flags(login)
+    _add_output(login)
+
+    logout = sub.add_parser("logout", help="Forget a stored LOOM server login")
+    logout.add_argument(
+        "--server",
+        metavar="URL",
+        help=f"Server to log out of (default: {auth_commands.DEFAULT_SERVER})",
+    )
+    _add_output(logout)
+
+    whoami = sub.add_parser("whoami", help="Show what this CLI is connected to")
+    _add_output(whoami)
+
+    connect = sub.add_parser(
+        "connect", help="Authenticate a named credential (e.g. a toolset) via OAuth"
+    )
+    connect.add_argument("name", help="Credential name, e.g. 'jira' or 'google'")
+    _add_oauth_flags(connect)
+    _add_output(connect)
+
+
+def _add_oauth_flags(parser: argparse.ArgumentParser) -> None:
+    """Flags shared by ``login`` and ``connect``: where the authorization
+    server is, and which flow to use. Each also has a ``LOOM_LOGIN_*`` /
+    ``LOOM_CONNECT_<NAME>_*`` environment variable fallback."""
+    parser.add_argument("--authorization-endpoint", metavar="URL", help="Authorization endpoint")
+    parser.add_argument("--token-endpoint", metavar="URL", help="Token endpoint")
+    parser.add_argument(
+        "--device-authorization-endpoint",
+        metavar="URL",
+        help="Device authorization endpoint (RFC 8628)",
+    )
+    parser.add_argument("--client-id", help="OAuth client id")
+    parser.add_argument(
+        "--client-secret", help="OAuth client secret, for a confidential client"
+    )
+    parser.add_argument(
+        "--scope", action="append", metavar="SCOPE", help="Requested scope (repeatable)"
+    )
+    flow = parser.add_mutually_exclusive_group()
+    flow.add_argument(
+        "--pkce", action="store_true", help="Force the browser PKCE flow"
+    )
+    flow.add_argument(
+        "--device",
+        action="store_true",
+        help="Force the device-code flow, for headless machines",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=300.0,
+        help="Give up waiting for the user to finish authorizing after this many seconds",
+    )
+    parser.add_argument(
+        "--redirect-port",
+        type=int,
+        default=None,
+        metavar="PORT",
+        help=(
+            f"Loopback port for the PKCE redirect "
+            f"(default: {auth_commands.DEFAULT_REDIRECT_PORT}; "
+            f"or ${auth_commands.REDIRECT_PORT_ENV} in .env)"
+        ),
+    )
 
 
 def _path(value: str):

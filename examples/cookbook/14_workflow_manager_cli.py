@@ -95,14 +95,20 @@ class WorkflowManagerAgent:
         model: AnthropicProvider,
         dispatcher: TriggerDispatcher,
         tool_registry: ToolsetRegistry,
+        executor: object | None = None,
     ) -> None:
         self._runtime = runtime
         self._model = model
         self._dispatcher = dispatcher
         self._registry = tool_registry
+        # Both agents take an executor, so the same manager runs on LOOM's
+        # built-in ReAct loop or on LangGraph, Agno, Pydantic AI, or a host's
+        # own — the tools and the verification pipeline do not change.
+        self._executor = executor
         self._coding_agent = WorkflowCodingAgent(
             model=model,
             tool_registry=tool_registry,
+            executor=executor,
         )
 
     async def chat(self, message: str) -> str:
@@ -141,6 +147,7 @@ class WorkflowManagerAgent:
         ]
 
         agent = Agent(
+            executor=self._executor,
             name="workflow_manager",
             instructions=(
                 "You are a workflow manager assistant. You help users:\n"

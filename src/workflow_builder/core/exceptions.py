@@ -246,7 +246,18 @@ class CredentialNotFound(WorkflowError):  # noqa: N818
 
 
 class AuthExpired(WorkflowError):  # noqa: N818
-    """A connection token or credential has expired. The run should park until refresh."""
+    """A connection token or credential has expired. The run should park until refresh.
+
+    ``name`` is the credential name (``CredentialStore``'s key) whose expiry
+    caused this, when raised from inside a run — ``runtime/engine.py`` reads
+    it to build the ``credential:<name>`` event a parked run resumes on.
+    Empty when raised outside a run (the CLI's own login/connect flow, which
+    catches this itself and never lets the engine see it).
+    """
+
+    def __init__(self, message: str, *, name: str = "") -> None:
+        super().__init__(message)
+        self.name = name
 
 
 class GrantDenied(WorkflowError):  # noqa: N818
@@ -256,6 +267,24 @@ class GrantDenied(WorkflowError):  # noqa: N818
         super().__init__(message)
         self.grant = grant
         self.required = required
+
+
+class InsufficientScope(WorkflowError):  # noqa: N818
+    """A caller's token does not hold a scope a LOOM surface operation requires.
+
+    Distinct from :class:`GrantDenied`: this is checked against a
+    :class:`~workflow_builder.identity.principal.Principal` *before* a
+    facade operation runs (start a run, cancel one, publish a workflow) —
+    inbound identity, not what a running workflow may call outbound.
+    ``server/app.py`` maps this to HTTP 403 with the required scope named,
+    not a bare 401 — 401 makes a client retry the whole login when the
+    problem is that this *particular* token was never going to be enough.
+    """
+
+    def __init__(self, message: str, *, required: str, held: list[str]) -> None:
+        super().__init__(message)
+        self.required = required
+        self.held = held
 
 
 class SessionExhausted(AgentError):  # noqa: N818
@@ -290,6 +319,7 @@ __all__ = [
     "DeterminismViolation",
     "GrantDenied",
     "GuardrailTripwire",
+    "InsufficientScope",
     "MaxTurnsExceeded",
     "ModelBehaviorError",
     "ModelRetry",

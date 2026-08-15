@@ -22,6 +22,7 @@ from workflow_builder.toolsets.google.gmail.models import (
     SentMessage,
 )
 from workflow_builder.toolsets.google.http import GoogleSession
+from workflow_builder.toolsets.pagination import Results
 
 if TYPE_CHECKING:
     import httpx
@@ -78,10 +79,11 @@ class GmailClient:
             limit=max_results,
             params=params,
         )
-        return [
-            MessageRef(id=item.get("id", ""), thread_id=item.get("threadId", ""))
-            for item in raw
-        ]
+        return raw.mapped(
+            lambda item: MessageRef(
+                id=item.get("id", ""), thread_id=item.get("threadId", "")
+            )
+        )
 
     async def get_message(self, message_id: str, *, format: str = "full") -> EmailMessage:
         """Fetch one message and flatten it."""
@@ -95,7 +97,7 @@ class GmailClient:
         query: str = "",
         max_results: int = 20,
         label_ids: list[str] | None = None,
-    ) -> list[EmailMessage]:
+    ) -> Results[EmailMessage]:
         """Search and hydrate each hit.
 
         The list endpoint returns bare ids, so this is 1 + N requests. That cost
@@ -106,9 +108,16 @@ class GmailClient:
 
         refs = await self.list_message_ids(query, max_results, label_ids)
         if not refs:
-            return []
-        return list(
-            await asyncio.gather(*(self.get_message(ref.id) for ref in refs))
+            return refs.mapped(lambda ref: ref)
+        hydrated = await asyncio.gather(*(self.get_message(ref.id) for ref in refs))
+        # Rebuilt from the refs, so the coverage of the *search* carries over —
+        # hydration is one request per hit and changes how many there are not
+        # at all.
+        return Results(
+            list(hydrated),
+            complete=refs.complete,
+            total=refs.total,
+            cursor=refs.cursor,
         )
 
     async def send_message(

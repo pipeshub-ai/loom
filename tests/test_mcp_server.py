@@ -189,6 +189,7 @@ class TestToolsUnit:
         for call in (
             tools.get_run_status(facade, "nope"),
             tools.get_run_journal(facade, "nope"),
+            tools.get_run_progress(facade, "nope"),
             tools.cancel_run(facade, "nope"),
             tools.retry_run(facade, "nope"),
             tools.replay_run(facade, "nope"),
@@ -279,6 +280,113 @@ class TestToolsUnit:
             await tools.run_workflow(facade, "doubler", "2", idempotency_key="k")
         )
         assert first["run_id"] == second["run_id"]
+
+
+class TestResponseCaps:
+    """A tool's response is capped server-side, with paging discoverable
+    through ``next_offset`` — so a busy install's history sizes one tool
+    call by what the caller asked to see, not by how much history exists."""
+
+    async def test_small_responses_pass_through_untouched(
+        self, facade: LocalFacade
+    ) -> None:
+        result = parsed(await tools.list_runs(facade))
+        assert "truncated" not in result
+
+    async def test_an_oversized_list_is_capped_with_a_next_offset(self) -> None:
+        payload = {"runs": [{"run_id": f"r{i}"} for i in range(5000)], "count": 5000}
+        capped = tools._cap_list(payload, "runs", 0)
+
+        assert capped["truncated"] is True
+        assert len(capped["runs"]) < 5000
+        assert capped["next_offset"] == len(capped["runs"])
+        assert len(tools._json(capped)) <= tools.MAX_RESPONSE_CHARS
+
+    async def test_a_list_already_under_budget_is_not_marked_truncated(self) -> None:
+        payload = {"runs": [{"run_id": "r1"}], "count": 1}
+        assert tools._cap_list(payload, "runs", 0) == payload
+
+    async def test_journal_pages_via_offset(self, facade: LocalFacade) -> None:
+        run = parsed(await tools.run_workflow(facade, "doubler", "9"))
+        first_page = parsed(await tools.get_run_journal(facade, run["run_id"]))
+        assert first_page["count"] == 1
+
+        # Asking past the end returns an empty page, not an error — the run
+        # exists, offset just names a position beyond what it recorded.
+        empty_page = parsed(
+            await tools.get_run_journal(facade, run["run_id"], offset=99)
+        )
+        assert empty_page["journal"] == []
+
+    async def test_an_oversized_single_object_falls_back_to_a_preview(self) -> None:
+        payload = {"run_id": "x", "output": "y" * 50_000}
+        capped = tools._cap_text(payload)
+
+        assert capped["truncated"] is True
+        assert capped["total_chars"] > tools.MAX_RESPONSE_CHARS
+        assert len(tools._json(capped)) <= tools.MAX_RESPONSE_CHARS
+        # The preview is a plain string field — still valid JSON overall.
+        assert json.loads(tools._json(capped))["preview"]
+
+
+class TestToolsetDiscoveryTools:
+    """``search_toolsets``/``show_toolset`` at the MCP layer — the same
+    catalog the coding agent's ReAct tools browse, exposed so a client pulls
+    integration detail on demand instead of it being preloaded.
+
+    ``loom mcp`` seeds every shipped toolset, so these tests do not register
+    Jira by hand — that would hide a regression where the default seed
+    stopped running.
+    """
+
+    async def test_search_finds_shipped_toolsets(self) -> None:
+        result = parsed(await tools.search_toolsets("jira"))
+        ids = {c["toolset_id"] for c in result["toolsets"]}
+        assert "jira" in ids
+
+    async def test_search_finds_gmail_calendar_and_confluence(self) -> None:
+        gmail = parsed(await tools.search_toolsets("gmail"))
+        calendar = parsed(await tools.search_toolsets("calendar"))
+        confluence = parsed(await tools.search_toolsets("confluence"))
+        assert "gmail" in {c["toolset_id"] for c in gmail["toolsets"]}
+        assert "google_calendar" in {c["toolset_id"] for c in calendar["toolsets"]}
+        assert "confluence" in {c["toolset_id"] for c in confluence["toolsets"]}
+
+    async def test_search_for_nothing_registered_is_empty_not_an_error(self) -> None:
+        result = parsed(await tools.search_toolsets("nonexistent_xyz_toolset_99"))
+        assert result["toolsets"] == []
+
+    async def test_show_lists_operations_for_a_shipped_toolset(self) -> None:
+        result = parsed(await tools.show_toolset("jira"))
+        assert result["toolset_id"] == "jira"
+        assert len(result["ops"]) >= 1
+
+    async def test_show_unknown_toolset_is_an_error_payload_not_a_raise(self) -> None:
+        result = parsed(await tools.show_toolset("does-not-exist"))
+        assert "error" in result
+
+    async def test_both_are_registered_as_mcp_tools(self, server) -> None:
+        names = {t.name for t in await server.list_tools()}
+        assert {"search_toolsets", "show_toolset"} <= names
+
+
+class TestSchemaBudget:
+    """A verbose docstring is a context tax paid on every turn a model holds
+    this server's tools in scope — this makes that a failing test instead of
+    a silent regression."""
+
+    MAX_TOTAL_SCHEMA_CHARS = 12_000
+
+    async def test_total_tool_schema_size_stays_under_budget(self, server) -> None:
+        registered = await server.list_tools()
+        total = sum(
+            len(t.name) + len(t.description or "") + len(json.dumps(t.inputSchema))
+            for t in registered
+        )
+        assert total <= self.MAX_TOTAL_SCHEMA_CHARS, (
+            f"{len(registered)} tools' schemas total {total} chars, over the "
+            f"{self.MAX_TOTAL_SCHEMA_CHARS} budget"
+        )
 
 
 class TestResourcesUnit:
@@ -422,11 +530,14 @@ class TestServerRegistration:
             "get_run_status",
             "list_runs",
             "get_run_journal",
+            "get_run_progress",
             "approve_run",
             "send_event",
             "cancel_run",
             "retry_run",
             "replay_run",
+            "search_toolsets",
+            "show_toolset",
         }
 
     async def test_every_tool_is_described(self, server) -> None:
@@ -602,7 +713,7 @@ class TestStdioEndToEnd:
 
             names = {t.name for t in (await session.list_tools()).tools}
             assert "run_workflow" in names
-            assert len(names) == 10
+            assert len(names) == 13
 
     async def test_workflows_from_the_module_are_visible(self, project: Path) -> None:
         """The gap that made the original server useless: an empty registry."""

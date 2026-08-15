@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from workflow_builder import Context, ExecutionStatus, Runtime, step, workflow
-from workflow_builder.core.models import Event, ExecutionRecord
+from workflow_builder.core.models import Event, ExecutionRecord, TriggerRecord
 from workflow_builder.runtime.journal import EntryKind, EntryStatus, JournalEntry
 from workflow_builder.state.memory import MemoryStore
 from workflow_builder.state.sqlite import SQLiteStore
@@ -451,3 +451,240 @@ class TestProtocolCoverage:
         ]
         missing = [method for method in required if not hasattr(cls, method)]
         assert missing == [], f"{name} is missing {missing}"
+
+
+class TestTriggerStoreConformance:
+    """The protocol nothing checked, against every store that claims it.
+
+    ``SQLiteStore`` carried none of these six methods, and
+    ``TriggerDispatcher`` quietly substituted an in-memory store for anything
+    that lacked ``save_trigger``. So the documented laptop default persisted
+    runs durably and kept schedules in RAM: every cron trigger vanished on
+    restart, with no error and no log line.
+
+    It survived because the conformance suite covered the *execution* protocol
+    and never this one. Adding a fifth store now means adding it to the
+    fixture, not remembering to write these again.
+    """
+
+    def _trigger(self, **overrides: object) -> TriggerRecord:
+        from datetime import UTC, datetime
+
+        defaults: dict = {
+            "trigger_id": "trg_1",
+            "workflow": "nightly",
+            "next_fire_at": datetime(2026, 3, 2, 9, 0, tzinfo=UTC),
+            "enabled": True,
+        }
+        return TriggerRecord(**{**defaults, **overrides})
+
+    async def test_a_saved_trigger_comes_back(self, store) -> None:
+        saved = self._trigger()
+        await store.save_trigger(saved)
+
+        found = await store.get_trigger("trg_1")
+        assert found is not None
+        assert found.workflow == "nightly"
+        assert found.next_fire_at == saved.next_fire_at
+
+    async def test_an_unknown_trigger_is_none(self, store) -> None:
+        assert await store.get_trigger("trg_nope") is None
+
+    async def test_listing_filters_by_workflow(self, store) -> None:
+        await store.save_trigger(self._trigger())
+        await store.save_trigger(
+            self._trigger(trigger_id="trg_2", workflow="weekly")
+        )
+
+        assert len(await store.list_triggers()) == 2
+        assert [t.workflow for t in await store.list_triggers(workflow="weekly")] == [
+            "weekly"
+        ]
+
+    async def test_only_past_due_and_enabled_triggers_are_due(self, store) -> None:
+        """The query the scheduler actually makes."""
+        from datetime import UTC, datetime
+
+        now = datetime(2026, 3, 2, 9, 30, tzinfo=UTC)
+        await store.save_trigger(self._trigger())                       # past
+        await store.save_trigger(
+            self._trigger(
+                trigger_id="trg_future",
+                next_fire_at=datetime(2026, 3, 2, 10, 0, tzinfo=UTC),
+            )
+        )
+        await store.save_trigger(
+            self._trigger(trigger_id="trg_off", enabled=False)
+        )
+        await store.save_trigger(
+            self._trigger(trigger_id="trg_unscheduled", next_fire_at=None)
+        )
+
+        due = await store.due_triggers(now)
+
+        assert [t.trigger_id for t in due] == ["trg_1"]
+
+    async def test_firing_advances_the_schedule_and_counts(self, store) -> None:
+        from datetime import UTC, datetime
+
+        await store.save_trigger(self._trigger())
+        fired = datetime(2026, 3, 2, 9, 0, tzinfo=UTC)
+        following = datetime(2026, 3, 3, 9, 0, tzinfo=UTC)
+
+        await store.update_after_fire("trg_1", fired, following)
+
+        found = await store.get_trigger("trg_1")
+        assert found.next_fire_at == following
+        assert found.last_fire_at == fired
+        assert found.run_count == 1
+
+    async def test_firing_an_unknown_trigger_is_a_no_op(self, store) -> None:
+        from datetime import UTC, datetime
+
+        await store.update_after_fire("trg_nope", datetime.now(UTC), None)
+
+    async def test_a_deleted_trigger_stops_being_due(self, store) -> None:
+        from datetime import UTC, datetime
+
+        await store.save_trigger(self._trigger())
+        await store.delete_trigger("trg_1")
+
+        assert await store.get_trigger("trg_1") is None
+        assert await store.due_triggers(datetime(2026, 3, 2, 10, 0, tzinfo=UTC)) == []
+
+    async def test_a_naive_now_is_read_as_utc(self, store) -> None:
+        """Drivers hand back naive datetimes; comparison must not explode."""
+        from datetime import datetime
+
+        await store.save_trigger(self._trigger())
+        due = await store.due_triggers(datetime(2026, 3, 2, 9, 30))
+
+        assert [t.trigger_id for t in due] == ["trg_1"]
+
+
+class FakeRedis:
+    """Enough Redis to exercise the contract, and no more.
+
+    A real server would make these tests an integration suite that most people
+    skip; the protocol surface used here is four commands, and faking it keeps
+    the *semantics* — NX, expiry, owner comparison — under test in CI.
+    """
+
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+        self.expiries: dict[str, int] = {}
+
+    async def get(self, key: str) -> str | None:
+        return self.values.get(key)
+
+    async def set(
+        self, key: str, value: str, *, nx: bool = False, ex: int | None = None,
+        px: int | None = None,
+    ) -> bool:
+        if nx and key in self.values:
+            return False
+        self.values[key] = value
+        if ex is not None:
+            self.expiries[key] = ex * 1000
+        if px is not None:
+            self.expiries[key] = px
+        return True
+
+    async def delete(self, key: str) -> None:
+        self.values.pop(key, None)
+        self.expiries.pop(key, None)
+
+
+class TestRedisStore:
+    """Cache and locks only — never the journal.
+
+    A journal wants durability, ordered scans, and queries by workflow and
+    status. Redis is the wrong shape for all three, and shipping it as an
+    ExecutionStore would invite a deployment that loses runs to an eviction.
+    """
+
+    def _store(self):
+        from workflow_builder.state.redis import RedisStore
+
+        return RedisStore(client=FakeRedis())
+
+    def test_it_is_not_an_execution_store(self) -> None:
+        """The absence is the design, so it is asserted rather than assumed."""
+        store = self._store()
+
+        for method in ("create_execution", "load_journal", "due_runs"):
+            assert not hasattr(store, method), f"Redis must not offer {method}"
+
+    def test_it_satisfies_the_two_protocols_it_claims(self) -> None:
+        from workflow_builder.state.base import CacheStore, LockProvider
+
+        store = self._store()
+        for protocol in (CacheStore, LockProvider):
+            missing = [
+                m
+                for m in dir(protocol)
+                if not m.startswith("_") and not hasattr(store, m)
+            ]
+            assert not missing, f"{protocol.__name__}: missing {missing}"
+
+    async def test_a_value_round_trips(self) -> None:
+        store = self._store()
+        await store.set("k", {"a": 1}, 60)
+
+        assert await store.get("k") == {"a": 1}
+        assert await store.get("absent") is None
+
+    async def test_zero_ttl_means_no_expiry_not_instant_expiry(self) -> None:
+        """The rule every other store follows; a no-op set is never intended."""
+        store = self._store()
+        await store.set("forever", "x", 0)
+
+        assert await store.get("forever") == "x"
+        assert "loom:cache:forever" not in store._client.expiries
+
+    async def test_deleting_removes_it(self) -> None:
+        store = self._store()
+        await store.set("k", "v", 60)
+        await store.delete("k")
+
+        assert await store.get("k") is None
+
+    async def test_keys_are_namespaced(self) -> None:
+        """A Redis shared with an application must not collide with it."""
+        store = self._store()
+        await store.set("k", "v", 60)
+        await store.acquire("k", "node-a", 60)
+
+        assert set(store._client.values) == {"loom:cache:k", "loom:lock:k"}
+
+    async def test_one_holder_at_a_time(self) -> None:
+        store = self._store()
+
+        assert await store.acquire("leader", "node-a", 60) is True
+        assert await store.acquire("leader", "node-b", 60) is False
+
+    async def test_the_holder_can_reacquire(self) -> None:
+        """A heartbeat is one call, not release-then-take with a gap in it."""
+        store = self._store()
+        await store.acquire("leader", "node-a", 60)
+
+        assert await store.acquire("leader", "node-a", 60) is True
+
+    async def test_renewing_a_lock_you_lost_fails(self) -> None:
+        store = self._store()
+        await store.acquire("leader", "node-a", 60)
+
+        assert await store.renew("leader", "node-a", 60) is True
+        assert await store.renew("leader", "node-b", 60) is False
+
+    async def test_releasing_someone_elses_lock_does_nothing(self) -> None:
+        """The bug this guards: a worker whose lease expired releasing the
+        lock a different worker has since taken."""
+        store = self._store()
+        await store.acquire("leader", "node-a", 60)
+
+        await store.release("leader", "node-b")
+
+        assert await store.acquire("leader", "node-c", 60) is False
+        await store.release("leader", "node-a")
+        assert await store.acquire("leader", "node-c", 60) is True

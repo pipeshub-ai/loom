@@ -42,6 +42,7 @@ from workflow_builder.toolsets.manifest import (
     OperationSpec,
     ToolsetManifest,
 )
+from workflow_builder.toolsets.pagination import paginates
 
 
 @dataclass
@@ -58,8 +59,30 @@ class Toolset:
     """Maps an operation ID (e.g. ``"issues.search"``) to a Tool."""
 
     def resolve(self, op_id: str) -> Any:
-        """Materialize a single tool. Triggers import on first call."""
-        return self._resolver(op_id)
+        """Materialize a single tool. Triggers import on first call.
+
+        The tool is stamped with where it came from — toolset, operation, and
+        effect class — because a resolved tool is an ordinary callable that can
+        be held, passed on, and invoked long after whatever narrowed the list
+        that produced it. Without that provenance, an effect broker asked
+        whether a call is permitted has only a display name to go on, and
+        ``search`` from one toolset is indistinguishable from ``search`` in
+        another.
+
+        Best-effort: a resolver may return a framework-native tool that has no
+        metadata to stamp, and a tool that cannot be labelled is still a tool.
+        """
+        tool = self._resolver(op_id)
+        metadata = getattr(tool, "metadata", None)
+        if isinstance(metadata, dict):
+            spec = next(
+                (op for op in self.manifest.all_operations() if op.id == op_id), None
+            )
+            metadata.setdefault("toolset", self.manifest.id)
+            metadata.setdefault("operation", op_id)
+            if spec is not None:
+                metadata.setdefault("effect", spec.effect)
+        return tool
 
     def resolve_all(self) -> list[Any]:
         """Materialize all tools in this toolset."""
@@ -119,6 +142,10 @@ class Toolset:
                 input_schema=t.parameters,
                 output_schema=_output_schema(step_fn),
                 idempotent=(effect == EffectClass.READ),
+                # Derived from the return type, never declared — see
+                # ``paginates``. One rule, checked mechanically, so a thousand
+                # toolsets stay honest with nobody maintaining a list.
+                pagination=paginates(step_fn),
             ))
 
         return cls._build(toolset_id, ops, tool_map, kind=kind, provider=provider)
@@ -176,6 +203,11 @@ class Toolset:
                 output_schema=_output_schema(fn),
                 effect=effect,
                 idempotent=(effect == EffectClass.READ),
+                # Derived, never declared: returning Results *is* the
+                # declaration, so a toolset author writes it once and a
+                # thousand of them stay honest without anyone maintaining a
+                # parallel list.
+                pagination=paginates(fn),
             ))
 
         return cls._build(
@@ -278,11 +310,30 @@ class ToolsetRegistry(ToolsetCatalog):
         return found
 
     def get_toolset(self, toolset_id: str) -> Toolset | None:
-        """The executable toolset, if one was registered (not just a manifest)."""
+        """The executable toolset for *toolset_id*, or ``None``.
+
+        Checked in order: registered here, registered on the parent, then the
+        toolsets LOOM ships. That last step is what lets a generated workflow
+        run standalone — ``python generated_workflow.py`` registers nothing,
+        and ``toolsets=["jira"]`` used to fail with "no executable toolset
+        'jira' is registered (known: none)".
+
+        A fallback, not a registration: the built-ins stay out of
+        ``list_toolsets`` and so out of :meth:`resolve_tools`'s no-ids sweep.
+        Asking for one by name gets it; asking for "everything" does not
+        quietly acquire four integrations and their destructive operations.
+        """
         found = self._toolsets.get(toolset_id)
-        if found is None and isinstance(self._parent, ToolsetRegistry):
-            return self._parent.get_toolset(toolset_id)
-        return found
+        if found is not None:
+            return found
+        if isinstance(self._parent, ToolsetRegistry):
+            inherited = self._parent.get_toolset(toolset_id)
+            if inherited is not None:
+                return inherited
+
+        from workflow_builder.toolsets.registry import builtin_toolset
+
+        return builtin_toolset(toolset_id)
 
     def list_toolsets(self) -> list[str]:
         """Every discoverable toolset id, this registry's and its parent's."""
@@ -428,6 +479,7 @@ class ToolsetRegistry(ToolsetCatalog):
             "A toolset with no Import line is reachable only through ctx.agent();",
             "name its operations in the prompt rather than writing calls to them.",
             "",
+            *PAGING_HOWTO,
         ]
         for m in manifests:
             lines.append(f"### {m.id} [{m.qualified_id}] -- {m.summary}")
@@ -447,6 +499,19 @@ class ToolsetRegistry(ToolsetCatalog):
                     f"  Resolve a {kind} with {op.function or op.id} before "
                     f"filtering on one — the API matches ids, not display names."
                 )
+
+            # Say which reads page. The flag was already on the manifests and
+            # went nowhere near the model, so a generated workflow capped at
+            # whatever number looked reasonable and reported the count as a
+            # total. Naming them is what makes ".complete" a question anyone
+            # thinks to ask.
+            paging = sorted(op.function or op.id for op in m.paginated())
+            if paging:
+                # A named example, not a rule to infer from. A small model
+                # copies; asking it to derive the call from a sentence is where
+                # "show all the stories" became max_results=100 and a count
+                # reported as a total.
+                lines.append(f"  Paged: {', '.join(paging)}")
 
             if detail == "index":
                 # Names, not signatures. A name is what a caller needs to know
@@ -504,6 +569,26 @@ def _output_schema(fn: Any) -> dict[str, Any]:
         return json_schema_for(annotation)
     except Exception:
         return {}
+
+
+#: How to use a paged read. Printed once for the whole catalog, not once per
+#: toolset: the pattern is identical everywhere, and a per-toolset copy would
+#: make the index grow with the number of integrations installed rather than
+#: with the task — which is the cost the three-tier catalog exists to avoid.
+PAGING_HOWTO = [
+    "A read marked 'paged' returns at most its max_results/limit, following",
+    "the API's pages to fill it, and the result knows whether it saw",
+    "everything — .complete survives being returned from a step.",
+    "  Bounded set — one call, then say what it covers:",
+    "      found = await ctx.step(<paged read>, ..., max_results=200)",
+    '      header = f"showing {found.summary()}"   # "200 of 312"',
+    "  Unbounded set (a mailbox, a log) — one page per step, resumable.",
+    "  Raising max_results is wrong there: one call for 50,000 rows is one",
+    "  journal entry, so a crash refetches all of them.",
+    "      page = await ctx.step(<paged read>, ..., cursor=cursor)",
+    '      await ctx.state.set("cursor", page.cursor)',
+    "",
+]
 
 
 def _schema_to_signature(name: str, schema: dict[str, Any]) -> str:

@@ -132,9 +132,11 @@ def resolve(
     than a traceback, whenever resolution fails.
     """
     if server:
+        from workflow_builder.cli.auth_commands import server_token_provider
         from workflow_builder.server.client import LoomClient
 
-        return Target(RemoteFacade(LoomClient(base_url=server)), target)
+        client = LoomClient(base_url=server, token_provider=server_token_provider(server))
+        return Target(RemoteFacade(client), target)
 
     from workflow_builder.runtime.engine import Runtime
 

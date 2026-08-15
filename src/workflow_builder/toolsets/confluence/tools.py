@@ -29,13 +29,14 @@ from workflow_builder.toolsets.confluence.models import (
     PageBody,
     SearchResult,
 )
+from workflow_builder.toolsets.pagination import Results
 
 
 @step(retry=Retry(max_attempts=3, initial_delay=1.0))
 async def confluence_search_pages(
     cql: str,
     limit: int = 20,
-) -> list[SearchResult]:
+) -> Results[SearchResult]:
     """Search Confluence content using CQL.
 
     Args:
@@ -151,7 +152,7 @@ async def confluence_get_page_body(page_id: str) -> PageBody:
 async def confluence_get_page_comments(
     page_id: str,
     limit: int = 25,
-) -> list[ConfluenceComment]:
+) -> Results[ConfluenceComment]:
     """Fetch comments on a Confluence page.
 
     Args:
@@ -188,7 +189,7 @@ async def confluence_add_comment(
 @step(retry=Retry(max_attempts=3, initial_delay=1.0))
 async def confluence_list_spaces(
     limit: int = 25,
-) -> list[ConfluenceSpace]:
+) -> Results[ConfluenceSpace]:
     """List all accessible Confluence spaces.
 
     Args:

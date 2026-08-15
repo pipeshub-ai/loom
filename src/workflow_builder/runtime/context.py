@@ -12,13 +12,17 @@ import asyncio
 import json
 import logging
 import random as _random
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+import warnings
+from collections.abc import Awaitable, Callable, Generator, Iterable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Generic, NoReturn, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, NoReturn, TypeVar, overload
 
 from workflow_builder.agents.memory import replace_history
 from workflow_builder.agents.result import AgentResult
+from workflow_builder.connectors.credentials import credential_store_scope
 from workflow_builder.core.exceptions import (
+    AuthExpired,
     BudgetExceeded,
     ConfigurationError,
     ContinueAsNew,
@@ -36,6 +40,7 @@ from workflow_builder.core.retry import Failure, OnError, Retry
 from workflow_builder.core.serde import decode, encode
 from workflow_builder.core.types import DepsT, Duration, to_seconds
 from workflow_builder.runtime.determinism import step_scope
+from workflow_builder.runtime.effects import EffectCall, EffectDenied
 from workflow_builder.runtime.journal import (
     EntryKind,
     EntryStatus,
@@ -43,10 +48,12 @@ from workflow_builder.runtime.journal import (
     JournalEntry,
     Scope,
 )
+from workflow_builder.security.authority import Authority
 from workflow_builder.steps.context import StepContext
 from workflow_builder.steps.definition import StepDefinition
 from workflow_builder.storage.artifact import ArtifactVersion
 from workflow_builder.storage.attachment import Attachment
+from workflow_builder.toolsets.manifest import EffectClass
 
 if TYPE_CHECKING:
     from workflow_builder.agents.agent import Agent
@@ -56,6 +63,31 @@ if TYPE_CHECKING:
     from workflow_builder.runtime.workflow import WorkflowDefinition
 
 T = TypeVar("T")
+
+
+#: How a journal entry kind reads to a broker. The broker's vocabulary is
+#: coarser on purpose: it decides authority, and authority is granted over
+#: toolsets, agents, and sub-workflows rather than over journal mechanics.
+_EFFECT_KINDS: dict[EntryKind, str] = {
+    EntryKind.STEP: "step",
+    EntryKind.AGENT: "agent",
+    EntryKind.CHILD_WORKFLOW: "child",
+    EntryKind.TOOL_CALL: "tool",
+}
+
+
+def _effect_arguments(recorded: Any) -> dict[str, Any]:
+    """The call's arguments, as far as a policy can usefully see them.
+
+    Best-effort by design. A broker decides on *what* is being called far more
+    often than on the values passed to it, and a step invoked positionally has
+    no argument names to report — so this offers what it can and never fails a
+    call over presentation.
+    """
+    if isinstance(recorded, dict) and "kwargs" in recorded:
+        named = recorded.get("kwargs")
+        return dict(named) if isinstance(named, dict) else {}
+    return dict(recorded) if isinstance(recorded, dict) else {}
 
 
 class DurableCall(Generic[T]):
@@ -114,10 +146,18 @@ class DurableCall(Generic[T]):
         self._metadata = metadata or {}
         self._future: asyncio.Future[Any] | None = None
 
-    def __await__(self) -> Any:
+    def __await__(self) -> Generator[Any, None, T]:
+        """Awaiting yields the call's own type, not ``Any``.
+
+        ``-> Any`` made every ``await ctx.step(...)`` and ``await ctx.agent(...)``
+        untyped at the point of use, so a workflow returning the result from a
+        ``-> str`` body drew ``no-any-return`` from mypy — on the exact pattern
+        the coding agent is told to write. The generic was declared and then
+        discarded one method later.
+        """
         return self._task().__await__()
 
-    def _task(self) -> asyncio.Future[Any]:
+    def _task(self) -> asyncio.Future[T]:
         """Memoize execution so awaiting the same call twice does not run it twice."""
         if self._future is None:
             self._future = asyncio.ensure_future(self._resolve())
@@ -149,7 +189,7 @@ class DurableCall(Generic[T]):
             fingerprint=self._fingerprint,
             input=_encode_debug(self._input),
             status=EntryStatus.PENDING,
-            started_at=_utcnow(),
+            started_at=self._clock.now(),
             metadata={k: v for k, v in self._metadata.items() if v is not None},
         )
         journal.put(entry)
@@ -158,75 +198,145 @@ class DurableCall(Generic[T]):
             f"{self.kind.value}.{self.name}",
             attributes={"workflow": ctx.workflow, "run_id": ctx.run_id, "path": self.path},
         )
+        try:
+            outcome = await ctx._runtime.broker.dispatch(
+                self._effect_call(entry, span), ctx._authority
+            )
+        except ControlSignal:
+            span.end()
+            raise
+        except BaseException:
+            span.end()
+            raise
+        if outcome.ok:
+            span.end()
+            return outcome.value
+
+        # Refused. Journal it as a failure so a replay sees what the run saw —
+        # a denial that left no trace would replay as if the effect had never
+        # been attempted, and the second run would take a different path.
+        span.end()
+        refusal = EffectDenied(
+            outcome.error or f"effect '{self.name}' denied",
+            call=self._effect_call(entry, span),
+            needs=outcome.needs,
+        )
+        entry.status = EntryStatus.FAILED
+        entry.error = ErrorInfo.from_exception(refusal, step_name=self.name)
+        entry.finished_at = self._clock.now()
+        journal.put(entry)
+        await ctx._maybe_flush(force=True)
+        return self._handle_failure(refusal, attempts=entry.attempts)
+
+    def _effect_call(self, entry: JournalEntry, span: Span) -> EffectCall:
+        """Describe this operation for the broker, and how to carry it out."""
+
+        async def perform() -> Any:
+            return await self._attempt_loop(entry, span)
+
+        return EffectCall(
+            kind=_EFFECT_KINDS.get(self.kind, self.kind.value),
+            target=self._metadata.get("effect_target") or self.name,
+            arguments=_effect_arguments(self._input),
+            effect=self._metadata.get("effect_class") or EffectClass.WRITE,
+            run_id=self._ctx.run_id,
+            path=self.path,
+            perform=perform,
+        )
+
+    @property
+    def _clock(self) -> Any:
+        return self._ctx._clock
+
+    async def _attempt_loop(self, entry: JournalEntry, span: Span) -> Any:
+        """Run the operation, retrying per its policy, and journal the outcome."""
+        ctx = self._ctx
+        journal = ctx._journal
         attempt = 0
         last_error: BaseException | None = None
-        try:
-            while True:
-                attempt += 1
-                entry.attempts = attempt
-                step_ctx = StepContext(
-                    run_id=ctx.run_id,
-                    workflow=ctx.workflow,
-                    step_name=self.name,
-                    path=self.path,
-                    attempt=attempt,
-                    max_attempts=self._retry.max_attempts,
-                    deps=ctx.deps,
-                    idempotency_key=f"{ctx.run_id}:{self.path}",
-                    logger=ctx.logger,
-                    credentials=ctx._runtime.credentials,
-                    span=span,
-                )
-                try:
+        while True:
+            attempt += 1
+            entry.attempts = attempt
+            step_ctx = StepContext(
+                run_id=ctx.run_id,
+                workflow=ctx.workflow,
+                step_name=self.name,
+                path=self.path,
+                attempt=attempt,
+                max_attempts=self._retry.max_attempts,
+                deps=ctx.deps,
+                idempotency_key=f"{ctx.run_id}:{self.path}",
+                logger=ctx.logger,
+                credentials=ctx._runtime.credentials,
+                span=span,
+            )
+            try:
+                # Bound for the duration of this attempt so a toolset's
+                # process-wide client singleton (get_default_client(),
+                # get_default_auth()) can resolve this run's CredentialStore
+                # with no `ctx` parameter of its own — see
+                # connectors/credentials.py::current_credential_store().
+                with credential_store_scope(ctx._runtime.credentials):
                     result = await self._invoke(attempt, step_ctx)
-                except ControlSignal:
-                    raise
-                except (TimeoutError, Exception) as exc:
-                    last_error = exc
-                    if not self._retry.should_retry(exc, attempt):
-                        break
-                    ctx.logger.warning(
-                        "step %s failed (attempt %d/%d): %s",
-                        self.name,
-                        attempt,
-                        self._retry.max_attempts,
-                        exc,
-                    )
-                    await asyncio.sleep(self._retry.delay_for(attempt, rng=ctx._backoff_rng))
-                else:
-                    entry.status = EntryStatus.COMPLETED
-                    entry.output = await ctx._store_payload(
-                        _encode_durable(
-                            result, what=f"{self.kind.value} '{self.name}' returned a value"
-                        )
-                    )
-                    entry.finished_at = _utcnow()
-                    if isinstance(usage := getattr(result, "usage", None), Usage):
-                        entry.usage = usage
-                    journal.put(entry)
-                    span.set_status("ok")
-                    await ctx._maybe_flush()
-                    return result
-
-            assert last_error is not None
-            entry.status = EntryStatus.FAILED
-            entry.error = ErrorInfo.from_exception(last_error, step_name=self.name)
-            entry.finished_at = _utcnow()
-            journal.put(entry)
-            span.record_exception(last_error)
-            await ctx._maybe_flush(force=True)
-
-            surfaced: BaseException = last_error
-            if attempt > 1:
-                surfaced = RetriesExhausted(
-                    f"step '{self.name}' failed after {attempt} attempts: {last_error}",
-                    step_name=self.name,
-                    attempts=attempt,
-                    cause=last_error,
+            except ControlSignal:
+                raise
+            except AuthExpired:
+                # Handled like a ControlSignal, not a step failure: writing
+                # this attempt to the journal as FAILED would make it
+                # permanent (see the FAILED branch in DurableCall._resolve —
+                # a replay must reproduce a recorded failure exactly, which
+                # is correct for an ordinary bug but wrong for a credential
+                # that becomes valid again after 'loom connect'). Left
+                # PENDING instead, propagating past this loop's own
+                # journal.put(entry) so the engine's Suspend conversion in
+                # runtime/engine.py can park the run, and a later resume
+                # actually re-attempts this step rather than replaying a
+                # baked-in failure.
+                raise
+            except (TimeoutError, Exception) as exc:
+                last_error = exc
+                if not self._retry.should_retry(exc, attempt):
+                    break
+                ctx.logger.warning(
+                    "step %s failed (attempt %d/%d): %s",
+                    self.name,
+                    attempt,
+                    self._retry.max_attempts,
+                    exc,
                 )
-            return self._handle_failure(surfaced, attempts=attempt)
-        finally:
-            span.end()
+                await ctx._clock.sleep(self._retry.delay_for(attempt, rng=ctx._backoff_rng))
+            else:
+                entry.status = EntryStatus.COMPLETED
+                entry.output = await ctx._store_payload(
+                    _encode_durable(
+                        result, what=f"{self.kind.value} '{self.name}' returned a value"
+                    )
+                )
+                entry.finished_at = self._clock.now()
+                if isinstance(usage := getattr(result, "usage", None), Usage):
+                    entry.usage = usage
+                journal.put(entry)
+                span.set_status("ok")
+                await ctx._maybe_flush()
+                return result
+
+        assert last_error is not None
+        entry.status = EntryStatus.FAILED
+        entry.error = ErrorInfo.from_exception(last_error, step_name=self.name)
+        entry.finished_at = self._clock.now()
+        journal.put(entry)
+        span.record_exception(last_error)
+        await ctx._maybe_flush(force=True)
+
+        surfaced: BaseException = last_error
+        if attempt > 1:
+            surfaced = RetriesExhausted(
+                f"step '{self.name}' failed after {attempt} attempts: {last_error}",
+                step_name=self.name,
+                attempts=attempt,
+                cause=last_error,
+            )
+        return self._handle_failure(surfaced, attempts=attempt)
 
     async def _invoke(self, attempt: int, step_ctx: StepContext) -> Any:
         ctx = self._ctx
@@ -267,10 +377,6 @@ async def _with_timeout(awaitable: Awaitable[Any], timeout: float | None, name: 
         return await asyncio.wait_for(awaitable, timeout)
     except TimeoutError as exc:
         raise TimeoutExceeded(f"step '{name}' exceeded its {timeout}s timeout") from exc
-
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 def _encode_durable(value: Any, *, what: str) -> Any:
@@ -315,6 +421,56 @@ def _json_bytes(encoded: Any) -> bytes | None:
         return None
 
 
+@dataclass(frozen=True)
+class WorkflowState:
+    """``ctx.state`` — the workflow's own key-value space, already scoped.
+
+    A thin binding rather than a store of its own: it exists so a workflow body
+    never has to name its own workflow, which is the detail most likely to be
+    got wrong and least likely to be noticed when it is.
+    """
+
+    _ctx: Context[Any]
+
+    async def get(self, key: str, default: Any = None) -> Any:
+        found = await self._store.get(self._workflow, key)
+        return default if found is None else found
+
+    async def set(self, key: str, value: Any) -> None:
+        await self._store.set(self._workflow, key, value)
+
+    async def delete(self, key: str) -> None:
+        await self._store.delete(self._workflow, key)
+
+    async def keys(self) -> list[str]:
+        return await self._store.keys(self._workflow)
+
+    @property
+    def _store(self) -> Any:
+        return self._ctx._runtime.state
+
+    @property
+    def _workflow(self) -> str:
+        return self._ctx.workflow
+
+
+def _authority_for(
+    runtime: Runtime,
+    definition: WorkflowDefinition[Any, Any, Any],
+) -> Authority:
+    """What a run of *definition* on *runtime* is permitted to do.
+
+    Note what is *not* here: the workflow's declared grants never override the
+    Runtime's. They are consulted only when the Runtime declared none, where
+    they act as a self-limitation. A workflow that could widen its own
+    permissions by asking for more would make the declaration worthless.
+    """
+    base = runtime.authority or Authority()
+    if base.grant.is_empty and definition.grants is not None:
+        return base.narrowed(grant=definition.grants)
+    return base
+
+
 class Context(Generic[DepsT]):
     """Durable orchestration API, passed as the first argument to every workflow."""
 
@@ -337,6 +493,18 @@ class Context(Generic[DepsT]):
         self._scope = scope or journal.root
         self.logger = logger or logging.getLogger(f"workflow.{record.workflow}")
         self._tracer = runtime.tracer
+        self._clock = runtime.clock
+        """Every timestamp this run writes and every wait it holds in memory.
+
+        Bound once rather than read through the Runtime each time, so a test
+        that swaps the clock does so before the run starts and cannot change it
+        underneath a run already in flight."""
+        self._authority = _authority_for(runtime, definition)
+        """What this run may do, handed to the broker on every dispatch.
+
+        The Runtime's authority, falling back to what the workflow declared it
+        needs — a workflow can narrow itself, but nothing it says can widen the
+        Runtime."""
         self._backoff_rng = _random.Random(record.run_id)
         self._pending_flush = 0
         self._compensation_stack: list[tuple[Callable[..., Awaitable[Any]], tuple[Any, ...]]] = []
@@ -500,8 +668,8 @@ class Context(Generic[DepsT]):
                 name=name,
                 status=EntryStatus.COMPLETED,
                 output=value,
-                started_at=_utcnow(),
-                finished_at=_utcnow(),
+                started_at=self._clock.now(),
+                finished_at=self._clock.now(),
                 attempts=1,
             )
         )
@@ -510,7 +678,8 @@ class Context(Generic[DepsT]):
 
     def now(self) -> datetime:
         """The current UTC time, frozen into the journal so replays agree."""
-        return datetime.fromisoformat(self._side_effect("now", lambda: _utcnow().isoformat()))
+        recorded = self._side_effect("now", lambda: self._clock.now().isoformat())
+        return datetime.fromisoformat(recorded)
 
     def uuid4(self) -> str:
         """A random UUID that stays the same across replays."""
@@ -552,24 +721,24 @@ class Context(Generic[DepsT]):
             kind=EntryKind.SLEEP,
             name=name,
             status=EntryStatus.SUSPENDED,
-            started_at=_utcnow(),
+            started_at=self._clock.now(),
         )
         entry.wake_at = when
         self._journal.put(entry)
 
-        remaining = (when - _utcnow()).total_seconds()
+        remaining = (when - self._clock.now()).total_seconds()
         if remaining <= 0:
             entry.status = EntryStatus.COMPLETED
-            entry.finished_at = _utcnow()
+            entry.finished_at = self._clock.now()
             self._journal.put(entry)
             return
 
         if remaining <= self._runtime.inline_timer_threshold:
             # Short waits are cheaper to hold in memory than to park and rehydrate.
             await self._flush()
-            await asyncio.sleep(remaining)
+            await self._clock.sleep(remaining)
             entry.status = EntryStatus.COMPLETED
-            entry.finished_at = _utcnow()
+            entry.finished_at = self._clock.now()
             self._journal.put(entry)
             return
 
@@ -610,14 +779,14 @@ class Context(Generic[DepsT]):
                     name=name,
                     status=EntryStatus.COMPLETED,
                     output=payload,
-                    started_at=_utcnow(),
-                    finished_at=_utcnow(),
+                    started_at=self._clock.now(),
+                    finished_at=self._clock.now(),
                 )
             )
             await self._maybe_flush()
             return decode(payload, output_type)
 
-        if deadline is not None and deadline <= _utcnow():
+        if deadline is not None and deadline <= self._clock.now():
             self._journal.put(
                 JournalEntry(
                     path=path,
@@ -626,8 +795,8 @@ class Context(Generic[DepsT]):
                     status=EntryStatus.COMPLETED,
                     output=_encode_durable(default, what=f"event '{name}' timeout default"),
                     metadata={"timed_out": True},
-                    started_at=_utcnow(),
-                    finished_at=_utcnow(),
+                    started_at=self._clock.now(),
+                    finished_at=self._clock.now(),
                 )
             )
             await self._maybe_flush()
@@ -640,7 +809,7 @@ class Context(Generic[DepsT]):
                 name=name,
                 status=EntryStatus.SUSPENDED,
                 wake_at=deadline,
-                started_at=_utcnow(),
+                started_at=self._clock.now(),
             )
         )
         await self._flush()
@@ -685,15 +854,20 @@ class Context(Generic[DepsT]):
             input={"run_id": run_id, "payload": payload},
         )
 
-    async def emit(self, name: str, payload: Any = None) -> None:
+    async def publish(self, name: str, payload: Any = None) -> None:
         """Broadcast an event to whoever is waiting for it.
 
         The counterpart to :meth:`signal`: that one names a target run, this one
         does not, so any run parked on ``wait_for_event(name)`` may take it.
-        Journaled, so a replay does not emit a second time.
+        Journaled, so a replay does not publish a second time.
 
         Use it for "this happened" — an order shipped, a document indexed — where
-        the emitter has no business knowing who cares.
+        the publisher has no business knowing who cares.
+
+        Named ``publish`` rather than ``emit`` because "emit" is also the
+        natural word for streaming a run's output, which is :meth:`report`.
+        Two meanings under one name is the kind of ambiguity that produces code
+        which reads correctly and does the other thing.
         """
 
         async def perform(attempt: int, step_ctx: StepContext) -> Any:
@@ -707,6 +881,60 @@ class Context(Generic[DepsT]):
             perform=perform,
             input={"payload": payload},
         )
+
+    async def emit(self, name: str, payload: Any = None) -> None:
+        """Deprecated alias for :meth:`publish`.
+
+        The journal entry keeps its ``emit:`` prefix, so a run started under the
+        old name replays under the new one. Renaming the entry would have made
+        every in-flight run's journal unreadable to the code that has to finish
+        it, which is a steep price for a tidier string.
+        """
+        warnings.warn(
+            "ctx.emit() is deprecated; use ctx.publish() for events, or "
+            "ctx.report() to stream a run's output. Removed in the next minor.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        await self.publish(name, payload)
+
+    # -- talking about a run while it runs ---------------------------------------------
+
+    async def report(self, message: str, *, kind: str = "text") -> None:
+        """Say what this run is doing, for anyone watching.
+
+        Not journaled, and deliberately so. A report is an observation about a
+        run, not a durable operation of it: journaling one would make progress
+        chatter part of the replay contract, so a workflow could not be made
+        more talkative without changing what its replays produce.
+
+        The consequence is that a replay reports again, since the body really
+        does run. That is the right outcome — a replay is a real execution and
+        someone watching it should see it move — and it cannot be mistaken for
+        the original, because the reports carry the replay's own run id.
+        """
+        await self._runtime.stream.report(self.run_id, message, kind=kind)
+
+    @property
+    def state(self) -> WorkflowState:
+        """Key-value state shared by every run of this workflow.
+
+        Scoped to the workflow, and mutable — where an artifact is immutable
+        and versioned. Reach for it when a run needs to know what the last run
+        left behind::
+
+            since = await ctx.state.get("cursor", default=0)
+            ...
+            await ctx.state.set("cursor", newest)
+
+        Reads and writes are *not* journaled, because the value is shared: a
+        replay that served the original value would be reading a fact about the
+        past and calling it the present. What that means in practice is that
+        state is not deterministic across replays, and a workflow whose control
+        flow branches on it will not replay identically. Journal the decision —
+        put the read inside a step — when that matters.
+        """
+        return WorkflowState(self)
 
     # -- composition ------------------------------------------------------------------
 
@@ -822,6 +1050,34 @@ class Context(Generic[DepsT]):
             input=input,
             output_type=None if detached else definition.output_type,
         )
+
+    @overload
+    def agent(
+        self,
+        agent_or_prompt: str,
+        input: Any = ...,
+        *,
+        name: str | None = ...,
+        max_turns: int | None = ...,
+        session_id: str | None = ...,
+        agent_id: str = ...,
+        toolsets: list[str] | None = ...,
+        **kwargs: Any,
+    ) -> DurableCall[AgentResult[str]]: ...
+
+    @overload
+    def agent(
+        self,
+        agent_or_prompt: Agent[Any, T],
+        input: Any = ...,
+        *,
+        name: str | None = ...,
+        max_turns: int | None = ...,
+        session_id: str | None = ...,
+        agent_id: str = ...,
+        toolsets: list[str] | None = ...,
+        **kwargs: Any,
+    ) -> DurableCall[AgentResult[T]]: ...
 
     def agent(
         self,
@@ -1081,8 +1337,8 @@ class Context(Generic[DepsT]):
                 name=f"compensate:{fn.__name__}",
                 status=EntryStatus.COMPLETED,
                 output=_encode_debug({"fn": fn.__name__, "args": args}),
-                started_at=_utcnow(),
-                finished_at=_utcnow(),
+                started_at=self._clock.now(),
+                finished_at=self._clock.now(),
                 attempts=1,
             )
         )
@@ -1131,8 +1387,8 @@ class Context(Generic[DepsT]):
                 name="continue_as_new",
                 status=EntryStatus.COMPLETED,
                 output=_encode_durable(seed, what="continue_as_new seed"),
-                started_at=_utcnow(),
-                finished_at=_utcnow(),
+                started_at=self._clock.now(),
+                finished_at=self._clock.now(),
                 attempts=1,
             )
         )

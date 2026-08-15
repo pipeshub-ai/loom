@@ -18,9 +18,14 @@ difference.
 from __future__ import annotations
 
 import importlib
+import sys
 from typing import Any
 
-__all__ = ["fake_value", "install_fakes"]
+__all__ = [
+    "fake_value",
+    "install_fakes",
+    "uninstall_fakes",
+]
 
 #: Deterministic by construction. A fake that returned varying data would make
 #: the replay check report a determinism fault in the harness, not the code.
@@ -106,11 +111,23 @@ def _resolve(root: dict[str, Any], ref: str) -> dict[str, Any]:
     return {}
 
 
+#: What ``install_fakes`` displaced, so it can be put back.
+#:
+#: Installing rewrites the toolset module in place, which is exactly right in
+#: the smoke subprocess — it is thrown away a moment later. In a long-lived
+#: process it is a leak: every later caller gets the stub, and a test suite
+#: that installs fakes once quietly validates the rest of its run against them.
+_DISPLACED: dict[tuple[str, str], Any] = {}
+
+
 def install_fakes(manifest: Any) -> list[str]:
     """Replace a toolset's callables with stand-ins. Returns what was replaced.
 
     Prefers the manifest's own ``fakes_module`` when it declares one, and falls
     back to values built from each operation's ``output_schema``.
+
+    Reversible with :func:`uninstall_fakes`. Anything running in a process that
+    outlives the fake — a test, a REPL, an embedded Runtime — must reverse it.
     """
     tools_module = getattr(manifest, "tools_module", "")
     if not tools_module:
@@ -139,16 +156,85 @@ def install_fakes(manifest: Any) -> list[str]:
         if not op.function or not hasattr(module, op.function):
             continue
 
-        if op.function in overrides:
-            setattr(module, op.function, overrides[op.function])
-            replaced.append(op.function)
-            continue
-
         original = getattr(module, op.function)
-        setattr(module, op.function, _stub(original, op))
+        _DISPLACED.setdefault((tools_module, op.function), original)
+
+        substitute = overrides.get(op.function) or _stub(original, op)
+        setattr(module, op.function, substitute)
         replaced.append(op.function)
 
     return replaced
+
+
+def executable_fake_toolset(manifest: Any) -> Any | None:
+    """An executable :class:`Toolset` over the *same* stand-ins, or ``None``.
+
+    Generated code reaches a toolset two ways, and until this existed the
+    sandbox only served one of them.
+
+    A direct call inside a ``@step`` — ``await jira_search_issues(...)`` —
+    binds to the module attribute, which :func:`install_fakes` has replaced.
+    That path worked.
+
+    ``ctx.agent(..., toolsets=["jira"])`` does not touch the module. It asks
+    the registry for an executable toolset and gets nothing, because a
+    subprocess registers none. So the smoke run failed with "no executable
+    toolset 'jira' is registered" on exactly the shape the coding agent's own
+    resolution ladder tells the model to produce for an ambiguous entity — the
+    sandbox refusing the pattern the prompt recommends.
+
+    The toolset built here resolves operations straight out of the already-
+    faked module, so both paths reach the same stand-ins. One source of fakes,
+    two ways in; a second set would drift.
+
+    Returns ``None`` when the manifest names no importable module, which is the
+    same condition under which :func:`install_fakes` does nothing.
+    """
+    tools_module = getattr(manifest, "tools_module", "")
+    if not tools_module:
+        return None
+
+    try:
+        module = importlib.import_module(tools_module)
+    except ImportError:
+        return None
+
+    from workflow_builder.agents.tool_registry import Toolset
+    from workflow_builder.agents.tools import coerce_tool
+
+    by_operation = {
+        op.id: op.function
+        for op in manifest.all_operations()
+        if op.function and hasattr(module, op.function)
+    }
+    if not by_operation:
+        return None
+
+    def resolve(op_id: str) -> Any:
+        # Read the attribute at call time, not now: the real manifest is kept,
+        # so a toolset built before install_fakes still resolves to the fake.
+        name = by_operation.get(op_id)
+        if name is None:
+            raise KeyError(f"unknown operation '{op_id}' in '{manifest.id}'")
+        return coerce_tool(getattr(module, name))
+
+    return Toolset(manifest=manifest, _resolver=resolve)
+
+
+def uninstall_fakes() -> list[str]:
+    """Put back everything :func:`install_fakes` displaced. Returns the names.
+
+    Safe to call when nothing was installed, so a caller can put it in a
+    ``finally`` without checking.
+    """
+    restored: list[str] = []
+    for (module_name, attribute), original in list(_DISPLACED.items()):
+        module = sys.modules.get(module_name)
+        if module is not None:
+            setattr(module, attribute, original)
+            restored.append(f"{module_name}.{attribute}")
+    _DISPLACED.clear()
+    return restored
 
 
 def _coerce(payload: Any, output_type: Any) -> Any:

@@ -516,3 +516,147 @@ class TestCodingResultLoad:
 
         with pytest.raises(ValueError, match="declares no @workflow"):
             CodingResult(code="x = 1\n").load()
+
+
+class TestTheAuthoringPlaneNeedsNoExecutor:
+    """P4: authoring must not require the thing that runs workflows.
+
+    It already did not — but "already true" and "guaranteed" differ by exactly
+    one test. The boundary held by accident of how the code grew, and the first
+    convenience import of ``Runtime`` into a check stage would have erased it
+    without anything objecting.
+
+    The smoke stage is the interesting case: it *does* need a Runtime, and
+    builds one **inside a subprocess**. That is the boundary working, not a
+    violation of it — the executor lives on the far side of a process wall, and
+    the authoring process never holds one.
+    """
+
+    AUTHORING = (
+        "workflow_builder/agents/coding_agent.py",
+        "workflow_builder/agents/stages.py",
+        "workflow_builder/agents/checks.py",
+        "workflow_builder/agents/validator.py",
+        "workflow_builder/agents/coding_tools.py",
+    )
+
+    def _source(self, relative: str) -> str:
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1] / "src"
+        return (root / relative).read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize("module", AUTHORING)
+    def test_no_authoring_module_imports_the_runtime(self, module: str) -> None:
+        """A generated file is text until something chooses to run it."""
+        import ast
+
+        tree = ast.parse(self._source(module))
+        imported: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                imported += [
+                    f"{node.module}.{alias.name}"
+                    for alias in node.names
+                    if alias.name == "Runtime"
+                ]
+            elif isinstance(node, ast.Import):
+                imported += [
+                    a.name for a in node.names if a.name.endswith("runtime.engine")
+                ]
+
+        assert not imported, f"{module} imports {imported}; authoring stays executor-free"
+
+    def test_generating_a_workflow_constructs_no_runtime(self) -> None:
+        """The property end to end, not module by module."""
+        from workflow_builder.agents.coding_agent import WorkflowCodingAgent
+
+        agent = WorkflowCodingAgent(model=object())
+
+        assert not any(
+            type(value).__name__ == "Runtime" for value in vars(agent).values()
+        )
+
+    def test_the_smoke_stage_puts_the_executor_behind_a_process_wall(self) -> None:
+        """Where the Runtime legitimately appears — and where it stays."""
+        import inspect
+
+        from workflow_builder.agents import smoke
+
+        source = inspect.getsource(smoke)
+        assert "subprocess" in source
+        assert "Runtime(" in source, "the child does build one; that is the point"
+
+        # ...and the parent side never does.
+        parent = source[: source.index("HARNESS")] if "HARNESS" in source else ""
+        assert "Runtime(" not in parent
+
+
+class TestIsCleanAgreesWithThePipeline:
+    """"verified: False" on correct code is a dead end without a reason.
+
+    Two defects, one symptom. ``is_clean`` read ``smoke.ok`` directly, so an
+    *environmental* smoke failure made it False — while the smoke stage that
+    produced that very result had already ruled it a **warning**, on the
+    grounds that a sandbox with no credential says nothing about the code. Two
+    parts of one pipeline disagreeing, with the caller told only "False".
+
+    And there was no way to ask why: the reason is spread across ``issues``,
+    ``smoke``, and ``review``.
+    """
+
+    def _result(self, **kwargs):
+        from workflow_builder.agents.coding_agent import CodingResult
+
+        return CodingResult(code="x = 1", **kwargs)
+
+    def _smoke(self, error: str):
+        from workflow_builder.agents.smoke import SmokeResult
+
+        return SmokeResult(ok=False, phase="run", error=error, traceback="")
+
+    def test_good_code_is_clean_and_lists_nothing(self) -> None:
+        result = self._result()
+
+        assert result.is_clean
+        assert result.blockers == []
+
+    def test_an_environmental_smoke_failure_is_not_a_blocker(self) -> None:
+        """The sandbox having no credential is not a fact about the code."""
+        result = self._result(smoke=self._smoke("401 Unauthorized"))
+
+        assert result.smoke.environmental
+        assert result.is_clean, "is_clean disagreed with the stage that ruled on it"
+        assert result.blockers == []
+
+    def test_a_real_smoke_failure_still_blocks_and_says_so(self) -> None:
+        result = self._result(smoke=self._smoke("'NoneType' has no attribute 'x'"))
+
+        assert not result.is_clean
+        assert result.blockers == ["smoke: 'NoneType' has no attribute 'x'"]
+
+    def test_an_error_issue_blocks_and_names_its_category(self) -> None:
+        from workflow_builder.agents.validator import CodeIssue
+
+        result = self._result(
+            issues=[
+                CodeIssue("imports", "no such name", "error"),
+                CodeIssue("types", "returns Any", "warning"),
+            ]
+        )
+
+        assert not result.is_clean
+        assert result.blockers == ["imports: no such name"]
+        assert not any("types" in b for b in result.blockers), "warnings do not block"
+
+    def test_blockers_is_empty_exactly_when_clean(self) -> None:
+        """The two must not be able to disagree, whatever is set."""
+        from workflow_builder.agents.validator import CodeIssue
+
+        for result in (
+            self._result(),
+            self._result(issues=[CodeIssue("x", "y", "error")]),
+            self._result(smoke=self._smoke("boom")),
+            self._result(smoke=self._smoke("connection refused")),
+        ):
+            assert result.is_clean is (not result.blockers)

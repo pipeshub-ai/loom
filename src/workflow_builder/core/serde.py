@@ -56,6 +56,10 @@ class JsonSerializer:
         data = _revive(data)
         if type_ is None or type_ is Any or data is None:
             return data
+        if isinstance(data, SelfEncoding):
+            # It came back from its own envelope, so it already knows things
+            # the declared type cannot express. Let it apply the type itself.
+            return data.__retype__(type_)
         try:
             return TypeAdapter(type_).validate_python(data)
         except Exception:
@@ -66,6 +70,66 @@ class JsonSerializer:
 
 #: Marker for binary data encoded into a JSON journal payload.
 BYTES_KEY = "__bytes_b64__"
+
+#: Marker for a value that describes its own wire form. See :class:`SelfEncoding`.
+WIRE_KEY = "__wire__"
+
+
+@runtime_checkable
+class SelfEncoding(Protocol):
+    """A type that knows how it survives a journal.
+
+    Pydantic renders a value by its *structure*, which is right until the
+    structure is not the whole value. A list subclass carrying "did I see
+    everything?" journals as a list and loses the answer — silently, and only
+    on the read side, which is the worst place to find out.
+
+    Implementing this is the escape hatch, and it is a protocol rather than a
+    branch in the serializer so that adding the next such type touches no code
+    here. The contract is narrow on purpose: a dict of JSON-compatible values
+    out, the same dict back in, and nothing about how it is stored.
+    """
+
+    def __wire__(self) -> dict[str, Any]:
+        """The value as plain data, excluding the marker."""
+        ...
+
+    @classmethod
+    def __from_wire__(cls, payload: dict[str, Any]) -> Any:
+        """Rebuild from :meth:`__wire__`'s output."""
+        ...
+
+    def __retype__(self, type_: Any) -> Any:
+        """A copy with contents coerced to *type_*, keeping what only I know.
+
+        Decoding otherwise has to choose between the declared type and the
+        envelope: validating through pydantic coerces the contents and discards
+        the metadata, while skipping validation keeps the metadata and hands
+        back raw dicts where models were declared. This is how a value gets
+        both.
+        """
+        ...
+
+
+#: Types eligible to be revived from a wire envelope, by name.
+#:
+#: Decoding cannot import arbitrary classes named in a payload — that is how a
+#: journal becomes an execution vector — so a type opts in by registering, and
+#: an unknown name decodes to its plain data rather than raising.
+_WIRE_TYPES: dict[str, type] = {}
+
+
+def register_wire_type(cls: type) -> type:
+    """Allow ``cls`` to be rebuilt from its envelope. Usable as a decorator."""
+    _WIRE_TYPES[cls.__name__] = cls
+    return cls
+
+
+def _wrap_self_encoding(value: Any) -> Any:
+    """Tag a self-describing value before Pydantic flattens it."""
+    return {
+        WIRE_KEY: {"type": type(value).__name__, "data": value.__wire__()}
+    }
 
 
 def _wrap_bytes(value: Any) -> Any:
@@ -78,6 +142,8 @@ def _wrap_bytes(value: Any) -> Any:
     is what makes the round trip lossless. Typed model fields need none of this
     and are left for Pydantic to handle.
     """
+    if isinstance(value, SelfEncoding) and not isinstance(value, type):
+        return _wrap_self_encoding(value)
     if isinstance(value, bytes | bytearray | memoryview):
         return {BYTES_KEY: base64.b64encode(bytes(value)).decode("ascii")}
     if isinstance(value, dict):
@@ -107,6 +173,13 @@ def _revive(data: Any) -> Any:
     if isinstance(data, dict):
         if set(data) == {BYTES_KEY}:
             return base64.b64decode(data[BYTES_KEY])
+        if set(data) == {WIRE_KEY}:
+            envelope = data[WIRE_KEY]
+            target = _WIRE_TYPES.get(envelope.get("type", ""))
+            payload = _revive(envelope.get("data") or {})
+            # An unregistered type decodes to its data rather than raising: a
+            # journal written by a newer deployment must still be readable.
+            return target.__from_wire__(payload) if target else payload
         return {k: _revive(v) for k, v in data.items()}
     if isinstance(data, list):
         return [_revive(item) for item in data]

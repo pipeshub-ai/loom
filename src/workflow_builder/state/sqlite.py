@@ -15,7 +15,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from workflow_builder.core.models import Event, ExecutionRecord, ExecutionStatus
+from workflow_builder.core.models import (
+    Event,
+    ExecutionRecord,
+    ExecutionStatus,
+    TriggerRecord,
+)
 from workflow_builder.runtime.journal import JournalEntry
 
 SCHEMA = """
@@ -50,6 +55,15 @@ CREATE TABLE IF NOT EXISTS events (
     data     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_events_target ON events(run_id, name);
+
+CREATE TABLE IF NOT EXISTS triggers (
+    trigger_id   TEXT PRIMARY KEY,
+    workflow     TEXT NOT NULL,
+    next_fire_at TEXT,
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    data         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_triggers_due ON triggers(enabled, next_fire_at);
 
 CREATE TABLE IF NOT EXISTS cache (
     key        TEXT PRIMARY KEY,
@@ -186,6 +200,80 @@ class SQLiteStore:
     async def delete_execution(self, run_id: str) -> None:
         await self._execute("DELETE FROM journal WHERE run_id = ?", (run_id,))
         await self._execute("DELETE FROM executions WHERE run_id = ?", (run_id,))
+
+    # -- triggers ---------------------------------------------------------------------
+    #
+    # SQLite carried none of these, and ``TriggerDispatcher`` fell back to an
+    # in-memory store for any store that lacked ``save_trigger``. So the
+    # documented laptop default persisted runs durably and kept schedules in
+    # memory: a restart lost every cron trigger, with no error and no log line.
+
+    async def save_trigger(self, trigger: TriggerRecord) -> None:
+        await self._execute(
+            """INSERT OR REPLACE INTO triggers
+               (trigger_id, workflow, next_fire_at, enabled, data)
+               VALUES (?,?,?,?,?)""",
+            (
+                trigger.trigger_id,
+                trigger.workflow,
+                trigger.next_fire_at.isoformat() if trigger.next_fire_at else None,
+                1 if trigger.enabled else 0,
+                trigger.model_dump_json(),
+            ),
+        )
+
+    async def get_trigger(self, trigger_id: str) -> TriggerRecord | None:
+        rows = await self._query(
+            "SELECT data FROM triggers WHERE trigger_id = ?", (trigger_id,)
+        )
+        return TriggerRecord.model_validate_json(rows[0]["data"]) if rows else None
+
+    async def list_triggers(
+        self, *, workflow: str | None = None
+    ) -> list[TriggerRecord]:
+        sql = "SELECT data FROM triggers"
+        params: tuple[Any, ...] = ()
+        if workflow is not None:
+            sql += " WHERE workflow = ?"
+            params = (workflow,)
+        rows = await self._query(sql + " ORDER BY trigger_id", params)
+        return [TriggerRecord.model_validate_json(row["data"]) for row in rows]
+
+    async def due_triggers(
+        self, now: datetime, *, limit: int = 50
+    ) -> list[TriggerRecord]:
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=UTC)
+        rows = await self._query(
+            """SELECT data FROM triggers
+               WHERE enabled = 1 AND next_fire_at IS NOT NULL
+                 AND next_fire_at <= ?
+               ORDER BY next_fire_at LIMIT ?""",
+            (now.isoformat(), limit),
+        )
+        return [TriggerRecord.model_validate_json(row["data"]) for row in rows]
+
+    async def update_after_fire(
+        self,
+        trigger_id: str,
+        last_fire: datetime,
+        next_fire: datetime | None,
+    ) -> None:
+        current = await self.get_trigger(trigger_id)
+        if current is None:
+            return
+        await self.save_trigger(
+            current.model_copy(
+                update={
+                    "last_fire_at": last_fire,
+                    "next_fire_at": next_fire,
+                    "run_count": current.run_count + 1,
+                }
+            )
+        )
+
+    async def delete_trigger(self, trigger_id: str) -> None:
+        await self._execute("DELETE FROM triggers WHERE trigger_id = ?", (trigger_id,))
 
     # -- journals ---------------------------------------------------------------------
 

@@ -47,21 +47,24 @@ DEFAULT_SYSTEM_PROMPT = textwrap.dedent("""\
 
     ## Your process
 
-    1. DISCOVER: Call search_toolsets with keywords from the spec to find
-       the integrations it needs.
-    2. INSPECT: Call show_toolset to see available operations, then
-       get_tool_contract for specific operations you need.
-    3. DOCS: Call get_tool_docs to get exact import paths, function
-       signatures, and usage examples for the toolset.
-    4. GENERATE: Write the complete Python workflow code following the
-       SDK rules below.
-    5. VALIDATE: Call validate_code with your generated code.
-    6. FIX: If validation finds errors, fix the code and validate again.
-    7. SUBMIT: When the code validates cleanly, use the final_output
-       tool to return the code and a brief explanation.
+    1. DISCOVER: search_toolsets with keywords from the spec.
+    2. INSPECT: show_toolset for operations, get_tool_contract for the ones
+       you need.
+    3. DOCS: get_tool_docs for exact imports and signatures.
+    4. RESOLVE: look up every entity the spec names and every enumerated
+       value it filters on — see "Resolve every entity".
+    5. PLAN: split the spec into nodes; decide per node whether code can do
+       it or it needs judgement — see "Code or judgement". Return this in
+       the final_output `plan` field.
+    6. GENERATE: write the workflow, following the SDK rules below.
+    7. VALIDATE: validate_code.
+    8. FIX: correct anything it reports, and validate again.
+    9. SUBMIT: final_output with the code, the plan, and a brief explanation.
 
-    If the spec does not mention any external integration, skip steps 1-3
-    and go directly to code generation.
+    RESOLVE and PLAN come before GENERATE, always. Code written first is code
+    built around a guess, and the guess is invisible in the finished file.
+
+    Skip 1-3 when the spec needs no external integration.
 
     ## SDK rules you MUST follow
 
@@ -69,14 +72,12 @@ DEFAULT_SYSTEM_PROMPT = textwrap.dedent("""\
     Start the file with:
         from workflow_builder import Context, Retry, step, workflow
 
-    NEVER import Retry from workflow_builder.steps — it comes from
-    workflow_builder directly. Other libraries (httpx, json) go at the top of
-    the file or inside step bodies. Never import a store: where the journal
-    lives is the host's choice, not the workflow's.
+    NEVER import Retry from workflow_builder.steps. Other libraries (httpx,
+    json) go at the top of the file or inside step bodies. Never import a
+    store: where the journal lives is the host's choice, not the workflow's.
 
     ### Step functions
-    - Decorate with @step for simple steps (no parentheses when no args)
-    - Decorate with @step(retry=Retry(max_attempts=3)) for retryable I/O
+    - @step, or @step(retry=Retry(max_attempts=3)) for retryable I/O
     - Must be async def
     - Parameters are plain data (str, int, dict, list) — NO ctx parameter
     - Do all I/O inside step functions, never in the workflow body
@@ -93,20 +94,16 @@ DEFAULT_SYSTEM_PROMPT = textwrap.dedent("""\
           ctx.step(a, x), ctx.step(b, y))
     - For durable sleep: await ctx.sleep(timedelta(minutes=5))
     - For AI agent calls: result = await ctx.agent("prompt text")
-      result.output is the agent's text response (str)
+      result.text() is the reply as a string; result.output is it typed
     - NEVER call datetime.now(), uuid.uuid4(), random.*() directly
     - NEVER do I/O in the workflow body
-
-    ### ctx.agent() — AI agent calls
-    Invokes the agent configured on the runtime; no framework import needed.
-        result = await ctx.agent("Search for 5 recent AI articles")
-        text = result.output  # str
 
     ### What the file contains
     Steps and workflows, and nothing else: no Runtime at import time, no store,
     no connections. Those are the host's decisions.
 
-    End with a demo block so the file can be run directly:
+    End with a demo block so the file runs directly — imports inside it, store
+    from the environment:
 
         if __name__ == "__main__":
             import asyncio
@@ -114,9 +111,7 @@ DEFAULT_SYSTEM_PROMPT = textwrap.dedent("""\
             from workflow_builder import Runtime
 
             async def main():
-                # Store comes from $LOOM_STORE; defaults to in-memory.
-                rt = Runtime.from_env()
-                result = await rt.run(workflow_fn, input_data)
+                result = await Runtime.from_env().run(workflow_fn, input_data)
                 print(f"Status: {result.status.value}")
                 if result.error:
                     print(f"Error: {result.error.message}")
@@ -124,81 +119,133 @@ DEFAULT_SYSTEM_PROMPT = textwrap.dedent("""\
 
             asyncio.run(main())
 
-    Keep the Runtime import inside that block.
+    ### What a toolset call hands back
+    Typed Pydantic models, not dicts — attribute access (`result.field`), not
+    subscripting.
 
-    ### Return types
-    Toolset tools return typed Pydantic models, not plain dicts.
-    Use attribute access (result.field), not subscripting (result["field"]).
+    A search or list returns at most its `max_results`/`limit`; the toolset
+    pages the API to fill it. The result is a list that also knows whether it
+    saw everything, and that survives being returned from a step:
+
+        found = await ctx.step(<search operation>, query, max_results=200)
+        if not found.complete:
+            header = f"showing {found.summary()}"   # "200 of 312"
+
+    Spec says **all / every / the full list** → raise the limit and report the
+    coverage. A count over a capped fetch looks complete and is not. For a set
+    with no natural bound — a mailbox, a log — take one page per step with
+    `cursor=`, as the toolset docs show; one call for 50,000 rows is a single
+    journal entry that a crash refetches whole.
 
     ## What the workflow returns
 
     A markdown string, annotated `-> str`, unless the spec asks otherwise —
-    the result is usually read by a person, not indexed into.
-
-    Lead with the answer, then the detail. When the result is empty, say what
-    was searched. Keep identifiers verbatim: keys, ids, URLs are what the
-    reader acts on. Tables for rows, bullets for a few items, prose for one.
+    the result is usually read by a person, not indexed into. Lead with the
+    answer, then the detail. When the result is empty, say what was searched.
+    Keep identifiers verbatim: keys, ids, URLs are what the reader acts on.
+    Tables for rows, bullets for a few, prose for one.
 
     Return structured data when the spec asks for it — "return a dict of...",
     "output JSON", or output that feeds a system rather than a person.
 
+    ## Code or judgement: decide per node, before writing any
+
+    For each node ask: **can I write a rule today that is right for every
+    input the spec allows?**
+
+    **Yes → `@step`.** Fetching, filtering on a resolved id, arithmetic,
+    formatting, sorting, sending.
+
+    **No, or unsure → `ctx.agent()`. When in doubt, use the agent.** A wrong
+    rule fails silently. Use it for open-ended language (summarise, draft,
+    rewrite), a judgement with no stated threshold ("needs attention",
+    "important", "relevant"), classification the data does not carry
+    (sentiment, intent, priority), and anything still ambiguous after
+    resolution.
+
+    The tell for a rule you should not write: a keyword list, a regex over
+    prose, or a threshold you picked. If you invented the constant, the spec
+    did not give you the rule — `if "urgent" in subject.lower()` is a guess
+    wearing the clothes of logic.
+
+    Part rule, part judgement → split it: a `@step` that fetches and narrows,
+    a `ctx.agent()` that judges what is left.
+
+    **The exception:** a lookup with one right answer — a person, a project, a
+    status name — is a query, not judgement. Resolve it below, at authoring
+    time. "When in doubt use the agent" is about whether a *rule* can express
+    the task, not about facts you can go and find.
+
     ## Resolve every entity before you write code
 
-    A spec names people, places, and states the way a person says them. APIs
-    match identifiers and their own configured vocabulary. Filtering on the
-    spec's words returns zero rows and no error, which reads as "nothing to do".
-
-    Nothing the spec names may reach a query as raw text. For each one:
+    A spec names people and states the way a person says them; APIs match
+    identifiers. Filtering on the spec's words returns zero rows and no error,
+    which reads as "nothing to do". Nothing the spec names may reach a query as
+    raw text. For each one:
 
     1. **Look it up now** with `call_read_operation`. Search broadly, then
-       narrow — a person's phrasing rarely matches a stored name exactly.
-       **At most two lookups per entity.** Repeating a search that already
-       answered does not make the answer clearer; if two attempts have not
+       narrow. **At most two lookups per entity** — repeating a search that
+       already answered does not make it clearer; if two attempts have not
        settled it, it is ambiguous, and rung 3 is where ambiguity goes.
-    2. **One clear answer** → put the id in the code with the name it came from
-       beside it in a comment. The workflow then does no lookup at run time.
+    2. **One clear answer** → put the id in the code, the name beside it in a
+       comment. The workflow then does no lookup at run time.
     3. **Ambiguous after those two lookups** → do not call the toolset
        operation directly for it. Emit a `ctx.agent()` step that resolves it at run time,
        handing over the candidates you found and the toolsets it may use.
        Deciding which "xyz work" someone meant is a judgement about language,
        and a model makes it where a query cannot.
-    4. **Nothing found** → return an error naming what was tried. Never fall
-       back to the raw string; it will silently match nothing.
+    4. **Nothing found** → error, naming what was tried. Never fall back to the
+       raw string; it silently matches nothing.
+
+    A **fuzzy text search is not a resolution**. `text ~ "..."`, `contains`,
+    `LIKE` — the spec's own words in front of a match operator is rung 4 in
+    disguise: it looks like searching and it is guessing. Nor may you quietly
+    fix a spelling: "sas" becoming "saas" is a guess about what someone meant,
+    and guesses belong in rung 3, made out loud with the candidates in view.
 
     The agent-node form, when rung 3 applies:
 
         resolved = await ctx.agent(
-            "Which of these stories, epics is 'xyz work'? "
-            "PA-1769 Launch Project 1; PA-1844 Project V2. "
+            "Which of these is 'xyz work'? PA-1769 Launch; PA-1844 V2. "
             "Reply with the key alone.",
             toolsets=["<the toolset>"],
         )
         issues = await ctx.step(<search operation>, f"parent = {resolved.output}")
 
-    Enumerated values — statuses, categories, labels — are usually per-account
-    configuration, not constants. Read them before filtering on them rather
-    than assuming the common defaults.
+    Enumerated values — statuses, categories, labels — are per-account
+    configuration, not constants. Read them before filtering on them.
 
-    Use `ctx.agent()` for judgement of this kind, and for genuine judgement
-    tasks (which of these need a reply, draft this). Not for a lookup that
-    already has one answer: that re-answers it, differently, on every run.
+    Not for a lookup with one answer: that
+    re-answers it, differently, on every run.
 
     ## Only the toolsets listed above exist
 
     If the spec needs another, do not write code against it — say so, naming
-    what the task needs and what is available. Building the part you can, and
-    stating what you could not, is fine. An invented import fails on its first
-    line, whenever it eventually runs.
+    what the task needs and what is available. Building the part you can and
+    saying what you could not is fine. An invented import fails on its first
+    line, whenever it runs.
 
     ## Output format
     Return the code via the final_output tool. The 'code' field must
-    contain the complete Python source — no markdown fences.
+    contain the complete Python source — no markdown fences. The 'plan' field
+    lists each node with the choice you made and why, so the choice can be
+    reviewed rather than inferred from the finished code.
 """)
 
 
 # ---------------------------------------------------------------------------
 # Structured output model for the final_output tool
 # ---------------------------------------------------------------------------
+
+
+class NodePlan(BaseModel):
+    """One node, and why it is code or judgement."""
+
+    node: str = Field(description="What this node does, in a few words.")
+    kind: str = Field(
+        description="'step' when a rule covers every input, 'agent' when it needs judgement."
+    )
+    why: str = Field(default="", description="One line: why that choice.")
 
 
 class CodingOutput(BaseModel):
@@ -210,6 +257,13 @@ class CodingOutput(BaseModel):
     explanation: str = Field(
         default="",
         description="Brief explanation of the design choices.",
+    )
+    plan: list[NodePlan] = Field(
+        default_factory=list,
+        description=(
+            "Each node with its step/agent choice and the reason. Decided "
+            "before the code is written."
+        ),
     )
 
 
@@ -240,6 +294,21 @@ class CodingResult:
     entity was actually resolved rather than assumed."""
     review: SupervisorVerdict | None = None
     """A second model's verdict, when a supervisor was configured."""
+    plan: list[NodePlan] = field(default_factory=list)
+    """Each node, classified as code or judgement, with the reason.
+
+    Surfaced rather than left in the prompt because a rule the model is asked
+    to follow silently is a rule nobody can check it followed. This is the
+    artifact a reviewer reads to see *why* a threshold became an agent call —
+    or to catch the reverse, an agent doing arithmetic.
+
+    Empty when the model did not supply one; absence is not a claim that
+    everything is deterministic."""
+
+    @property
+    def judgement_nodes(self) -> list[NodePlan]:
+        """The nodes the agent decided needed judgement."""
+        return [node for node in self.plan if node.kind == "agent"]
 
     def load(self) -> Any:
         """Import the generated code and return its ``WorkflowDefinition``.
@@ -289,11 +358,38 @@ class CodingResult:
 
         Static cleanliness alone is a weak claim — code can validate perfectly,
         run perfectly, and still charge a customer twice.
+
+        See :attr:`blockers` for *why* when this is ``False``.
         """
-        static_ok = not any(i.severity == "error" for i in self.issues)
-        ran_ok = self.smoke is None or self.smoke.ok
-        reviewed_ok = self.review is None or not self.review.blocking
-        return static_ok and ran_ok and reviewed_ok
+        return not self.blockers
+
+    @property
+    def blockers(self) -> list[str]:
+        """Why :attr:`is_clean` is ``False`` — empty when it is ``True``.
+
+        Added because "verified: False" on correct code is a dead end: the
+        reason is spread across ``issues``, ``smoke``, and ``review``, and a
+        caller has to know which to read.
+
+        An **environmental** smoke failure is not a blocker. The smoke stage
+        already treats it as a warning — the sandbox having no credential says
+        nothing about the code — and ``is_clean`` used to disagree with the
+        stage that produced the result, so a correct workflow that talks to a
+        real service could never be clean.
+        """
+        found = [
+            f"{issue.category}: {issue.message}"
+            for issue in self.issues
+            if issue.severity == "error"
+        ]
+        unverified = self.smoke is not None and (
+            self.smoke.environmental or self.smoke.unverifiable
+        )
+        if self.smoke is not None and not self.smoke.ok and not unverified:
+            found.append(f"smoke: {self.smoke.error}")
+        if self.review is not None and self.review.blocking:
+            found.append("review: the supervisor blocked it")
+        return found
 
     def save(self, path: str) -> None:
         """Write the generated code to *path*."""
@@ -348,8 +444,18 @@ class WorkflowCodingAgent:
         smoke_input: Any = None,
         supervisor: CodeSupervisor | None = None,
         stages: list[Any] | None = None,
+        executor: Any = None,
     ) -> None:
         self._model = model
+        self._executor = executor
+        """Optional :class:`AgentExecutor` — LangGraph, Agno, Pydantic AI, or a
+        host's own. ``None`` uses LOOM's built-in ReAct loop.
+
+        Only the *turn loop* is swappable. Discovery tools, the verification
+        pipeline, and repair stay here, because they are what makes generated
+        code trustworthy and no framework supplies them. An executor that
+        cannot honour ``output_type`` will lose the plan — the conformance
+        suite is what stops one shipping that way."""
         self._max_repair = max_repair_attempts
         self._max_discovery = max_discovery_turns
         """Turns allowed before repair: search, inspect, read docs, resolve the
@@ -638,6 +744,7 @@ class WorkflowCodingAgent:
             output_type=CodingOutput,
             model_settings=ModelSettings(temperature=0.2),
             limits=UsageLimits(max_turns=max_turns),
+            executor=self._executor,
         )
 
         try:
@@ -647,14 +754,30 @@ class WorkflowCodingAgent:
             # answer it can act on — an exception discards whatever the run
             # learned and gives them a stack trace instead of a reason.
             logger.info("generate | agent loop ended: %s", exc)
+            # Advice that cannot help is worse than none: a missing API key
+            # is not fixed by raising the turn budget, and telling someone to
+            # narrow their spec sends them to rewrite a spec that was fine.
+            from workflow_builder.agents.smoke import is_environmental
+
+            if is_environmental(str(exc)):
+                remedy = (
+                    "This is about the environment, not the spec — a missing "
+                    "credential, service, or network. Set the provider's API "
+                    "key (ANTHROPIC_API_KEY, OPENAI_API_KEY, …); a shell does "
+                    "not read .env the way the cookbooks do."
+                )
+            else:
+                remedy = (
+                    "If it ran out of turns, raise max_discovery_turns or "
+                    "narrow the spec — each entity it has to resolve costs a "
+                    "turn."
+                )
             return CodingResult(
                 code="",
                 issues=[
                     CodeIssue(
                         "unsupported",
-                        f"The agent did not produce code: {exc}. If it ran out "
-                        "of turns, raise max_discovery_turns or narrow the "
-                        "spec — each entity it has to resolve costs a turn.",
+                        f"The agent did not produce code: {exc}. {remedy}",
                         "error",
                     )
                 ],
@@ -663,14 +786,27 @@ class WorkflowCodingAgent:
 
         # Extract code from structured output
         explanation = ""
+        plan: list[NodePlan] = []
         if isinstance(result.output, CodingOutput):
             code = result.output.code
             explanation = result.output.explanation
+            plan = list(result.output.plan)
         elif isinstance(result.output, dict):
             code = result.output.get("code", "")
             explanation = str(result.output.get("explanation", ""))
+            plan = [
+                NodePlan.model_validate(entry)
+                for entry in result.output.get("plan") or []
+                if isinstance(entry, dict)
+            ]
         else:
             code = str(result.output or "")
+
+        if plan:
+            logger.info(
+                "generate | plan: %s",
+                ", ".join(f"{node.node}={node.kind}" for node in plan),
+            )
 
         code = _extract_code(code)
 
@@ -740,6 +876,7 @@ class WorkflowCodingAgent:
         return CodingResult(
             code=code,
             issues=issues,
+            plan=plan,
             tool_calls=[(c.name, _brief_args(c.arguments)) for c in result.tool_calls],
             smoke=smoke,
             review=review,

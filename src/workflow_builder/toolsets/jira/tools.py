@@ -31,13 +31,14 @@ from workflow_builder.toolsets.jira.models import (
     Transition,
     UserLookup,
 )
+from workflow_builder.toolsets.pagination import Results
 
 
 @step(retry=Retry(max_attempts=3, initial_delay=1.0))
 async def jira_search_issues(
     jql: str,
     max_results: int = 20,
-) -> list[JiraIssue]:
+) -> Results[JiraIssue]:
     """Search Jira issues using JQL.
 
     Args:
@@ -203,7 +204,7 @@ async def jira_list_projects() -> list[JiraProject]:
 async def jira_search_users(
     query: str,
     max_results: int = 10,
-) -> list[JiraUser]:
+) -> Results[JiraUser]:
     """Find Jira users by display name or email address.
 
     Use this before writing a JQL clause about a person. JQL addresses people by
@@ -293,7 +294,7 @@ async def jira_get_project(project_key: str) -> JiraProjectDetail:
 
 
 @step(retry=Retry(max_attempts=3, initial_delay=1.0))
-async def jira_get_comments(issue_key: str, max_results: int = 20) -> list[Comment]:
+async def jira_get_comments(issue_key: str, max_results: int = 20) -> Results[Comment]:
     """Read an issue's comments.
 
     Args:

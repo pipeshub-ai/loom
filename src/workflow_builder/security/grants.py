@@ -32,9 +32,31 @@ class GrantSet(BaseModel):
     """e.g. ``["api.atlassian.com"]``"""
     budget: dict[str, Any] = Field(default_factory=dict)
     """e.g. ``{"usd_per_run": 0.50}``"""
+    strict: bool = False
+    """Close every dimension, not just the ones with entries.
+
+    Off by default so an existing ``GrantSet`` that only ever declared
+    ``toolsets`` keeps behaving exactly as before. When ``True``,
+    :class:`~workflow_builder.runtime.effects.GuardedBroker` denies ``agent``
+    and ``child`` calls too when ``agents``/``subflows`` is empty, instead of
+    treating "nothing declared" as "nothing to check" for that dimension.
+    An identity-derived grant (e.g. from an OAuth scope) should set this —
+    a token that grants ``jira:read`` must not leave every ``ctx.agent()``
+    call unchecked simply because the token said nothing about agents.
+    """
 
     @property
     def is_empty(self) -> bool:
+        """True when this grant set narrows nothing at all.
+
+        ``strict`` alone makes this ``False`` even with every list empty —
+        a strict grant with nothing declared means "deny everything", the
+        opposite of unrestricted, and must not be short-circuited to
+        "permit everything" by ``Authority.is_unrestricted`` or
+        :class:`~workflow_builder.runtime.effects.GuardedBroker`.
+        """
+        if self.strict:
+            return False
         return not any([
             self.toolsets,
             self.agents,
@@ -71,7 +93,15 @@ class GrantSet(BaseModel):
         return False
 
     def merge(self, other: GrantSet) -> GrantSet:
-        """Merge two grant sets (union)."""
+        """Merge two grant sets (union) — widens what is permitted.
+
+        Use this to combine what *several declared workflows* need. Do not
+        use it to combine a declared grant with an identity-derived one
+        (a token's scopes, a delegated caller's authority) — that direction
+        must narrow, which is what :meth:`intersect` is for. ``strict`` is
+        ORed rather than dropped, so merging a strict grant with a lenient
+        one does not silently reopen the dimensions the strict side closed.
+        """
         return GrantSet(
             toolsets=_dedup(self.toolsets + other.toolsets),
             agents=_dedup(self.agents + other.agents),
@@ -79,6 +109,41 @@ class GrantSet(BaseModel):
             subflows=_dedup(self.subflows + other.subflows),
             egress=_dedup(self.egress + other.egress),
             budget={**self.budget, **other.budget},
+            strict=self.strict or other.strict,
+        )
+
+    def intersect(self, other: GrantSet) -> GrantSet:
+        """What both grant sets permit — narrows, never widens.
+
+        This is the direction identity must travel: mapping a token's scopes
+        onto a workflow's declared grant must never grant *more* than the
+        workflow declared, no matter how broad the token's scopes are.
+        ``declared.intersect(scopes_to_grant(token.scopes, declared))``
+        (see :mod:`workflow_builder.identity.scopes`) is the intended call
+        shape, and the result is provably a subset of both operands:
+
+        - ``toolsets`` entries are kept only when one side's entry *covers*
+          the other's (same scope, or a broader scope with a compatible
+          effect) — the narrower of the pair survives. Two entries that
+          govern different toolsets contribute nothing, so a caller with
+          no matching entry gets no toolset access at all rather than a
+          leftover from one side.
+        - ``agents``/``resources``/``subflows``/``egress`` intersect as
+          plain sets — an exact match on both sides.
+        - ``budget`` keeps a key from either side (absence means
+          unconstrained, i.e. the more permissive value), taking the
+          numeric minimum when both sides declare the same key.
+        - ``strict`` is ORed: intersecting with a strict grant must not
+          make the result less strict than either input.
+        """
+        return GrantSet(
+            toolsets=_intersect_toolsets(self.toolsets, other.toolsets),
+            agents=_intersect_plain(self.agents, other.agents),
+            resources=_intersect_plain(self.resources, other.resources),
+            subflows=_intersect_plain(self.subflows, other.subflows),
+            egress=_intersect_plain(self.egress, other.egress),
+            budget=_intersect_budget(self.budget, other.budget),
+            strict=self.strict or other.strict,
         )
 
 
@@ -90,6 +155,65 @@ def _dedup(items: list[str]) -> list[str]:
         if item not in seen:
             seen.add(item)
             result.append(item)
+    return result
+
+
+def _intersect_plain(a: list[str], b: list[str]) -> list[str]:
+    """Exact-match set intersection, order taken from `a`."""
+    held = set(b)
+    return _dedup([item for item in a if item in held])
+
+
+def _parse_toolset_entry(entry: str) -> tuple[str, str]:
+    """Split a ``<toolset>[.<group>][:<effect>]`` entry into (scope, effect).
+
+    ``effect == ""`` means "any effect" — an unqualified entry like ``"jira"``.
+    """
+    scope, _, effect = entry.partition(":")
+    return scope, effect
+
+
+def _covers(broad: tuple[str, str], narrow: tuple[str, str]) -> bool:
+    """Whether everything `narrow` permits is also permitted by `broad`."""
+    broad_scope, broad_effect = broad
+    narrow_scope, narrow_effect = narrow
+    scope_ok = narrow_scope == broad_scope or narrow_scope.startswith(f"{broad_scope}.")
+    effect_ok = broad_effect == "" or broad_effect == narrow_effect
+    return scope_ok and effect_ok
+
+
+def _intersect_toolsets(a: list[str], b: list[str]) -> list[str]:
+    """Keep an entry only where the other side grants at least as much.
+
+    For each pair of entries, one across `a` and one across `b`: if they are
+    identical, keep it; if one covers the other, keep the narrower one.
+    Entries with no counterpart on the other side (including everything, when
+    either list is empty) contribute nothing — the other side never declared
+    that access, so it cannot survive an intersection.
+    """
+    result: list[str] = []
+    parsed_a = [(entry, _parse_toolset_entry(entry)) for entry in a]
+    parsed_b = [(entry, _parse_toolset_entry(entry)) for entry in b]
+    for entry_a, scope_a in parsed_a:
+        for entry_b, scope_b in parsed_b:
+            if scope_a == scope_b:
+                result.append(entry_a)
+            elif _covers(scope_a, scope_b):
+                result.append(entry_b)
+            elif _covers(scope_b, scope_a):
+                result.append(entry_a)
+    return _dedup(result)
+
+
+def _intersect_budget(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
+    """Narrower budget: min of shared numeric keys, else whichever side has it."""
+    result = dict(a)
+    for key, value in b.items():
+        current = result.get(key)
+        if key in result and isinstance(current, int | float) and isinstance(value, int | float):
+            result[key] = min(current, value)
+        elif key not in result:
+            result[key] = value
     return result
 
 

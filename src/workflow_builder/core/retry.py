@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from workflow_builder.core.exceptions import (
+    AuthExpired,
     GuardrailTripwire,
     NonRetryableError,
     ValidationError,
@@ -17,10 +18,16 @@ from workflow_builder.core.types import Duration, to_seconds
 RetryPredicate = Callable[[BaseException], bool]
 
 #: Failures that are pointless to retry: they will fail identically every time.
+#: AuthExpired included deliberately — retrying within a step's backoff window
+#: (seconds) cannot produce the human reauthorization the credential needs, so
+#: retrying only delays the moment the run parks. Excluded, it would surface
+#: to the engine wrapped in RetriesExhausted instead of bare, and the engine's
+#: AuthExpired -> Suspend mapping would never see it.
 PERMANENT_ERRORS: tuple[type[BaseException], ...] = (
     NonRetryableError,
     ValidationError,
     GuardrailTripwire,
+    AuthExpired,
     TypeError,
     ValueError,
     KeyError,

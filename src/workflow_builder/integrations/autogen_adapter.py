@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from workflow_builder.integrations.base import AgentExecutor
+from workflow_builder.integrations.structured import coerce_output
 
 
 def _build_tool_schema(
@@ -72,7 +73,7 @@ class AutoGenExecutor:
         result: TaskResult = await self._team.run(
             task=input
         )
-        return result
+        return coerce_output(result, output_type)
 
 
 # -- static protocol check ---------------------------------------------------

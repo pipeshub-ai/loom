@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from workflow_builder.integrations.base import AgentExecutor
+from workflow_builder.integrations.structured import coerce_output
 
 
 def _build_tool_schema(
@@ -74,7 +75,7 @@ class LangGraphExecutor:
         result = await self._graph.ainvoke(
             invoke_input, config=config or None
         )
-        return result
+        return coerce_output(result, output_type)
 
 
 # -- static protocol check ---------------------------------------------------

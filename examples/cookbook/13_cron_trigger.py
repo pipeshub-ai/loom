@@ -12,16 +12,21 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils import header, log
 
 from workflow_builder import Context, Runtime, step, workflow
+from workflow_builder.runtime.clock import ManualClock
 from workflow_builder.runtime.dispatcher import TriggerDispatcher
 from workflow_builder.state.memory import MemoryStore
+from workflow_builder.testing import advance
 from workflow_builder.triggers.specs import Schedule
+
+#: A fixed moment, so the run is reproducible rather than "whenever you ran it".
+START = datetime(2026, 3, 2, 8, 59, tzinfo=UTC)
 
 
 @step
@@ -53,27 +58,25 @@ async def heartbeat(ctx: Context, _input: None = None) -> str:
 async def main() -> None:
     header("Cron Trigger Example")
 
-    rt = Runtime(store=MemoryStore())
+    # Fixed start time, so the example prints the same thing every run.
+    rt = Runtime(store=MemoryStore(), clock=ManualClock(START))
     dispatcher = TriggerDispatcher(rt)
 
     log("setup", "Registering heartbeat workflow (cron: */1 * * * *)")
     await dispatcher.register_workflow_async(heartbeat)
 
-    # `tick(now)` takes the time to evaluate against, so a schedule can be
-    # exercised without waiting for the wall clock. Real deployments call
-    # `dispatcher.start(interval=...)` and let it use the actual time; driving
-    # the clock is how you test a schedule in seconds instead of minutes.
+    # A ManualClock is the Runtime's own clock, so moving it moves everything
+    # that reads the time — the dispatcher's schedule and any ctx.sleep alike.
+    # `advance()` moves it, ticks both schedulers, and waits for the runs it
+    # started, which is what "let a minute pass" actually has to mean.
+    #
+    # Real deployments pass no clock and call `dispatcher.start(interval=...)`.
     header("FIRING THE SCHEDULE")
-    log("setup", "Advancing a synthetic clock a minute at a time")
+    log("setup", "Advancing the clock a minute at a time")
 
-    clock = datetime.now(UTC).replace(second=0, microsecond=0)
-    for minute in range(1, 4):
-        moment = clock + timedelta(minutes=minute)
-        fired = await dispatcher.tick(moment)
-        log("tick", f"{moment:%H:%M} -> fired {len(fired)} run(s)")
-
-    # Give the spawned runs a moment to finish.
-    await asyncio.sleep(0.1)
+    for _ in range(3):
+        fired = await advance(rt, minutes=1, dispatcher=dispatcher)
+        log("tick", f"{rt.clock.now():%H:%M} -> fired {len(fired)} run(s)")
 
     runs = await rt.list_runs(workflow="heartbeat")
     header("RUNS")

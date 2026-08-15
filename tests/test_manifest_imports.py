@@ -9,6 +9,7 @@ first line. Documentation that names a symbol is a promise the symbol exists.
 from __future__ import annotations
 
 import importlib
+from typing import ClassVar
 
 import pytest
 
@@ -135,3 +136,139 @@ class TestGeneratedDocs:
 
         assert "not importable" in docs
         assert "Import:" not in docs
+
+
+class TestPaginationIsDeclaredWhereItHappens:
+    """One rule, checked mechanically, across every toolset there will ever be.
+
+    ``max_results: int`` looks identical whether it caps a complete answer or
+    truncates a partial one, so the agent cannot infer paging from a signature
+    and a workflow ends up reporting a page as a total. Declaring it per
+    operation by hand would work for four toolsets and drift for a thousand.
+
+    So the return type *is* the declaration — a paged read returns ``Results``
+    — and this asserts the hand-written manifests agree with the functions they
+    describe. Auto-generated manifests cannot disagree; they derive it.
+    """
+
+    def _manifests(self):
+        return [
+            JIRA_MANIFEST,
+            CONFLUENCE_MANIFEST,
+            GMAIL_MANIFEST,
+            GOOGLE_CALENDAR_MANIFEST,
+        ]
+
+    def _resolve(self, manifest, op):
+        import importlib
+
+        module = importlib.import_module(manifest.tools_module)
+        return getattr(module, op.function, None)
+
+    #: Toolset id → the module whose client methods do the paging.
+    CLIENTS: ClassVar[dict[str, str]] = {
+        "jira": "workflow_builder.toolsets.jira.client",
+        "confluence": "workflow_builder.toolsets.confluence.client",
+        "gmail": "workflow_builder.toolsets.google.gmail.client",
+        "google_calendar": "workflow_builder.toolsets.google.calendar.client",
+    }
+
+    def _client_pages(self, module_name: str) -> set[str]:
+        """Client methods that run a paging loop.
+
+        Source inspection, and deliberately so: the client is the only place
+        that knows the truth, and asking it by *calling* it would need
+        credentials. Fails closed — a loop written some way this does not
+        recognise reports a missing declaration rather than passing quietly.
+        """
+        import importlib
+        import inspect
+
+        module = importlib.import_module(module_name)
+        found: set[str] = set()
+        for _, klass in inspect.getmembers(module, inspect.isclass):
+            if not klass.__module__.startswith(module_name):
+                continue
+            for name, method in inspect.getmembers(klass, inspect.isfunction):
+                try:
+                    source = inspect.getsource(method)
+                except OSError:
+                    continue
+                if "collect(" in source or "paginate(" in source or ".mapped(" in source:
+                    found.add(name)
+        return found
+
+    def test_a_client_that_pages_says_so_all_the_way_out(self) -> None:
+        """The check the two-way version could not make.
+
+        ``calendar_list_calendars`` paged, rebuilt a plain list from the result,
+        and returned it. Manifest and return type agreed it did not page — they
+        agreed with each other and both disagreed with the code. The client is
+        the ground truth, so this compares against it.
+        """
+        from workflow_builder.toolsets.pagination import paginates
+
+        wrong: list[str] = []
+        for manifest in self._manifests():
+            paging = self._client_pages(self.CLIENTS[manifest.id])
+            module = __import__(manifest.tools_module, fromlist=["x"])
+            for op in manifest.all_operations():
+                fn = getattr(module, op.function, None) if op.function else None
+                if fn is None:
+                    continue
+                # The tool wraps a client method of a related name.
+                stem = op.function.split("_", 1)[-1]
+                if stem not in paging and op.id.split(".")[-1] not in paging:
+                    continue
+                if not paginates(fn):
+                    wrong.append(
+                        f"{manifest.id}.{op.id}: the client pages but "
+                        f"{op.function} returns a plain list — the coverage is "
+                        f"computed and thrown away"
+                    )
+        assert not wrong, "\n  ".join(["client and tool disagree:", *wrong])
+
+    def test_every_manifest_matches_its_implementation(self) -> None:
+        from workflow_builder.toolsets.pagination import paginates
+
+        wrong: list[str] = []
+        for manifest in self._manifests():
+            if not manifest.tools_module:
+                continue
+            for op in manifest.all_operations():
+                fn = self._resolve(manifest, op) if op.function else None
+                if fn is None:
+                    continue
+                actual = paginates(fn)
+                if actual != op.pagination:
+                    claim = "declares" if op.pagination else "does not declare"
+                    does = "does" if actual else "does not"
+                    wrong.append(
+                        f"{manifest.id}.{op.id}: manifest {claim} pagination, "
+                        f"{op.function} {does} return Results"
+                    )
+        assert not wrong, "manifest and implementation disagree:\n  " + "\n  ".join(wrong)
+
+    def test_the_paged_reads_are_reachable_as_a_group(self) -> None:
+        """``paginated()`` is what the docs render; it must not be empty."""
+        from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
+
+        paged = {op.function for op in JIRA_MANIFEST.paginated()}
+        assert "jira_search_issues" in paged
+        assert "jira_get_issue" not in paged, "a single-object read is not paged"
+
+    def test_the_agent_is_told_which_reads_page(self) -> None:
+        """The flag existed and reached the catalog, the lockfile, and nothing
+        the model ever saw. This is the line that closes that gap."""
+        from workflow_builder.agents.tool_registry import ToolsetRegistry
+        from workflow_builder.toolsets.jira.manifest import JIRA_MANIFEST
+
+        registry = ToolsetRegistry()
+        registry.register(JIRA_MANIFEST)
+        docs = registry.describe(["jira"], detail="index")
+
+        assert "Paged: " in docs
+        assert "jira_search_issues" in docs.split("Paged: ")[1].split("\n")[0]
+        # The how-to is in the catalog header, once, not once per toolset.
+        assert ".complete" in docs
+        assert docs.count("Bounded set — one call") == 1

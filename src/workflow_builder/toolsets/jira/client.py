@@ -19,6 +19,7 @@ import base64
 import os
 from typing import Any
 
+from workflow_builder.connectors.credentials import current_credential_store, resolve_bearer_token
 from workflow_builder.toolsets.jira.models import (
     Comment,
     CreatedIssue,
@@ -30,6 +31,16 @@ from workflow_builder.toolsets.jira.models import (
     Transition,
     UserLookup,
 )
+from workflow_builder.toolsets.pagination import (
+    OffsetPaging,
+    Results,
+    TokenPaging,
+    page_through,
+)
+
+#: Jira Cloud caps a page here whatever ``maxResults`` asks for, and reports
+#: no error when it does.
+JIRA_PAGE_CAP = 100
 
 
 class JiraClient:
@@ -51,26 +62,54 @@ class JiraClient:
         base_url: str | None = None,
         email: str | None = None,
         api_token: str | None = None,
+        *,
+        credential_name: str = "jira",
     ) -> None:
         self._base_url = (base_url or os.environ.get("JIRA_URL", "")).rstrip("/")
         self._email = email or os.environ.get("JIRA_EMAIL", "")
         self._token = api_token or os.environ.get("JIRA_API_TOKEN", "")
+        self._credential_name = credential_name
 
         if not self._base_url:
             msg = "JIRA_URL is required (env var or base_url argument)"
             raise ValueError(msg)
-        if not self._email or not self._token:
+        # A CredentialStore bound to the current run might supply what the
+        # environment did not, but that can only be checked with an await —
+        # deferred to _headers() at first actual call. Raise now only when
+        # nothing could possibly save it: no email/token *and* no store
+        # bound at all, exactly today's behaviour when neither is true.
+        if (not self._email or not self._token) and current_credential_store() is None:
             msg = "JIRA_EMAIL and JIRA_API_TOKEN are required"
             raise ValueError(msg)
 
-        credentials = base64.b64encode(
-            f"{self._email}:{self._token}".encode()
-        ).decode()
-        self._headers = {
-            "Authorization": f"Basic {credentials}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
+    async def _headers(self) -> dict[str, str]:
+        """Basic auth from email/token, or a CredentialStore-issued bearer token.
+
+        The store is checked first and on every call — never cached — so a
+        run that connected 'jira' after this client was constructed, or
+        whose stored token the store has since refreshed, is never stuck
+        with what was true when ``__init__`` ran. Falls back to Basic auth
+        when no store is bound or it has nothing under ``credential_name``,
+        which is exactly today's only behaviour.
+        """
+        token = await resolve_bearer_token(self._credential_name)
+        if token:
+            return {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+        if self._email and self._token:
+            credentials = base64.b64encode(f"{self._email}:{self._token}".encode()).decode()
+            return {
+                "Authorization": f"Basic {credentials}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+        raise ValueError(
+            "JIRA_EMAIL and JIRA_API_TOKEN are required, or connect a "
+            f"'{self._credential_name}' credential via a CredentialStore"
+        )
 
     # ------------------------------------------------------------------
     # Low-level HTTP
@@ -80,8 +119,9 @@ class JiraClient:
         import httpx
 
         url = f"{self._base_url}/rest/api/3/{path.lstrip('/')}"
+        headers = await self._headers()
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(url, headers=self._headers, params=params)
+            resp = await client.get(url, headers=headers, params=params)
             resp.raise_for_status()
             return resp.json()
 
@@ -89,8 +129,9 @@ class JiraClient:
         import httpx
 
         url = f"{self._base_url}/rest/api/3/{path.lstrip('/')}"
+        headers = await self._headers()
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(url, headers=self._headers, json=json)
+            resp = await client.post(url, headers=headers, json=json)
             resp.raise_for_status()
             return resp.json()
 
@@ -98,8 +139,9 @@ class JiraClient:
         import httpx
 
         url = f"{self._base_url}/rest/api/3/{path.lstrip('/')}"
+        headers = await self._headers()
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.put(url, headers=self._headers, json=json)
+            resp = await client.put(url, headers=headers, json=json)
             resp.raise_for_status()
             return resp.json() if resp.content else {}
 
@@ -107,8 +149,9 @@ class JiraClient:
         import httpx
 
         url = f"{self._base_url}/rest/api/3/{path.lstrip('/')}"
+        headers = await self._headers()
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.delete(url, headers=self._headers, params=params)
+            resp = await client.delete(url, headers=headers, params=params)
             resp.raise_for_status()
 
     # ------------------------------------------------------------------
@@ -120,25 +163,38 @@ class JiraClient:
         jql: str,
         max_results: int = 20,
         fields: list[str] | None = None,
-    ) -> list[JiraIssue]:
-        """Search using JQL and return a flat list of typed issues.
+    ) -> Results:
+        """Search using JQL and return typed issues, following every page.
 
-        Uses POST /rest/api/3/search/jql (Jira Cloud current endpoint).
+        Uses POST /rest/api/3/search/jql (Jira Cloud current endpoint), which
+        caps a page at 100 however large a ``maxResults`` you send — and says
+        nothing when it does. Asking for 500 and receiving 100 with a 200 OK is
+        the failure this loop exists to prevent.
+
+        The result is a list, so existing callers are unaffected; check
+        ``.complete`` to find out whether ``max_results`` cut it off.
         """
         default_fields = [
             "summary", "status", "assignee", "priority",
             "issuetype", "created", "updated", "description",
             "comment", "labels", "project",
         ]
-        data = await self._post(
-            "search/jql",
-            {
-                "jql": jql,
-                "maxResults": max_results,
-                "fields": fields or default_fields,
-            },
+
+        return await page_through(
+            lambda params: self._post(
+                "search/jql",
+                {"jql": jql, "fields": fields or default_fields, **params},
+            ),
+            style=TokenPaging(
+                items="issues",
+                token_param="nextPageToken",
+                last_field="isLast",
+                total_field="total",
+            ),
+            limit=max_results,
+            page_size=JIRA_PAGE_CAP,
+            row=_flatten_issue,
         )
-        return [_flatten_issue(i) for i in data.get("issues", [])]
 
     async def get_issue(self, issue_key: str) -> JiraIssue:
         """Fetch a single issue by key, e.g. ``'PROJ-123'``."""
@@ -248,18 +304,26 @@ class JiraClient:
         )
         return issue_key
 
-    async def get_comments(self, issue_key: str, max_results: int = 20) -> list[Comment]:
-        """Read an issue's comments, flattened out of Atlassian Document Format."""
-        data = await self._get(f"issue/{issue_key}/comment", maxResults=max_results)
-        return [
-            Comment(
+    async def get_comments(self, issue_key: str, max_results: int = 20) -> Results:
+        """Read an issue's comments, flattened out of Atlassian Document Format.
+
+        Offset-paged rather than token-paged — the same endpoint family, a
+        different dialect, which is why the loop takes the paging scheme as an
+        argument instead of assuming one.
+        """
+
+        return await page_through(
+            lambda params: self._get(f"issue/{issue_key}/comment", **params),
+            style=OffsetPaging(items="comments", total_field="total"),
+            limit=max_results,
+            page_size=JIRA_PAGE_CAP,
+            row=lambda item: Comment(
                 id=item.get("id", ""),
                 author=(item.get("author") or {}).get("displayName", ""),
                 created=item.get("created", ""),
                 body=_flatten_adf(item.get("body")),
-            )
-            for item in data.get("comments", [])
-        ]
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Projects
@@ -316,7 +380,7 @@ class JiraClient:
             active=bool(data.get("active", True)),
         )
 
-    async def search_users(self, query: str, max_results: int = 10) -> list[JiraUser]:
+    async def search_users(self, query: str, max_results: int = 10) -> Results:
         """Find users by display name or email.
 
         The bridge between a human saying "Vishwjeet" and JQL, which addresses
@@ -324,16 +388,20 @@ class JiraClient:
         until two people share one, or somebody is renamed; an accountId does
         not move.
         """
-        data = await self._get("user/search", query=query, maxResults=max_results)
-        return [
-            JiraUser(
+        # A bare array with no envelope, so OffsetPaging falls back to "a short
+        # page means the end" — see its docstring for what that cannot answer.
+        return await page_through(
+            lambda params: self._get("user/search", query=query, **params),
+            style=OffsetPaging(),
+            limit=max_results,
+            page_size=JIRA_PAGE_CAP,
+            row=lambda item: JiraUser(
                 account_id=item.get("accountId", ""),
                 display_name=item.get("displayName", ""),
                 email=item.get("emailAddress", ""),
                 active=bool(item.get("active", True)),
-            )
-            for item in data
-        ]
+            ),
+        )
 
 
     async def resolve_user(self, name: str, cutoff: float = 0.6) -> UserLookup:

@@ -20,6 +20,7 @@ from workflow_builder.toolsets.google.gmail.models import (
     GmailProfile,
     SentMessage,
 )
+from workflow_builder.toolsets.pagination import Results
 
 if TYPE_CHECKING:
     from workflow_builder.storage.attachment import Attachment
@@ -60,7 +61,7 @@ _SEND = Retry(max_attempts=1)
 async def gmail_search_messages(
     query: str = "",
     max_results: int = 20,
-) -> list[EmailMessage]:
+) -> Results[EmailMessage]:
     """Search the mailbox with Gmail search syntax.
 
     Costs one request per hit on top of the search, so keep max_results small.

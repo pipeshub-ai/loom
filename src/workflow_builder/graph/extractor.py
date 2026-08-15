@@ -39,7 +39,8 @@ _CTX_CALL_MAP: dict[str, NodeKind] = {
     "wait_for_approval": NodeKind.HUMAN,
     "child": NodeKind.SUBFLOW,
     "agent": NodeKind.AGENT,
-    "emit": NodeKind.EMIT,
+    "publish": NodeKind.EMIT,
+    "emit": NodeKind.EMIT,  # deprecated alias for publish, still drawable
     "signal": NodeKind.EMIT,
     "checkpoint": NodeKind.ARTIFACT,
 }

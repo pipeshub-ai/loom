@@ -520,3 +520,71 @@ class TestWorkflowTools:
         result = await tools[1]("nonexistent")
         data = json.loads(result)
         assert "error" in data
+
+
+class TestSchedulesSurviveARestart:
+    """The test that would have caught the data loss, at the level it happened.
+
+    ``SQLiteStore`` implemented no ``TriggerStore`` method, and the dispatcher
+    substituted an in-memory store for any store that could not hold triggers.
+    Runs were durable, schedules were not, and nothing said so — the failure
+    only appears on the second start of a long-lived process, which is the
+    hardest place to be looking.
+    """
+
+    async def test_a_schedule_registered_on_sqlite_outlives_the_process(
+        self, tmp_path
+    ) -> None:
+        from workflow_builder import Context, Runtime, workflow
+        from workflow_builder.runtime.dispatcher import TriggerDispatcher
+        from workflow_builder.state import SQLiteStore
+        from workflow_builder.triggers import Schedule
+
+        @workflow(name="restart_nightly", triggers=[Schedule(cron="0 9 * * *")])
+        async def nightly(ctx: Context, _=None) -> str:
+            """Every morning at nine."""
+            return "ran"
+
+        database = tmp_path / "runs.db"
+
+        first = Runtime(store=SQLiteStore(database))
+        dispatcher = TriggerDispatcher(first)
+        assert type(dispatcher._store).__name__ == "SQLiteStore", (
+            "the dispatcher must use the runtime's durable store, not a stand-in"
+        )
+        await dispatcher.register(nightly)
+        await first.store.close()
+
+        # A restart: same file on disk, nothing else carried over.
+        second = Runtime(store=SQLiteStore(database))
+        survivors = await TriggerDispatcher(second)._store.list_triggers()
+        await second.store.close()
+
+        assert [t.workflow for t in survivors] == ["restart_nightly"]
+
+    async def test_a_store_that_cannot_hold_schedules_says_so(self) -> None:
+        """Refusing is read once; degrading is discovered in production."""
+        from workflow_builder import Runtime
+        from workflow_builder.core.exceptions import ConfigurationError
+        from workflow_builder.runtime.dispatcher import TriggerDispatcher
+
+        # A real Runtime whose store implements ExecutionStore and no more —
+        # which is exactly what a host writing its own backend produces.
+        runtime = Runtime()
+        runtime.store = object()
+
+        with pytest.raises(ConfigurationError) as caught:
+            TriggerDispatcher(runtime)
+
+        message = str(caught.value)
+        assert "cannot persist schedules" in message
+        assert "trigger_store=" in message, "the message must name the way out"
+
+    async def test_an_explicit_ephemeral_store_is_still_allowed(self) -> None:
+        """Opting out is fine; doing it by accident is not."""
+        from workflow_builder import Runtime
+        from workflow_builder.runtime.dispatcher import TriggerDispatcher
+        from workflow_builder.state import MemoryStore
+
+        dispatcher = TriggerDispatcher(Runtime(), trigger_store=MemoryStore())
+        assert dispatcher._store is not None

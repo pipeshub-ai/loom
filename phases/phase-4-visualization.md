@@ -6,6 +6,17 @@
 
 **System Design References:** Chapters 7, 12.8-12.9 (L2f, L2g data flow diagrams).
 
+**Host note (PipesHub).** WGIR extraction below is the structural contract —
+what a host is allowed to trust as "everything this code does." A host that
+wants a bespoke rendering surface (e.g. an agent that turns the code file into
+a live React app, as PipesHub does) builds it as a consumer of WGIR, not a
+replacement for it: render however you like, then verify the render's
+node/edge set against WGIR before showing it to a user, the same way
+`Explainer._verify_completeness` (§3.7) already checks a narration against the
+skeleton. See [`docs/pipeshub-integration.md`](../docs/pipeshub-integration.md)
+§9.2 for the full reconciliation and why an agent-only render (no
+verification step) is a regression from what this phase guarantees.
+
 ---
 
 ## 1. Exit Criteria & Success Metrics
@@ -807,6 +818,7 @@ flowchart LR
 | **GraphPatch completeness** | Only 6 ops — complex edits rejected | "Edit in IDE" fallback + coding agent |
 | **Dynamic flows** | Flows generated at runtime bypass AST extraction | Document: extracted flows must be importable at check time |
 | **Large graphs** | 100+ node graphs may produce unwieldy narrations | Hierarchical narration: summary + detail per section |
+| **Agent-rendered canvases (host-built)** | A host renders WGIR as a custom UI (e.g. an agent generating a React app) without verifying the render against WGIR, silently reintroducing "the model can hide a step" | This phase's contract is WGIR, not a specific renderer; document the verify-against-WGIR requirement for any alternate rendering surface (see PipesHub integration §9.2) |
 
 ---
 

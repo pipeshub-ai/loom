@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from workflow_builder.integrations.base import AgentExecutor
+from workflow_builder.integrations.structured import coerce_output
 
 
 class PydanticAIExecutor:
@@ -48,7 +49,7 @@ class PydanticAIExecutor:
             )
 
         result = await self._agent.run(input)
-        return result.data
+        return coerce_output(result.data, output_type)
 
 
 # -- static protocol check ---------------------------------------------------
