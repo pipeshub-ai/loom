@@ -66,7 +66,19 @@
       "Bash(python -m pytest tests/test_p2_production.py -q -k \"Http or http\")",
       "Bash(grep -n '^#\\\\{1,3\\\\} ' tools.md core.md subagent.md session.md)",
       "Bash(grep -n '^#\\\\{2,3\\\\} ' tool-catalog.md)",
-      "Bash(rg -n \"'\\(web|headless|run|exec\\)'\" apps/cli/src/*.ts)"
+      "Bash(rg -n \"'\\(web|headless|run|exec\\)'\" apps/cli/src/*.ts)",
+      "Bash(grep -n '^```python' docs/nodes-plan.md)",
+      "Bash(grep -n '^```text' docs/pagination-plan.md)",
+      "Bash(ruff --version)",
+      "Bash(.venv/bin/ruff check *)",
+      "Bash(../../.venv/bin/python 23_bounded_tool_results.py)",
+      "Bash(/Users/abhishek/opensource/loom/.venv/bin/python 23_bounded_tool_results.py)",
+      "Bash(rm -rf .loom-blobs)",
+      "Bash(.venv/bin/mypy)",
+      "Bash(awk '{print $9, $5\"b\"}')",
+      "Bash(git show *)",
+      "Read(//tmp/**)",
+      "Bash(sed 's/^/mypy errors in touched files: /')"
     ]
   }
 }

@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
     from workflow_builder.facade import RuntimeFacade
     from workflow_builder.identity.config import IdentitySettings
+    from workflow_builder.mcp_server.authoring_config import AuthoringConfig
 
 __all__ = ["build_server", "create_server", "serve"]
 
@@ -52,6 +53,7 @@ def build_server(
     scheduler: bool = True,
     identity: IdentitySettings | None = None,
     transport: str = "stdio",
+    authoring: AuthoringConfig | None = None,
 ) -> FastMCP:
     """Bind a :class:`RuntimeFacade` to a FastMCP server.
 
@@ -60,6 +62,10 @@ def build_server(
     install behaves exactly as it did before identity existed. ``transport``
     matters here too: auth only ever applies over a networked transport,
     never over ``stdio`` — see ``mcp_server/server.py::build_server`` for why.
+
+    ``authoring`` defaults to ``AuthoringConfig.from_env()`` — pass
+    ``AuthoringConfig(enabled=False)`` to serve only the sixteen
+    run-management tools, with none of the six code-authoring ones.
     """
     _require_mcp()
     from workflow_builder.mcp_server.server import build_server as _build
@@ -72,6 +78,7 @@ def build_server(
         scheduler=scheduler,
         identity=identity,
         transport=transport,
+        authoring=authoring,
     )
 
 
@@ -92,6 +99,7 @@ def serve(
     port: int = 8000,
     scheduler: bool = True,
     identity: IdentitySettings | None = None,
+    authoring: AuthoringConfig | None = None,
 ) -> None:
     """Run the server until the client disconnects.
 
@@ -99,6 +107,9 @@ def serve(
     speak; ``http`` (streamable HTTP) is for clients that connect over a network.
     ``host`` and ``port`` apply to those, and are ignored by stdio. ``scheduler``
     runs the timer loop while the server is up, so ``ctx.sleep()`` resumes.
+
+    ``authoring`` defaults to ``AuthoringConfig.from_env()``; pass
+    ``AuthoringConfig(enabled=False)`` to drop the six code-authoring tools.
 
     Refuses to bind a non-loopback host over a networked transport with no
     identity configured — that combination would serve every workflow this
@@ -124,6 +135,7 @@ def serve(
         scheduler=scheduler,
         identity=identity,
         transport=transport,
+        authoring=authoring,
     )
     if transport == "stdio":
         server.run("stdio")

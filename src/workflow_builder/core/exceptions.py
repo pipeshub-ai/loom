@@ -30,6 +30,25 @@ class ValidationError(WorkflowError):
     """Input or output failed schema validation."""
 
 
+class InputMismatch(ValidationError):  # noqa: N818 - names the mismatch, not an error class
+    """A payload does not fit the workflow's declared input.
+
+    Raised at the door, before a run record exists. A run that could never
+    have started is not a failed run: counting it as one skews every
+    reliability number, consumes an admission slot for work that cannot
+    happen, and leaves something in history that ``retry()`` will fail
+    identically forever. This says "you sent the wrong input" rather than
+    "this workflow is broken", which is the distinction the two audiences
+    need.
+    """
+
+    def __init__(self, message: str, *, workflow: str = "", path: str = "") -> None:
+        super().__init__(message)
+        self.workflow = workflow
+        self.path = path
+        """Dotted location of the offending field, when one field is at fault."""
+
+
 class SerializationError(WorkflowError):
     """A value could not be journaled because it is not serializable."""
 

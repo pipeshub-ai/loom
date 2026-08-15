@@ -205,6 +205,27 @@ class TestAuthorizationUrl:
         assert "response_type=code" in url
         assert "scope=jira.issues%3Aread" in url
 
+    def test_extra_params_are_merged_into_the_url(self) -> None:
+        client = _client()
+        url = client.authorization_url(
+            state="s",
+            code_challenge="c",
+            extra_params={"access_type": "offline", "prompt": "consent"},
+        )
+        assert "access_type=offline" in url
+        assert "prompt=consent" in url
+
+    def test_pkce_false_omits_challenge_params(self) -> None:
+        client = _client(pkce=False)
+        url = client.authorization_url(state="s")
+        assert "code_challenge" not in url
+        assert "code_challenge_method" not in url
+
+    def test_pkce_true_without_a_challenge_raises(self) -> None:
+        client = _client()
+        with pytest.raises(ConfigurationError, match="code_challenge"):
+            client.authorization_url(state="s")
+
     def test_without_an_authorization_endpoint_raises_configuration_error(self) -> None:
         client = _client(authorization_endpoint="")
         with pytest.raises(ConfigurationError):
@@ -232,6 +253,14 @@ class TestAuthorizationCodeFlow:
         assert cred.refresh_token is not None
         assert cred.scopes == {"jira.issues:read"}
         assert cred.expires_at is not None
+
+    async def test_pkce_false_exchanges_without_a_verifier(
+        self, server: FakeAuthServer
+    ) -> None:
+        server.issue_code("plain-code")
+        client = _client(pkce=False)
+        cred = await client.exchange_code("plain-code")
+        assert cred.token.reveal().startswith("access-")
 
     async def test_wrong_verifier_is_rejected(self, server: FakeAuthServer) -> None:
         _, challenge = generate_pkce_pair()

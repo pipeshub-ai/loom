@@ -111,6 +111,12 @@ def check_file(
             f"narration omitted {len(missing)} node(s): {', '.join(missing[:5])}"
         )
 
+    # A grant that names nothing permits nothing, and reads as a restriction
+    # either way. Caught here because `loom check` is the pass that runs before
+    # anyone deploys, and a startup failure at that point is a fixed typo
+    # rather than an agent reporting a missing tool in production.
+    report.problems.extend(_grant_problems(source_file))
+
     if not write:
         report.unchanged.extend([graph_path, description_path])
         return report
@@ -171,3 +177,24 @@ def _load_definitions(
     steps = [v for v in vars(module).values() if isinstance(v, StepDefinition)]
     workflows = [v for v in vars(module).values() if isinstance(v, WorkflowDefinition)]
     return steps, workflows
+
+
+def _grant_problems(source_file: Path) -> list[str]:
+    """Grant entries in *source_file* that name no registered toolset.
+
+    Reads the source rather than importing it: `loom check` must not execute
+    the workflow it is checking, and the entries are literals in the decorator.
+    """
+    from workflow_builder.agents.stages import _declared_grants
+    from workflow_builder.toolsets.registry import get_catalog
+
+    try:
+        code = source_file.read_text(encoding="utf-8")
+    except OSError:
+        return []
+
+    catalog = get_catalog()
+    found: list[str] = []
+    for grant in _declared_grants(code):
+        found.extend(str(issue) for issue in grant.validate_against(toolsets=catalog))
+    return found

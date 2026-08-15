@@ -15,6 +15,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
+from workflow_builder.agents.bounds import bound_result
 from workflow_builder.agents.executor import AgentContext, AgentSettings
 from workflow_builder.agents.guardrails import GuardrailAction
 from workflow_builder.agents.limits import DEFAULT_LIMITS
@@ -74,6 +75,16 @@ class BuiltInAgentRuntime:
         self._agent = agent
         self.agent_id = agent.name
 
+    @staticmethod
+    def _spill_store(context: Any) -> Any:
+        """Where an oversized tool result is stored, if anywhere.
+
+        Derived from the Runtime's blob service rather than configured
+        separately: a deployment that has somewhere to put large values already
+        said so once, and asking twice is how the two drift apart.
+        """
+        return getattr(context, "spill", None)
+
     async def execute(
         self,
         input: Any,
@@ -91,7 +102,25 @@ class BuiltInAgentRuntime:
                 f"Set agent.model to a ModelProvider instance."
             )
 
-        effective_tools = tools if tools is not None else agent.tools
+        effective_tools = list(tools if tools is not None else agent.tools)
+        if getattr(agent, "user_interaction", None) is not None and not any(
+            t.name == "ask_user" for t in effective_tools
+        ):
+            from workflow_builder.agents.interaction import make_ask_user_tool
+
+            effective_tools.append(make_ask_user_tool(agent.user_interaction))
+
+        # Mounted up front, not when a result first overflows: the model sees
+        # the tool list before the call that overflows, and a locator it has no
+        # way to follow is just a more informative truncation.
+        store = self._spill_store(context)
+        if agent.bounds is not None and store is not None:
+            from workflow_builder.agents.spill_tools import spill_tools
+
+            known = {t.name for t in effective_tools}
+            effective_tools.extend(
+                t for t in spill_tools(store) if t.name not in known
+            )
         tool_map = {t.name: t for t in effective_tools}
         limits = agent.limits or DEFAULT_LIMITS
         model_settings = agent.model_settings.merged_with(
@@ -269,11 +298,16 @@ class BuiltInAgentRuntime:
                     # Execute tool
                     started = time.monotonic()
                     outcome = "ok"
+                    result: Any = None
                     try:
                         tool_ctx = ToolContext(
                             run_id=context.run_id if context else "",
                             agent_name=agent.name,
                             tool_call_id=call.id,
+                            deps=getattr(context, "deps", None) if context else None,
+                            workflow_ctx=(
+                                getattr(context, "workflow_ctx", None) if context else None
+                            ),
                         )
                         result = await _dispatch_tool(tool, call, tool_ctx, context)
                         result_str = tool.render_result(result)
@@ -306,7 +340,21 @@ class BuiltInAgentRuntime:
                         (time.monotonic() - started) * 1000,
                     )
 
-                    messages.append(tool_result(call.id, result_str, name=call.name))
+                    # Bound what the *conversation* carries. The item below
+                    # keeps the rendered result as-is, and the journal keeps
+                    # the value whole: a replay has to reconstruct the run that
+                    # happened, and an unbounded result is still what the tool
+                    # returned. Only the model's view is capped.
+                    bounded = await bound_result(
+                        result_str,
+                        result if outcome == "ok" else None,
+                        bounds=agent.bounds,
+                        store=self._spill_store(context),
+                        run_id=context.run_id if context else "",
+                        tool=call.name,
+                        call_id=call.id,
+                    )
+                    messages.append(tool_result(call.id, bounded, name=call.name))
                     items.append(RunItem(
                         kind=ItemKind.TOOL_OUTPUT,
                         agent=agent.name,
@@ -422,6 +470,7 @@ async def run_agent_durably(
     ctx: Context[Any],
     max_turns: int | None = None,
     session_id: str | None = None,
+    authority: Any = None,
     **kwargs: Any,
 ) -> AgentResult[Any]:
     """Run an agent within a durable workflow context.
@@ -438,6 +487,12 @@ async def run_agent_durably(
         workflow=ctx.workflow,
         session_id=session_id,
         broker=ctx._runtime.broker,
-        authority=ctx._authority,
+        # Narrowed for this call when the caller asked for less; the workflow's
+        # own authority otherwise. Passed rather than read off the context, so
+        # two concurrent ctx.agent() calls under gather cannot see each other's.
+        authority=authority if authority is not None else ctx._authority,
+        deps=ctx.deps,
+        workflow_ctx=ctx,
+        spill=ctx._runtime.spill,
     )
     return await agent(input, settings=settings, context=context)

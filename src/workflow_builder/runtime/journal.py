@@ -18,6 +18,7 @@ in the journal, and a completed entry returns the recorded value instead of runn
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
@@ -26,6 +27,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from workflow_builder.core.exceptions import NondeterminismError
 from workflow_builder.core.models import ErrorInfo, StepRecord, StepStatus, Usage
+
+logger = logging.getLogger(__name__)
 
 
 class EntryKind(StrEnum):
@@ -48,6 +51,21 @@ class EntryStatus(StrEnum):
     PENDING = "pending"
     COMPLETED = "completed"
     FAILED = "failed"
+    """Terminal. Replay re-raises what the run originally saw."""
+    EXHAUSTED = "exhausted"
+    """The step spent its own retry budget; the *run* may still be attempted.
+
+    A step that exhausts ``Retry`` has said nothing about whether the run is
+    finished — a payment gateway returning 503 needs the same code run again in
+    five minutes, not the journal edited. Recording that as ``FAILED`` makes it
+    permanent, which leaves ``retry()`` (prune and restart) as the only
+    recovery, and pruning throws away the attempt history that would tell an
+    operator this has failed six times against the same gateway.
+
+    Replay re-executes an exhausted entry as if it were absent, keeping the
+    attempts recorded. The engine promotes it to ``FAILED`` when the run itself
+    goes terminal and no outer driver claimed it.
+    """
     SUSPENDED = "suspended"
 
 
@@ -119,6 +137,13 @@ class JournalEntry(BaseModel):
 
     @property
     def is_settled(self) -> bool:
+        """Whether replay can serve this entry rather than re-running it.
+
+        ``EXHAUSTED`` is deliberately absent: it is recorded, but it is not an
+        answer, so counting it as settled would make ``Journal.replayed``
+        over-report and let a lookup short-circuit work that still has to
+        happen.
+        """
         return self.status in (EntryStatus.COMPLETED, EntryStatus.FAILED)
 
     def to_record(self, seq: int) -> StepRecord:
@@ -126,6 +151,9 @@ class JournalEntry(BaseModel):
             EntryStatus.PENDING: StepStatus.PENDING,
             EntryStatus.COMPLETED: StepStatus.COMPLETED,
             EntryStatus.FAILED: StepStatus.FAILED,
+            # Reads as failed to anything rendering a run — it did fail — while
+            # the journal keeps the distinction that decides what replay does.
+            EntryStatus.EXHAUSTED: StepStatus.FAILED,
             EntryStatus.SUSPENDED: StepStatus.RUNNING,
         }
         return StepRecord(
@@ -159,6 +187,39 @@ class CompatibilityMode(StrEnum):
     """
 
 
+class VerifyMode(StrEnum):
+    """Whether a replayed entry must prove it belongs to the call that found it.
+
+    A path finds *an* entry. Kind and name make it plausible. Neither makes it
+    right: two calls to one step at adjacent positions match each other's
+    entries, so swapping the two lines replays each call against the other's
+    recorded output — with no error, because everything the lookup compares is
+    still equal. The fingerprint (name plus arguments) is the part that differs,
+    and it has been recorded on every entry since the journal existed.
+
+    Separate from :class:`CompatibilityMode`, which answers a different
+    question. Compatibility is about *shape* — the workflow issued a different
+    operation than the one recorded — and its answer is to truncate and move on.
+    Verification is about *arguments*, where truncating would be far too
+    destructive a response to what is usually a benign difference.
+    """
+
+    OFF = "off"
+    """Compare nothing. What the engine did before verification existed."""
+
+    WARN = "warn"
+    """Serve the recorded value, log once, and flag the entry.
+
+    The default, because an argument difference is not always a bug: a step
+    whose input derives from ``ctx.state`` — which is deliberately not
+    journaled — legitimately replays with different arguments. Raising on that
+    would break correct workflows, so the first release only tells you.
+    """
+
+    STRICT = "strict"
+    """Raise :class:`NondeterminismError` naming the step and both fingerprints."""
+
+
 def _describe_hash_mismatch(
     entry: JournalEntry, contract_hash: str, closure_hash: str
 ) -> str:
@@ -183,13 +244,29 @@ class Journal:
         entries: list[JournalEntry] | None = None,
         *,
         compatibility: CompatibilityMode = CompatibilityMode.STRICT,
+        verify: VerifyMode = VerifyMode.WARN,
+        resume_exhausted: bool = True,
     ) -> None:
         self._entries: dict[str, JournalEntry] = {e.path: e for e in entries or []}
         self._compatibility = compatibility
+        self._verify = verify
+        self.resume_exhausted = resume_exhausted
+        """Whether an exhausted entry is re-executed or re-raised on this pass.
+
+        The same record answers two different questions depending on who is
+        asking. ``retry``/``resume`` want the step attempted again, with the
+        work before it still served from the journal. ``replay`` is a rehearsal
+        of what happened and must reproduce the failure the run actually saw.
+        Reading the status per operation keeps one record honest for both,
+        where mutating it on the way to terminal would settle the question for
+        whichever asked first.
+        """
         self._dirty: set[str] = set()
         self.root = Scope()
         self.replayed = 0
         self.executed = 0
+        self.drifted: list[str] = []
+        """Paths whose replayed arguments differed from the recorded ones."""
 
     # -- lookup -----------------------------------------------------------------------
 
@@ -204,6 +281,7 @@ class Journal:
         *,
         contract_hash: str = "",
         closure_hash: str = "",
+        fingerprint: str = "",
     ) -> JournalEntry | None:
         """Return the entry at ``path``, verifying that replay has not diverged.
 
@@ -212,12 +290,18 @@ class Journal:
 
         When ``contract_hash`` or ``closure_hash`` are supplied, mismatches against the
         journal entry are treated as divergences — the step's signature or body changed.
+
+        ``fingerprint`` identifies the call's *arguments*. It is checked under
+        :class:`VerifyMode`, which is a separate axis from compatibility: a
+        shape divergence truncates, an argument divergence warns or raises but
+        never discards a journal the run may still need.
         """
         entry = self._entries.get(path)
         if entry is None:
             return None
 
         if entry.kind is kind and entry.name == name:
+            self._verify_arguments(entry, fingerprint)
             # Check for contract/closure drift when hashes are available.
             hash_mismatch = _describe_hash_mismatch(entry, contract_hash, closure_hash)
             if hash_mismatch:
@@ -253,6 +337,77 @@ class Journal:
         self.truncate(path)
         return None
 
+    def _verify_arguments(self, entry: JournalEntry, fingerprint: str) -> None:
+        """Check that a replayed call asked for what the recorded one asked for.
+
+        Silent when either side has no fingerprint. An entry journaled before
+        this check existed carries none, and refusing to replay those would
+        make an upgrade strand every in-flight run — a far worse failure than
+        the one being prevented.
+        """
+        if self._verify is VerifyMode.OFF:
+            return
+        if not fingerprint or not entry.fingerprint:
+            return
+        if fingerprint == entry.fingerprint:
+            return
+
+        if self._verify is VerifyMode.STRICT:
+            raise NondeterminismError(
+                f"replay diverged at position {entry.path}: {entry.kind.value} "
+                f"'{entry.name}' was journaled with different arguments than the "
+                f"call replaying now ({entry.fingerprint[:8]}→{fingerprint[:8]}). "
+                f"Two calls to one step can swap places without changing their "
+                f"kind or name, so the recorded value may belong to the other "
+                f"call. If the arguments come from ctx.state or another "
+                f"unjournaled read, move that read into a step; otherwise "
+                f"replay with verify=VerifyMode.WARN.",
+                seq=path_order(entry.path)[0],
+                expected=entry.fingerprint,
+                actual=fingerprint,
+            )
+
+        entry.metadata["argument_drift"] = True
+        # Marked dirty so the flag reaches storage: a warning in a log the
+        # operator was not watching is not a report. The write is idempotent
+        # and happens only for entries that actually drifted.
+        self._dirty.add(entry.path)
+        self.drifted.append(entry.path)
+        logger.warning(
+            "replay argument drift at %s (%s '%s'): journaled %s, replaying %s. "
+            "The recorded value is being served anyway. If the arguments come "
+            "from ctx.state or another unjournaled read, move that read into a "
+            "step so the run replays identically.",
+            entry.path,
+            entry.kind.value,
+            entry.name,
+            entry.fingerprint[:8],
+            fingerprint[:8],
+        )
+
+    def find(self, kind: EntryKind, name: str) -> JournalEntry | None:
+        """The first entry matching *kind* and *name*, wherever it sits.
+
+        For the one record whose identity is its name rather than its position:
+        a version gate has to be found by the same key after the code around it
+        moves, or it cannot do its job.
+        """
+        for path in sorted(self._entries, key=path_order):
+            entry = self._entries[path]
+            if entry.kind is kind and entry.name == name:
+                return entry
+        return None
+
+    def has_entries_after(self, path: str) -> bool:
+        """Whether anything was recorded past *path*.
+
+        Evidence that the body already ran through this position — which is how
+        a version gate tells "never been here" from "was here before the gate
+        existed".
+        """
+        boundary = path_order(path)
+        return any(path_order(other) > boundary for other in self._entries)
+
     def truncate(self, path: str) -> None:
         """Drop the entry at ``path``, everything nested beneath it, and every later entry."""
         boundary = path_order(path)
@@ -261,6 +416,16 @@ class Journal:
             self._dirty.discard(key)
 
     # -- mutation ---------------------------------------------------------------------
+
+    def mark_dirty(self, path: str) -> None:
+        """Queue an already-recorded entry for re-persisting.
+
+        For flags discovered *during* replay — argument drift, contract drift —
+        which belong on the entry rather than only in a log the operator was
+        not watching.
+        """
+        if path in self._entries:
+            self._dirty.add(path)
 
     def put(self, entry: JournalEntry) -> JournalEntry:
         self._entries[entry.path] = entry
@@ -313,7 +478,17 @@ class Journal:
         return any(other.startswith(prefix) for other in self._entries)
 
     def failed_entries(self) -> list[JournalEntry]:
-        return [entry for entry in self.entries() if entry.status is EntryStatus.FAILED]
+        return [
+            entry
+            for entry in self.entries()
+            if entry.status in (EntryStatus.FAILED, EntryStatus.EXHAUSTED)
+        ]
+
+    def exhausted_entries(self) -> list[JournalEntry]:
+        """Entries a further attempt at the run would re-execute."""
+        return [
+            entry for entry in self.entries() if entry.status is EntryStatus.EXHAUSTED
+        ]
 
     def __len__(self) -> int:
         return len(self._entries)

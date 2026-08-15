@@ -57,9 +57,8 @@ DEFAULT_SYSTEM_PROMPT = textwrap.dedent("""\
        it or it needs judgement — see "Code or judgement". Return this in
        the final_output `plan` field.
     6. GENERATE: write the workflow, following the SDK rules below.
-    7. VALIDATE: validate_code.
-    8. FIX: correct anything it reports, and validate again.
-    9. SUBMIT: final_output with the code, the plan, and a brief explanation.
+    7. VALIDATE: validate_code, correct what it reports, validate again.
+    8. SUBMIT: final_output with the code, the plan, and a brief explanation.
 
     RESOLVE and PLAN come before GENERATE, always. Code written first is code
     built around a guess, and the guess is invisible in the finished file.
@@ -81,8 +80,9 @@ DEFAULT_SYSTEM_PROMPT = textwrap.dedent("""\
     - Must be async def
     - Parameters are plain data (str, int, dict, list) — NO ctx parameter
     - Do all I/O inside step functions, never in the workflow body
-    - Toolset tools are steps themselves: call them directly inside a
-      @step function, not via ctx.step()
+    - Toolset tools ARE steps: call them with ctx.step(tool, ...) from the
+      workflow body. Awaiting one inside another @step skips the journal, its
+      retry policy, and the grant check
 
     ### Workflow function
     - Decorate with @workflow(name="<descriptive_name>")
@@ -93,10 +93,19 @@ DEFAULT_SYSTEM_PROMPT = textwrap.dedent("""\
     - For parallel steps: results = await ctx.gather(
           ctx.step(a, x), ctx.step(b, y))
     - For durable sleep: await ctx.sleep(timedelta(minutes=5))
+    - For files: an Attachment carries bytes plus filename and mime.
+      Stage then commit so a run can accumulate files before publishing:
+
+        export = await ctx.step(gmail_get_attachment, message_id, att_id)
+        await ctx.stage_artifact("invoice.pdf", export)
+        version = await ctx.commit_staged("invoice.pdf")
+
+      ctx.put_artifact(name, data) publishes immediately; ctx.artifact_url(name)
+      mints a short-lived URL — never journal it. Never re-download an
+      offloaded ref.
     - For AI agent calls: result = await ctx.agent("prompt text")
       result.text() is the reply as a string; result.output is it typed
     - NEVER call datetime.now(), uuid.uuid4(), random.*() directly
-    - NEVER do I/O in the workflow body
 
     ### What the file contains
     Steps and workflows, and nothing else: no Runtime at import time, no store,
@@ -437,6 +446,7 @@ class WorkflowCodingAgent:
         max_discovery_turns: int = 20,
         tool_docs: list[str] | None = None,
         tool_registry: object | None = None,
+        node_registry: object | None = None,
         instructions: str | None = None,
         extra_instructions: str = "",
         allowed_packages: Iterable[str] | None = None,
@@ -445,6 +455,7 @@ class WorkflowCodingAgent:
         supervisor: CodeSupervisor | None = None,
         stages: list[Any] | None = None,
         executor: Any = None,
+        user_interaction: Any | None = None,
     ) -> None:
         self._model = model
         self._executor = executor
@@ -476,6 +487,18 @@ class WorkflowCodingAgent:
         )
         self._tool_docs = tool_docs or []
         self._tool_registry = tool_registry
+        if node_registry is None:
+            from workflow_builder.nodes.registry import (
+                get_node_catalog,
+                load_builtin_nodes,
+            )
+
+            load_builtin_nodes()
+            node_registry = get_node_catalog()
+        self._node_registry = node_registry
+        """The node catalog the agent browses. Pass ``rt.nodes`` so it finds
+        exactly the nodes the generated workflow can call; the process-global
+        catalog is the default and can be a superset."""
         self._instructions = instructions
         self._extra_instructions = extra_instructions
         self._smoke_test = smoke_test
@@ -488,7 +511,9 @@ class WorkflowCodingAgent:
         self._pipeline = CheckPipeline(
             stages
             if stages is not None
-            else default_stages(supervisor=None, smoke=smoke_test)
+            else default_stages(
+                supervisor=None, smoke=smoke_test, registry=self._tool_registry
+            )
         )
         """Verification stages, cheapest first. Passing ``stages=`` replaces the
         default arrangement outright — a caller wanting a linter but no smoke
@@ -497,6 +522,12 @@ class WorkflowCodingAgent:
         """Optional second model that reviews the finished code. Off by default:
         it costs an extra call, and it is only worth it when the workflow does
         something you would want a colleague to look at."""
+        self._user_interaction = user_interaction
+        self._ask_gate: Any | None = None
+        if user_interaction is not None:
+            from workflow_builder.agents.interaction import AskUserGate
+
+            self._ask_gate = AskUserGate()
 
     def build_system_prompt(self) -> str:
         """Compose the full system prompt.
@@ -529,6 +560,14 @@ class WorkflowCodingAgent:
             if desc:
                 parts.append(desc)
 
+        # Categories and counts only. Never the node list: the block must stay
+        # O(categories) so registering the five-hundredth custom node does not
+        # lengthen this prompt. Detail comes from search_nodes/node_contract.
+        if self._node_registry is not None:
+            block = self._node_registry.prompt_block()
+            if block:
+                parts.append(block)
+
         # Backward compat: append hand-written tool_docs if provided
         if self._tool_docs:
             parts.append(
@@ -537,6 +576,15 @@ class WorkflowCodingAgent:
 
         if self._extra_instructions:
             parts.append(self._extra_instructions)
+
+        if self._user_interaction is not None:
+            parts.append(
+                "## Asking the user\n\n"
+                "When the spec is ambiguous and you cannot proceed without a "
+                "decision the spec does not make, use ask_user. Do not ask to "
+                "confirm what the spec already states. Keep questions short. "
+                "Prefer select with options when the choices are known."
+            )
 
         return "\n\n".join(parts)
 
@@ -726,6 +774,11 @@ class WorkflowCodingAgent:
         from workflow_builder.agents.limits import UsageLimits
         from workflow_builder.agents.models import ModelSettings
 
+        if self._user_interaction is not None:
+            from workflow_builder.agents.interaction import AskUserGate
+
+            self._ask_gate = AskUserGate()
+
         max_turns = self._max_discovery + self._max_repair
         logger.info(
             "generate | model=%s max_turns=%d pre_loaded_docs=%d",
@@ -739,7 +792,11 @@ class WorkflowCodingAgent:
             instructions=self.build_system_prompt(),
             model=self._model,
             tools=build_coding_tools(
-                registry=self._tool_registry, validator=self._validator
+                registry=self._tool_registry,
+                validator=self._validator,
+                node_registry=self._node_registry,
+                interaction=self._user_interaction,
+                gate=self._ask_gate,
             ),
             output_type=CodingOutput,
             model_settings=ModelSettings(temperature=0.2),
@@ -809,6 +866,11 @@ class WorkflowCodingAgent:
             )
 
         code = _extract_code(code)
+
+        # Repair and smoke must not block on a human. Flip the gate off
+        # before either re-invokes the same agent object.
+        if self._ask_gate is not None:
+            self._ask_gate.enabled = False
 
         # No code is a refusal, not a broken generation — most often because the
         # task needs an integration this environment does not have. Reporting it

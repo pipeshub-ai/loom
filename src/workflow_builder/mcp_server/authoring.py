@@ -1,0 +1,407 @@
+"""What an MCP client can *author* with LOOM's coding toolchain.
+
+Every function here is a plain coroutine — no ``mcp`` import — over the same
+components :class:`~workflow_builder.agents.coding_agent.WorkflowCodingAgent`
+uses internally via ``build_coding_tools()``: the toolset catalog, the code
+validator, and the sandboxed smoke runner. The MCP wiring lives in
+:mod:`.server` and does nothing but bind these to tool names and annotations.
+
+The design is deliberately *not* a wrapper around
+``WorkflowCodingAgent.generate()``. That would nest a second LLM inside the
+host's own model turn, need a server-side API key, and fight MCP's tool-call
+timeouts. Instead, each stage of the agent's own discover -> generate ->
+validate -> smoke -> save pipeline is exposed as its own tool, so the host
+model — Cursor, Claude — drives the loop with the model it already has, and
+LOOM supplies only the verification the host model cannot do itself: real
+toolset schemas, AST/import checks, and a real (sandboxed) execution.
+
+Every tool returns JSON text with an ``error`` key on failure. None raise —
+a raise aborts the calling model's turn; a payload it can read and act on.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+#: Same ceiling as ``mcp_server/tools.py`` — a discipline on what this server
+#: hands back, not a client-side limit.
+MAX_RESPONSE_CHARS = 8_000
+
+__all__ = [
+    "MAX_RESPONSE_CHARS",
+    "call_read_operation",
+    "get_tool_contract",
+    "get_tool_docs",
+    "save_workflow",
+    "smoke_test_workflow",
+    "validate_workflow_code",
+]
+
+
+def _json(payload: Any) -> str:
+    return json.dumps(payload, indent=2, default=str)
+
+
+def _catalog() -> Any:
+    """The process-global toolset catalog these tools browse.
+
+    Same registry ``mcp_server/tools.py::search_toolsets``/``show_toolset``
+    and the coding agent's own ReAct tools browse — one catalog, multiple
+    callers, so a client that just searched for "jira" finds the same
+    toolset here without a second registration step.
+    """
+    from workflow_builder.toolsets.registry import get_catalog, register_available_toolsets
+
+    register_available_toolsets()
+    return get_catalog()
+
+
+async def get_tool_contract(op_path: str) -> str:
+    """Full typed contract for one toolset operation.
+
+    Args:
+        op_path: Dotted path like ``"jira.issues.search"`` — toolset id, then
+            the operation id from ``show_toolset``.
+
+    Returns JSON: ``op_id``, ``input_schema``, ``output_schema``, ``scopes``,
+    ``effect``, ``description``, ``idempotent``, ``pagination``,
+    ``import_line``, ``toolset_id``. ``import_line`` is the exact
+    ``from ... import ...`` statement the generated code needs — it comes
+    from the toolset's manifest, not the operation contract itself.
+    """
+    catalog = _catalog()
+    try:
+        contract = catalog.stub(op_path)
+    except (KeyError, ValueError) as exc:
+        return _json({"error": str(exc)})
+
+    result = contract.model_dump()
+    toolset_id = op_path.split(".", 1)[0]
+    manifest = catalog.get(toolset_id)
+    result["import_line"] = manifest.import_line() if manifest is not None else ""
+    result["toolset_id"] = toolset_id
+    if result.get("pagination"):
+        result["pagination_note"] = (
+            "This operation returns a Results list (a list subclass). "
+            "Check .complete (False when max_results cut it short), "
+            ".total (how many matched), and .cursor (continuation token). "
+            "Set max_results high enough or loop with the cursor. "
+            "Never silently drop results."
+        )
+    return _json(result)
+
+
+async def get_tool_docs(toolset_id: str) -> str:
+    """Usage documentation for a toolset: imports, signatures, examples.
+
+    Args:
+        toolset_id: e.g. ``"jira"``, ``"confluence"``.
+
+    Not every toolset has hand-written docs — only ones registered via
+    ``register_tool_docs`` (built-in: jira, confluence, langchain). Toolsets
+    without them are still fully usable via ``get_tool_contract``; this is a
+    denser, example-carrying supplement where it exists.
+    """
+    from workflow_builder.agents.coding_tools import _TOOL_DOCS_REGISTRY, _ensure_builtin_docs
+
+    _ensure_builtin_docs()
+    docs = _TOOL_DOCS_REGISTRY.get(toolset_id)
+    if docs is None:
+        return _json(
+            {
+                "error": f"No tool docs registered for '{toolset_id}'.",
+                "available": sorted(_TOOL_DOCS_REGISTRY),
+                "note": "get_tool_contract works for any registered toolset, "
+                "with or without docs.",
+            }
+        )
+    if callable(docs):
+        docs = docs()
+        _TOOL_DOCS_REGISTRY[toolset_id] = docs
+    return docs if isinstance(docs, str) else _json(docs)
+
+
+async def call_read_operation(
+    op_path: str,
+    arguments_json: str = "{}",
+    *,
+    seen: dict[str, int] | None = None,
+) -> str:
+    """Execute a READ-ONLY toolset operation, for resolving entities before
+    writing code that depends on them.
+
+    Use this to turn a name in a spec into the id generated code actually
+    needs — which account id is "Vishwjeet", whether project "SAAS" exists —
+    rather than guessing and shipping code that runs and returns nothing.
+
+    Only operations declared ``read`` may be called; a write or destructive
+    operation is refused. This performs a real call against connected
+    credentials — a missing credential or network failure comes back as an
+    ``error`` explaining that authoring cannot resolve it here, not a crash.
+
+    Args:
+        op_path: Fully qualified operation, e.g. ``"jira.projects.list"``.
+        arguments_json: The operation's arguments, JSON-encoded object, e.g.
+            ``'{"name": "Vishwjeet"}'``. Defaults to no arguments.
+    """
+    from workflow_builder.agents.coding_tools import _call_read_operation
+
+    try:
+        arguments = json.loads(arguments_json) if arguments_json else {}
+    except json.JSONDecodeError as exc:
+        return _json({"error": f"arguments_json is not valid JSON: {exc}"})
+
+    result = await _call_read_operation(op_path, arguments, registry=None, seen=seen)
+    return result[:MAX_RESPONSE_CHARS]
+
+
+async def validate_workflow_code(
+    code: str,
+    allowed_packages: str | None = None,
+) -> str:
+    """Validate workflow code against LOOM's static rules. Does not run it.
+
+    Runs, in order: a compile check (catches what ``ast.parse`` lets through,
+    like a bare ``return`` outside a function), then AST structure checks
+    (missing ``@workflow``/``@step``, bare I/O in a workflow body,
+    nondeterministic calls, unresolvable ``workflow_builder`` symbols, and
+    imports of toolsets this server does not have registered).
+
+    Args:
+        code: Complete Python source.
+        allowed_packages: Comma-separated third-party package names the
+            target environment has installed, e.g. ``"httpx,pandas"``. Omit
+            to skip the allowlist check entirely.
+
+    Returns JSON: ``{"valid": bool, "issues": [{"category", "severity",
+    "message"}, ...]}``. ``valid`` is false only when an issue's severity is
+    ``"error"`` — warnings do not block.
+    """
+    from workflow_builder.agents.smoke import compile_check
+    from workflow_builder.agents.validator import CodeValidator
+
+    compiled = compile_check(code)
+    if not compiled.ok:
+        return _json(
+            {
+                "valid": False,
+                "issues": [
+                    {
+                        "category": "syntax",
+                        "severity": "error",
+                        "message": compiled.error,
+                    }
+                ],
+            }
+        )
+
+    packages = (
+        {p.strip() for p in allowed_packages.split(",") if p.strip()}
+        if allowed_packages
+        else None
+    )
+    validator = CodeValidator(
+        allowed_packages=packages,
+        toolset_modules=_toolset_modules(),
+    )
+    issues = validator.validate(code)
+    return _json(
+        {
+            "valid": not any(i.severity == "error" for i in issues),
+            "issues": [
+                {"category": i.category, "severity": i.severity, "message": i.message}
+                for i in issues
+            ],
+        }
+    )
+
+
+async def smoke_test_workflow(
+    code: str,
+    workflow_input_json: str = "null",
+    *,
+    timeout: float = 30.0,
+) -> str:
+    """Run workflow code once in a sandboxed subprocess. Does not touch a
+    real network or credential.
+
+    The subprocess uses ``MemoryStore`` and a mock model provider, with every
+    registered toolset's operations replaced by schema-generated fakes — the
+    same sandbox ``WorkflowCodingAgent`` smoke-tests generated code in. A
+    failure here is either a real bug (missing import, wrong step arity, a
+    workflow body touching ``ctx`` incorrectly) or, per the ``environmental``
+    flag, an artifact of the sandbox having no credentials — the latter is
+    not something to fix in the code.
+
+    Args:
+        code: Complete Python source; must contain an ``@workflow`` function.
+        workflow_input_json: Input for the workflow, JSON-encoded. ``"null"``
+            (default) derives one from the workflow's declared input type.
+        timeout: Seconds before the subprocess is killed and the run reported
+            as failed (not a hang in this tool — a bounded wait).
+
+    Returns JSON: ``ok``, ``phase`` (``compile``/``import``/``run``/``done``),
+    ``error``, ``traceback``, ``steps_executed``, ``output_preview``,
+    ``workflows_found``, ``status``, ``environmental``.
+    """
+    import asyncio
+
+    from workflow_builder.agents.smoke import smoke_run
+
+    try:
+        workflow_input = json.loads(workflow_input_json) if workflow_input_json else None
+    except json.JSONDecodeError as exc:
+        return _json({"error": f"workflow_input_json is not valid JSON: {exc}"})
+
+    fakes = _fakes_for_registered_toolsets()
+
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None,
+        lambda: smoke_run(code, workflow_input, timeout=timeout, fakes=fakes),
+    )
+    return _json(
+        {
+            "ok": result.ok,
+            "phase": result.phase,
+            "error": result.error,
+            "traceback": result.traceback[:2000] if result.traceback else "",
+            "steps_executed": result.steps_executed,
+            "output_preview": result.output_preview[:1000],
+            "workflows_found": result.workflows_found,
+            "status": result.status,
+            "environmental": result.environmental,
+        }
+    )
+
+
+async def save_workflow(code: str, path: str) -> str:
+    """Write generated workflow code to a file.
+
+    Refuses an absolute path, a ``..`` component, or a non-``.py`` extension
+    — this tool writes to the host's filesystem, and those are exactly the
+    ways a path escapes the project it was meant to land in. Compile-checks
+    before writing, so a saved file is at least syntactically valid.
+
+    Args:
+        code: Complete Python source.
+        path: Relative file path, e.g. ``"flows/overdue_tickets.py"``. Parent
+            directories are created if missing.
+
+    Returns JSON: ``{"saved": bool, "path": str, "workflows_found": [...]}``
+    on success, or ``{"error": ...}``. ``workflows_found`` is best-effort —
+    the code is imported once to look for ``@workflow`` functions, and an
+    import failure there still leaves the file saved.
+    """
+    from pathlib import Path, PurePosixPath
+
+    from workflow_builder.agents.smoke import compile_check
+
+    posix = PurePosixPath(path)
+    if posix.is_absolute():
+        return _json({"error": "path must be relative, not absolute"})
+    if ".." in posix.parts:
+        return _json({"error": "path must not contain '..'"})
+    if posix.suffix != ".py":
+        return _json({"error": f"path must end in '.py', got '{posix.suffix}'"})
+
+    compiled = compile_check(code)
+    if not compiled.ok:
+        return _json(
+            {"error": f"code does not compile: {compiled.error}", "saved": False}
+        )
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(code, encoding="utf-8")
+
+    return _json(
+        {
+            "saved": True,
+            "path": str(target),
+            "workflows_found": _find_workflow_names(code),
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _toolset_modules() -> dict[str, str]:
+    """Toolset id to its real importable module, for the validator's import
+    check.
+
+    Mirrors ``WorkflowCodingAgent._toolset_modules`` — a toolset's id and its
+    module are not the same string (``google_calendar`` lives at
+    ``workflow_builder.toolsets.google.calendar``), so the check needs the
+    real path, not a name-based guess.
+    """
+    catalog = _catalog()
+    modules: dict[str, str] = {}
+    for toolset_id in catalog.list_toolsets():
+        manifest = catalog.get(toolset_id)
+        module = getattr(manifest, "tools_module", "") if manifest is not None else ""
+        if module:
+            modules[toolset_id] = module
+    return modules
+
+
+def _fakes_for_registered_toolsets() -> list[tuple[str, str]]:
+    """``(tools_module, manifest_import_path)`` pairs for every registered
+    toolset, for ``smoke_run``'s ``fakes=``.
+
+    Mirrors ``WorkflowCodingAgent._check_context`` — ``smoke_run`` does not
+    discover fakes on its own; the caller must resolve each manifest's own
+    import path so the subprocess can re-import it.
+    """
+    from workflow_builder.agents.coding_agent import _manifest_path
+
+    catalog = _catalog()
+    fakes: list[tuple[str, str]] = []
+    for toolset_id in catalog.list_toolsets():
+        manifest = catalog.get(toolset_id)
+        if manifest is None:
+            continue
+        tools_module = getattr(manifest, "tools_module", "")
+        if not tools_module:
+            continue
+        manifest_path = _manifest_path(manifest)
+        if manifest_path:
+            fakes.append((tools_module, manifest_path))
+    return fakes
+
+
+def _find_workflow_names(code: str) -> list[str]:
+    """Names of every ``@workflow`` function in *code*, best-effort.
+
+    Imports *code* into a throwaway module — the same approach
+    ``CodingResult.load()`` takes — rather than parsing the AST for a
+    decorator name, since the true test of "is this a workflow" is the
+    object the decorator produces, not what the source calls it.
+    """
+    import importlib.util
+    import tempfile
+
+    from workflow_builder.runtime.workflow import WorkflowDefinition
+
+    names: list[str] = []
+    try:
+        with tempfile.NamedTemporaryFile(
+            suffix=".py", mode="w", delete=False
+        ) as tmp:
+            tmp.write(code)
+            tmp.flush()
+            spec = importlib.util.spec_from_file_location("_loom_saved_workflow", tmp.name)
+            if spec is None or spec.loader is None:
+                return names
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        for value in vars(module).values():
+            if isinstance(value, WorkflowDefinition):
+                names.append(value.name)
+    except Exception:
+        pass  # best-effort — a failed import still leaves the file saved
+    return names

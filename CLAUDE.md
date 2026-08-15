@@ -291,6 +291,113 @@ Outside a workflow, `agent.session(key=...)` returns an `AgentSession` that does
 the same load/append around direct calls. It requires `persistence` to be
 `SESSION` or `PERSISTENT`.
 
+### Nodes
+
+A **node** is a typed, versioned, catalogued unit of workflow work: Pydantic in,
+Pydantic out. Where a `@step` is your function journaled, a node is a *shareable
+contract* — searchable by the coding agent, renderable as copy-pasteable code,
+installable from another package.
+
+```python
+result = await ctx.node("human.approval", ApprovalIn(subject="refund", timeout=86400))
+```
+
+**A node is packaging over the existing engine, not a second durability
+mechanism.** Everything durable a node does goes through `Context`; the body's
+own calls journal beneath the node's path via `ctx.nested()`, and a node that
+parks raises `Suspend` exactly as `ctx.wait_for_approval` does. Deleting
+`workflow_builder/nodes/` could not change how an existing workflow replays.
+
+Seven categories, and the split between `control`/`transform` and `agent` is the
+"code or judgement" rule made structural: `control.switch` is a rule you can
+write today, `agent.classify` is judgement.
+
+| Category | Nodes |
+|---|---|
+| `human` | approval, choice, form, review_edit, escalate |
+| `guard` | schema, policy, pii, budget, content |
+| `control` | switch, filter, dedupe, batch, throttle |
+| `transform` | map_fields, template, extract, join, redact |
+| `io` | http_request, wait_for_webhook |
+| `agent` | classify, extract_structured, summarize, judge |
+| `custom` | whatever you register |
+
+**Authoring is one file.** `@register_node` derives `input_schema`,
+`output_schema`, and `node_class` from the class, so the node is discoverable,
+contract-renderable, and validator-known with no second declaration. Distribute
+by `loom_node` entry point, the same shape as `loom_toolset`.
+
+`Runtime.nodes` mirrors `Runtime.toolsets`: `NodeRegistry(parent=…)` chains to
+the process-global catalog, so `@register_node` and entry points reach every
+Runtime while `rt.nodes.register(...)` stays local.
+
+**Imported from `workflow_builder.nodes`, never re-exported at top level.**
+`workflow_builder.node` is already the `@node` *step* decorator — a `StepClass`
+that behaves exactly like `@effect` and differs only in WGIR colour. Putting
+`Node` beside `node` in one namespace would make two unrelated things one
+autocomplete apart, so the package boundary is the disambiguator, as it is for
+`workflow_builder.toolsets`.
+
+**Replay across a node upgrade is refused, not guessed.** Each call journals
+`node_id`, `node_version`, and a hash of the two schemas; a mismatch on replay
+raises `ContractChanged` rather than decoding an old payload into a new model.
+
+#### Human-in-the-loop
+
+LOOM owns parking the run, journaling the request, and validating the answer.
+**Delivering it to a person is the provider's** — implement `HumanChannel`
+(`deliver`/`withdraw`) and pass `Runtime(human=…)`. `HumanRequest` carries the
+JSON Schema of the accepted answer, so a channel builds its UI from the request
+rather than special-casing node ids.
+
+Three properties, each the fix for a specific failure:
+
+- **Delivery is journaled**, so it happens exactly once per request across
+  replays. Otherwise every restart re-notifies and a team learns to ignore the
+  channel.
+- **No channel configured raises before the run parks.** A run parked with
+  nobody listening is indistinguishable from patience, so it is found a day late.
+- **`AutoRespondChannel` is not a convenience.** Without it, a generated workflow
+  containing an approval hangs in the smoke sandbox, and the cheapest repair a
+  model can find is deleting the approval — shipping a workflow that passes every
+  check having stripped out the control the spec asked for.
+
+`ctx.wait_for_approval` is unchanged and uses the same `approval:<subject>`
+event, so `runtime.approve()` resolves either.
+
+#### Guardrail nodes
+
+`Guardrail`/`GuardrailResult`/`GuardrailAction` are reused, not forked. What is
+new is where they attach: standalone (`ctx.guard(...)`), around a node
+(`NodeSpec.guards` or `ctx.node(..., guards=[...])`), and where they already ran,
+around agent tool calls.
+
+One semantic changes with the wider reach: **outside an agent loop, REJECT
+raises.** In an agent loop it hands the model an explanation so it can adapt; in
+a workflow body there is nobody to adapt, and a falsy return a caller ignores
+would let the guarded work proceed. A guard that *raises* is treated as a
+tripwire, never an allow — a check that cannot run has found nothing.
+
+#### What the coding agent sees
+
+The prompt carries **category headers and counts only — O(categories), never
+O(nodes)**. Registering 500 custom nodes adds nothing; a test asserts that as
+line-count equality, not a tolerance. Detail arrives on demand through three
+tools:
+
+| Tool | Returns |
+|---|---|
+| `search_nodes(query, category=…)` | cards; an empty query with a category lists it |
+| `show_node(id)` | schemas, examples, effect, requires |
+| `node_contract(id)` | **the code to write** |
+
+That last one is the substantive difference from `ToolsetCatalog.stub()`, which
+returns JSON Schema — a *description of* a call. The agent's next action is to
+*write* one, so every schema→Python translation is a chance to invent a keyword
+argument. `node_contract` returns the import line, the call with annotated
+fields, the result type, whether it parks the run, and what the Runtime needs —
+all rendered from the node's own models, so it cannot drift.
+
 ### Adding a toolset
 
 `docs/guides/toolsets.md` is the end-to-end walkthrough — three files (client,
@@ -436,13 +543,185 @@ discards the coverage.
 `Results` ⟹ manifest declares it. The client is ground truth; that check found
 six drifts on its first run.
 
+### Failure Taxonomy
+
+`EntryStatus.EXHAUSTED` is a step that spent its own `Retry` budget. It is not
+`FAILED`, because a step has said nothing about whether the *run* is finished —
+a gateway returning 503 needs the same code run again in five minutes with the
+other nine steps still cached, not the journal edited.
+
+The same record answers two questions, read per operation rather than mutated:
+`Journal(resume_exhausted=…)` is `True` for retry/resume (re-execute the entry,
+serve everything before it from the journal) and `False` for `replay`, which is
+a rehearsal of what happened and must reproduce the failure the run saw. The
+engine sets it from `record.trigger`.
+
+`retry()` therefore truncates only genuinely `FAILED` entries. An exhausted one
+is re-executed by replay on its own, so pruning it would throw away the attempt
+history that tells an operator this has failed six times against the same
+gateway. Nothing is promoted on the way to terminal — an earlier draft did, and
+it put a journal write after the compensation stack had already unwound while
+making the distinction unobservable, since every failed run erased it.
+
+### Version Gates
+
+`ctx.patched("use-new-pricing")` lets a branch ship without changing what runs
+already in flight are doing. A run reaching the gate for the first time records
+that the patch was present and takes the new branch, forever; a run that was
+*already past that point* takes the old one, because its journal proves it was
+there first (`Journal.has_entries_after`).
+
+The marker is keyed by **name, not position** — deliberately unlike every other
+entry — so inserting a durable call before the gate does not change which
+decision it finds. That is why a patch id must be unique within a workflow and
+must never be reused for a different change.
+
+### Testing With The Journal
+
+`workflow_builder.testing`. The replay engine already prefers a recorded entry
+to running anything, so a test can state what happened instead of substituting
+a stand-in for the step that would have:
+
+```python
+result = await run_with(
+    onboard,
+    payload,
+    given(research, returns={"summary": "canned"}),
+    given(send_email, raises=TimeoutError("smtp down")),
+)
+```
+
+A seeded entry means exactly what a recorded one means, so there is nothing to
+keep in sync. Seeds resolve by name and kind, so a mismatch surfaces as the
+engine's own divergence error rather than as a fact nobody used.
+
+`assert_replays(workflow, input)` runs a workflow, replays it, and asserts the
+output did not change — the `replay` stage from the coding agent's pipeline,
+available to anyone writing a workflow by hand.
+
+### Seam Catalog
+
+`python scripts/gen_seam_catalog.py` writes one page per port under
+`docs/seams/`, generated from the Protocol's own methods, docstrings,
+implementations, and importers. `--check` fails when a page no longer matches
+the code, and runs in CI.
+
+Nine seams and one gate, not a doc-sync suite: the value is the alarm, not the
+document. Implementations are found structurally as well as by declared base,
+because a Protocol is usually satisfied without naming it — listing only
+subclasses reported "none found" for exactly the seams whose implementations
+are cleanest.
+
+### Grant Validation
+
+`security/grants.py`. An entry that names nothing permits nothing —
+`allows_operation` simply never matches it — so `grants=["jira.issues:writ"]`
+yields a workflow that reads as restricted to what it lists and is in fact
+restricted to nothing. From the outside the two are indistinguishable until an
+agent reports, hours later, that it could not find a tool.
+
+`GrantSet.validate_against(toolsets=…, agents=…)` returns `GrantIssue`s rather
+than raising, because the right response differs by caller:
+
+| Caller | Behavior |
+|---|---|
+| `Runtime.register()` | raises `ConfigurationError` — the only moment that knows the effective registry, since `rt.toolsets` chains to the process-global one |
+| `loom check` | reports as a problem, beside the narration check |
+| `WorkflowCodingAgent` | a `grants` stage (cost 12, non-blocking) feeding repair |
+
+**Grants are only enforced on journaled calls.** `broker.dispatch` runs inside
+`DurableCall._resolve`, so `await ctx.step(jira_search_issues, ...)` is weighed
+against the `GrantSet` and `await jira_search_issues(...)` — legal, because a
+toolset tool is a `@step` and `StepDefinition.__call__` bypasses the journal —
+is not. A direct call also skips the tool's declared `Retry` and gives the
+enclosing step's granularity to replay. `DEFAULT_SYSTEM_PROMPT` tells generated
+code to use `ctx.step`; `TestOnlyJournaledCallsAreGuarded` pins the reason.
+
+Four failure modes, each with near-matches attached: unknown toolset, unknown
+group, unknown effect, unknown agent. Two things it deliberately does not do:
+an **empty registry checks nothing** (toolsets load lazily and via entry
+points, so empty now says nothing about the entries), and validation reads
+**manifest metadata only** — Layer 1 stays Layer 1, and no toolset is imported
+to check a string.
+
+### Bounded Tool Results
+
+`agents/bounds.py`. A tool that returns four megabytes puts four megabytes into
+the next model request, and into every request after it — until the provider
+truncates and the model answers confidently about data it never saw. That is
+the failure worth naming: not an error, a wrong answer that looks right.
+
+`Agent(bounds=ResultBounds(max_bytes=32_768))` caps what one result contributes
+to the *conversation*. The journal still records the value whole — a replay has
+to reconstruct the run that happened — and `Runtime(blobs=...)` makes the
+original retrievable through `read_spill` / `grep_spill`, which are mounted
+before the overflow rather than after it, because the model reads the tool list
+first.
+
+Three properties, each one a bug avoided:
+
+- **The cap is on the replacement.** The notice's own byte cost is reserved out
+  of the budget, so bounding can never make a result larger. Truncate-then-append
+  overshoots by exactly the length of the notice.
+- **A paged read keeps its coverage.** `Results` serializes rows first and
+  `complete`/`total` last, so a head-and-tail cut is precisely where the
+  coverage disappears — reintroducing "one page reported as a total", the thing
+  `Results` exists to prevent. `coverage_of()` hoists it into the notice first.
+- **Best-effort throughout.** No blob service, or a failed save, degrades to
+  truncation with an honest notice. A spill failure never turns a successful
+  tool call into an error.
+
+`Runtime(spill=...)` swaps the store; it defaults to `BlobSpillStore` when
+blobs are configured, `None` otherwise. `bounds=None` (the default) is exactly
+what shipped before. See `examples/cookbook/23_bounded_tool_results.py`.
+
+### Replay Verification
+
+`Journal.lookup()` finds an entry by position and confirms its kind and name.
+None of that proves the entry belongs to the call that found it: two calls to
+one step at adjacent positions match each other's entries, so swapping the two
+lines replays each against the other's recorded output — silently, because
+everything compared is still equal.
+
+`VerifyMode` closes that with the fingerprint (name plus arguments) already
+recorded on every entry. `WARN` is the default: it serves the value, logs, and
+flags the entry `argument_drift` so `loom show` can surface it. `STRICT` raises
+`NondeterminismError` naming both fingerprints. `OFF` is the old behaviour.
+
+The default is not `STRICT` because a step whose input derives from `ctx.state`
+— deliberately not journaled — legitimately replays with different arguments.
+Raising on that would break correct workflows to catch an uncommon one.
+
+Separate from `CompatibilityMode`, which answers a different question: a
+*shape* divergence (a different operation at that position) truncates and moves
+on; an *argument* divergence warns or raises but never discards a journal the
+run may still need.
+
+### Input Validation
+
+`runtime/validation.py`. `Runtime._open_execution` checks a payload against the
+workflow's `input_schema()` **before the record is created**, the same position
+admission occupies and for the same reason: a run that could never have started
+should leave nothing behind. Raises `InputMismatch`, which the CLI renders as
+exit code 2 (usage) rather than 1 (failed).
+
+Deliberately shallow — the declared top-level type and an object's required
+properties. Anything deeper is the input model's own job and its error is
+better. `None` is never rejected: `run()` defaults its input to `None`, so it
+is indistinguishable from "not supplied". `Runtime(validate_input=False)` is
+the escape hatch for a codebase whose annotations were never meant as contracts.
+
 ### Files and Artifacts
 
 | Concept | Use |
 |---|---|
 | **`Attachment`** | A file's bytes *plus* filename, MIME, and size. `Attachment.from_bytes/from_path/from_text`; `await att.offload(blobs)` moves content to blob storage and keeps the metadata inline. Journals losslessly. |
-| **Blobs** | `Runtime(blobs=BlobService(LocalBlobBackend(...)))` or `S3BlobBackend`. Content-addressed and immutable; oversized journal payloads offload automatically. |
+| **Blobs** | `Runtime(blobs=BlobService(...))` or `$LOOM_BLOBS`. Content-addressed and immutable; oversized journal payloads offload automatically. Backends: `file://`, `s3://`, `az://`, `gs://` via `blob_backend_from_url()`. |
 | **Artifacts** | `ctx.put_artifact(name, data)` → `name@1`, `ctx.get_artifact(name, version=None)`, `ctx.artifact_versions(name)`. The mutable-name layer over immutable blobs. |
+| **Staging** | `ctx.stage_artifact(name, bytes_or_attachment)` then `ctx.commit_staged(name)`. Per-run; an offloaded Attachment reuses its `ref`. |
+| **Signed URLs** | `ctx.artifact_url(name)` mints a short-lived download URL (not journaled — URLs expire). Presigned uploads: `upload_url` then `confirm_upload`. Local HMAC URLs need `LocalBlobBackend(base_url=...)`. |
+
+`$LOOM_BLOBS` is read by `Runtime.from_env()`, the same way `$LOOM_STORE` picks the journal. `file:///var/loom/blobs`, `s3://bucket/prefix`, `az://container/prefix`, `gs://bucket/prefix`. Extras: `[s3]`, `[azure]`, `[gcs]`.
 
 Two properties worth knowing: republishing identical bytes resolves to the
 existing version rather than creating a duplicate, so retries and replays do not
@@ -450,8 +729,9 @@ inflate the version chain. And `get_artifact` journals the version it resolved,
 so a replay reads what the original run read — a replay rehearses what happened,
 not what would happen now.
 
-`RetentionManager.compact(store, blobs=...)` deletes orphaned blobs; without the
-`blobs=` argument it reclaims rows and leaks content.
+`RetentionManager.compact(store, blobs=...)` deletes orphaned blobs and drops
+per-run staging entries; without the `blobs=` argument it reclaims rows and leaks
+content.
 
 ### Long-Running Runs
 

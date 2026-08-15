@@ -331,6 +331,8 @@ class TestWorkflowManagerAgent:
             "get_run_status",
             "cancel_run",
             "schedule_workflow",
+            "list_artifacts",
+            "put_artifact",
         }
 
     def test_its_loop_is_swappable(self) -> None:
@@ -371,7 +373,7 @@ class TestWorkflowManagerAgent:
         """Existing callers keep working; a facade is what to pass."""
         from workflow_builder.agents.workflow_tools import build_workflow_tools
 
-        assert len(build_workflow_tools(_runtime())) == 7
+        assert len(build_workflow_tools(_runtime())) == 9
 
 
 class TestAuthorizedFacade:

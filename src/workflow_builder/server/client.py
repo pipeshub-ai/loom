@@ -178,24 +178,27 @@ class LoomClient:
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
         wait: bool = False,
+        env: dict[str, str] | None = None,
+        credentials: dict[str, str] | Any | None = None,
     ) -> dict[str, Any]:
         """Start a run. Returns the run as the server sees it.
 
         Pass ``idempotency_key`` when the caller may retry the request — the
         server returns the original run rather than starting a second one.
         """
-        return await self._request(
-            "POST",
-            "/runs",
-            json={
-                "workflow": workflow,
-                "input": input,
-                "idempotency_key": idempotency_key,
-                "tags": tags or [],
-                "metadata": metadata or {},
-                "wait": wait,
-            },
-        )
+        body: dict[str, Any] = {
+            "workflow": workflow,
+            "input": input,
+            "idempotency_key": idempotency_key,
+            "tags": tags or [],
+            "metadata": metadata or {},
+            "wait": wait,
+        }
+        if env:
+            body["env"] = env
+        if credentials is not None:
+            body["credentials"] = credentials
+        return await self._request("POST", "/runs", json=body)
 
     async def get(self, run_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/runs/{run_id}")
@@ -267,3 +270,139 @@ class LoomClient:
             waited += interval
             run = await self.get(run_id)
         return run
+
+    # -- artifacts ------------------------------------------------------------
+
+    async def list_artifacts(self) -> list[dict[str, Any]]:
+        return await self._request("GET", "/artifacts")
+
+    async def artifact_history(self, name: str) -> list[dict[str, Any]]:
+        return await self._request("GET", f"/artifacts/{name}/versions")
+
+    async def artifact_url(
+        self, name: str, version: int | None = None, expires_in: int = 3600
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"expires_in": expires_in}
+        if version is not None:
+            params["version"] = version
+        return await self._request("GET", f"/artifacts/{name}/url", params=params)
+
+    async def read_artifact(
+        self, name: str, version: int | None = None
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if version is not None:
+            params["version"] = version
+        return await self._request("GET", f"/artifacts/{name}/content", params=params)
+
+    async def put_artifact(
+        self,
+        name: str,
+        content_b64: str,
+        *,
+        mime: str = "application/octet-stream",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            f"/artifacts/{name}",
+            json={
+                "content_b64": content_b64,
+                "mime": mime,
+                "metadata": metadata,
+            },
+        )
+
+    async def upload_url(
+        self,
+        name: str,
+        mime: str = "application/octet-stream",
+        max_size: int | None = None,
+        expires_in: int | None = None,
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            f"/artifacts/{name}/upload-url",
+            json={"mime": mime, "max_size": max_size, "expires_in": expires_in},
+        )
+
+    async def confirm_upload(
+        self,
+        upload_id: str,
+        name: str,
+        run_id: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            f"/artifacts/{name}/confirm",
+            json={
+                "upload_id": upload_id,
+                "run_id": run_id,
+                "metadata": metadata,
+            },
+        )
+
+    async def read_blob(
+        self, ref: str, expires: int, signature: str, method: str = "GET"
+    ) -> dict[str, Any]:
+        import base64
+
+        response = await self._raw(
+            "GET",
+            f"/blobs/{ref}",
+            params={"expires": expires, "sig": signature, "method": method},
+        )
+        mime = (response.headers.get("content-type") or "application/octet-stream").split(
+            ";"
+        )[0]
+        content = response.content
+        return {
+            "content_b64": base64.b64encode(content).decode("ascii"),
+            "mime": mime,
+            "size": len(content),
+            "ref": ref,
+        }
+
+    async def write_blob(
+        self,
+        ref: str,
+        expires: int,
+        signature: str,
+        content_b64: str,
+        mime: str = "application/octet-stream",
+        method: str = "PUT",
+    ) -> dict[str, Any]:
+        import base64
+
+        return await self._request(
+            "PUT",
+            f"/blobs/{ref}",
+            params={"expires": expires, "sig": signature, "method": method},
+            content=base64.b64decode(content_b64),
+            headers={"Content-Type": mime},
+        )
+
+    async def _raw(self, method: str, path: str, **kwargs: Any) -> Any:
+        """Like ``_request`` but returns the HTTP response (for binary bodies)."""
+        headers = dict(kwargs.pop("headers", None) or {})
+        headers.update(await self._authorization_header(force_refresh=False))
+        response = await self._http.request(method, path, headers=headers, **kwargs)
+        if response.status_code == 401 and self._token_provider is not None:
+            refreshed = await self._authorization_header(force_refresh=True)
+            if refreshed:
+                headers.update(refreshed)
+                response = await self._http.request(method, path, headers=headers, **kwargs)
+        if response.status_code >= 400:
+            try:
+                detail = response.json().get("detail", response.text)
+            except Exception:
+                detail = response.text
+            if isinstance(detail, dict):
+                detail = detail.get("detail") or detail.get("error_description") or detail
+            raise LoomClientError(
+                str(detail),
+                status_code=response.status_code,
+                www_authenticate=response.headers.get("WWW-Authenticate"),
+            )
+        return response

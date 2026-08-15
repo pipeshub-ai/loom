@@ -709,7 +709,17 @@ class TestContinueAsNewIntegration:
 
 
 class TestVersionGate:
-    async def test_patched_returns_false_by_default(self) -> None:
+    """A fresh run takes the new branch; a run already past the gate does not.
+
+    This once asserted that ``patched`` returned False for a fresh run, which
+    was the stub's behaviour rather than a designed one — ``_active_patches``
+    was an empty frozenset nothing ever wrote to, so no run could take a new
+    branch and the gate could not do the job it exists for. The direction that
+    matters is the other one, and it is covered in
+    ``tests/test_failure_taxonomy.py::TestVersionGates``.
+    """
+
+    async def test_a_fresh_run_takes_the_patched_branch(self) -> None:
         @workflow
         async def gated_flow(ctx, data: str) -> str:
             if ctx.patched("new_format"):
@@ -719,4 +729,14 @@ class TestVersionGate:
         store = MemoryStore()
         rt = Runtime(store=store)
         result = await rt.run(gated_flow, "hello")
-        assert result.output == "v1:hello"
+        assert result.output == "v2:hello"
+
+    async def test_the_choice_is_recorded_so_a_replay_repeats_it(self) -> None:
+        @workflow
+        async def gated_flow2(ctx, data: str) -> str:
+            return f"v2:{data}" if ctx.patched("new_format") else f"v1:{data}"
+
+        store = MemoryStore()
+        rt = Runtime(store=store)
+        first = await rt.run(gated_flow2, "hello")
+        assert (await rt.replay(first.run_id)).output == first.output

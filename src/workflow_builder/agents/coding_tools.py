@@ -156,6 +156,113 @@ async def get_tool_docs(toolset_id: str) -> str:
     return docs
 
 
+# ---------------------------------------------------------------------------
+# Node discovery — the same three tiers as toolsets, one difference at tier 3
+# ---------------------------------------------------------------------------
+
+
+def _nodes(override: Any | None = None) -> Any:
+    if override is not None:
+        return override
+    from workflow_builder.nodes.registry import get_node_catalog, load_builtin_nodes
+
+    load_builtin_nodes()
+    return get_node_catalog()
+
+
+@tool
+async def search_nodes(
+    query: str = "", category: str | None = None, limit: int = 10
+) -> str:
+    """Find reusable nodes — typed units called with ``await ctx.node(id, Input(...))``.
+
+    Prefer a catalogued node over hand-written code when one covers the work: it
+    is typed, versioned, and already tested.
+
+    Args:
+        query: Keywords, e.g. "approval", "classify", "http". May be empty.
+        category: One of human, guard, control, transform, io, agent, custom.
+            An empty query with a category lists that category.
+        limit: Most results to return.
+
+    Returns JSON array of {id, category, summary, suspends, requires}.
+    """
+    return await _search_nodes(query, category, limit, registry=None)
+
+
+async def _search_nodes(
+    query: str, category: str | None, limit: int, *, registry: Any | None
+) -> str:
+    try:
+        cards = _nodes(registry).search(query or "", category=category, limit=limit)
+    except ValueError:
+        from workflow_builder.nodes.spec import NodeCategory
+
+        return json.dumps(
+            {
+                "error": f"no category {category!r}",
+                "categories": [c.value for c in NodeCategory],
+            }
+        )
+    if not cards:
+        catalog = _nodes(registry)
+        return json.dumps(
+            {
+                "error": f"nothing matched {query!r}"
+                + (f" in category {category!r}" if category else ""),
+                "categories": {
+                    c.value: n for c, n in sorted(catalog.categories().items())
+                },
+            }
+        )
+    return json.dumps([c.model_dump(mode="json") for c in cards], indent=2)
+
+
+@tool
+async def show_node(node_id: str) -> str:
+    """Show one node in full: schemas, examples, effect, and what it requires.
+
+    For the code to write, call ``node_contract`` instead — it returns the
+    invocation rather than a description of it.
+
+    Args:
+        node_id: A node id, e.g. "human.approval".
+    """
+    return await _show_node(node_id, registry=None)
+
+
+async def _show_node(node_id: str, *, registry: Any | None) -> str:
+    from workflow_builder.nodes.errors import NodeNotFound
+
+    try:
+        return json.dumps(_nodes(registry).show(node_id).model_dump(mode="json"), indent=2)
+    except NodeNotFound as exc:
+        return json.dumps({"error": str(exc), "suggestions": exc.suggestions})
+
+
+@tool
+async def node_contract(node_id: str) -> str:
+    """Get the exact code to call a node: import line, call, and result type.
+
+    Returns runnable Python, not a schema — copy it and fill in the values. The
+    header says whether the node parks the run and what the Runtime must have
+    configured.
+
+    Args:
+        node_id: A node id, e.g. "human.approval".
+    """
+    return await _node_contract(node_id, registry=None)
+
+
+async def _node_contract(node_id: str, *, registry: Any | None) -> str:
+    from workflow_builder.nodes.errors import NodeNotFound
+
+    try:
+        return _nodes(registry).contract(node_id)
+    except NodeNotFound as exc:
+        return json.dumps({"error": str(exc), "suggestions": exc.suggestions})
+
+
 def _default_validator() -> Any:
     from workflow_builder.agents.validator import CodeValidator
 
@@ -354,6 +461,10 @@ def build_coding_tools(
     *,
     registry: Any | None = None,
     validator: Any | None = None,
+    node_registry: Any | None = None,
+    interaction: Any | None = None,
+    budget: int = 5,
+    gate: Any | None = None,
 ) -> list[Tool]:
     """Return the ReAct tools for the workflow coding agent.
 
@@ -367,55 +478,101 @@ def build_coding_tools(
     validator:
         A configured :class:`CodeValidator`, typically carrying an
         ``allowed_packages`` allowlist. Defaults to an unrestricted one.
+    node_registry:
+        The :class:`NodeRegistry` the node tools browse. Pass the Runtime's own
+        (``rt.nodes``) so the agent discovers exactly the nodes the generated
+        workflow will be able to call.
+    interaction:
+        Optional :class:`~workflow_builder.agents.interaction.UserInteraction`.
+        When provided, an ``ask_user`` tool is included; when ``None`` the
+        tool is omitted entirely, so the model cannot call something that
+        will fail.
+    budget:
+        Maximum ``ask_user`` calls per generation. Ignored when *gate* is
+        passed (the gate carries its own budget).
+    gate:
+        Optional :class:`~workflow_builder.agents.interaction.AskUserGate`
+        the caller can flip off during repair. Created internally when
+        *interaction* is set and this is omitted.
 
     The returned tools keep the schemas of the module-level originals; only the
     bound behaviour changes, so the model sees an identical interface.
     """
-    if registry is None and validator is None:
-        return [
+    from workflow_builder.agents.interaction import AskUserGate, make_ask_user_tool
+
+    tools: list[Tool]
+    if registry is None and validator is None and node_registry is None:
+        tools = [
             search_toolsets,
             show_toolset,
             get_tool_contract,
             get_tool_docs,
             call_read_operation,
+            search_nodes,
+            show_node,
+            node_contract,
             validate_code,
         ]
+    else:
+        # Per-instance ledger: the count spans one generation and resets with the
+        # next, so a repeated lookup is detected within a run and not across runs.
+        seen_lookups: dict[str, int] = {}
 
-    # Per-instance ledger: the count spans one generation and resets with the
-    # next, so a repeated lookup is detected within a run and not across runs.
-    seen_lookups: dict[str, int] = {}
+        async def bound_call(
+            op_path: str, arguments: dict[str, Any] | str | None = None
+        ) -> str:
+            return await _call_read_operation(
+                op_path, arguments, registry=registry, seen=seen_lookups
+            )
 
-    async def bound_call(
-        op_path: str, arguments: dict[str, Any] | str | None = None
-    ) -> str:
-        return await _call_read_operation(
-            op_path, arguments, registry=registry, seen=seen_lookups
+        async def bound_search(query: str) -> str:
+            cards = _registry(registry).search(query)
+            return json.dumps([c.model_dump() for c in cards], indent=2)
+
+        async def bound_show(toolset_id: str, group: str | None = None) -> str:
+            try:
+                table = _registry(registry).show(toolset_id, group)
+                return json.dumps(table.model_dump(), indent=2)
+            except KeyError as exc:
+                return json.dumps({"error": str(exc)})
+
+        async def bound_contract(op_path: str) -> str:
+            try:
+                return json.dumps(_registry(registry).stub(op_path).model_dump(), indent=2)
+            except (KeyError, ValueError) as exc:
+                return json.dumps({"error": str(exc)})
+
+        async def bound_validate(code: str) -> str:
+            return _format_issues((validator or _default_validator()).validate(code))
+
+        async def bound_search_nodes(
+            query: str = "", category: str | None = None, limit: int = 10
+        ) -> str:
+            return await _search_nodes(query, category, limit, registry=node_registry)
+
+        async def bound_show_node(node_id: str) -> str:
+            return await _show_node(node_id, registry=node_registry)
+
+        async def bound_node_contract(node_id: str) -> str:
+            return await _node_contract(node_id, registry=node_registry)
+
+        tools = [
+            replace(search_toolsets, fn=bound_search),
+            replace(show_toolset, fn=bound_show),
+            replace(get_tool_contract, fn=bound_contract),
+            get_tool_docs,
+            replace(call_read_operation, fn=bound_call),
+            replace(search_nodes, fn=bound_search_nodes),
+            replace(show_node, fn=bound_show_node),
+            replace(node_contract, fn=bound_node_contract),
+            replace(validate_code, fn=bound_validate),
+        ]
+
+    if interaction is not None:
+        tools.append(
+            make_ask_user_tool(
+                interaction,
+                gate=gate or AskUserGate(budget=budget),
+            )
         )
-
-    async def bound_search(query: str) -> str:
-        cards = _registry(registry).search(query)
-        return json.dumps([c.model_dump() for c in cards], indent=2)
-
-    async def bound_show(toolset_id: str, group: str | None = None) -> str:
-        try:
-            return json.dumps(_registry(registry).show(toolset_id, group).model_dump(), indent=2)
-        except KeyError as exc:
-            return json.dumps({"error": str(exc)})
-
-    async def bound_contract(op_path: str) -> str:
-        try:
-            return json.dumps(_registry(registry).stub(op_path).model_dump(), indent=2)
-        except (KeyError, ValueError) as exc:
-            return json.dumps({"error": str(exc)})
-
-    async def bound_validate(code: str) -> str:
-        return _format_issues((validator or _default_validator()).validate(code))
-
-    return [
-        replace(search_toolsets, fn=bound_search),
-        replace(show_toolset, fn=bound_show),
-        replace(get_tool_contract, fn=bound_contract),
-        get_tool_docs,
-        replace(call_read_operation, fn=bound_call),
-        replace(validate_code, fn=bound_validate),
-    ]
+    return tools

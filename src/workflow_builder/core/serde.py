@@ -62,9 +62,18 @@ class JsonSerializer:
             return data.__retype__(type_)
         try:
             return TypeAdapter(type_).validate_python(data)
-        except Exception:
+        except Exception as exc:
             # A declared type that no longer matches the journal (for example after a
             # refactor) should not destroy an in-flight run; hand back the raw payload.
+            #
+            # But say so. Silently downgrading means the workflow receives a dict
+            # where it declared a model and fails several lines later at an
+            # attribute access, which reads as a bug in the workflow rather than
+            # drift in the journal. The reason is recorded against the value's
+            # identity so a caller that wants to react — the engine's replay
+            # verification, a diagnostic — can ask, and one that does not is
+            # unaffected.
+            _record_drift(data, type_, exc)
             return data
 
 
@@ -232,3 +241,43 @@ def resolve_annotations(fn: Any) -> dict[str, Any]:
         return typing.get_type_hints(fn)
     except Exception:
         return dict(getattr(fn, "__annotations__", {}))
+
+
+#: Values handed back undecoded, keyed by identity, with the reason.
+#:
+#: Keyed by ``id()`` and bounded, because the payload itself is often unhashable
+#: and holding a reference would keep a journal payload alive for the life of
+#: the process. A miss simply reports no drift, which is the honest answer for
+#: a value this has forgotten.
+_DRIFT: dict[int, tuple[Any, str]] = {}
+_DRIFT_LIMIT = 512
+
+
+def _record_drift(data: Any, type_: Any, exc: Exception) -> None:
+    """Remember that *data* could not be decoded into *type_*."""
+    if len(_DRIFT) >= _DRIFT_LIMIT:
+        _DRIFT.clear()
+    reason = str(exc).split("\n")[1].strip() if "\n" in str(exc) else str(exc)
+    _DRIFT[id(data)] = (type_, f"{_name_of(type_)}: {reason}")
+
+
+def drift_of(value: Any, type_: Any | None = None) -> str | None:
+    """Why *value* was handed back undecoded, or ``None``.
+
+    Args:
+        value: The value :func:`decode` returned.
+        type_: The type it was expected to decode into. When given, a record
+            for a different type is ignored — the same object can be decoded
+            against more than one contract.
+    """
+    found = _DRIFT.get(id(value))
+    if found is None:
+        return None
+    recorded_type, reason = found
+    if type_ is not None and recorded_type is not type_:
+        return None
+    return reason
+
+
+def _name_of(type_: Any) -> str:
+    return getattr(type_, "__name__", None) or str(type_)

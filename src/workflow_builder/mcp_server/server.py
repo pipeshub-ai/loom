@@ -18,7 +18,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from workflow_builder.mcp_server import prompts, resources, tools
+from workflow_builder.mcp_server import authoring, prompts, resources, tools
+from workflow_builder.mcp_server.authoring_config import AuthoringConfig
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
@@ -93,6 +94,22 @@ re-executes from the journal and repeats no side effects. They are not \
 interchangeable.
 """
 
+AUTHORING_INSTRUCTIONS = """
+
+4. You can also create new workflows, using your own model plus these tools:
+   - search_toolsets / show_toolset / get_tool_contract / get_tool_docs to \
+discover integrations and their typed schemas
+   - call_read_operation to resolve entity names to ids (a project, a user) \
+before generating code that depends on them
+   - validate_workflow_code to check generated code against LOOM's rules \
+(compile, structure, determinism, imports) without running it
+   - smoke_test_workflow to execute generated code once in a sandbox with \
+mocked integrations — no real API calls
+   - save_workflow to write the finished code to a file
+   The loop: discover, write code, validate, fix, smoke, fix, save, then \
+run_workflow. The create_workflow prompt walks through it in full.
+"""
+
 
 def build_server(
     facade: RuntimeFacade,
@@ -103,6 +120,7 @@ def build_server(
     scheduler: bool = True,
     identity: IdentitySettings | None = None,
     transport: str = "stdio",
+    authoring: AuthoringConfig | None = None,
 ) -> FastMCP:
     """Bind a facade to a FastMCP server.
 
@@ -137,6 +155,14 @@ def build_server(
     stdio connection Claude Desktop/Code depend on for no security benefit,
     since stdio was never reachable by anyone but the process that spawned
     it in the first place.
+
+    ``authoring`` defaults to ``AuthoringConfig.from_env()`` — six extra
+    tools (``get_tool_contract``, ``get_tool_docs``, ``call_read_operation``,
+    ``validate_workflow_code``, ``smoke_test_workflow``, ``save_workflow``)
+    that let a client generate and verify new workflow code using LOOM's own
+    toolchain, on top of the sixteen run-management tools above. Pass
+    ``AuthoringConfig(enabled=False)`` (or set ``LOOM_MCP_AUTHORING=0``) for a
+    server that exposes only the run-management surface.
     """
     from mcp.server.fastmcp import FastMCP
 
@@ -149,10 +175,13 @@ def build_server(
     identity = identity if identity is not None else IdentitySettings()
     mcp_auth = build_mcp_auth(identity)
     auth_enabled = mcp_auth is not None and transport != "stdio"
+    authoring = authoring if authoring is not None else AuthoringConfig.from_env()
+
+    instructions = INSTRUCTIONS + AUTHORING_INSTRUCTIONS if authoring.enabled else INSTRUCTIONS
 
     server = FastMCP(
         name,
-        instructions=INSTRUCTIONS,
+        instructions=instructions,
         host=host,
         port=port,
         lifespan=_scheduler_lifespan(facade) if scheduler else None,
@@ -162,7 +191,9 @@ def build_server(
     )
     _register_tools(server, facade, auth_enabled)
     _register_resources(server, facade, auth_enabled)
-    _register_prompts(server, facade, auth_enabled)
+    _register_prompts(server, facade, auth_enabled, authoring.enabled)
+    if authoring.enabled:
+        _register_authoring_tools(server, authoring)
     return server
 
 
@@ -173,13 +204,20 @@ def build_server(
 
 def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: bool) -> None:
     """Expose the actions. Signatures are the schema, so keep them typed."""
+    from mcp.types import ToolAnnotations
 
-    @server.tool()
+    @server.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def list_workflows() -> str:
         """List every workflow this server can run, with input schemas."""
         return await tools.list_workflows(_principal_facade(base_facade, auth_enabled))
 
-    @server.tool()
+    @server.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=False, openWorldHint=True
+        )
+    )
     async def run_workflow(
         workflow: str, input_json: str = "null", idempotency_key: str | None = None
     ) -> str:
@@ -198,7 +236,9 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
             idempotency_key=idempotency_key,
         )
 
-    @server.tool()
+    @server.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def get_run_status(run_id: str) -> str:
         """Get one run's status, input, output, and error.
 
@@ -207,7 +247,9 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
         """
         return await tools.get_run_status(_principal_facade(base_facade, auth_enabled), run_id)
 
-    @server.tool()
+    @server.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def list_runs(
         workflow: str | None = None, status: str | None = None, limit: int = 20
     ) -> str:
@@ -223,7 +265,9 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
             _principal_facade(base_facade, auth_enabled), workflow, status, limit
         )
 
-    @server.tool()
+    @server.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def get_run_journal(run_id: str, offset: int = 0) -> str:
         """Read the durable operations a run recorded, in order.
 
@@ -239,7 +283,11 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
             _principal_facade(base_facade, auth_enabled), run_id, offset
         )
 
-    @server.tool()
+    @server.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True, idempotentHint=False, openWorldHint=False
+        )
+    )
     async def get_run_progress(run_id: str, offset: int = 0) -> str:
         """Read what a run has narrated while running.
 
@@ -255,7 +303,11 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
             _principal_facade(base_facade, auth_enabled), run_id, offset
         )
 
-    @server.tool()
+    @server.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+        )
+    )
     async def approve_run(run_id: str, subject: str, approved: bool = True) -> str:
         """Answer a human approval that a suspended run is waiting on.
 
@@ -268,7 +320,11 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
             _principal_facade(base_facade, auth_enabled), run_id, subject, approved
         )
 
-    @server.tool()
+    @server.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=False, openWorldHint=True
+        )
+    )
     async def send_event(run_id: str, event: str, payload_json: str = "null") -> str:
         """Deliver an event to a run parked on it.
 
@@ -281,7 +337,11 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
             _principal_facade(base_facade, auth_enabled), run_id, event, payload_json
         )
 
-    @server.tool()
+    @server.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+        )
+    )
     async def cancel_run(run_id: str) -> str:
         """Cancel a run. Already-finished runs are left alone.
 
@@ -290,7 +350,11 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
         """
         return await tools.cancel_run(_principal_facade(base_facade, auth_enabled), run_id)
 
-    @server.tool()
+    @server.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=False, openWorldHint=True
+        )
+    )
     async def retry_run(run_id: str) -> str:
         """Re-run a failed execution from its failed step, against current code.
 
@@ -302,7 +366,11 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
         """
         return await tools.retry_run(_principal_facade(base_facade, auth_enabled), run_id)
 
-    @server.tool()
+    @server.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=False, openWorldHint=False
+        )
+    )
     async def replay_run(run_id: str) -> str:
         """Re-execute a run from its journal, repeating no side effects.
 
@@ -314,7 +382,9 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
         """
         return await tools.replay_run(_principal_facade(base_facade, auth_enabled), run_id)
 
-    @server.tool()
+    @server.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def search_toolsets(query: str) -> str:
         """Search registered toolsets (Jira, Gmail, Slack, ...) by keyword.
 
@@ -323,7 +393,9 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
         """
         return await tools.search_toolsets(query)
 
-    @server.tool()
+    @server.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def show_toolset(toolset_id: str, group: str | None = None) -> str:
         """List the operations one toolset exposes, optionally filtered to a group.
 
@@ -332,6 +404,191 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
             group: Only this operation group, e.g. "issues".
         """
         return await tools.show_toolset(toolset_id, group)
+
+    @server.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
+    async def list_artifacts() -> str:
+        """List named artifacts stored on this runtime, latest version of each."""
+        return await tools.list_artifacts(_principal_facade(base_facade, auth_enabled))
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True, idempotentHint=False, openWorldHint=False
+        )
+    )
+    async def get_artifact_url(
+        name: str, version: int | None = None, expires_in: int = 3600
+    ) -> str:
+        """Mint a time-limited download URL for a named artifact.
+
+        Args:
+            name: Artifact name, e.g. "daily-report.md".
+            version: Specific version; omit for latest.
+            expires_in: URL lifetime in seconds (default 3600).
+        """
+        return await tools.get_artifact_url(
+            _principal_facade(base_facade, auth_enabled), name, version, expires_in
+        )
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+        )
+    )
+    async def put_artifact(
+        name: str, content_b64: str, mime: str = "application/octet-stream"
+    ) -> str:
+        """Publish small content as a named artifact.
+
+        Args:
+            name: Artifact name.
+            content_b64: File bytes, base64-encoded. Keep this small.
+            mime: Content type.
+        """
+        return await tools.put_artifact(
+            _principal_facade(base_facade, auth_enabled), name, content_b64, mime
+        )
+
+
+# ---------------------------------------------------------------------------
+# Authoring tools
+# ---------------------------------------------------------------------------
+
+
+def _register_authoring_tools(server: FastMCP, config: AuthoringConfig) -> None:
+    """Expose LOOM's coding-agent toolchain so a client can author, not just
+    run, workflows.
+
+    Not facade-scoped, like ``search_toolsets``/``show_toolset`` above: what
+    toolsets exist, whether code compiles, and whether it smoke-tests clean
+    are server-wide facts, not per-run data.
+
+    ``_seen`` is one dict for the life of this server instance, shared by
+    every call to ``call_read_operation`` — the same repeat-limit protection
+    ``build_coding_tools()`` gives the coding agent's own ReAct loop, so a
+    client stuck re-asking the same lookup gets told to stop rather than
+    burning calls against a real API.
+    """
+    from mcp.types import ToolAnnotations
+
+    _seen: dict[str, int] = {}
+
+    def _too_large(code: str) -> str | None:
+        size = len(code.encode("utf-8"))
+        if size <= config.max_code_size:
+            return None
+        return authoring._json(
+            {
+                "error": f"code is {size} bytes, over the {config.max_code_size} "
+                "byte limit for this tool",
+            }
+        )
+
+    @server.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
+    async def get_tool_contract(op_path: str) -> str:
+        """Full typed contract for one toolset operation: schema, scopes,
+        effect, and the import line generated code needs.
+
+        Args:
+            op_path: Dotted path like "jira.issues.search" — a toolset id
+                from search_toolsets, then an operation id from show_toolset.
+        """
+        return await authoring.get_tool_contract(op_path)
+
+    @server.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
+    async def get_tool_docs(toolset_id: str) -> str:
+        """Usage documentation for a toolset: import lines, signatures,
+        and worked examples, where available.
+
+        Args:
+            toolset_id: e.g. "jira", "confluence".
+        """
+        return await authoring.get_tool_docs(toolset_id)
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=False, openWorldHint=True
+        )
+    )
+    async def call_read_operation(op_path: str, arguments_json: str = "{}") -> str:
+        """Execute a READ-ONLY toolset operation, to resolve a name to an id
+        before writing code that depends on it.
+
+        A real call against connected credentials. Write and destructive
+        operations are refused. Use this instead of guessing what a spec's
+        entity names resolve to.
+
+        Args:
+            op_path: e.g. "jira.projects.list".
+            arguments_json: The operation's arguments, JSON-encoded object.
+        """
+        return await authoring.call_read_operation(op_path, arguments_json, seen=_seen)
+
+    @server.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
+    async def validate_workflow_code(
+        code: str, allowed_packages: str | None = None
+    ) -> str:
+        """Check generated workflow code against LOOM's static rules —
+        compile, structure, determinism, imports. Does not execute it.
+
+        Args:
+            code: Complete Python source.
+            allowed_packages: Comma-separated third-party packages the target
+                environment has, e.g. "httpx,pandas". Omit to skip that check.
+        """
+        error = _too_large(code)
+        if error is not None:
+            return error
+        return await authoring.validate_workflow_code(code, allowed_packages)
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True, idempotentHint=False, openWorldHint=False
+        )
+    )
+    async def smoke_test_workflow(
+        code: str, workflow_input_json: str = "null"
+    ) -> str:
+        """Run generated workflow code once in a sandbox — no real network
+        or credentials, every toolset faked.
+
+        Args:
+            code: Complete Python source; must contain an @workflow function.
+            workflow_input_json: Input, JSON-encoded. "null" derives one from
+                the workflow's declared type.
+        """
+        error = _too_large(code)
+        if error is not None:
+            return error
+        return await authoring.smoke_test_workflow(
+            code, workflow_input_json, timeout=config.smoke_timeout
+        )
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=False, openWorldHint=False
+        )
+    )
+    async def save_workflow(code: str, path: str) -> str:
+        """Write generated workflow code to a file.
+
+        Refuses an absolute path, a '..' component, or a non-.py extension.
+
+        Args:
+            code: Complete Python source.
+            path: Relative file path, e.g. "flows/overdue_tickets.py".
+        """
+        error = _too_large(code)
+        if error is not None:
+            return error
+        return await authoring.save_workflow(code, path)
 
 
 # ---------------------------------------------------------------------------
@@ -370,13 +627,20 @@ def _register_resources(server: FastMCP, base_facade: RuntimeFacade, auth_enable
 # ---------------------------------------------------------------------------
 
 
-def _register_prompts(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: bool) -> None:
+def _register_prompts(
+    server: FastMCP,
+    base_facade: RuntimeFacade,
+    auth_enabled: bool,
+    authoring_enabled: bool = False,
+) -> None:
     """Expose the reusable task templates."""
 
     @server.prompt()
     def create_workflow(description: str) -> str:
         """Draft a LOOM workflow from a plain-English description."""
-        return prompts.build_create_workflow_prompt(description)
+        return prompts.build_create_workflow_prompt(
+            description, authoring_enabled=authoring_enabled
+        )
 
     @server.prompt()
     async def debug_run(run_id: str) -> str:

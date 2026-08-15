@@ -22,11 +22,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from fastapi import Depends, FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import RedirectResponse, Response
+from pydantic import BaseModel, Field, field_validator
 
 from workflow_builder.core.exceptions import (
     AdmissionRejected,
+    ConfigurationError,
+    InputMismatch,
     InsufficientScope,
     RegistryError,
 )
@@ -57,6 +60,16 @@ class StartRunRequest(BaseModel):
     wait: bool = False
     """Block until the run reaches a terminal state or parks. Off by default,
     because a workflow that sleeps for a day should not hold a socket open."""
+    env: dict[str, str] | None = None
+    """Per-run environment overrides. Not for secrets — use ``loom connect``."""
+    credentials: dict[str, str] | None = None
+    """Refused by AuthorizedFacade / RemoteFacade; LocalFacade honours it."""
+
+    @field_validator("metadata")
+    @classmethod
+    def _drop_reserved_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
+        reserved = {"loom.env", "loom.credential_names"}
+        return {k: v for k, v in value.items() if k not in reserved}
 
 
 class EventRequest(BaseModel):
@@ -64,6 +77,30 @@ class EventRequest(BaseModel):
 
     name: str
     payload: Any = None
+
+
+class ConfirmUploadRequest(BaseModel):
+    """Body for ``POST /artifacts/{name}/confirm``."""
+
+    upload_id: str
+    run_id: str = ""
+    metadata: dict[str, Any] | None = None
+
+
+class PutArtifactRequest(BaseModel):
+    """Body for ``POST /artifacts/{name}`` — small payloads only."""
+
+    content_b64: str
+    mime: str = "application/octet-stream"
+    metadata: dict[str, Any] | None = None
+
+
+class UploadUrlRequest(BaseModel):
+    """Body for ``POST /artifacts/{name}/upload-url``."""
+
+    mime: str = "application/octet-stream"
+    max_size: int | None = None
+    expires_in: int | None = None
 
 
 class RunView(BaseModel):
@@ -196,6 +233,23 @@ def create_app(
             )
         if isinstance(exc, AuthorizationError):
             return HTTPException(status_code=403, detail=str(exc))
+        if isinstance(exc, InputMismatch):
+            # 422, not 400: the request parsed, and the payload is
+            # well-formed JSON — it just is not what this workflow accepts.
+            return HTTPException(status_code=422, detail=str(exc))
+        if isinstance(exc, ConfigurationError):
+            return HTTPException(status_code=400, detail=str(exc))
+        from workflow_builder.storage.artifact import ArtifactNotFound
+        from workflow_builder.storage.blob import BlobNotFoundError
+        from workflow_builder.storage.signed_urls import UploadNotFound, UploadTooLarge
+        from workflow_builder.storage.staging import StagingNotFound
+
+        if isinstance(
+            exc, ArtifactNotFound | UploadNotFound | StagingNotFound | BlobNotFoundError
+        ):
+            return HTTPException(status_code=404, detail=str(exc))
+        if isinstance(exc, UploadTooLarge):
+            return HTTPException(status_code=413, detail=str(exc))
         if isinstance(exc, RegistryError):
             return HTTPException(status_code=404, detail=str(exc))
         if isinstance(exc, AdmissionRejected):
@@ -242,6 +296,8 @@ def create_app(
                 tags=body.tags,
                 metadata=body.metadata,
                 wait=body.wait,
+                env=body.env,
+                credentials=body.credentials,
             )
         except Exception as exc:
             raise _fail(exc) from exc
@@ -330,5 +386,160 @@ def create_app(
             raise _fail(exc) from exc
         # Replay starts a *new* run; report that one, not the original.
         return _view(await _require(facade, replayed["run_id"]))
+
+    @app.get("/artifacts")
+    async def list_artifacts(facade: RuntimeFacade = injected) -> list[dict[str, Any]]:
+        try:
+            return await facade.list_artifacts()
+        except Exception as exc:
+            raise _fail(exc) from exc
+
+    @app.get("/artifacts/{name}")
+    async def get_artifact(name: str, facade: RuntimeFacade = injected) -> dict[str, Any]:
+        try:
+            history = await facade.artifact_history(name)
+        except Exception as exc:
+            raise _fail(exc) from exc
+        if not history:
+            raise HTTPException(status_code=404, detail=f"no artifact named {name!r}")
+        return history[-1]
+
+    @app.get("/artifacts/{name}/versions")
+    async def artifact_versions(
+        name: str, facade: RuntimeFacade = injected
+    ) -> list[dict[str, Any]]:
+        try:
+            return await facade.artifact_history(name)
+        except Exception as exc:
+            raise _fail(exc) from exc
+
+    @app.get("/artifacts/{name}/url")
+    async def artifact_url(
+        name: str,
+        version: int | None = None,
+        expires_in: int = 3600,
+        facade: RuntimeFacade = injected,
+    ) -> dict[str, Any]:
+        try:
+            return await facade.artifact_url(name, version, expires_in)
+        except Exception as exc:
+            raise _fail(exc) from exc
+
+    @app.get("/artifacts/{name}/content")
+    async def artifact_content(
+        name: str,
+        version: int | None = None,
+        facade: RuntimeFacade = injected,
+    ) -> dict[str, Any]:
+        try:
+            return await facade.read_artifact(name, version)
+        except Exception as exc:
+            raise _fail(exc) from exc
+
+    @app.get("/artifacts/{name}/download")
+    async def download_artifact(
+        name: str,
+        version: int | None = None,
+        facade: RuntimeFacade = injected,
+    ) -> Any:
+        import base64
+
+        try:
+            info = await facade.artifact_url(name, version)
+        except ConfigurationError:
+            try:
+                payload = await facade.read_artifact(name, version)
+            except Exception as exc:
+                raise _fail(exc) from exc
+            headers: dict[str, str] = {}
+            disposition = payload.get("content_disposition") or name
+            if "filename=" not in str(disposition):
+                disposition = f'attachment; filename="{disposition}"'
+            headers["Content-Disposition"] = str(disposition)
+            return Response(
+                content=base64.b64decode(payload["content_b64"]),
+                media_type=payload.get("mime") or "application/octet-stream",
+                headers=headers,
+            )
+        except Exception as exc:
+            raise _fail(exc) from exc
+        return RedirectResponse(info["url"], status_code=302)
+
+    @app.post("/artifacts/{name}")
+    async def put_artifact(
+        name: str, body: PutArtifactRequest, facade: RuntimeFacade = injected
+    ) -> dict[str, Any]:
+        try:
+            return await facade.put_artifact(
+                name, body.content_b64, mime=body.mime, metadata=body.metadata
+            )
+        except Exception as exc:
+            raise _fail(exc) from exc
+
+    @app.post("/artifacts/{name}/upload-url")
+    async def create_upload_url(
+        name: str, body: UploadUrlRequest, facade: RuntimeFacade = injected
+    ) -> dict[str, Any]:
+        try:
+            return await facade.upload_url(
+                name, mime=body.mime, max_size=body.max_size, expires_in=body.expires_in
+            )
+        except Exception as exc:
+            raise _fail(exc) from exc
+
+    @app.post("/artifacts/{name}/confirm")
+    async def confirm_artifact_upload(
+        name: str, body: ConfirmUploadRequest, facade: RuntimeFacade = injected
+    ) -> dict[str, Any]:
+        try:
+            return await facade.confirm_upload(
+                body.upload_id, name, run_id=body.run_id, metadata=body.metadata
+            )
+        except Exception as exc:
+            raise _fail(exc) from exc
+
+    @app.get("/blobs/{ref:path}")
+    async def download_blob(
+        ref: str,
+        expires: int,
+        sig: str,
+        method: str = "GET",
+        facade: RuntimeFacade = injected,
+    ) -> Response:
+        import base64
+
+        try:
+            payload = await facade.read_blob(ref, expires, sig, method)
+        except Exception as exc:
+            raise _fail(exc) from exc
+        return Response(
+            content=base64.b64decode(payload["content_b64"]),
+            media_type=payload.get("mime") or "application/octet-stream",
+        )
+
+    @app.put("/blobs/{ref:path}")
+    async def upload_blob(
+        ref: str,
+        request: Request,
+        expires: int,
+        sig: str,
+        method: str = "PUT",
+        facade: RuntimeFacade = injected,
+    ) -> dict[str, Any]:
+        import base64
+
+        body = await request.body()
+        mime = request.headers.get("content-type") or "application/octet-stream"
+        try:
+            return await facade.write_blob(
+                ref,
+                expires,
+                sig,
+                base64.b64encode(body).decode("ascii"),
+                mime=mime,
+                method=method,
+            )
+        except Exception as exc:
+            raise _fail(exc) from exc
 
     return app

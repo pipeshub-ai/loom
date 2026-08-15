@@ -40,6 +40,7 @@ def _args(**overrides: Any) -> argparse.Namespace:
         "timeout": 5.0,
         "redirect_port": None,
         "json": False,
+        "provider": None,
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -198,6 +199,52 @@ class TestResolveTarget:
         args = _args(client_id="c", token_endpoint="https://x/token", authorization_endpoint="https://x/authorize")
         target = auth_commands._resolve_target(args, name="jira", env_prefix="LOOM_CONNECT_JIRA")
         assert target.scopes == ("read", "write")
+
+    def test_a_known_provider_fills_endpoints_from_the_registry(self) -> None:
+        target = auth_commands._resolve_target(
+            _args(client_id="X", client_secret="Y"),
+            name="google",
+            env_prefix="LOOM_CONNECT_GOOGLE",
+            provider_hint="google",
+        )
+        assert target.token_endpoint == "https://oauth2.googleapis.com/token"
+        assert target.authorization_endpoint == "https://accounts.google.com/o/oauth2/v2/auth"
+        assert target.extra_auth_params["access_type"] == "offline"
+        assert target.provider_id == "google"
+        assert target.pkce is True
+
+    def test_scope_flags_replace_provider_defaults_rather_than_merging(self) -> None:
+        target = auth_commands._resolve_target(
+            _args(client_id="X", client_secret="Y", scope=["openid"]),
+            name="google",
+            env_prefix="LOOM_CONNECT_GOOGLE",
+            provider_hint="google",
+        )
+        assert target.scopes == ("openid",)
+
+    def test_login_does_not_infer_a_provider_from_the_name(self) -> None:
+        with pytest.raises(ConfigurationError, match="token endpoint and a client id"):
+            auth_commands._resolve_target(
+                _args(), name="google", env_prefix="LOOM_LOGIN"
+            )
+
+    def test_an_unknown_provider_hint_is_named_in_the_error(self) -> None:
+        with pytest.raises(ConfigurationError, match="not a known provider"):
+            auth_commands._resolve_target(
+                _args(),
+                name="custom",
+                env_prefix="LOOM_CONNECT_CUSTOM",
+                provider_hint="not-a-real-provider",
+            )
+
+    def test_github_disables_pkce(self) -> None:
+        target = auth_commands._resolve_target(
+            _args(client_id="X", client_secret="Y"),
+            name="github",
+            env_prefix="LOOM_CONNECT_GITHUB",
+            provider_hint="github",
+        )
+        assert target.pkce is False
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +448,73 @@ class TestRunPkceFlow:
 
         assert credential.token.reveal().startswith("access-")
 
+    async def test_extra_auth_params_reach_the_authorization_url(
+        self, server: FakeAuthServer, out: Printer, _no_real_browser: list[str]
+    ) -> None:
+        target = _target(extra_auth_params={"access_type": "offline", "prompt": "consent"})
+
+        async def simulate_browser() -> None:
+            while not _no_real_browser:
+                await asyncio.sleep(0)
+            parsed = urlparse(_no_real_browser[0])
+            qs = parse_qs(parsed.query)
+            assert qs["access_type"] == ["offline"]
+            assert qs["prompt"] == ["consent"]
+            challenge = qs["code_challenge"][0]
+            state = qs["state"][0]
+            redirect_uri = urlparse(qs["redirect_uri"][0])
+            server.issue_code("sim-code", code_challenge=challenge)
+            reader, writer = await asyncio.open_connection(
+                redirect_uri.hostname, redirect_uri.port
+            )
+            writer.write(
+                f"GET {redirect_uri.path}?code=sim-code&state={state} HTTP/1.1\r\n"
+                f"Host: {redirect_uri.hostname}\r\n\r\n".encode()
+            )
+            await writer.drain()
+            await reader.read()
+            writer.close()
+
+        simulator = asyncio.ensure_future(simulate_browser())
+        credential = await auth_commands._run_pkce_flow(
+            target, out, timeout=5.0, redirect_port=0
+        )
+        await simulator
+        assert credential.token.reveal().startswith("access-")
+
+    async def test_pkce_false_omits_challenge_and_verifier(
+        self, server: FakeAuthServer, out: Printer, _no_real_browser: list[str]
+    ) -> None:
+        target = _target(pkce=False)
+
+        async def simulate_browser() -> None:
+            while not _no_real_browser:
+                await asyncio.sleep(0)
+            parsed = urlparse(_no_real_browser[0])
+            qs = parse_qs(parsed.query)
+            assert "code_challenge" not in qs
+            assert "code_challenge_method" not in qs
+            state = qs["state"][0]
+            redirect_uri = urlparse(qs["redirect_uri"][0])
+            server.issue_code("sim-code")
+            reader, writer = await asyncio.open_connection(
+                redirect_uri.hostname, redirect_uri.port
+            )
+            writer.write(
+                f"GET {redirect_uri.path}?code=sim-code&state={state} HTTP/1.1\r\n"
+                f"Host: {redirect_uri.hostname}\r\n\r\n".encode()
+            )
+            await writer.drain()
+            await reader.read()
+            writer.close()
+
+        simulator = asyncio.ensure_future(simulate_browser())
+        credential = await auth_commands._run_pkce_flow(
+            target, out, timeout=5.0, redirect_port=0
+        )
+        await simulator
+        assert credential.token.reveal().startswith("access-")
+
     async def test_a_mismatched_state_is_rejected(
         self, server: FakeAuthServer, out: Printer, _no_real_browser: list[str]
     ) -> None:
@@ -464,6 +578,29 @@ class TestConnectStampsMetadata:
 
         assert credential.metadata["token_endpoint"] == "https://auth.test/token"
         assert credential.metadata["client_id"] == "loom-cli"
+
+    async def test_provider_id_is_persisted(
+        self, server: FakeAuthServer, out: Printer
+    ) -> None:
+        args = _args(
+            device=True,
+            client_id="loom-cli",
+            token_endpoint="https://auth.test/token",
+            device_authorization_endpoint="https://auth.test/device_authorization",
+            provider="google",
+        )
+
+        async def approve_shortly() -> None:
+            while not server._devices:
+                await asyncio.sleep(0)
+            server.approve_device(next(iter(server._devices)))
+
+        approver = asyncio.ensure_future(approve_shortly())
+        credential = await auth_commands._connect(
+            args, out, name="jira", env_prefix="LOOM_CONNECT_JIRA"
+        )
+        await approver
+        assert credential.metadata["provider_id"] == "google"
 
 
 class TestMetadataRefresherRoundTrip:
@@ -598,6 +735,41 @@ class TestCmdConnect:
         assert asyncio.run(store.names()) == ["jira"]
 
 
+class TestCmdDisconnect:
+    def test_forgets_the_named_credential(
+        self, store: MemoryCredentialStore, capsys: Any
+    ) -> None:
+        asyncio.run(store.put("jira", _stored()))
+        args = _args(json=True)
+        args.name = "jira"
+
+        assert auth_commands.cmd_disconnect(args) == int(Exit.OK)
+        assert asyncio.run(store.names()) == []
+        printed = capsys.readouterr().out
+        assert '"disconnected": true' in printed
+
+    def test_disconnecting_something_never_connected_is_not_an_error(
+        self, capsys: Any
+    ) -> None:
+        args = _args(json=True)
+        args.name = "never-connected"
+
+        assert auth_commands.cmd_disconnect(args) == int(Exit.OK)
+        printed = capsys.readouterr().out
+        assert '"disconnected": false' in printed
+
+    def test_disconnecting_one_name_leaves_others_stored(
+        self, store: MemoryCredentialStore
+    ) -> None:
+        asyncio.run(store.put("jira", _stored()))
+        asyncio.run(store.put("google", _stored()))
+        args = _args(json=True)
+        args.name = "jira"
+
+        auth_commands.cmd_disconnect(args)
+        assert asyncio.run(store.names()) == ["google"]
+
+
 class TestCmdLogout:
     def test_forgets_the_stored_login(self, store: MemoryCredentialStore) -> None:
         asyncio.run(store.put("loom:http://x", _stored()))
@@ -716,3 +888,36 @@ class TestCliWiring:
         )
         assert args.redirect_port == 4321
         assert args.name == "jira"
+
+    def test_connect_accepts_provider(self) -> None:
+        from workflow_builder.cli import build_parser
+
+        args = build_parser().parse_args(
+            ["connect", "my-google", "--provider", "google"]
+        )
+        assert args.name == "my-google"
+        assert args.provider == "google"
+
+    def test_login_has_no_provider_flag(self) -> None:
+        from workflow_builder.cli import build_parser
+
+        args = build_parser().parse_args(["login"])
+        assert not hasattr(args, "provider")
+
+    def test_providers_lists_google(self, capsys: Any) -> None:
+        assert auth_commands.cmd_providers(_args(json=True)) == int(Exit.OK)
+        printed = capsys.readouterr().out
+        assert '"id": "google"' in printed
+        assert "authorization_endpoint" in printed
+
+    def test_disconnect_is_wired_into_the_parser(self) -> None:
+        from workflow_builder.cli import build_parser
+
+        args = build_parser().parse_args(["disconnect", "jira"])
+        assert args.name == "jira"
+        assert args.command == "disconnect"
+
+    def test_disconnect_dispatches_to_cmd_disconnect(self) -> None:
+        from workflow_builder.cli import _HANDLERS
+
+        assert _HANDLERS["disconnect"] is auth_commands.cmd_disconnect

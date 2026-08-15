@@ -12,6 +12,38 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+#: Effects a toolset entry may pin, matching :class:`EffectClass` values.
+_EFFECTS = frozenset({"read", "write", "destructive"})
+
+
+class GrantIssue(BaseModel):
+    """One grant entry that names nothing the runtime can see."""
+
+    entry: str
+    dimension: str
+    """Which list it came from: ``toolsets``, ``agents``, …"""
+    reason: str
+    suggestions: list[str] = Field(default_factory=list)
+
+    @classmethod
+    def of(
+        cls, dimension: str, entry: str, known: list[str], *, part: str | None = None
+    ) -> GrantIssue:
+        """Build an issue with the closest known names attached."""
+        from workflow_builder.nodes.base import near_matches
+
+        wanted = part or entry
+        return cls(
+            entry=entry,
+            dimension=dimension,
+            reason=f"no {dimension[:-1]} named {wanted!r} is registered",
+            suggestions=near_matches(wanted, known),
+        )
+
+    def __str__(self) -> str:
+        hint = f" — did you mean {', '.join(self.suggestions)}?" if self.suggestions else ""
+        return f"grant {self.entry!r}: {self.reason}{hint}"
+
 
 class GrantSet(BaseModel):
     """Declares the permissions a workflow requires.
@@ -91,6 +123,83 @@ class GrantSet(BaseModel):
             if group and scope == f"{toolset_id}.{group}":
                 return True
         return False
+
+    def validate_against(
+        self,
+        *,
+        toolsets: Any = None,
+        agents: Any = None,
+    ) -> list[GrantIssue]:
+        """Check that every entry names something that exists.
+
+        An unrecognized entry is worse than a wrong one, because it fails
+        silently in the safe direction: ``allows_operation`` matches nothing,
+        so a workflow declaring ``jira.issues:writ`` gets an empty toolset and
+        the failure surfaces much later as "the agent could not find a tool".
+        An operator reading ``grants=[...]`` would reasonably believe the
+        workflow is restricted to what it lists; a typo means it is restricted
+        to nothing, which looks identical from the outside until it doesn't.
+
+        Returns issues rather than raising, because the right response differs
+        by caller: registration raises, ``loom check`` prints, and the coding
+        agent repairs.
+
+        Args:
+            toolsets: A registry answering ``list_toolsets()``, and optionally
+                ``get(id)`` for group checking. Only manifest metadata is read
+                — no toolset is imported to validate a string.
+            agents: An optional collection of known agent names.
+        """
+        issues: list[GrantIssue] = []
+        if toolsets is not None:
+            issues += self._toolset_issues(toolsets)
+        if agents is not None:
+            known = sorted(agents)
+            for name in self.agents:
+                if name not in known:
+                    issues.append(GrantIssue.of("agents", name, known))
+        return issues
+
+    def _toolset_issues(self, registry: Any) -> list[GrantIssue]:
+        known = list(registry.list_toolsets())
+        if not known:
+            # Nothing registered is not the same as nothing valid. Toolsets load
+            # lazily and via entry points, so a registry that is empty at this
+            # moment says nothing about the entries — and flagging all of them
+            # would fail every workflow whose grants are declared before its
+            # integrations are registered.
+            return []
+        issues: list[GrantIssue] = []
+        for entry in self.toolsets:
+            scope, effect = _parse_toolset_entry(entry)
+            toolset_id, _, group = scope.partition(".")
+
+            if toolset_id not in known:
+                issues.append(GrantIssue.of("toolsets", entry, known, part=toolset_id))
+                continue
+            if effect and effect not in _EFFECTS:
+                issues.append(
+                    GrantIssue(
+                        entry=entry,
+                        dimension="toolsets",
+                        reason=f"unknown effect {effect!r}",
+                        suggestions=sorted(_EFFECTS),
+                    )
+                )
+                continue
+            if group:
+                manifest = registry.get(toolset_id)
+                groups = sorted(getattr(manifest, "groups", {}) or {})
+                if groups and group not in groups:
+                    issues.append(
+                        GrantIssue(
+                            entry=entry,
+                            dimension="toolsets",
+                            reason=f"toolset {toolset_id!r} has no group {group!r}",
+                            suggestions=[f"{toolset_id}.{g}" for g in groups[:3]],
+                        )
+                    )
+        return issues
 
     def merge(self, other: GrantSet) -> GrantSet:
         """Merge two grant sets (union) — widens what is permitted.

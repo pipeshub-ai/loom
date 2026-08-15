@@ -154,6 +154,8 @@ class RetentionManager:
                     result.payloads_deleted += await self._drop_blobs(
                         store, blobs, record.run_id, dry_run=dry_run
                     )
+                if not dry_run:
+                    await self._drop_staging(store, record.run_id)
 
                 if expiring:
                     if not dry_run:
@@ -190,6 +192,19 @@ class RetentionManager:
                 with suppress(Exception):
                     await blobs.delete(ref)
         return deleted
+
+    @staticmethod
+    async def _drop_staging(store: Any, run_id: str) -> None:
+        """Drop per-run staging entries once the run itself is being compacted."""
+        manifest_key = f"staging:{run_id}:__manifest__"
+        names = await store.get(manifest_key)
+        if not names:
+            return
+        for name in names:
+            with suppress(Exception):
+                await store.delete(f"staging:{run_id}:{name}")
+        with suppress(Exception):
+            await store.delete(manifest_key)
 
     def should_archive_run(self, completed_at: datetime) -> bool:
         """Return ``True`` if a run completed before the run-record cutoff."""

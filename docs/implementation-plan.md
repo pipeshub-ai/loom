@@ -1,5 +1,7 @@
 # LOOM implementation plan
 
+<!-- docs-illustrative -->
+
 **What this is:** the work LOOM does to become a substrate a platform can build
 on, without becoming that platform.
 

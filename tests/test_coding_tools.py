@@ -155,13 +155,32 @@ class TestBuildCodingTools:
         from workflow_builder.agents.coding_tools import build_coding_tools
 
         tools = build_coding_tools()
-        assert len(tools) == 6  # + call_read_operation
         names = {t.name for t in tools}
-        assert "search_toolsets" in names
-        assert "show_toolset" in names
-        assert "get_tool_contract" in names
-        assert "get_tool_docs" in names
-        assert "validate_code" in names
+        # The toolset tier, the node tier, and the validator. Asserted by name
+        # rather than by count: a count says nothing about which tool went
+        # missing, and the whole set is the agent's visible surface.
+        assert names == {
+            "search_toolsets",
+            "show_toolset",
+            "get_tool_contract",
+            "get_tool_docs",
+            "call_read_operation",
+            "search_nodes",
+            "show_node",
+            "node_contract",
+            "validate_code",
+        }
+        assert "ask_user" not in names
+
+    def test_ask_user_is_included_only_when_interaction_is_set(self) -> None:
+        from workflow_builder.agents.coding_tools import build_coding_tools
+        from workflow_builder.agents.interaction import CallbackUserInteraction, UserResponse
+
+        tools = build_coding_tools(
+            interaction=CallbackUserInteraction(lambda q: UserResponse(answer="x"))
+        )
+        assert "ask_user" in {t.name for t in tools}
+        assert len(tools) == len(build_coding_tools()) + 1
 
     def test_all_have_descriptions(self) -> None:
         from workflow_builder.agents.coding_tools import build_coding_tools

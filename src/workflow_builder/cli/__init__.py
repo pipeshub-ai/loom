@@ -39,6 +39,10 @@ _HANDLERS = {
     "show": commands.cmd_show,
     "watch": commands.cmd_watch,
     "approve": commands.cmd_approve,
+    "pending": commands.cmd_pending,
+    "respond": commands.cmd_respond,
+    "nodes": commands.cmd_nodes,
+    "node": commands.cmd_node,
     "send": commands.cmd_send,
     "cancel": commands.cmd_cancel,
     "retry": commands.cmd_retry,
@@ -48,10 +52,13 @@ _HANDLERS = {
     "serve": commands.cmd_serve,
     "mcp": commands.cmd_mcp,
     "ui": commands.cmd_ui,
+    "artifacts": commands.cmd_artifacts,
     "login": auth_commands.cmd_login,
     "logout": auth_commands.cmd_logout,
     "whoami": auth_commands.cmd_whoami,
     "connect": auth_commands.cmd_connect,
+    "disconnect": auth_commands.cmd_disconnect,
+    "providers": auth_commands.cmd_providers,
     "setup": mcp_setup.cmd_setup,
 }
 
@@ -182,6 +189,17 @@ def _running(sub: argparse._SubParsersAction) -> None:
         metavar="KEY",
         help="Reuse to make a retried invocation return the original run",
     )
+    run.add_argument(
+        "--env",
+        action="append",
+        metavar="KEY=VAL",
+        help="Per-run environment override (repeatable). Not for secrets.",
+    )
+    run.add_argument(
+        "--env-file",
+        metavar="PATH",
+        help="Load KEY=VAL lines as per-run environment overrides",
+    )
     _add_backend(run)
     _add_output(run)
 
@@ -208,6 +226,22 @@ def _running(sub: argparse._SubParsersAction) -> None:
     _add_backend(watch)
     _add_output(watch)
 
+    artifacts = sub.add_parser("artifacts", help="List, show, or download artifacts")
+    artifacts.add_argument(
+        "action",
+        nargs="?",
+        default="list",
+        choices=("list", "show", "download"),
+        help="list (default), show NAME, or download NAME",
+    )
+    artifacts.add_argument("name", nargs="?", help="Artifact name")
+    artifacts.add_argument("--version", type=int, default=None, help="Specific version")
+    artifacts.add_argument(
+        "--output", "-o", help="Path to write downloaded bytes (download only)"
+    )
+    _add_backend(artifacts)
+    _add_output(artifacts)
+
 
 def _acting(sub: argparse._SubParsersAction) -> None:
     approve = sub.add_parser("approve", help="Resolve a pending human approval")
@@ -218,6 +252,33 @@ def _acting(sub: argparse._SubParsersAction) -> None:
     )
     _add_backend(approve)
     _add_output(approve)
+
+    pending = sub.add_parser(
+        "pending", help="List runs parked on a person, and what each is asked"
+    )
+    pending.add_argument(
+        "run_id", nargs="?", help="Only this run, instead of every parked one"
+    )
+    _add_backend(pending)
+    _add_output(pending)
+
+    respond = sub.add_parser(
+        "respond", help="Answer a parked human request with a typed payload"
+    )
+    respond.add_argument("run_id", help="Run identifier")
+    respond.add_argument("subject", help="Request subject, e.g. 'refund'")
+    respond.add_argument(
+        "payload", nargs="?", help="Answer as JSON, @file.json, or a bare string"
+    )
+    respond.add_argument("--approve", action="store_true", help="Set approved=true")
+    respond.add_argument("--reject", action="store_true", help="Set approved=false")
+    respond.add_argument(
+        "--select", action="append", help="Choose an option (repeatable)"
+    )
+    respond.add_argument("--comment", help="Free-text note recorded with the answer")
+    respond.add_argument("--responder", help="Who answered, recorded on the run")
+    _add_backend(respond)
+    _add_output(respond)
 
     send = sub.add_parser("send", help="Deliver an event to a parked run")
     send.add_argument("run_id", help="Run identifier")
@@ -245,6 +306,20 @@ def _serving(sub: argparse._SubParsersAction) -> None:
     workflows = sub.add_parser("workflows", help="List available workflows")
     _add_backend(workflows)
     _add_output(workflows)
+
+    nodes = sub.add_parser("nodes", help="List catalogued nodes a workflow can call")
+    nodes.add_argument("query", nargs="?", help="Keywords to match")
+    nodes.add_argument(
+        "--category",
+        help="human | guard | control | transform | io | agent | custom",
+    )
+    _add_backend(nodes)
+    _add_output(nodes)
+
+    node = sub.add_parser("node", help="Show one node, with the code to call it")
+    node.add_argument("node_id", help="Node id, e.g. human.approval")
+    _add_backend(node)
+    _add_output(node)
 
     publish = sub.add_parser("publish", help="Record a workflow in the catalog")
     publish.add_argument("target", help="Workflow name, or path.py::name")
@@ -284,6 +359,14 @@ def _serving(sub: argparse._SubParsersAction) -> None:
     )
     mcp.add_argument(
         "--port", type=int, default=8000, help="Bind port (http and sse transports)"
+    )
+    mcp.add_argument(
+        "--no-authoring",
+        action="store_true",
+        help="Do not register the code-authoring tools (get_tool_contract, "
+        "validate_workflow_code, smoke_test_workflow, save_workflow, ...); "
+        "serve only the run-management tools. Same effect as "
+        "LOOM_MCP_AUTHORING=0",
     )
     _add_backend(mcp)
     _add_output(mcp)
@@ -361,8 +444,24 @@ def _authenticating(sub: argparse._SubParsersAction) -> None:
         "connect", help="Authenticate a named credential (e.g. a toolset) via OAuth"
     )
     connect.add_argument("name", help="Credential name, e.g. 'jira' or 'google'")
+    connect.add_argument(
+        "--provider",
+        metavar="ID",
+        help="OAuth provider id (see 'loom providers'). Defaults to NAME.",
+    )
     _add_oauth_flags(connect)
     _add_output(connect)
+
+    disconnect = sub.add_parser(
+        "disconnect", help="Forget a named credential connected via 'loom connect'"
+    )
+    disconnect.add_argument("name", help="Credential name, e.g. 'jira' or 'google'")
+    _add_output(disconnect)
+
+    providers = sub.add_parser(
+        "providers", help="List pre-configured OAuth providers"
+    )
+    _add_output(providers)
 
 
 def _add_oauth_flags(parser: argparse.ArgumentParser) -> None:
@@ -381,7 +480,10 @@ def _add_oauth_flags(parser: argparse.ArgumentParser) -> None:
         "--client-secret", help="OAuth client secret, for a confidential client"
     )
     parser.add_argument(
-        "--scope", action="append", metavar="SCOPE", help="Requested scope (repeatable)"
+        "--scope",
+        action="append",
+        metavar="SCOPE",
+        help="Requested scope (repeatable). Replaces provider defaults.",
     )
     flow = parser.add_mutually_exclusive_group()
     flow.add_argument(

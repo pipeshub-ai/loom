@@ -43,6 +43,13 @@ _CTX_CALL_MAP: dict[str, NodeKind] = {
     "emit": NodeKind.EMIT,  # deprecated alias for publish, still drawable
     "signal": NodeKind.EMIT,
     "checkpoint": NodeKind.ARTIFACT,
+    "put_artifact": NodeKind.ARTIFACT,
+    "get_artifact": NodeKind.ARTIFACT,
+    "artifact_versions": NodeKind.ARTIFACT,
+    "stage_artifact": NodeKind.ARTIFACT,
+    "commit_staged": NodeKind.ARTIFACT,
+    "discard_staged": NodeKind.ARTIFACT,
+    "artifact_url": NodeKind.ARTIFACT,
 }
 
 

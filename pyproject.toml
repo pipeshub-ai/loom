@@ -43,6 +43,8 @@ dependencies = [
 mongo = ["motor>=3.0"]
 postgres = ["asyncpg>=0.29"]
 s3 = ["aioboto3>=13.0"]
+azure = ["azure-storage-blob>=12.0"]
+gcs = ["google-cloud-storage>=2.0"]
 
 # Google Workspace service-account auth (Gmail/Calendar toolsets).
 # The refresh-token and access-token flows need nothing but httpx.
@@ -111,7 +113,7 @@ dev = [
 
 # Install everything
 all = [
-    "workflow-builder[mongo,postgres,s3,google,identity,credentials,anthropic,openai,gemini,langchain,api,cli,tui,mcp]"
+    "workflow-builder[mongo,postgres,s3,azure,gcs,google,identity,credentials,anthropic,openai,gemini,langchain,api,cli,tui,mcp]"
 ]
 
 [project.urls]

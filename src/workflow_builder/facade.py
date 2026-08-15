@@ -22,6 +22,8 @@ one it was handed.
 
 from __future__ import annotations
 
+import base64
+import contextlib
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -63,6 +65,8 @@ class RuntimeFacade(Protocol):
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
         wait: bool = True,
+        env: dict[str, str] | None = None,
+        credentials: dict[str, str] | Any | None = None,
     ) -> dict[str, Any]:
         """Start a run. ``wait=False`` returns as soon as it is recorded."""
         ...
@@ -116,12 +120,122 @@ class RuntimeFacade(Protocol):
         """Remove a schedule. ``False`` when there was no such trigger."""
         ...
 
+    async def pending(self, run_id: str | None = None) -> list[dict[str, Any]]:
+        """Every run parked on a person, and what each is being asked.
+
+        Derived from the journal rather than a second store: a waiting run *is*
+        a suspended ``approval:<subject>`` entry, and the sibling delivery entry
+        holds the request. Keeping a parallel table would be one more thing to
+        drift out of step with the run it describes.
+        """
+        ...
+
+    async def respond(
+        self, run_id: str, subject: str, answer: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Answer a parked human request with a typed payload.
+
+        ``approve`` is the yes/no shortcut over this; a choice, a form, or an
+        edited draft needs the whole answer.
+        """
+        ...
+
+    async def nodes(
+        self, query: str = "", *, category: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Catalogued nodes, optionally narrowed by query or category."""
+        ...
+
+    async def node(self, node_id: str) -> dict[str, Any]:
+        """One node in full, including the code to call it."""
+        ...
+
+    async def list_artifacts(self) -> list[dict[str, Any]]:
+        """Latest version of every named artifact."""
+        ...
+
+    async def artifact_history(self, name: str) -> list[dict[str, Any]]:
+        """Every version of *name*, oldest first."""
+        ...
+
+    async def artifact_url(
+        self, name: str, version: int | None = None, expires_in: int = 3600
+    ) -> dict[str, Any]:
+        """Presigned download URL for an artifact version."""
+        ...
+
+    async def read_artifact(
+        self, name: str, version: int | None = None
+    ) -> dict[str, Any]:
+        """Artifact bytes as base64, for backends that cannot sign URLs."""
+        ...
+
+    async def put_artifact(
+        self,
+        name: str,
+        content_b64: str,
+        *,
+        mime: str = "application/octet-stream",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Publish small content under *name*. For MCP and CLI, not large files."""
+        ...
+
+    async def upload_url(
+        self,
+        name: str,
+        mime: str = "application/octet-stream",
+        max_size: int | None = None,
+        expires_in: int | None = None,
+    ) -> dict[str, Any]:
+        """Create a presigned PUT session for *name*."""
+        ...
+
+    async def confirm_upload(
+        self,
+        upload_id: str,
+        name: str,
+        run_id: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Verify a presigned upload and publish it as an artifact."""
+        ...
+
+    async def read_blob(
+        self, ref: str, expires: int, signature: str, method: str = "GET"
+    ) -> dict[str, Any]:
+        """Serve a locally signed blob after HMAC verification."""
+        ...
+
+    async def write_blob(
+        self,
+        ref: str,
+        expires: int,
+        signature: str,
+        content_b64: str,
+        mime: str = "application/octet-stream",
+        method: str = "PUT",
+    ) -> dict[str, Any]:
+        """Accept a locally signed PUT after HMAC verification."""
+        ...
+
     async def close(self) -> None: ...
 
 
 # ---------------------------------------------------------------------------
 # Shared shapes
 # ---------------------------------------------------------------------------
+
+
+_REDACT_METADATA = frozenset({"loom.env"})
+
+
+def _public_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """Metadata safe to put on the wire — env overrides are not."""
+    out = dict(metadata or {})
+    for key in _REDACT_METADATA:
+        out.pop(key, None)
+    return out
 
 
 def describe_record(record: Any) -> dict[str, Any]:
@@ -138,7 +252,7 @@ def describe_record(record: Any) -> dict[str, Any]:
         "created_at": record.created_at.isoformat() if record.created_at else None,
         "finished_at": record.finished_at.isoformat() if record.finished_at else None,
         "awaiting_event": record.awaiting_event,
-        "metadata": dict(record.metadata),
+        "metadata": _public_metadata(record.metadata),
         # Not secret and not new information — embedded callers already read
         # ``record.metadata`` directly — but exposing it here is what lets
         # ``AuthorizedFacade`` check a run's pinned owner identically whether
@@ -182,9 +296,13 @@ def describe_result(result: Any) -> dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------------------
-# Local
-# ---------------------------------------------------------------------------
+def describe_artifact(version: Any) -> dict[str, Any]:
+    """Render an :class:`ArtifactVersion` as the wire shape."""
+    return version.model_dump(mode="json")
+
+
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
 
 
 @dataclass
@@ -239,7 +357,14 @@ class LocalFacade:
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
         wait: bool = True,
+        env: dict[str, str] | None = None,
+        credentials: dict[str, str] | Any | None = None,
     ) -> dict[str, Any]:
+        extra: dict[str, Any] = {}
+        if env:
+            extra["env"] = env
+        if credentials is not None:
+            extra["credentials"] = credentials
         if wait:
             result = await self.runtime.run(
                 workflow,
@@ -247,6 +372,7 @@ class LocalFacade:
                 idempotency_key=idempotency_key,
                 tags=tags or [],
                 metadata=metadata or {},
+                **extra,
             )
             run_id = result.run_id
         else:
@@ -256,6 +382,7 @@ class LocalFacade:
                 idempotency_key=idempotency_key,
                 tags=tags or [],
                 metadata=metadata or {},
+                **extra,
             )
         found = await self.get(run_id)
         return found or {"run_id": run_id, "status": "pending", "workflow": workflow}
@@ -311,6 +438,105 @@ class LocalFacade:
         record = await self.runtime.publish(workflow)
         return record.model_dump(mode="json")
 
+    # -- human requests -----------------------------------------------------
+
+    async def pending(self, run_id: str | None = None) -> list[dict[str, Any]]:
+        from workflow_builder.core.models import ExecutionStatus
+
+        if run_id is not None:
+            record = await self.runtime.get(run_id)
+            records = [record] if record is not None else []
+        else:
+            records = await self.runtime.list_runs(
+                status=ExecutionStatus.SUSPENDED, limit=200
+            )
+
+        waiting: list[dict[str, Any]] = []
+        for record in records:
+            waiting.extend(await self._waiting_on_a_person(record))
+        return waiting
+
+    async def _waiting_on_a_person(self, record: Any) -> list[dict[str, Any]]:
+        """The requests this run is parked on, read out of its journal.
+
+        Against :class:`StepRecord`, which is the *public* view of the journal
+        and a coarser vocabulary than the entries the engine writes: ``kind`` is
+        a plain string and ``EntryStatus.SUSPENDED`` surfaces as
+        ``StepStatus.RUNNING``. Filtering on the engine's own enums here matched
+        nothing and returned an empty list — which reads as "nothing is waiting",
+        the one wrong answer this command must never give.
+        """
+        from workflow_builder.core.models import StepStatus
+        from workflow_builder.nodes.human.asking import HumanTicket
+
+        entries = await self.runtime.history(record.run_id)
+
+        tickets: dict[str, Any] = {}
+        for entry in entries:
+            if entry.kind == "step" and entry.name.startswith("deliver:"):
+                try:
+                    ticket = HumanTicket.model_validate(entry.output)
+                except Exception:
+                    continue
+                tickets[ticket.request.subject] = ticket
+
+        #: A journalled wait that has not resolved. The engine writes SUSPENDED;
+        #: the public view reports it as RUNNING or PENDING.
+        unresolved = {StepStatus.RUNNING, StepStatus.PENDING}
+
+        found: list[dict[str, Any]] = []
+        for entry in entries:
+            if entry.kind != "event" or entry.status not in unresolved:
+                continue
+            if not entry.name.startswith("approval:"):
+                continue
+            subject = entry.name.removeprefix("approval:")
+            ticket = tickets.get(subject)
+            request = ticket.request if ticket else None
+            found.append(
+                {
+                    "run_id": record.run_id,
+                    "workflow": record.workflow,
+                    "subject": subject,
+                    # A request raised by ctx.wait_for_approval has no ticket —
+                    # it is still waiting on a person and still belongs here,
+                    # with the fields a node would have supplied left empty.
+                    "prompt": request.prompt if request else "",
+                    "node_id": request.node_id if request else "",
+                    "assignees": list(request.assignees) if request else [],
+                    "context": dict(request.context) if request else {},
+                    "response_schema": dict(request.response_schema) if request else {},
+                    "expires_at": (
+                        request.expires_at.isoformat()
+                        if request and request.expires_at
+                        else None
+                    ),
+                    "delivered": ticket.receipt.delivered if ticket else False,
+                    "channel": ticket.receipt.channel if ticket else "",
+                    "next_action": f"loom respond {record.run_id} {subject} --approve",
+                }
+            )
+        return found
+
+    async def respond(
+        self, run_id: str, subject: str, answer: dict[str, Any]
+    ) -> dict[str, Any]:
+        await self.send_event(run_id, f"approval:{subject}", answer)
+        return await self.get(run_id) or {}
+
+    # -- nodes --------------------------------------------------------------
+
+    async def nodes(
+        self, query: str = "", *, category: str | None = None
+    ) -> list[dict[str, Any]]:
+        cards = self.runtime.nodes.search(query or "", category=category, limit=200)
+        return [card.model_dump(mode="json") for card in cards]
+
+    async def node(self, node_id: str) -> dict[str, Any]:
+        detail = self.runtime.nodes.show(node_id).model_dump(mode="json")
+        detail["contract"] = self.runtime.nodes.contract(node_id)
+        return detail
+
     def _dispatcher(self) -> Any:
         """One dispatcher per Runtime, made on demand.
 
@@ -360,6 +586,151 @@ class LocalFacade:
         await store.delete_trigger(trigger_id)
         return True
 
+    async def list_artifacts(self) -> list[dict[str, Any]]:
+        service = self.runtime.require_artifacts()
+        latest = []
+        for name in await service.names():
+            latest.append(describe_artifact(await service.get(name)))
+        return latest
+
+    async def artifact_history(self, name: str) -> list[dict[str, Any]]:
+        service = self.runtime.require_artifacts()
+        return [describe_artifact(item) for item in await service.history(name)]
+
+    async def artifact_url(
+        self, name: str, version: int | None = None, expires_in: int = 3600
+    ) -> dict[str, Any]:
+        service = self.runtime.require_artifacts()
+        url = await service.url(name, version, expires_in=expires_in)
+        resolved = await service.get(name, version)
+        return {
+            "url": url,
+            "name": resolved.name,
+            "version": resolved.version,
+            "expires_in": expires_in,
+            "mime": resolved.mime,
+        }
+
+    async def read_artifact(
+        self, name: str, version: int | None = None
+    ) -> dict[str, Any]:
+        service = self.runtime.require_artifacts()
+        resolved = await service.get(name, version)
+        data = await service.read(resolved.name, resolved.version)
+        disposition = resolved.content_disposition or resolved.name
+        return {
+            "content_b64": _b64(data),
+            "mime": resolved.mime,
+            "size": resolved.size,
+            "name": resolved.name,
+            "version": resolved.version,
+            "sha256": resolved.sha256,
+            "content_disposition": disposition,
+        }
+
+    async def put_artifact(
+        self,
+        name: str,
+        content_b64: str,
+        *,
+        mime: str = "application/octet-stream",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        service = self.runtime.require_artifacts()
+        data = base64.b64decode(content_b64)
+        extra = dict(metadata or {})
+        version = await service.put(name, data, mime=mime, **extra)
+        return describe_artifact(version)
+
+    async def upload_url(
+        self,
+        name: str,
+        mime: str = "application/octet-stream",
+        max_size: int | None = None,
+        expires_in: int | None = None,
+    ) -> dict[str, Any]:
+        urls = self.runtime.require_signed_urls()
+        session = await urls.create_upload_session(
+            name, mime=mime, max_size=max_size, expires_in=expires_in
+        )
+        return session.model_dump(mode="json")
+
+    async def confirm_upload(
+        self,
+        upload_id: str,
+        name: str,
+        run_id: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        urls = self.runtime.require_signed_urls()
+        session = await urls._load_session(upload_id)
+        if session.name != name:
+            raise ConfigurationError(
+                f"upload '{upload_id}' was created for {session.name!r}, not {name!r}"
+            )
+        version = await urls.confirm_upload(
+            upload_id,
+            artifacts=self.runtime.require_artifacts(),
+            run_id=run_id,
+            metadata=metadata,
+        )
+        return describe_artifact(version)
+
+    async def read_blob(
+        self, ref: str, expires: int, signature: str, method: str = "GET"
+    ) -> dict[str, Any]:
+        from workflow_builder.security.rbac import AuthorizationError
+        from workflow_builder.storage.blob import BlobNotFoundError
+
+        blobs = self.runtime.blobs
+        if blobs is None:
+            raise ConfigurationError(
+                "blob downloads need blob storage. Pass blobs=BlobService(...) to Runtime()."
+            )
+        backend = blobs.backend
+        verify = getattr(backend, "verify_signed_url", None)
+        if verify is None or not verify(ref, expires, signature, method):
+            raise AuthorizationError("invalid or expired blob signature")
+        try:
+            data = await backend.get(ref)
+        except BlobNotFoundError:
+            raise AuthorizationError("invalid or expired blob signature") from None
+        mime = "application/octet-stream"
+        head = getattr(backend, "head", None)
+        if head is not None:
+            with contextlib.suppress(Exception):
+                mime = (await head(ref)).mime or mime
+        return {
+            "content_b64": _b64(data),
+            "mime": mime,
+            "size": len(data),
+            "ref": ref,
+        }
+
+    async def write_blob(
+        self,
+        ref: str,
+        expires: int,
+        signature: str,
+        content_b64: str,
+        mime: str = "application/octet-stream",
+        method: str = "PUT",
+    ) -> dict[str, Any]:
+        from workflow_builder.security.rbac import AuthorizationError
+
+        blobs = self.runtime.blobs
+        if blobs is None:
+            raise ConfigurationError(
+                "blob uploads need blob storage. Pass blobs=BlobService(...) to Runtime()."
+            )
+        backend = blobs.backend
+        verify = getattr(backend, "verify_signed_url", None)
+        if verify is None or not verify(ref, expires, signature, method):
+            raise AuthorizationError("invalid or expired blob signature")
+        data = base64.b64decode(content_b64)
+        await backend.put(ref, data, mime)
+        return {"ref": ref, "size": len(data), "mime": mime}
+
     async def close(self) -> None:
         await self.runtime.shutdown()
         store_close = getattr(self.runtime.store, "close", None)
@@ -377,6 +748,23 @@ class LocalFacade:
 _NO_REMOTE_SCHEDULING = (
     "scheduling is not exposed over HTTP yet. Run the command against the "
     "process that owns the store — drop --server — or add the routes."
+)
+#: Why the human-request and node views are local-only for now. The same shape
+#: as scheduling: the capability exists on the port, the HTTP routes do not yet,
+#: and saying which is missing beats a NotImplementedError.
+_NO_REMOTE_HUMAN = (
+    "pending human requests are not exposed over HTTP yet. Run the command "
+    "against the process that owns the store — drop --server — or add the "
+    "routes. Answering one already works remotely: use 'loom approve'."
+)
+_NO_REMOTE_NODES = (
+    "the node catalog is not exposed over HTTP yet, and a remote server's "
+    "catalog is the one that matters. Drop --server to browse this process's."
+)
+_NO_REMOTE_CREDENTIALS = (
+    "credentials= cannot be sent over HTTP — a live token would leave the "
+    "process. Run 'loom connect <name>' on the server, or start the run "
+    "in-process."
 )
 
 
@@ -398,7 +786,11 @@ class RemoteFacade:
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
         wait: bool = True,
+        env: dict[str, str] | None = None,
+        credentials: dict[str, str] | Any | None = None,
     ) -> dict[str, Any]:
+        if credentials is not None:
+            raise ConfigurationError(_NO_REMOTE_CREDENTIALS)
         return await self.client.start(
             workflow,
             payload,
@@ -406,6 +798,7 @@ class RemoteFacade:
             tags=tags,
             metadata=metadata,
             wait=wait,
+            env=env,
         )
 
     async def get(self, run_id: str) -> dict[str, Any] | None:
@@ -457,6 +850,92 @@ class RemoteFacade:
 
     async def unschedule(self, trigger_id: str) -> bool:
         raise ConfigurationError(_NO_REMOTE_SCHEDULING)
+
+    async def pending(self, run_id: str | None = None) -> list[dict[str, Any]]:
+        raise ConfigurationError(_NO_REMOTE_HUMAN)
+
+    async def respond(
+        self, run_id: str, subject: str, answer: dict[str, Any]
+    ) -> dict[str, Any]:
+        # This one *does* work remotely: answering is an ordinary event.
+        await self.client.send_event(run_id, f"approval:{subject}", answer)
+        return await self.client.get(run_id) or {}
+
+    async def nodes(
+        self, query: str = "", *, category: str | None = None
+    ) -> list[dict[str, Any]]:
+        raise ConfigurationError(_NO_REMOTE_NODES)
+
+    async def node(self, node_id: str) -> dict[str, Any]:
+        raise ConfigurationError(_NO_REMOTE_NODES)
+
+    async def list_artifacts(self) -> list[dict[str, Any]]:
+        return await self.client.list_artifacts()
+
+    async def artifact_history(self, name: str) -> list[dict[str, Any]]:
+        return await self.client.artifact_history(name)
+
+    async def artifact_url(
+        self, name: str, version: int | None = None, expires_in: int = 3600
+    ) -> dict[str, Any]:
+        return await self.client.artifact_url(name, version, expires_in)
+
+    async def read_artifact(
+        self, name: str, version: int | None = None
+    ) -> dict[str, Any]:
+        return await self.client.read_artifact(name, version)
+
+    async def put_artifact(
+        self,
+        name: str,
+        content_b64: str,
+        *,
+        mime: str = "application/octet-stream",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await self.client.put_artifact(
+            name, content_b64, mime=mime, metadata=metadata
+        )
+
+    async def upload_url(
+        self,
+        name: str,
+        mime: str = "application/octet-stream",
+        max_size: int | None = None,
+        expires_in: int | None = None,
+    ) -> dict[str, Any]:
+        return await self.client.upload_url(
+            name, mime=mime, max_size=max_size, expires_in=expires_in
+        )
+
+    async def confirm_upload(
+        self,
+        upload_id: str,
+        name: str,
+        run_id: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await self.client.confirm_upload(
+            upload_id, name, run_id=run_id, metadata=metadata
+        )
+
+    async def read_blob(
+        self, ref: str, expires: int, signature: str, method: str = "GET"
+    ) -> dict[str, Any]:
+        return await self.client.read_blob(ref, expires, signature, method)
+
+    async def write_blob(
+        self,
+        ref: str,
+        expires: int,
+        signature: str,
+        content_b64: str,
+        mime: str = "application/octet-stream",
+        method: str = "PUT",
+    ) -> dict[str, Any]:
+        return await self.client.write_blob(
+            ref, expires, signature, content_b64, mime=mime, method=method
+        )
 
     async def publish(self, workflow: str) -> dict[str, Any]:
         raise ConfigurationError(

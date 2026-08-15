@@ -98,6 +98,22 @@ class Printer:
         else:
             print(_strip_markup(text))
 
+    def verbatim(self, text: str) -> None:
+        """Text printed exactly as given, with no markup interpretation.
+
+        ``line`` renders through rich, which reads ``[human]`` as a style tag
+        and prints nothing where the category was. Anything that is *code* — a
+        rendered node contract, a generated snippet — has to come through here,
+        because the whole point of it is that a reader can copy it and have it
+        work.
+        """
+        if self.as_json or self.quiet:
+            return
+        if self._console is not None:
+            self._console.print(text, markup=False, highlight=False)
+        else:
+            print(text)
+
     def error(self, text: str) -> None:
         """A problem, on stderr so it survives ``> out.json``."""
         if self._errors is not None:

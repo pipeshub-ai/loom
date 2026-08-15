@@ -373,9 +373,15 @@ class TestToolsetDiscoveryTools:
 class TestSchemaBudget:
     """A verbose docstring is a context tax paid on every turn a model holds
     this server's tools in scope — this makes that a failing test instead of
-    a silent regression."""
+    a silent regression.
 
-    MAX_TOTAL_SCHEMA_CHARS = 12_000
+    Raised from 12,000 to 18,000 when the six authoring tools (each carrying
+    a ``code: str`` parameter and a several-sentence docstring) joined the
+    sixteen run-management ones — measured total is ~10.3k, so this still
+    leaves headroom to catch a real regression rather than being sized to
+    exactly today's total."""
+
+    MAX_TOTAL_SCHEMA_CHARS = 18_000
 
     async def test_total_tool_schema_size_stays_under_budget(self, server) -> None:
         registered = await server.list_tools()
@@ -522,6 +528,38 @@ class TestServerRegistration:
         )
         assert (args.host, args.port) == ("0.0.0.0", 9001)
 
+    def test_the_cli_has_a_no_authoring_flag(self) -> None:
+        from workflow_builder.cli import build_parser
+
+        args = build_parser().parse_args(["mcp", "--no-authoring"])
+        assert args.no_authoring is True
+        assert build_parser().parse_args(["mcp"]).no_authoring is False
+
+    async def test_authoring_tools_absent_when_disabled(self, facade: LocalFacade) -> None:
+        from workflow_builder.mcp_server import build_server
+        from workflow_builder.mcp_server.authoring_config import AuthoringConfig
+
+        server = build_server(facade, authoring=AuthoringConfig(enabled=False))
+        names = {tool.name for tool in await server.list_tools()}
+        assert len(names) == 16
+        assert "save_workflow" not in names
+
+    async def test_read_only_tools_marked_correctly(self, server) -> None:
+        by_name = {tool.name: tool for tool in await server.list_tools()}
+        for name in (
+            "list_workflows",
+            "get_run_status",
+            "list_runs",
+            "search_toolsets",
+            "show_toolset",
+            "get_tool_contract",
+            "get_tool_docs",
+            "validate_workflow_code",
+        ):
+            assert by_name[name].annotations.readOnlyHint is True, name
+        for name in ("run_workflow", "cancel_run", "save_workflow"):
+            assert by_name[name].annotations.readOnlyHint is False, name
+
     async def test_all_tools_are_registered(self, server) -> None:
         names = {tool.name for tool in await server.list_tools()}
         assert names == {
@@ -538,7 +576,24 @@ class TestServerRegistration:
             "replay_run",
             "search_toolsets",
             "show_toolset",
+            "list_artifacts",
+            "get_artifact_url",
+            "put_artifact",
+            # Authoring tools — on by default; see test_mcp_authoring.py for
+            # the coroutines themselves and the on/off gating.
+            "get_tool_contract",
+            "get_tool_docs",
+            "call_read_operation",
+            "validate_workflow_code",
+            "smoke_test_workflow",
+            "save_workflow",
         }
+
+    async def test_every_tool_has_annotations(self, server) -> None:
+        """FastMCP 1.26+ hints — readOnly/destructive/idempotent/openWorld —
+        that let a client reason about risk before calling a tool."""
+        for tool in await server.list_tools():
+            assert tool.annotations is not None, tool.name
 
     async def test_every_tool_is_described(self, server) -> None:
         """The description is what a model chooses on."""
@@ -583,6 +638,39 @@ class TestServerRegistration:
 
     async def test_instructions_warn_about_suspended(self, server) -> None:
         assert "suspended" in (server.instructions or "")
+
+    async def test_instructions_describe_authoring_when_enabled(self, server) -> None:
+        assert "save_workflow" in (server.instructions or "")
+
+
+class TestValidateThenSmokeChain:
+    """The loop a host model actually drives: write code, validate it, fix,
+    then smoke-test — through the real MCP protocol layer, not the bare
+    coroutines (see test_mcp_authoring.py for those)."""
+
+    async def test_validate_then_smoke_on_the_same_code(self, server) -> None:
+        code = (
+            "from workflow_builder import Context, step, workflow\n\n"
+            "@step\n"
+            "async def double(n: int) -> int:\n"
+            "    return n * 2\n\n"
+            '@workflow(name="doubler2")\n'
+            "async def doubler2(ctx: Context, n: int) -> int:\n"
+            "    return await ctx.step(double, n)\n"
+        )
+        validated = json.loads(
+            _text_of(await server.call_tool("validate_workflow_code", {"code": code}))
+        )
+        assert validated["valid"] is True
+
+        smoked = json.loads(
+            _text_of(
+                await server.call_tool(
+                    "smoke_test_workflow", {"code": code, "workflow_input_json": "4"}
+                )
+            )
+        )
+        assert smoked["ok"] is True
 
 
 class TestServerCalls:
@@ -713,7 +801,8 @@ class TestStdioEndToEnd:
 
             names = {t.name for t in (await session.list_tools()).tools}
             assert "run_workflow" in names
-            assert len(names) == 13
+            assert "save_workflow" in names  # authoring tools on by default
+            assert len(names) == 22
 
     async def test_workflows_from_the_module_are_visible(self, project: Path) -> None:
         """The gap that made the original server useless: an empty registry."""

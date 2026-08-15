@@ -61,6 +61,12 @@ async def waiter(ctx: Context, _input: str) -> str:
     return str(payload.get("token", ""))
 
 
+@workflow(name="echo_env", description="Echo a per-run env key")
+async def echo_env(ctx: Context, key: str) -> str:
+    """Read ctx.env, so --env can be tested end to end."""
+    return ctx.env[key]
+
+
 @workflow(name="breaker", description="Always fails")
 async def breaker(ctx: Context, _input: str) -> str:
     """Fail, to exercise retry and replay."""
@@ -199,6 +205,33 @@ class TestInputParsing:
         done = loom(project, "run", "doubler", "-i", "@nope.json")
         assert done.returncode == Exit.USAGE
         assert "Traceback" not in done.stderr
+
+
+class TestEnvFlags:
+    def test_env_flag_reaches_the_workflow(self, project: Path) -> None:
+        run = start_run(project, "echo_env", "-i", "REGION", "--env", "REGION=eu")
+        assert run["output"] == "eu"
+
+    def test_env_file_and_flag_override(self, project: Path) -> None:
+        (project / "run.env").write_text("REGION=from-file\n# comment\nOTHER=x\n")
+        run = start_run(
+            project,
+            "echo_env",
+            "-i",
+            "REGION",
+            "--env-file",
+            "run.env",
+            "--env",
+            "REGION=from-flag",
+        )
+        assert run["output"] == "from-flag"
+
+    def test_parse_env_rejects_a_bare_key(self) -> None:
+        from workflow_builder.cli.commands import parse_env
+        from workflow_builder.core.exceptions import ConfigurationError
+
+        with pytest.raises(ConfigurationError, match="KEY=VAL"):
+            parse_env(["NOEQUALS"], None)
 
 
 # ---------------------------------------------------------------------------

@@ -34,6 +34,10 @@ OFFLINE = [
     "16_http_server.py",
     "17_files_and_artifacts.py",
     "19_pagination.py",
+    "20_human_nodes.py",
+    "21_guardrail_nodes.py",
+    "22_custom_nodes.py",
+    "23_bounded_tool_results.py",
 ]
 
 #: Needs an API key. Exercised for structure, not executed.

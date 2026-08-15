@@ -16,7 +16,11 @@ from typing import Any
 
 from workflow_builder.cli.output import Exit, Printer, exit_for
 from workflow_builder.cli.targets import CliBackend, Target, resolve
-from workflow_builder.core.exceptions import ConfigurationError, RegistryError
+from workflow_builder.core.exceptions import (
+    ConfigurationError,
+    InputMismatch,
+    RegistryError,
+)
 
 #: How often ``--follow`` and ``watch`` re-read a run, in seconds.
 POLL_INTERVAL = 0.4
@@ -44,7 +48,11 @@ def run_async(coro: Any) -> int:
     """Drive a command coroutine, turning known errors into exit codes."""
     try:
         return asyncio.run(coro)
-    except (ConfigurationError, RegistryError) as exc:
+    except (ConfigurationError, InputMismatch, RegistryError) as exc:
+        # InputMismatch is USAGE rather than FAILED on purpose: the payload was
+        # refused at the door, so there is no run to have failed. A script that
+        # branches on the exit code has to be able to tell "fix your input"
+        # from "the workflow broke".
         print(str(exc), file=sys.stderr)
         return Exit.USAGE
     except KeyboardInterrupt:
@@ -69,6 +77,33 @@ def parse_input(raw: str | None) -> Any:
         return json.loads(raw)
     except json.JSONDecodeError:
         return raw
+
+
+def parse_env(pairs: list[str] | None, env_file: str | None) -> dict[str, str]:
+    """Decode ``--env KEY=VAL`` and ``--env-file`` into a dict.
+
+    File lines are ``KEY=VAL``, with comments and blanks skipped. Flag pairs
+    override file entries.
+    """
+    result: dict[str, str] = {}
+    if env_file:
+        path = Path(env_file)
+        if not path.exists():
+            raise ConfigurationError(f"no such env file: {path}")
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            result[key.strip()] = value.strip().strip("'\"")
+    for item in pairs or []:
+        if "=" not in item:
+            raise ConfigurationError(f"--env expects KEY=VAL, got {item!r}")
+        key, _, value = item.partition("=")
+        if not key:
+            raise ConfigurationError(f"--env expects KEY=VAL, got {item!r}")
+        result[key] = value
+    return result
 
 
 def report_run(out: Printer, run: dict[str, Any], *, journal: list | None = None) -> None:
@@ -259,11 +294,13 @@ def cmd_run(args: argparse.Namespace) -> int:
 
         try:
             payload = parse_input(args.input)
+            env = parse_env(getattr(args, "env", None), getattr(args, "env_file", None))
             run = await target.backend.start(
                 target.workflow,
                 payload,
                 idempotency_key=args.idempotency_key,
                 wait=not args.detach,
+                env=env or None,
             )
             run_id = run["run_id"]
 
@@ -500,6 +537,206 @@ def cmd_workflows(args: argparse.Namespace) -> int:
     return run_async(body())
 
 
+def cmd_pending(args: argparse.Namespace) -> int:
+    """List the runs parked on a person, and what each is being asked.
+
+    The command that makes a parked run a queue item rather than a mystery.
+    Before this, finding one meant already knowing it existed.
+    """
+
+    async def body() -> int:
+        out = printer_for(args)
+        target = with_backend(args)
+        try:
+            waiting = await target.backend.pending(getattr(args, "run_id", None))
+            out.json(waiting)
+            if not waiting:
+                out.line("  nothing is waiting on a person")
+                return Exit.OK
+            out.table(
+                ["run", "subject", "asked of", "delivered", "prompt"],
+                [
+                    [
+                        row["run_id"],
+                        row["subject"],
+                        ", ".join(row["assignees"]) or "-",
+                        # A request nobody was told about is the failure this
+                        # column exists to surface: the run looks patient.
+                        "yes" if row["delivered"] else f"no ({row['channel'] or 'no channel'})",
+                        (row["prompt"] or "")[:44],
+                    ]
+                    for row in waiting
+                ],
+            )
+            for row in waiting:
+                out.line(f"  {row['next_action']}")
+            return Exit.OK
+        finally:
+            await target.backend.close()
+
+    return run_async(body())
+
+
+def cmd_respond(args: argparse.Namespace) -> int:
+    """Answer a parked human request with a typed payload.
+
+    ``loom approve`` is the yes/no shortcut; this is what a choice, a form, or
+    an edited draft needs.
+    """
+
+    async def body() -> int:
+        out = printer_for(args)
+        target = with_backend(args)
+        try:
+            answer = _answer_from(args)
+            run = await target.backend.respond(args.run_id, args.subject, answer)
+            out.json(run)
+            out.line(f"  answered '{args.subject}' with {answer}")
+            out.status(run, prefix="  ")
+            out.value("output", run.get("output"))
+            return exit_for(run)
+        finally:
+            await target.backend.close()
+
+    return run_async(body())
+
+
+def _answer_from(args: argparse.Namespace) -> dict[str, Any]:
+    """The payload to deliver, from the flags given.
+
+    ``--approve``/``--reject`` and ``--value`` compose, so a rejection can carry
+    a comment and a form answer can be approved in one call.
+    """
+    answer: dict[str, Any] = {}
+    if args.payload:
+        parsed = parse_input(args.payload)
+        if isinstance(parsed, dict):
+            answer.update(parsed)
+        else:
+            answer["value"] = parsed
+    if args.approve:
+        answer["approved"] = True
+    if args.reject:
+        answer["approved"] = False
+    if args.select:
+        answer["selected"] = list(args.select)
+    if args.comment:
+        answer["comment"] = args.comment
+    if args.responder:
+        answer["responder"] = args.responder
+    return answer
+
+
+def cmd_nodes(args: argparse.Namespace) -> int:
+    """List the catalogued nodes a workflow can call."""
+
+    async def body() -> int:
+        out = printer_for(args)
+        target = with_backend(args)
+        try:
+            found = await target.backend.nodes(
+                args.query or "", category=args.category
+            )
+            out.json(found)
+            if not found:
+                out.line("  no nodes matched")
+                return Exit.OK
+            out.table(
+                ["node", "category", "parks", "summary"],
+                [
+                    [
+                        row["id"],
+                        row["category"],
+                        "yes" if row["suspends"] else "",
+                        (row["summary"] or "")[:56],
+                    ]
+                    for row in sorted(found, key=lambda r: (r["category"], r["id"]))
+                ],
+            )
+            return Exit.OK
+        finally:
+            await target.backend.close()
+
+    return run_async(body())
+
+
+def cmd_node(args: argparse.Namespace) -> int:
+    """Show one node, including the exact code to call it."""
+
+    async def body() -> int:
+        out = printer_for(args)
+        target = with_backend(args)
+        try:
+            detail = await target.backend.node(args.node_id)
+            out.json(detail)
+            # verbatim, not line: this is code, and rich would eat the
+            # [category] tag in the header and any bracket in a default value.
+            out.verbatim(detail["contract"])
+            return Exit.OK
+        finally:
+            await target.backend.close()
+
+    return run_async(body())
+
+
+def cmd_artifacts(args: argparse.Namespace) -> int:
+    """List, inspect, or download named artifacts."""
+    import base64
+    from pathlib import Path
+
+    async def body() -> int:
+        out = printer_for(args)
+        target = with_backend(args)
+        action = args.action or "list"
+        try:
+            if action == "list":
+                items = await target.backend.list_artifacts()
+                out.json(items)
+                out.table(
+                    ["name", "version", "size", "mime"],
+                    [
+                        [
+                            item.get("name", ""),
+                            str(item.get("version", "")),
+                            str(item.get("size", "")),
+                            item.get("mime", ""),
+                        ]
+                        for item in items
+                    ],
+                )
+                return Exit.OK
+            if not args.name:
+                out.error("name is required for show/download")
+                return Exit.USAGE
+            if action == "show":
+                history = await target.backend.artifact_history(args.name)
+                out.json(history)
+                out.table(
+                    ["version", "size", "sha256", "run"],
+                    [
+                        [
+                            str(item.get("version", "")),
+                            str(item.get("size", "")),
+                            str(item.get("sha256", ""))[:12],
+                            str(item.get("created_by_run", ""))[:16],
+                        ]
+                        for item in history
+                    ],
+                )
+                return Exit.OK
+            payload = await target.backend.read_artifact(args.name, args.version)
+            data = base64.b64decode(payload["content_b64"])
+            dest = Path(args.output) if args.output else Path(payload.get("name") or args.name)
+            dest.write_bytes(data)
+            out.json({"path": str(dest), "size": len(data), "mime": payload.get("mime")})
+            out.line(f"wrote {dest} ({len(data)} bytes)")
+            return Exit.OK
+        finally:
+            await target.backend.close()
+
+    return run_async(body())
+
+
 def cmd_publish(args: argparse.Namespace) -> int:
     """Record a workflow in the durable catalog."""
 
@@ -593,9 +830,17 @@ def cmd_mcp(args: argparse.Namespace) -> int:
     runtime = getattr(target.backend, "runtime", None)
     workflows = sorted(runtime.workflows) if runtime is not None else []
 
+    from workflow_builder.mcp_server.authoring_config import AuthoringConfig
     from workflow_builder.toolsets.registry import register_available_toolsets
 
     toolsets = register_available_toolsets()
+    authoring = AuthoringConfig.from_env()
+    if args.no_authoring:
+        authoring = AuthoringConfig(
+            enabled=False,
+            smoke_timeout=authoring.smoke_timeout,
+            max_code_size=authoring.max_code_size,
+        )
 
     # stdio *is* the protocol channel, so anything written to stdout would
     # corrupt the stream. Status goes to stderr.
@@ -606,6 +851,7 @@ def cmd_mcp(args: argparse.Namespace) -> int:
         )
         if toolsets:
             out.error(f"  toolsets: {', '.join(toolsets)}")
+        out.error(f"  authoring tools: {'on' if authoring.enabled else 'off'}")
         if not workflows and not args.server:
             out.error(
                 "  no workflows imported — pass --module <file.py>, or list "
@@ -618,6 +864,7 @@ def cmd_mcp(args: argparse.Namespace) -> int:
         )
         for name in workflows:
             out.line(f"    [dim]{name}[/dim]")
+        out.line(f"  authoring tools: {'on' if authoring.enabled else 'off'}")
 
     try:
         serve(
@@ -627,6 +874,7 @@ def cmd_mcp(args: argparse.Namespace) -> int:
             host=args.host,
             port=args.port,
             scheduler=not args.no_scheduler,
+            authoring=authoring,
         )
     except ValueError as exc:
         out.error(str(exc))

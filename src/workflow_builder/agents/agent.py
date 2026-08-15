@@ -61,6 +61,18 @@ class Agent(Generic[OutputT]):
     persistence: PersistenceClass = PersistenceClass.EPHEMERAL
     handoffs: list[Agent[Any]] = field(default_factory=list)
     """Agents this one can delegate to via handoff."""
+    user_interaction: Any = None
+    """Optional :class:`~workflow_builder.agents.interaction.UserInteraction`.
+    When set, an ``ask_user`` tool is injected into the turn loop unless the
+    caller already provided one."""
+    bounds: Any = None
+    """Optional :class:`~workflow_builder.agents.bounds.ResultBounds`.
+
+    ``None`` sends every tool result to the model whole, which is what shipped.
+    Set it to cap what one result can contribute to the context — the full
+    value still reaches the journal, and, when a spill store is configured,
+    stays retrievable through ``read_spill`` / ``grep_spill``.
+    """
     metadata: dict[str, Any] = field(default_factory=dict)
 
     async def __call__(

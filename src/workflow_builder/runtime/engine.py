@@ -21,6 +21,7 @@ from workflow_builder.core.exceptions import (
     AuthExpired,
     ConfigurationError,
     ContinueAsNew,
+    InputMismatch,
     RegistryError,
     Suspend,
     WorkflowCancelled,
@@ -42,7 +43,12 @@ from workflow_builder.runtime.clock import Clock, SystemClock
 from workflow_builder.runtime.context import Context
 from workflow_builder.runtime.effects import DirectBroker, EffectBroker
 from workflow_builder.runtime.flowcontrol import AdmissionController, AdmissionDecision
-from workflow_builder.runtime.journal import CompatibilityMode, Journal
+from workflow_builder.runtime.journal import (
+    CompatibilityMode,
+    EntryStatus,
+    Journal,
+    VerifyMode,
+)
 from workflow_builder.runtime.leader import LeaderElector
 from workflow_builder.runtime.registry import WorkflowRecord
 from workflow_builder.runtime.state import (
@@ -83,11 +89,15 @@ class Runtime:
         cache: Any | None = None,
         tracer: Tracer | None = None,
         credentials: Any | None = None,
+        credential_resolver: Any | None = None,
+        env: dict[str, str] | None = None,
         service_principal: ServicePrincipal | None = None,
         deps: Any = None,
         agent_backend: Any | None = None,
         blobs: Any | None = None,
         toolsets: Any | None = None,
+        nodes: Any | None = None,
+        human: Any | None = None,
         sessions: Any | None = None,
         admission: AdmissionController | None = None,
         role: Role | None = None,
@@ -97,6 +107,8 @@ class Runtime:
         state: StateStore | None = None,
         stream: RunStream | None = None,
         artifacts: Any | None = None,
+        signed_urls: Any | None = None,
+        staging: Any | None = None,
         catalog: Any | None = None,
         node_id: str | None = None,
         lease_ttl: Duration = 60.0,
@@ -106,6 +118,9 @@ class Runtime:
         max_inline_wait: Duration = 0.0,
         flush_every: int = 1,
         compatibility: CompatibilityMode = CompatibilityMode.STRICT,
+        verify: VerifyMode = VerifyMode.WARN,
+        validate_input: bool = True,
+        spill: Any | None = None,
         strict_determinism: bool = False,
     ) -> None:
         if backend is not None:
@@ -121,6 +136,15 @@ class Runtime:
         self.cache = cache if cache is not None else self.store
         self.tracer: Tracer = tracer or NoopTracer()
         self.credentials = credentials
+        self.credential_resolver = credential_resolver
+        """Optional async callable ``(ExecutionRecord) -> CredentialStore | None``.
+        Re-derives per-run credentials on resume, including on another node."""
+        self.env: dict[str, str] = dict(env or {})
+        """Runtime-level environment defaults, overridden by ``run(env=...)``."""
+        self._run_credentials: dict[str, Any] = {}
+        """In-memory per-run credential stores, keyed by run id. Cleared when
+        the run goes terminal. Survives a park in this process; a resolver
+        covers a resume elsewhere."""
         self.service_principal = service_principal or ServicePrincipal(subject="scheduler")
         """The identity a trigger-fired run submits under (``record.metadata``),
         since a cron/interval trigger has no interactive caller to ask. Only
@@ -142,6 +166,31 @@ class Runtime:
             # register_toolset() or a loom_toolset entry point is reachable here
             # — while registrations made on this Runtime stay local to it.
             self.toolsets = ToolsetRegistry(parent=get_catalog())
+
+        if nodes is not None:
+            self.nodes = nodes
+        else:
+            from workflow_builder.nodes.registry import (
+                NodeRegistry,
+                get_node_catalog,
+                load_builtin_nodes,
+                load_node_entry_points,
+            )
+
+            # Same arrangement as toolsets: chains to the process-global catalog
+            # so @register_node and loom_node entry points reach every Runtime,
+            # while rt.nodes.register(...) stays local to this one. Entry points
+            # load here rather than at import, so `import workflow_builder` does
+            # not pull in every installed node package.
+            load_builtin_nodes()
+            load_node_entry_points()
+            self.nodes = NodeRegistry(parent=get_node_catalog())
+
+        self.human = human
+        """Optional :class:`HumanChannel` — how a ``human.*`` node reaches a
+        person. LOOM owns parking the run and validating the answer; delivery is
+        the provider's. Without one, a ``human.*`` node raises before the run
+        parks rather than parking with nobody listening."""
 
         if sessions is not None:
             self.sessions = sessions
@@ -201,6 +250,22 @@ class Runtime:
                 self.blobs, StoreBackedArtifactStore(self.store)
             )
 
+        self.staging = staging
+        """Optional :class:`~workflow_builder.storage.staging.StagingManager`.
+        Built automatically when blobs and artifacts are both available."""
+        if self.staging is None and self.artifacts is not None and self.blobs is not None:
+            from workflow_builder.storage.staging import StagingManager
+
+            self.staging = StagingManager(self.blobs, self.artifacts, self.store)
+
+        self.signed_urls = signed_urls
+        """Optional :class:`~workflow_builder.storage.signed_urls.SignedUrlService`.
+        Built automatically when blobs are configured."""
+        if self.signed_urls is None and self.blobs is not None:
+            from workflow_builder.storage.signed_urls import SignedUrlService
+
+            self.signed_urls = SignedUrlService(self.blobs, self.store)
+
         if catalog is not None:
             self.catalog = catalog
         else:
@@ -226,6 +291,39 @@ class Runtime:
         the process runs out of memory."""
 
         self.compatibility = compatibility
+        self.verify = verify
+        """Whether a replayed entry must prove it belongs to the call that found it.
+
+        Defaults to :attr:`VerifyMode.WARN`: a difference is reported and the
+        recorded value is still served. Arguments read from ``ctx.state`` — not
+        journaled by design — legitimately differ across replays, so raising by
+        default would break correct workflows to catch an uncommon one.
+        """
+        self.validate_input = validate_input
+        """Whether a payload is checked against ``input_schema()`` before a run opens.
+
+        On by default, because a shape mismatch that reaches a step body
+        surfaces as an ``AttributeError`` several operations in, which reads as
+        a broken workflow rather than a wrong input. Turn it off for a codebase
+        with decorative annotations — a parameter declared ``str`` that the body
+        ignores and callers fill with anything — where the declaration was never
+        meant as a contract.
+        """
+        if spill is not None:
+            self.spill = spill
+        elif self.blobs is not None:
+            from workflow_builder.agents.bounds import BlobSpillStore
+
+            self.spill = BlobSpillStore(self.blobs)
+        else:
+            self.spill = None
+        """Where an oversized tool result is stored so the model can page it.
+
+        Defaults to the blob service when one is configured: a deployment that
+        has somewhere to put large values has already said so once, and asking
+        twice is how two settings drift apart. Without blobs there is no store,
+        and bounding degrades to truncation with an honest notice.
+        """
         self.strict_determinism = strict_determinism
 
         self.inline_timer_threshold = to_seconds(inline_timer_threshold)
@@ -264,8 +362,13 @@ class Runtime:
         to insist on having none.
         """
         from workflow_builder.state.factory import store_from_env
+        from workflow_builder.storage.blob import blob_service_from_env
 
         overrides.setdefault("store", store_from_env())
+        if "blobs" not in overrides:
+            blobs = blob_service_from_env()
+            if blobs is not None:
+                overrides["blobs"] = blobs
         if "agent_backend" not in overrides:
             backend = _backend_from_env()
             if backend is not None:
@@ -282,8 +385,33 @@ class Runtime:
             raise ConfigurationError(
                 f"a different workflow named '{definition.name}' is registered"
             )
+        self._check_grants(definition)
         self._workflows[definition.name] = definition
         return definition
+
+    def _check_grants(self, definition: WorkflowDefinition[Any, Any, Any]) -> None:
+        """Refuse a grant that names nothing this Runtime can see.
+
+        Registration is the only moment that knows the effective registry —
+        ``rt.toolsets`` chains to the process-global one, so the answer differs
+        per Runtime and cannot be settled at decoration. It is also early
+        enough to be useful: a typo caught here is a startup failure with a
+        suggestion, where the same typo caught at ``ctx.agent()`` is an agent
+        reporting that it could not find a tool, hours later.
+        """
+        grants = getattr(definition, "grants", None)
+        if grants is None or not getattr(grants, "toolsets", None):
+            return
+        issues = grants.validate_against(toolsets=self.toolsets)
+        if not issues:
+            return
+        listed = "; ".join(str(issue) for issue in issues)
+        raise ConfigurationError(
+            f"workflow '{definition.name}' declares grants that name nothing "
+            f"registered: {listed}. A grant entry that matches nothing permits "
+            f"nothing, so the workflow would run with an empty toolset rather "
+            f"than the one it appears to declare."
+        )
 
     def register_all(self, definitions: Sequence[WorkflowDefinition[Any, Any, Any]]) -> None:
         for definition in definitions:
@@ -363,12 +491,18 @@ class Runtime:
         root_run_id: str | None = None,
         tags: Sequence[str] = (),
         metadata: dict[str, Any] | None = None,
+        credentials: dict[str, str] | Any | None = None,
+        env: dict[str, str] | None = None,
     ) -> ExecutionResult:
         """Start a workflow and drive it until it finishes or parks.
 
         Raises :class:`AuthorizationError` when a ``role`` is configured without
         ``flow:run``, and :class:`AdmissionRejected` when the workflow's
         ``flow_control`` policy declines to admit this run.
+
+        ``credentials`` is a name→token map or a :class:`CredentialStore`,
+        layered over :attr:`credentials` for this run only. ``env`` is a
+        name→value map layered over :attr:`env` and ``os.environ``.
         """
         self._authorize(Permission.FLOW_RUN)
         definition = self.resolve_workflow(target)
@@ -384,23 +518,19 @@ class Runtime:
                 )
                 return await self._result_for(existing)
 
-        record = ExecutionRecord(
-            workflow=definition.name,
-            workflow_version=definition.version,
-            status=ExecutionStatus.PENDING,
+        record = await self._open_execution(
+            definition,
+            input,
             trigger=trigger,
-            input=encode(input),
-            parent_run_id=parent_run_id,
-            root_run_id=root_run_id or parent_run_id,
             idempotency_key=idempotency_key,
-            code_hash=definition.code_hash,
-            created_at=self.clock.now(),
-            tags=list(tags),
-            metadata=dict(metadata or {}),
+            parent_run_id=parent_run_id,
+            root_run_id=root_run_id,
+            tags=tags,
+            metadata=metadata,
+            run_id=run_id,
+            credentials=credentials,
+            env=env,
         )
-        if run_id:
-            record.run_id = run_id
-        await self.store.create_execution(record)
         return await self._drive(record.run_id, deps=deps)
 
     async def submit(
@@ -427,21 +557,22 @@ class Runtime:
                 return existing.run_id
 
         await self._admit(definition, kwargs.get("metadata"))
-        record = ExecutionRecord(
-            workflow=definition.name,
-            workflow_version=definition.version,
-            status=ExecutionStatus.PENDING,
-            trigger=kwargs.pop("trigger", TriggerKind.MANUAL),
-            input=encode(input),
-            parent_run_id=kwargs.pop("parent_run_id", None),
-            idempotency_key=idempotency_key,
-            code_hash=definition.code_hash,
-            created_at=self.clock.now(),
-            tags=list(kwargs.pop("tags", ())),
-            metadata=dict(kwargs.pop("metadata", None) or {}),
-        )
-        await self.store.create_execution(record)
+        credentials = kwargs.pop("credentials", None)
+        env = kwargs.pop("env", None)
         deps = kwargs.pop("deps", None)
+        record = await self._open_execution(
+            definition,
+            input,
+            trigger=kwargs.pop("trigger", TriggerKind.MANUAL),
+            idempotency_key=idempotency_key,
+            parent_run_id=kwargs.pop("parent_run_id", None),
+            root_run_id=kwargs.pop("root_run_id", None),
+            tags=kwargs.pop("tags", ()),
+            metadata=kwargs.pop("metadata", None),
+            run_id=kwargs.pop("run_id", None),
+            credentials=credentials,
+            env=env,
+        )
         self._spawn(self._drive(record.run_id, deps=deps))
         return record.run_id
 
@@ -464,11 +595,15 @@ class Runtime:
         """
         record = await self._require(run_id)
         journal = Journal(await self.store.load_journal(run_id))
-        failures = journal.failed_entries()
-        if failures:
-            first_failed = failures[0].path
+        # Only a hard failure is truncated. An exhausted entry is re-executed
+        # by replay on its own, so pruning it would throw away the attempt
+        # history that tells an operator this has failed six times against the
+        # same gateway — which is the whole reason the two are distinguished.
+        hard = [e for e in journal.entries() if e.status is EntryStatus.FAILED]
+        if hard:
+            first_failed = hard[0].path
             await self.store.truncate_journal(run_id, first_failed)
-            logger.info("retrying %s from %s (%s)", run_id, first_failed, failures[0].name)
+            logger.info("retrying %s from %s (%s)", run_id, first_failed, hard[0].name)
 
         record.status = ExecutionStatus.PENDING
         record.error = None
@@ -503,6 +638,9 @@ class Runtime:
         clone.finished_at = None
         await self.store.create_execution(clone)
         await self.store.save_journal(clone.run_id, await self.store.load_journal(run_id))
+        source_store = self._run_credentials.get(run_id)
+        if source_store is not None:
+            self._run_credentials[clone.run_id] = source_store
         return await self._drive(clone.run_id, deps=deps)
 
     async def cancel(self, run_id: str, *, reason: str = "cancelled by request") -> None:
@@ -643,6 +781,12 @@ class Runtime:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
         self._background.clear()
+        backend = getattr(self.blobs, "backend", None)
+        close = getattr(backend, "close", None)
+        if close is not None:
+            result = close()
+            if hasattr(result, "__await__"):
+                await result
 
     # -- concurrency ------------------------------------------------------------------
 
@@ -657,6 +801,116 @@ class Runtime:
         return self._limiters[limit_key]
 
     # -- persistence ------------------------------------------------------------------
+
+    async def _open_execution(
+        self,
+        definition: WorkflowDefinition[Any, Any, Any],
+        input: Any,
+        *,
+        trigger: TriggerKind,
+        idempotency_key: str | None,
+        parent_run_id: str | None,
+        root_run_id: str | None,
+        tags: Sequence[str],
+        metadata: dict[str, Any] | None,
+        run_id: str | None,
+        credentials: Any,
+        env: dict[str, str] | None,
+    ) -> ExecutionRecord:
+        """Create the record, stamp env/credential names, bind per-run store.
+
+        The shape gate runs first, before anything is written. A payload the
+        workflow cannot accept is not a run that failed — it is a run that never
+        started, and recording it as the former would put work that could never
+        happen into every reliability number and leave something in history that
+        ``retry()`` fails identically forever.
+        """
+        self._check_input(definition, input)
+        meta = _sanitize_metadata(metadata)
+        if env:
+            from workflow_builder.runtime.environment import validate_run_env
+
+            meta["loom.env"] = validate_run_env(env)
+        per_run = await _as_credential_store(credentials)
+        if per_run is not None:
+            meta["loom.credential_names"] = list(await per_run.names())
+        record = ExecutionRecord(
+            workflow=definition.name,
+            workflow_version=definition.version,
+            status=ExecutionStatus.PENDING,
+            trigger=trigger,
+            input=encode(input),
+            parent_run_id=parent_run_id,
+            root_run_id=root_run_id or parent_run_id,
+            idempotency_key=idempotency_key,
+            code_hash=definition.code_hash,
+            created_at=self.clock.now(),
+            tags=list(tags),
+            metadata=meta,
+        )
+        if run_id:
+            record.run_id = run_id
+        await self.store.create_execution(record)
+        if per_run is not None:
+            self._run_credentials[record.run_id] = per_run
+        return record
+
+    def _check_input(
+        self, definition: WorkflowDefinition[Any, Any, Any], input: Any
+    ) -> None:
+        """Refuse a payload the workflow's declared input cannot accept.
+
+        Shallow by design — see :mod:`workflow_builder.runtime.validation`. A
+        workflow that declares nothing checkable is run as before.
+        """
+        if not self.validate_input:
+            return
+
+        from workflow_builder.runtime.validation import shape_error
+
+        schema = definition.input_schema()
+        mismatch = shape_error(schema, input)
+        if mismatch is None:
+            return
+        declared = (schema or {}).get("title") or definition.input_name
+        raise InputMismatch(
+            f"{mismatch.message} Workflow '{definition.name}' expects "
+            f"{definition.input_name}: {declared}.",
+            workflow=definition.name,
+            path=mismatch.path,
+        )
+
+    async def _credentials_for(self, record: ExecutionRecord) -> Any:
+        """Layer per-run, resolver, and Runtime stores for this record.
+
+        Per-run and resolver stores are the run's identity. Runtime-level
+        credentials are ambient fallback and must not satisfy a name this
+        run declared — that would swap the caller-supplied principal for
+        whatever happens to be in the environment.
+        """
+        from workflow_builder.connectors.credentials import LayeredCredentialStore
+
+        identity: list[Any] = []
+        per_run = self._run_credentials.get(record.run_id)
+        if per_run is not None:
+            identity.append(per_run)
+        if self.credential_resolver is not None:
+            import inspect
+
+            resolved = self.credential_resolver(record)
+            if inspect.isawaitable(resolved):
+                resolved = await resolved
+            if resolved is not None:
+                identity.append(resolved)
+        ambient: list[Any] = [self.credentials] if self.credentials is not None else []
+        required = frozenset(record.metadata.get("loom.credential_names") or ())
+        if not identity and not ambient and not required:
+            return None
+        if len(identity) == 1 and not ambient and not required:
+            return identity[0]
+        if not identity and len(ambient) == 1 and not required:
+            return ambient[0]
+        return LayeredCredentialStore(*identity, ambient=ambient, required=required)
 
     async def persist_journal(self, record: ExecutionRecord, journal: Journal) -> None:
         dirty = journal.drain_dirty()
@@ -690,7 +944,14 @@ class Runtime:
                 return await self._finish_cancelled(record)
 
             journal = Journal(
-                await self.store.load_journal(run_id), compatibility=self.compatibility
+                await self.store.load_journal(run_id),
+                compatibility=self.compatibility,
+                verify=self.verify,
+                # A replay rehearses what happened, so a step that gave up must
+                # give up again. Everything else — retry, resume, an outer
+                # driver re-enqueueing — wants it attempted, with the work
+                # before it still served from the journal.
+                resume_exhausted=record.trigger is not TriggerKind.REPLAY,
             )
             record.status = ExecutionStatus.RUNNING
             record.attempt += 1
@@ -707,6 +968,8 @@ class Runtime:
                 journal=journal,
                 definition=definition,
                 deps=deps if deps is not None else self.deps,
+                credentials=await self._credentials_for(record),
+                env=_environment_for(record, self.env),
             )
 
             span = self.tracer.start_span(
@@ -858,6 +1121,10 @@ class Runtime:
         self._signal_completion(record.run_id)
         logger.info("run %s rotated into %s", record.run_id, successor.run_id)
 
+        parent_store = self._run_credentials.get(record.run_id)
+        if parent_store is not None:
+            self._run_credentials[successor.run_id] = parent_store
+
         # Background, not inline: a forever-flow rotating inline would recurse
         # until the stack ran out.
         self._spawn(self._drive(successor.run_id, deps=deps))
@@ -945,6 +1212,22 @@ class Runtime:
                 "or artifacts=ArtifactService(...) to supply your own."
             )
         return self.artifacts
+
+    def require_staging(self) -> Any:
+        """The staging manager, or a clear error explaining how to get one."""
+        if self.staging is None:
+            raise ConfigurationError(
+                "staging needs blob storage. Pass blobs=BlobService(...) to Runtime()."
+            )
+        return self.staging
+
+    def require_signed_urls(self) -> Any:
+        """The signed-URL service, or a clear error explaining how to get one."""
+        if self.signed_urls is None:
+            raise ConfigurationError(
+                "signed URLs need blob storage. Pass blobs=BlobService(...) to Runtime()."
+            )
+        return self.signed_urls
 
     async def _heartbeat(self, run_id: str) -> None:
         """Extend this run's lease while we are actually working on it.
@@ -1076,6 +1359,8 @@ class Runtime:
         raw_output: Any = None,
     ) -> ExecutionResult:
         entries = journal or Journal(await self.store.load_journal(record.run_id))
+        if record.status.is_terminal:
+            self._run_credentials.pop(record.run_id, None)
         return ExecutionResult(
             run_id=record.run_id,
             workflow=record.workflow,
@@ -1127,4 +1412,48 @@ def _backend_from_env() -> Any | None:
             continue
         return BuiltInBackend(model=provider)
     return None
+
+
+_RESERVED_METADATA = frozenset({"loom.env", "loom.credential_names"})
+
+
+def _sanitize_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """Drop reserved keys from caller-supplied metadata.
+
+    ``POST /runs`` accepts arbitrary metadata, so ``loom.env`` /
+    ``loom.credential_names`` are injection vectors unless stripped here —
+    then we write our own. Other ``loom.*`` keys (``loom.principal``) stay;
+    identity pins those.
+    """
+    out = dict(metadata or {})
+    for key in _RESERVED_METADATA:
+        out.pop(key, None)
+    return out
+
+
+async def _as_credential_store(credentials: Any) -> Any:
+    """Coerce a name→token map or an existing store into a CredentialStore."""
+    if credentials is None:
+        return None
+    if isinstance(credentials, dict):
+        from workflow_builder.connectors.credentials import (
+            MemoryCredentialStore,
+            StoredCredential,
+        )
+        from workflow_builder.core.secret import Secret
+
+        store = MemoryCredentialStore()
+        for name, token in credentials.items():
+            await store.put(name, StoredCredential(token=Secret(str(token))))
+        return store
+    return credentials
+
+
+def _environment_for(record: ExecutionRecord, runtime_env: dict[str, str]) -> Any:
+    from workflow_builder.runtime.environment import RunEnvironment
+
+    run_env = record.metadata.get("loom.env")
+    if not isinstance(run_env, dict):
+        run_env = {}
+    return RunEnvironment(run_env=run_env, runtime_env=runtime_env)
 

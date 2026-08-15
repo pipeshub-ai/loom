@@ -167,6 +167,7 @@ class OAuthClient:
         lease_ttl: float = 30.0,
         poll_interval: float = 1.0,
         clock: Clock | None = None,
+        pkce: bool = True,
     ) -> None:
         self._client_id = client_id
         self._authorization_endpoint = authorization_endpoint
@@ -181,6 +182,7 @@ class OAuthClient:
         self._lease_ttl = lease_ttl
         self._poll_interval = poll_interval
         self.clock = clock or SystemClock()
+        self._pkce = pkce
 
     # -- PKCE authorization-code flow ----------------------------------------
 
@@ -188,7 +190,7 @@ class OAuthClient:
         self,
         *,
         state: str,
-        code_challenge: str,
+        code_challenge: str = "",
         extra_params: dict[str, str] | None = None,
     ) -> str:
         """The URL to send a browser to. Pair with :func:`generate_pkce_pair`."""
@@ -201,24 +203,34 @@ class OAuthClient:
             "client_id": self._client_id,
             "redirect_uri": self._redirect_uri,
             "state": state,
-            "code_challenge": code_challenge,
-            "code_challenge_method": "S256",
         }
+        if self._pkce:
+            if not code_challenge:
+                raise ConfigurationError(
+                    "PKCE is enabled on this OAuthClient; pass code_challenge"
+                )
+            params["code_challenge"] = code_challenge
+            params["code_challenge_method"] = "S256"
         if self._scopes:
             params["scope"] = " ".join(self._scopes)
         if extra_params:
             params.update(extra_params)
         return f"{self._authorization_endpoint}?{urlencode(params)}"
 
-    async def exchange_code(self, code: str, *, code_verifier: str) -> StoredCredential:
+    async def exchange_code(self, code: str, *, code_verifier: str = "") -> StoredCredential:
         """Trade an authorization code (plus its PKCE verifier) for tokens."""
         payload = {
             "grant_type": "authorization_code",
             "code": code,
             "redirect_uri": self._redirect_uri,
             "client_id": self._client_id,
-            "code_verifier": code_verifier,
         }
+        if self._pkce:
+            if not code_verifier:
+                raise ConfigurationError(
+                    "PKCE is enabled on this OAuthClient; pass code_verifier"
+                )
+            payload["code_verifier"] = code_verifier
         if self._client_secret:
             payload["client_secret"] = self._client_secret
         data = await self._post_token(payload)

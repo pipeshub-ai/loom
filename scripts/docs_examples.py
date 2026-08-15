@@ -32,6 +32,16 @@ BLOCK = re.compile(r"```python\n(.*?)```", re.S)
 #: every block. Prepended to each block on that page.
 PREAMBLE_MARKER = "<!-- docs-preamble -->"
 
+#: A page may declare that its blocks are illustrations rather than examples.
+#:
+#: Design and planning documents quote code that does not exist yet, or quote a
+#: fragment of code that does, to argue about it. Neither is something a reader
+#: copies, and holding them to the same bar as a guide has one of two outcomes:
+#: the check goes red and stops being trusted, or the argument gets contorted
+#: into runnable snippets and stops being clear. The marker is per-page and
+#: explicit, so a real guide cannot opt out by accident.
+SKIP_MARKER = "<!-- docs-illustrative -->"
+
 #: Failures that are about the machine, not the documentation. An example that
 #: needs a database is not wrong because this runner has no database; saying so
 #: is the difference between a useful signal and a red build nobody trusts.
@@ -85,10 +95,16 @@ def preamble_of(text: str) -> str:
 
 
 def examples(paths: list[Path] | None = None) -> list[Example]:
-    """Every example, each carrying its page's shared imports."""
+    """Every example, each carrying its page's shared imports.
+
+    Pages marked :data:`SKIP_MARKER` contribute nothing: their blocks are
+    illustrations in an argument, not code anyone runs.
+    """
     found: list[Example] = []
     for path in paths or markdown_files():
         text = path.read_text(encoding="utf-8")
+        if SKIP_MARKER in text:
+            continue
         shared = preamble_of(text)
         for match in BLOCK.finditer(text):
             body = match.group(1)

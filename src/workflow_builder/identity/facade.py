@@ -78,8 +78,18 @@ class AuthorizedFacade:
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
         wait: bool = True,
+        env: dict[str, str] | None = None,
+        credentials: dict[str, str] | Any | None = None,
     ) -> dict[str, Any]:
         self.principal.requires(Scope.RUNS_WRITE.value)
+        if credentials is not None:
+            from workflow_builder.core.exceptions import ConfigurationError
+
+            raise ConfigurationError(
+                "credentials= cannot be sent through an AuthorizedFacade — "
+                "connect the credential on the server with 'loom connect', or "
+                "start the run in-process."
+            )
         pinned = {**(metadata or {}), PRINCIPAL_KEY: self.principal.subject}
         result = await self.inner.start(
             workflow,
@@ -88,6 +98,8 @@ class AuthorizedFacade:
             tags=tags,
             metadata=pinned,
             wait=wait,
+            env=env,
+            credentials=None,
         )
         # An idempotency-key hit returns whatever run already exists under
         # that key, which may belong to someone else — redact rather than
@@ -152,6 +164,116 @@ class AuthorizedFacade:
     async def unschedule(self, trigger_id: str) -> bool:
         self.principal.requires(Scope.SCHEDULES_WRITE.value)
         return await self.inner.unschedule(trigger_id)
+
+    async def pending(self, run_id: str | None = None) -> list[dict[str, Any]]:
+        """What is parked on a person, narrowed to runs this principal owns.
+
+        Reading it is ``runs:read``; a request carries the run's own context, so
+        listing every one of them would leak across principals exactly as
+        ``list_runs`` would.
+        """
+        self.principal.requires(Scope.RUNS_READ.value)
+        if run_id is not None:
+            await self._require_owned(run_id)
+            return await self.inner.pending(run_id)
+        mine = {run["run_id"] for run in await self.list_runs(status="suspended")}
+        return [row for row in await self.inner.pending() if row["run_id"] in mine]
+
+    async def respond(
+        self, run_id: str, subject: str, answer: dict[str, Any]
+    ) -> dict[str, Any]:
+        self.principal.requires(Scope.RUNS_WRITE.value)
+        await self._require_owned(run_id)
+        return await self.inner.respond(run_id, subject, answer)
+
+    async def nodes(
+        self, query: str = "", *, category: str | None = None
+    ) -> list[dict[str, Any]]:
+        # The catalog describes what this deployment can run, not anybody's
+        # data, so it reads under the same scope as listing workflows.
+        self.principal.requires(Scope.WORKFLOWS_READ.value)
+        return await self.inner.nodes(query, category=category)
+
+    async def node(self, node_id: str) -> dict[str, Any]:
+        self.principal.requires(Scope.WORKFLOWS_READ.value)
+        return await self.inner.node(node_id)
+
+    async def list_artifacts(self) -> list[dict[str, Any]]:
+        self.principal.requires(Scope.RUNS_READ.value)
+        return await self.inner.list_artifacts()
+
+    async def artifact_history(self, name: str) -> list[dict[str, Any]]:
+        self.principal.requires(Scope.RUNS_READ.value)
+        return await self.inner.artifact_history(name)
+
+    async def artifact_url(
+        self, name: str, version: int | None = None, expires_in: int = 3600
+    ) -> dict[str, Any]:
+        self.principal.requires(Scope.RUNS_READ.value)
+        return await self.inner.artifact_url(name, version, expires_in)
+
+    async def read_artifact(
+        self, name: str, version: int | None = None
+    ) -> dict[str, Any]:
+        self.principal.requires(Scope.RUNS_READ.value)
+        return await self.inner.read_artifact(name, version)
+
+    async def put_artifact(
+        self,
+        name: str,
+        content_b64: str,
+        *,
+        mime: str = "application/octet-stream",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.principal.requires(Scope.RUNS_WRITE.value)
+        return await self.inner.put_artifact(
+            name, content_b64, mime=mime, metadata=metadata
+        )
+
+    async def upload_url(
+        self,
+        name: str,
+        mime: str = "application/octet-stream",
+        max_size: int | None = None,
+        expires_in: int | None = None,
+    ) -> dict[str, Any]:
+        self.principal.requires(Scope.RUNS_WRITE.value)
+        return await self.inner.upload_url(
+            name, mime=mime, max_size=max_size, expires_in=expires_in
+        )
+
+    async def confirm_upload(
+        self,
+        upload_id: str,
+        name: str,
+        run_id: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.principal.requires(Scope.RUNS_WRITE.value)
+        return await self.inner.confirm_upload(
+            upload_id, name, run_id=run_id, metadata=metadata
+        )
+
+    async def read_blob(
+        self, ref: str, expires: int, signature: str, method: str = "GET"
+    ) -> dict[str, Any]:
+        self.principal.requires(Scope.RUNS_READ.value)
+        return await self.inner.read_blob(ref, expires, signature, method)
+
+    async def write_blob(
+        self,
+        ref: str,
+        expires: int,
+        signature: str,
+        content_b64: str,
+        mime: str = "application/octet-stream",
+        method: str = "PUT",
+    ) -> dict[str, Any]:
+        self.principal.requires(Scope.RUNS_WRITE.value)
+        return await self.inner.write_blob(
+            ref, expires, signature, content_b64, mime=mime, method=method
+        )
 
     async def close(self) -> None:
         await self.inner.close()

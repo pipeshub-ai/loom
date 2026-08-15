@@ -18,6 +18,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Generic, NoReturn, TypeVar, overload
 
+from pydantic import BaseModel
+from pydantic import ValidationError as PydanticValidationError
+
 from workflow_builder.agents.memory import replace_history
 from workflow_builder.agents.result import AgentResult
 from workflow_builder.connectors.credentials import credential_store_scope
@@ -26,6 +29,7 @@ from workflow_builder.core.exceptions import (
     BudgetExceeded,
     ConfigurationError,
     ContinueAsNew,
+    ContractChanged,
     ControlSignal,
     RetriesExhausted,
     SerializationError,
@@ -39,6 +43,7 @@ from workflow_builder.core.models import ErrorInfo, Usage
 from workflow_builder.core.retry import Failure, OnError, Retry
 from workflow_builder.core.serde import decode, encode
 from workflow_builder.core.types import DepsT, Duration, to_seconds
+from workflow_builder.nodes.errors import NodeContractError
 from workflow_builder.runtime.determinism import step_scope
 from workflow_builder.runtime.effects import EffectCall, EffectDenied
 from workflow_builder.runtime.journal import (
@@ -167,10 +172,29 @@ class DurableCall(Generic[T]):
         ctx = self._ctx
         journal = ctx._journal
 
-        recorded = journal.lookup(self.path, self.kind, self.name)
+        recorded = journal.lookup(
+            self.path, self.kind, self.name, fingerprint=self._fingerprint
+        )
         if recorded is not None and recorded.status is EntryStatus.COMPLETED:
-            return decode(await ctx._load_payload(recorded.output), self._output_type)
-        if recorded is not None and recorded.status is EntryStatus.FAILED:
+            self._check_contract(recorded)
+            value = decode(await ctx._load_payload(recorded.output), self._output_type)
+            self._note_drift(recorded, value)
+            return value
+        if (
+            recorded is not None
+            and recorded.status is EntryStatus.EXHAUSTED
+            and journal.resume_exhausted
+        ):
+            # Recorded, but not an answer. The step spent its own retry budget;
+            # whether the *run* is finished was never its call. Falling through
+            # re-executes it with the other entries still served from the
+            # journal, which is what "resume at step 9" has to mean for a
+            # transient outage — where retry() would prune the history instead.
+            recorded = None
+        if recorded is not None and recorded.status in (
+            EntryStatus.FAILED,
+            EntryStatus.EXHAUSTED,
+        ):
             # Replay must surface the failure the workflow originally saw. To re-run the
             # step against fixed code use runtime.retry(), which prunes failed entries.
             return self._handle_failure(
@@ -228,6 +252,58 @@ class DurableCall(Generic[T]):
         await ctx._maybe_flush(force=True)
         return self._handle_failure(refusal, attempts=entry.attempts)
 
+    def _note_drift(self, recorded: JournalEntry, value: Any) -> None:
+        """Report a journaled value that no longer fits its declared type.
+
+        ``decode`` hands the raw payload back rather than failing, so an
+        in-flight run survives a refactor. Left silent, the workflow then gets a
+        dict where it declared a model and fails at an attribute access several
+        lines on — a symptom that points at the wrong place. This puts the
+        cause on the entry and in the log, once.
+        """
+        from workflow_builder.core.serde import drift_of
+
+        reason = drift_of(value, self._output_type)
+        if reason is None:
+            return
+        recorded.metadata["contract_drift"] = reason
+        self._ctx._journal.mark_dirty(recorded.path)
+        self._ctx.logger.warning(
+            "replay contract drift at %s (%s '%s'): the journaled value no "
+            "longer decodes into %s, so the raw payload was used. %s",
+            recorded.path,
+            recorded.kind.value,
+            recorded.name,
+            reason.split(":")[0],
+            "Pin the previous version to replay this run, or use runtime.retry() "
+            "to re-execute against current code.",
+        )
+
+    def _check_contract(self, recorded: JournalEntry) -> None:
+        """Refuse to replay a journaled result through a changed contract.
+
+        A call that declares a ``contract`` in its metadata is asserting which
+        input/output shape produced the stored value. If the installed code now
+        declares a different one, decoding the old payload into the new model
+        would let an upgrade quietly change what an old run replays to — the run
+        would appear to have done something it never did.
+
+        Only checked when *both* sides declare one, so entries journaled before
+        this existed replay unchanged.
+        """
+        declared = self._metadata.get("contract")
+        stored = (recorded.metadata or {}).get("contract")
+        if not declared or not stored or declared == stored:
+            return
+        target = self._metadata.get("node_id") or self.name
+        raise ContractChanged(
+            f"{target} was journaled under contract {stored} and the installed "
+            f"version declares {declared}. Replaying the stored value through a "
+            "changed input/output shape would make this run appear to have done "
+            "something it did not. Pin the previous version to replay this run, "
+            "or use runtime.retry() to re-execute against current code."
+        )
+
     def _effect_call(self, entry: JournalEntry, span: Span) -> EffectCall:
         """Describe this operation for the broker, and how to carry it out."""
 
@@ -267,7 +343,7 @@ class DurableCall(Generic[T]):
                 deps=ctx.deps,
                 idempotency_key=f"{ctx.run_id}:{self.path}",
                 logger=ctx.logger,
-                credentials=ctx._runtime.credentials,
+                credentials=ctx._credentials,
                 span=span,
             )
             try:
@@ -276,7 +352,7 @@ class DurableCall(Generic[T]):
                 # get_default_auth()) can resolve this run's CredentialStore
                 # with no `ctx` parameter of its own — see
                 # connectors/credentials.py::current_credential_store().
-                with credential_store_scope(ctx._runtime.credentials):
+                with credential_store_scope(ctx._credentials):
                     result = await self._invoke(attempt, step_ctx)
             except ControlSignal:
                 raise
@@ -321,7 +397,10 @@ class DurableCall(Generic[T]):
                 return result
 
         assert last_error is not None
-        entry.status = EntryStatus.FAILED
+        # EXHAUSTED, not FAILED: this step is done trying, the run is not
+        # necessarily done. The engine promotes it when the run goes terminal
+        # with nobody having claimed it.
+        entry.status = EntryStatus.EXHAUSTED
         entry.error = ErrorInfo.from_exception(last_error, step_name=self.name)
         entry.finished_at = self._clock.now()
         journal.put(entry)
@@ -454,6 +533,37 @@ class WorkflowState:
         return self._ctx.workflow
 
 
+
+def _as_declared(produced: Any, output_type: type[BaseModel], node_id: str) -> Any:
+    """Return *produced* as the node's declared ``Output``, or raise.
+
+    A node whose body returns the wrong shape must fail here rather than hand
+    back something that looks typed and is not. That is the defect
+    ``coerce_output`` exists to prevent on the adapter side: the caller believes
+    it holds a model, and finds out several attribute accesses later somewhere
+    unrelated.
+
+    A plain dict is validated rather than refused — returning a literal is a
+    natural thing to write and the declared model makes it checkable — but
+    anything else is a contract error.
+    """
+    if isinstance(produced, output_type):
+        return produced
+    if isinstance(produced, dict):
+        try:
+            return output_type.model_validate(produced)
+        except PydanticValidationError as exc:
+            raise NodeContractError(
+                f"{node_id} returned a dict that does not fit "
+                f"{output_type.__name__}: {exc}"
+            ) from exc
+    raise NodeContractError(
+        f"{node_id} declares Output={output_type.__name__} and its run() returned "
+        f"{type(produced).__name__}. The declared models are the node's contract; "
+        "returning something else makes every caller's type annotation a lie."
+    )
+
+
 def _authority_for(
     runtime: Runtime,
     definition: WorkflowDefinition[Any, Any, Any],
@@ -484,6 +594,8 @@ class Context(Generic[DepsT]):
         deps: DepsT | None = None,
         logger: logging.Logger | None = None,
         scope: Scope | None = None,
+        credentials: Any = None,
+        env: Any = None,
     ) -> None:
         self._runtime = runtime
         self._record = record
@@ -499,7 +611,24 @@ class Context(Generic[DepsT]):
         Bound once rather than read through the Runtime each time, so a test
         that swaps the clock does so before the run starts and cannot change it
         underneath a run already in flight."""
+        self._credentials = credentials
+        """The :class:`~workflow_builder.connectors.credentials.CredentialStore`
+        bound for this run — per-run tokens layered over the Runtime's store.
+        ``None`` preserves the pre-existing env-var fallback in toolsets."""
+        if env is not None:
+            self.env = env
+        else:
+            from workflow_builder.runtime.environment import RunEnvironment
+
+            self.env = RunEnvironment()
+        """Per-run environment overrides. See :class:`RunEnvironment`."""
         self._authority = _authority_for(runtime, definition)
+        self._grant_override: Any = None
+        """Grant narrowed by an enclosing call, inherited by nested ones.
+
+        ``None`` means "whatever the workflow declared". Set only by
+        :meth:`_effective_grant`'s callers, and only ever to something smaller.
+        """
         """What this run may do, handed to the broker on every dispatch.
 
         The Runtime's authority, falling back to what the workflow declared it
@@ -525,6 +654,8 @@ class Context(Generic[DepsT]):
             deps=self._deps,
             logger=self.logger,
             scope=self._scope.child(path),
+            credentials=self._credentials,
+            env=self.env,
         )
         return clone
 
@@ -1028,16 +1159,23 @@ class Context(Generic[DepsT]):
         label = name or definition.name
 
         async def perform(attempt: int, step_ctx: StepContext) -> Any:
+            child_kwargs: dict[str, Any] = {
+                "parent_run_id": self.run_id,
+                "deps": self._deps,
+            }
+            parent_store = self._runtime._run_credentials.get(self.run_id)
+            if parent_store is not None:
+                child_kwargs["credentials"] = parent_store
+            env_overrides = self.env.overrides()
+            if env_overrides:
+                child_kwargs["env"] = env_overrides
             if detached:
-                return await self._runtime.submit(
-                    definition, input, parent_run_id=self.run_id, deps=self._deps
-                )
+                return await self._runtime.submit(definition, input, **child_kwargs)
             result = await self._runtime.run(
                 definition,
                 input,
-                parent_run_id=self.run_id,
                 root_run_id=self._record.root_run_id or self.run_id,
-                deps=self._deps,
+                **child_kwargs,
             )
             return result.unwrap()
 
@@ -1089,6 +1227,7 @@ class Context(Generic[DepsT]):
         session_id: str | None = None,
         agent_id: str = "",
         toolsets: list[str] | None = None,
+        grants: Any = None,
         **kwargs: Any,
     ) -> DurableCall[AgentResult[T]]:
         """Run an agent durably.
@@ -1118,6 +1257,12 @@ class Context(Generic[DepsT]):
             separate memories of it.
         max_turns:
             Per-call override of the backend's turn budget.
+        grants:
+            Optional :class:`~workflow_builder.security.grants.GrantSet`
+            narrowing what *this* call may reach. Intersected with the grant
+            already in force, never unioned — a call cannot hand itself
+            authority its caller does not hold, and a nested ``ctx.agent()``
+            inherits the narrowed set rather than the workflow's declaration.
         """
         if isinstance(agent_or_prompt, str) and input is None:
             return self._agent_from_backend(
@@ -1127,6 +1272,7 @@ class Context(Generic[DepsT]):
                 session_id=session_id,
                 max_turns=max_turns,
                 agent_id=agent_id,
+                grants=grants,
             )
 
         # Backward-compatible path: Agent object
@@ -1142,6 +1288,7 @@ class Context(Generic[DepsT]):
                 ctx=self.nested(step_ctx.path),
                 max_turns=max_turns,
                 session_id=session_id,
+                authority=self._authority_with(self._effective_grant(grants)),
                 **kwargs,
             )
 
@@ -1159,6 +1306,37 @@ class Context(Generic[DepsT]):
             retry=Retry(max_attempts=1),
         )
 
+    def _effective_grant(self, requested: Any = None) -> Any:
+        """The grant in force for one call: declared, then narrowed.
+
+        Narrowing only. ``GrantSet.intersect`` is provably a subset of both
+        operands, so a call cannot widen what its caller holds no matter what
+        it asks for — which is the property that makes the parameter safe to
+        expose to generated code and to a nested agent.
+
+        The narrowed set is carried on the Context, so a sub-workflow or a
+        nested ``ctx.agent()`` inherits it rather than reaching back to the
+        workflow's declaration. Without that, narrowing would last exactly one
+        call deep, which is the same as not narrowing at all.
+        """
+        declared = self._grant_override or self._definition.grants
+        if requested is None:
+            return declared
+        if declared is None:
+            return requested
+        return declared.intersect(requested)
+
+    def _authority_with(self, grant: Any) -> Any:
+        """This context's authority, narrowed to *grant*.
+
+        Returned rather than assigned: the broker weighs every dispatch against
+        whatever authority it is handed, and two ``ctx.agent()`` calls running
+        under ``gather`` must not be able to observe each other's narrowing.
+        """
+        if grant is None or grant is self._definition.grants:
+            return self._authority
+        return self._authority.narrowed(grant=grant)
+
     def _agent_from_backend(
         self,
         prompt: str,
@@ -1168,6 +1346,7 @@ class Context(Generic[DepsT]):
         session_id: str | None = None,
         max_turns: int | None = None,
         agent_id: str = "",
+        grants: Any = None,
     ) -> DurableCall[AgentResult[Any]]:
         """Route a prompt-only ctx.agent() call through the runtime's backend."""
         backend = self._runtime.agent_backend
@@ -1196,7 +1375,7 @@ class Context(Generic[DepsT]):
             # Layer 3: resolve tools lazily from the registry, narrowed to what
             # this workflow declared it may use.
             tools = self._runtime.toolsets.resolve_tools(
-                toolsets, grants=self._definition.grants
+                toolsets, grants=self._effective_grant(grants)
             )
             history = (
                 await self._runtime.sessions.get(memory_key) if memory_key else []
@@ -1226,6 +1405,125 @@ class Context(Generic[DepsT]):
             metadata={"agent_id": identity, "session_id": session_id},
         )
 
+    # -- nodes --------------------------------------------------------------------------
+
+    def node(
+        self,
+        node_id: str,
+        payload: Any = None,
+        *,
+        name: str | None = None,
+        guards: list[Any] | None = None,
+        retry: Retry | int | None = None,
+        timeout: Duration | None = None,
+    ) -> DurableCall[Any]:
+        """Run a catalogued node: Pydantic in, Pydantic out.
+
+            decision = await ctx.node("human.approval", ApprovalIn(subject="refund"))
+
+        Nodes add no durability semantics. This journals exactly what the
+        equivalent hand-written code would, and a node that parks the run raises
+        ``Suspend`` the same way ``ctx.wait_for_approval`` does.
+
+        Three things happen **before** the call is journaled, deliberately: the
+        node is resolved, its runtime requirements are checked, and *payload* is
+        validated against the node's declared ``Input``. A missing capability or
+        a malformed payload is the caller's mistake, and surfacing it as a failed
+        step — or worse, as a run parked with nobody listening — puts the error
+        arbitrarily far from its cause.
+        """
+        from workflow_builder.nodes.base import NodeContext
+
+        registry = self._runtime.nodes
+        node = registry.resolve(node_id, runtime=self._runtime)
+        definition = type(node)
+        spec = definition.spec
+
+        try:
+            validated = (
+                payload
+                if isinstance(payload, definition.Input)
+                else definition.Input.model_validate(payload or {})
+            )
+        except PydanticValidationError as exc:
+            raise NodeContractError(
+                f"{node_id} was called with a payload that does not fit "
+                f"{definition.Input.__name__}: {exc}"
+            ) from exc
+
+        applied_guards = list(guards) if guards is not None else list(spec.guards)
+        label = name or f"node:{node_id}"
+
+        async def perform(attempt: int, step_ctx: StepContext) -> Any:
+            scoped = self.nested(step_ctx.path)
+            node_ctx = NodeContext(scoped)
+            checked = validated
+            if applied_guards:
+                # Imported here rather than at module scope: the guard package
+                # exports its node classes, so a top-level import would register
+                # five nodes on `import workflow_builder` — before anything asked
+                # for a catalog, and reported as already-present by the loader.
+                from workflow_builder.nodes.guard.runner import apply_guards
+
+                checked = await apply_guards(
+                    applied_guards,
+                    validated,
+                    ctx=node_ctx,
+                    registry=registry,
+                    phase="input",
+                    subject=node_id,
+                )
+            produced = await node.run(node_ctx, checked)
+            return _as_declared(produced, definition.Output, node_id)
+
+        return DurableCall(
+            self,
+            kind=EntryKind.STEP,
+            name=label,
+            perform=perform,
+            fingerprint=make_fingerprint(label, (validated,)),
+            input=validated,
+            output_type=definition.Output,
+            retry=(
+                Retry(max_attempts=retry)
+                if isinstance(retry, int)
+                else retry or Retry(max_attempts=1)
+            ),
+            timeout=timeout,
+            metadata={
+                "node_id": node_id,
+                "node_version": spec.version,
+                "effect_class": spec.effect,
+                "effect_target": node_id,
+                # Journaled so a node upgraded between a run and its replay is
+                # caught rather than decoding an old payload into a new model.
+                "contract": spec.contract_hash,
+            },
+        )
+
+    async def guard(self, guard_id: Any, value: Any = None) -> Any:
+        """Check *value* against a guard, and return what the run should use.
+
+        ALLOW returns *value* unchanged and REPLACE returns the substitute;
+        REJECT and TRIPWIRE raise. Returning a falsy verdict a caller could
+        ignore is the one behaviour a guard must not have outside an agent loop,
+        where there is no model to hand the explanation to.
+        """
+        from workflow_builder.nodes.base import NodeContext
+        from workflow_builder.nodes.guard.runner import apply_guards
+
+        return await apply_guards(
+            [guard_id],
+            value,
+            ctx=NodeContext(self),
+            registry=self._runtime.nodes,
+            phase="standalone",
+            subject=getattr(guard_id, "name", str(guard_id)),
+            # A guard input carries configuration around the thing being
+            # checked; what the run should use afterwards is the thing.
+            unwrap=True,
+        )
+
     # -- artifacts ----------------------------------------------------------------------
 
     def put_artifact(
@@ -1250,10 +1548,19 @@ class Context(Generic[DepsT]):
 
         async def perform(attempt: int, step_ctx: StepContext) -> Any:
             service = self._runtime.require_artifacts()
-            raw = payload.data or b"" if isinstance(payload, Attachment) else payload
-            content_type = payload.mime if isinstance(payload, Attachment) else mime
+            if isinstance(payload, Attachment):
+                if payload.is_offloaded:
+                    raw = await payload.read(self._runtime.blobs)
+                else:
+                    raw = payload.data or b""
+                content_type = payload.mime
+                extra = {**payload.metadata, **metadata}
+            else:
+                raw = payload
+                content_type = mime
+                extra = metadata
             return await service.put(
-                name, raw, mime=content_type, run_id=self.run_id, **metadata
+                name, raw, mime=content_type, run_id=self.run_id, **extra
             )
 
         return DurableCall(
@@ -1308,6 +1615,105 @@ class Context(Generic[DepsT]):
             output_type=list[ArtifactVersion],
         )
 
+    def stage_artifact(
+        self,
+        name: str,
+        data: bytes | Attachment,
+        *,
+        mime: str = "application/octet-stream",
+        **metadata: Any,
+    ) -> DurableCall[Any]:
+        """Stage a file for later commit as a versioned artifact.
+
+        Journaled. On replay, returns the same staged entry without re-staging.
+        Bytes go to blob storage immediately so a crash does not lose them.
+        An already-offloaded :class:`Attachment` reuses its ``ref``.
+        """
+        from workflow_builder.storage.staging import StagedArtifact
+
+        payload = data
+        label = f"artifact:stage:{name}"
+
+        async def perform(attempt: int, step_ctx: StepContext) -> Any:
+            staging = self._runtime.require_staging()
+            return await staging.stage(
+                name, payload, mime=mime, run_id=self.run_id, metadata=metadata
+            )
+
+        return DurableCall(
+            self,
+            kind=EntryKind.STEP,
+            name=label,
+            perform=perform,
+            fingerprint=make_fingerprint(label, (name,)),
+            input={"name": name, "mime": mime},
+            output_type=StagedArtifact,
+        )
+
+    def commit_staged(
+        self, name: str, *, labels: dict[str, str] | None = None
+    ) -> DurableCall[ArtifactVersion]:
+        """Promote a staged artifact to a versioned artifact.
+
+        Journaled. On replay, returns the same :class:`ArtifactVersion`.
+        """
+        from workflow_builder.storage.staging import StagingNotFound
+
+        label = f"artifact:commit:{name}"
+
+        async def perform(attempt: int, step_ctx: StepContext) -> Any:
+            try:
+                return await self._runtime.require_staging().commit(
+                    name, run_id=self.run_id, labels=labels
+                )
+            except StagingNotFound as exc:
+                raise StepError(str(exc), step_name=label) from exc
+
+        return DurableCall(
+            self,
+            kind=EntryKind.STEP,
+            name=label,
+            perform=perform,
+            fingerprint=make_fingerprint(label, (name,)),
+            input={"name": name},
+            output_type=ArtifactVersion,
+        )
+
+    def discard_staged(self, name: str) -> DurableCall[None]:
+        """Drop a staged artifact. Journaled for replay consistency."""
+        label = f"artifact:discard:{name}"
+
+        async def perform(attempt: int, step_ctx: StepContext) -> Any:
+            await self._runtime.require_staging().discard(name, run_id=self.run_id)
+            return None
+
+        return DurableCall(
+            self,
+            kind=EntryKind.STEP,
+            name=label,
+            perform=perform,
+            fingerprint=make_fingerprint(label, (name,)),
+            input={"name": name},
+            output_type=type(None),
+        )
+
+    async def artifact_url(
+        self,
+        name: str,
+        version: int | None = None,
+        *,
+        expires_in: int = 3600,
+    ) -> str:
+        """Generate a presigned download URL for an artifact.
+
+        Not replay-stable: signed URLs expire, so a journaled URL would be
+        dead by the time a replay ran. Generating a fresh one is side-effect
+        free and is the correct behaviour on re-entry.
+        """
+        return await self._runtime.require_artifacts().url(
+            name, version, expires_in=expires_in
+        )
+
     # -- saga / compensation ------------------------------------------------------------
 
     async def compensate(
@@ -1323,7 +1729,12 @@ class Context(Generic[DepsT]):
         handler still runs.
         """
         path = self._scope.allocate()
-        recorded = self._journal.lookup(path, EntryKind.STEP, f"compensate:{fn.__name__}")
+        # A @step is the obvious thing to reach for here, and it has no
+        # __name__ — which surfaced as an AttributeError inside the failure
+        # path, i.e. as a second, unrelated-looking failure while the first was
+        # being unwound.
+        label = getattr(fn, "name", None) or getattr(fn, "__name__", None) or repr(fn)
+        recorded = self._journal.lookup(path, EntryKind.STEP, f"compensate:{label}")
         if recorded is not None and recorded.status is EntryStatus.COMPLETED:
             # Already registered on a prior attempt — rebuild the stack
             self._compensation_stack.append((fn, args))
@@ -1334,9 +1745,9 @@ class Context(Generic[DepsT]):
             JournalEntry(
                 path=path,
                 kind=EntryKind.STEP,
-                name=f"compensate:{fn.__name__}",
+                name=f"compensate:{label}",
                 status=EntryStatus.COMPLETED,
-                output=_encode_debug({"fn": fn.__name__, "args": args}),
+                output=_encode_debug({"fn": label, "args": args}),
                 started_at=self._clock.now(),
                 finished_at=self._clock.now(),
                 attempts=1,
@@ -1355,21 +1766,72 @@ class Context(Generic[DepsT]):
             try:
                 await fn(*args)
             except Exception as exc:
-                self.logger.error("compensation %s failed: %s", fn.__name__, exc)
-                failures.append(fn.__name__)
+                label = (
+                    getattr(fn, "name", None) or getattr(fn, "__name__", None) or repr(fn)
+                )
+                self.logger.error("compensation %s failed: %s", label, exc)
+                failures.append(label)
         self._compensation_stack.clear()
         return failures
 
     # -- version gates ------------------------------------------------------------------
 
     def patched(self, name: str) -> bool:
-        """Version gate for in-flight migration.
+        """Version gate: introduce a branch without breaking runs already going.
 
-        Returns ``True`` if the named patch is active on this flow
-        version.  Use to introduce backward-compatible behaviour changes
-        that don't affect already-running executions.
+        ::
+
+            if ctx.patched("use-new-pricing"):
+                total = await ctx.step(price_v2, cart)
+            else:
+                total = await ctx.step(price_v1, cart)
+
+        A run that reaches this gate for the first time records that the patch
+        was present and takes the new branch, and keeps taking it on every
+        later replay. A run that was *already past this point* before the
+        branch existed takes the old one — forever — because its journal proves
+        it did.
+
+        That is what makes the two safe to deploy at once. Without it, adding a
+        branch changes what an in-flight run does halfway through, which is the
+        one thing replay is supposed to rule out.
+
+        The marker is keyed by *name*, not by position, so inserting a durable
+        call before the gate does not change which decision it finds. That is
+        deliberately unlike every other entry in the journal, and it is the
+        reason a patch id must be unique within a workflow and must never be
+        reused for a different change.
+
+        Args:
+            name: A stable id for this change. Keep it after the old branch is
+                deleted for as long as any suspended run might still hold the
+                marker; ``loom runs`` is how you find out.
         """
-        return name in self._active_patches
+        marker = f"patch:{name}"
+        recorded = self._journal.find(EntryKind.SIDE_EFFECT, marker)
+        if recorded is not None:
+            return bool(recorded.output)
+
+        # No marker. Either this run has never been here, or it got past this
+        # point before the gate existed. The journal answers that: an entry
+        # allocated after this position means the body already ran through here
+        # under the old code.
+        path = self._scope.allocate()
+        predates = self._journal.has_entries_after(path)
+        active = not predates
+        self._journal.put(
+            JournalEntry(
+                path=path,
+                kind=EntryKind.SIDE_EFFECT,
+                name=marker,
+                status=EntryStatus.COMPLETED,
+                output=active,
+                started_at=self._clock.now(),
+                finished_at=self._clock.now(),
+                attempts=1,
+            )
+        )
+        return active
 
     # -- forever-flow rotation ----------------------------------------------------------
 

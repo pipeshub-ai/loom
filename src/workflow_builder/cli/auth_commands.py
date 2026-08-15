@@ -40,7 +40,7 @@ import secrets
 import sys
 import webbrowser
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
@@ -56,8 +56,10 @@ if TYPE_CHECKING:
 
 __all__ = [
     "cmd_connect",
+    "cmd_disconnect",
     "cmd_login",
     "cmd_logout",
+    "cmd_providers",
     "cmd_whoami",
     "server_token_provider",
 ]
@@ -211,6 +213,9 @@ class _OAuthTarget:
     client_id: str
     client_secret: str | None
     scopes: tuple[str, ...]
+    extra_auth_params: dict[str, str] = field(default_factory=dict)
+    pkce: bool = True
+    provider_id: str = ""
 
 
 def env_prefix_for(name: str) -> str:
@@ -219,7 +224,13 @@ def env_prefix_for(name: str) -> str:
     return f"LOOM_CONNECT_{slug}"
 
 
-def _resolve_target(args: argparse.Namespace, *, name: str, env_prefix: str) -> _OAuthTarget:
+def _resolve_target(
+    args: argparse.Namespace,
+    *,
+    name: str,
+    env_prefix: str,
+    provider_hint: str | None = None,
+) -> _OAuthTarget:
     def flag(attr: str) -> str | None:
         value = getattr(args, attr, None)
         return str(value) if value else None
@@ -227,22 +238,47 @@ def _resolve_target(args: argparse.Namespace, *, name: str, env_prefix: str) -> 
     def pick(attr: str, suffix: str) -> str | None:
         return flag(attr) or os.environ.get(f"{env_prefix}_{suffix}") or None
 
-    authorization_endpoint = pick("authorization_endpoint", "AUTHORIZATION_ENDPOINT")
-    token_endpoint = pick("token_endpoint", "TOKEN_ENDPOINT")
-    device_authorization_endpoint = pick(
-        "device_authorization_endpoint", "DEVICE_AUTHORIZATION_ENDPOINT"
+    provider = None
+    if provider_hint:
+        from workflow_builder.connectors.oauth_providers import get_oauth_provider
+
+        provider = get_oauth_provider(provider_hint)
+
+    authorization_endpoint = (
+        pick("authorization_endpoint", "AUTHORIZATION_ENDPOINT")
+        or (provider.authorization_endpoint if provider else None)
+    )
+    token_endpoint = (
+        pick("token_endpoint", "TOKEN_ENDPOINT")
+        or (provider.token_endpoint if provider else None)
+    )
+    device_authorization_endpoint = (
+        pick("device_authorization_endpoint", "DEVICE_AUTHORIZATION_ENDPOINT")
+        or (provider.device_authorization_endpoint if provider else None)
     )
     client_id = pick("client_id", "CLIENT_ID")
     client_secret = pick("client_secret", "CLIENT_SECRET")
 
     scope_flags = tuple(getattr(args, "scope", None) or ())
-    scopes = scope_flags or tuple(os.environ.get(f"{env_prefix}_SCOPES", "").split())
+    env_scopes = tuple(os.environ.get(f"{env_prefix}_SCOPES", "").split())
+    if scope_flags:
+        scopes = scope_flags
+    elif env_scopes:
+        scopes = env_scopes
+    else:
+        scopes = provider.default_scopes if provider else ()
 
     if not token_endpoint or not client_id:
+        hint = ""
+        if provider is None and provider_hint:
+            hint = (
+                f". '{provider_hint}' is not a known provider — pass "
+                "--token-endpoint/--client-id, or see 'loom providers'"
+            )
         raise ConfigurationError(
             f"'{name}' needs a token endpoint and a client id: pass "
             "--token-endpoint/--client-id, or set "
-            f"{env_prefix}_TOKEN_ENDPOINT/{env_prefix}_CLIENT_ID"
+            f"{env_prefix}_TOKEN_ENDPOINT/{env_prefix}_CLIENT_ID{hint}"
         )
     if not authorization_endpoint and not device_authorization_endpoint:
         raise ConfigurationError(
@@ -251,6 +287,7 @@ def _resolve_target(args: argparse.Namespace, *, name: str, env_prefix: str) -> 
             f"{env_prefix}_* environment variable) — nothing to connect to"
         )
 
+    extra = dict(provider.extra_auth_params) if provider else {}
     return _OAuthTarget(
         name=name,
         authorization_endpoint=authorization_endpoint,
@@ -259,6 +296,9 @@ def _resolve_target(args: argparse.Namespace, *, name: str, env_prefix: str) -> 
         client_id=client_id,
         client_secret=client_secret,
         scopes=scopes,
+        extra_auth_params=extra,
+        pkce=provider.supports_pkce if provider else True,
+        provider_id=provider.id if provider else "",
     )
 
 
@@ -297,6 +337,8 @@ def _target_metadata(target: _OAuthTarget) -> dict[str, str]:
         meta["client_secret"] = target.client_secret
     if target.device_authorization_endpoint:
         meta["device_authorization_endpoint"] = target.device_authorization_endpoint
+    if target.provider_id:
+        meta["provider_id"] = target.provider_id
     return meta
 
 
@@ -422,9 +464,17 @@ async def _run_pkce_flow(
             token_endpoint=target.token_endpoint,
             redirect_uri=redirect_uri,
             scopes=target.scopes,
+            pkce=target.pkce,
         )
-        verifier, challenge = generate_pkce_pair()
-        url = client.authorization_url(state=state, code_challenge=challenge)
+        extra = target.extra_auth_params or None
+        if target.pkce:
+            verifier, challenge = generate_pkce_pair()
+            url = client.authorization_url(
+                state=state, code_challenge=challenge, extra_params=extra
+            )
+        else:
+            verifier = ""
+            url = client.authorization_url(state=state, extra_params=extra)
         out.line()
         out.line("  Opening your browser to continue.")
         out.line(f"  Redirect URI: [bold]{redirect_uri}[/bold]")
@@ -458,7 +508,16 @@ async def _connect(
 ) -> StoredCredential:
     """Resolve a target, pick a flow, run it, and stamp the result with the
     metadata :class:`MetadataRefresher` needs to renew it unattended."""
-    target = _resolve_target(args, name=name, env_prefix=env_prefix)
+    # Provider lookup is connect-only. ``cmd_login`` stores under
+    # ``loom:<server>`` and must not infer a third-party provider from that name.
+    provider_hint = None
+    if env_prefix.startswith("LOOM_CONNECT"):
+        provider_hint = getattr(args, "provider", None) or name
+    target = _resolve_target(
+        args, name=name, env_prefix=env_prefix, provider_hint=provider_hint
+    )
+    if target.scopes:
+        out.line("  Requesting scopes: " + " ".join(target.scopes))
     flow = _choose_flow(args, target)
     timeout = float(getattr(args, "timeout", None) or 300.0)
 
@@ -472,6 +531,7 @@ async def _connect(
             token_endpoint=target.token_endpoint,
             device_authorization_endpoint=target.device_authorization_endpoint,
             scopes=target.scopes,
+            pkce=target.pkce,
         )
         credential = await _run_device_flow(client, out)
     else:
@@ -593,3 +653,66 @@ def cmd_connect(args: argparse.Namespace) -> int:
         return int(Exit.OK)
 
     return run_async(body())
+
+
+def cmd_disconnect(args: argparse.Namespace) -> int:
+    """Forget a named credential connected via ``loom connect``.
+
+    The counterpart to :func:`cmd_connect` — same name, same store, same
+    encrypted-at-rest file. Distinct from :func:`cmd_logout`, which forgets
+    this CLI's own ``loom:<server>`` login rather than a toolset credential.
+    """
+    out = printer_for(args)
+    name = args.name
+
+    async def body() -> int:
+        store = _store()
+        existed = name in await store.names()
+        await store.forget(name)
+        out.line(
+            f"  Disconnected '{name}'."
+            if existed
+            else f"  '{name}' was not connected."
+        )
+        out.json({"name": name, "disconnected": existed})
+        return int(Exit.OK)
+
+    return run_async(body())
+
+
+def cmd_providers(args: argparse.Namespace) -> int:
+    """List pre-configured OAuth providers."""
+    from workflow_builder.connectors.oauth_providers import list_oauth_providers
+
+    out = printer_for(args)
+    providers = list_oauth_providers()
+    out.table(
+        ["id", "name", "pkce", "default_scopes"],
+        [
+            [
+                p.id,
+                p.display_name,
+                "yes" if p.supports_pkce else "no",
+                " ".join(p.default_scopes) or "-",
+            ]
+            for p in providers
+        ],
+    )
+    out.json(
+        {
+            "providers": [
+                {
+                    "id": p.id,
+                    "display_name": p.display_name,
+                    "authorization_endpoint": p.authorization_endpoint,
+                    "token_endpoint": p.token_endpoint,
+                    "device_authorization_endpoint": p.device_authorization_endpoint,
+                    "default_scopes": list(p.default_scopes),
+                    "supports_pkce": p.supports_pkce,
+                    "docs_url": p.docs_url,
+                }
+                for p in providers
+            ]
+        }
+    )
+    return int(Exit.OK)

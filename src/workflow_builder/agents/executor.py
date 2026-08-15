@@ -54,6 +54,14 @@ class AgentContext(BaseModel):
     used rather than where it was handed out."""
     authority: Any = None
     """What the broker weighs the tool call against."""
+    workflow_ctx: Any = None
+    """The durable :class:`~workflow_builder.runtime.context.Context` when this
+    agent is running inside a workflow. Threaded into each ``ToolContext`` so
+    a tool can journal work (``ctx.call``, ``ctx.step``, ``ctx.child``)."""
+    spill: Any = None
+    """Optional :class:`~workflow_builder.agents.bounds.SpillStore` for tool
+    results too large to put in front of the model. Passed in rather than
+    discovered, so the agent layer keeps no reference to the Runtime."""
 
 
 @runtime_checkable

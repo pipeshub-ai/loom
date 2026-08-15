@@ -536,7 +536,84 @@ def _closest(word: str, terms: set[str]) -> str | None:
     return found[0] if found else None
 
 
-def default_stages(*, supervisor: Any = None, smoke: bool = True) -> list[Any]:
+class GrantStage:
+    """Does a declared grant name a toolset that exists?
+
+    A grant entry that matches nothing permits nothing — ``allows_operation``
+    simply never returns True for it — so a typo produces a workflow that looks
+    restricted to what it lists and is in fact restricted to nothing. The
+    failure surfaces much later, as an agent reporting that it could not find a
+    tool, with nothing pointing back at the declaration.
+
+    Non-blocking: the code is otherwise correct, and the repair is one string.
+    """
+
+    name: str = "grants"
+    cost: int = 12
+    blocking: bool = False
+
+    def __init__(self, registry: Any = None) -> None:
+        self._registry = registry
+
+    async def run(self, code: str, context: CheckContext) -> CheckResult:
+        registry = self._registry
+        if registry is None or not getattr(registry, "list_toolsets", None):
+            return CheckResult(self.name, skipped="no toolset registry to check against")
+
+        issues: list[CodeIssue] = []
+        for grant in _declared_grants(code):
+            for issue in grant.validate_against(toolsets=registry):
+                issues.append(
+                    CodeIssue(
+                        "grants",
+                        f"{issue}. An entry that matches nothing permits "
+                        "nothing, so this workflow would run with an empty "
+                        "toolset rather than the one it appears to declare.",
+                        "warning",
+                    )
+                )
+        return CheckResult(self.name, issues=issues[:3])
+
+
+def _declared_grants(code: str) -> list[Any]:
+    """Every ``GrantSet(toolsets=[...])`` literal in a source file.
+
+    Read from the AST rather than by importing: a stage must not execute the
+    code it is checking, and the entries are literals by the time they matter.
+    """
+    from workflow_builder.security.grants import GrantSet
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+
+    found: list[Any] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = node.func.id if isinstance(node.func, ast.Name) else (
+            node.func.attr if isinstance(node.func, ast.Attribute) else ""
+        )
+        if name != "GrantSet":
+            continue
+        entries: list[str] = []
+        for keyword in node.keywords:
+            if keyword.arg != "toolsets" or not isinstance(keyword.value, ast.List):
+                continue
+            entries = [
+                element.value
+                for element in keyword.value.elts
+                if isinstance(element, ast.Constant) and isinstance(element.value, str)
+            ]
+        if entries:
+            found.append(GrantSet(toolsets=entries))
+    return found
+
+
+def default_stages(
+    *, supervisor: Any = None, smoke: bool = True, registry: Any = None
+) -> list[Any]:
     """The standard pipeline, cheapest first.
 
     Callers compose their own list when they want something else; this is the
@@ -545,6 +622,7 @@ def default_stages(*, supervisor: Any = None, smoke: bool = True) -> list[Any]:
     stages: list[Any] = [
         CompileStage(),
         StaticStage(),
+        GrantStage(registry),
         CoverageStage(),
         ResolutionStage(),
         LintStage(),

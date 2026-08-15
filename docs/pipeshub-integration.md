@@ -1,5 +1,7 @@
 # PipesHub Workflow System — architecture, and the road to running on LOOM
 
+<!-- docs-illustrative -->
+
 **Status:** working document. **Audience:** whoever implements the merge.
 **Sources:** `pipeshub-ai@backend/{python,nodejs}`, `pipeshub-ai@frontend`,
 `~/opensource/workflow-sdk-design-v1.md`, and the `~/.cursor/plans/*workflow*`

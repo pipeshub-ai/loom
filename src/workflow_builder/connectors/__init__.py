@@ -15,6 +15,7 @@ from workflow_builder.connectors.credentials import (
     CredentialStore,
     EncryptedFileCredentialStore,
     KeyringCredentialStore,
+    LayeredCredentialStore,
     MemoryCredentialStore,
     Peekable,
     Refresher,
@@ -25,16 +26,29 @@ from workflow_builder.connectors.oauth_client import (
     MetadataRefresher,
     OAuthClient,
 )
+from workflow_builder.connectors.oauth_providers import (
+    OAuthProviderConfig,
+    discover_oidc,
+    get_oauth_provider,
+    list_oauth_providers,
+    register_oauth_provider,
+)
 
 __all__ = [
     "CredentialStore",
     "DeviceAuthorization",
     "EncryptedFileCredentialStore",
     "KeyringCredentialStore",
+    "LayeredCredentialStore",
     "MemoryCredentialStore",
     "MetadataRefresher",
     "OAuthClient",
+    "OAuthProviderConfig",
     "Peekable",
     "Refresher",
     "StoredCredential",
+    "discover_oidc",
+    "get_oauth_provider",
+    "list_oauth_providers",
+    "register_oauth_provider",
 ]

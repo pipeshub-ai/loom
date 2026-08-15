@@ -476,17 +476,46 @@ class TestMarkdownByDefault:
         """Every line is paid on every turn of every generation.
 
         A drift guard, not a physical limit — so it moves when a genuinely new
-        required behaviour lands, and only then. It has moved once, from 8000,
-        to pay for three rules added after real generations went wrong:
+        required behaviour lands, and only then. It moved once from 8000 to
+        8500, to pay for three rules added after real generations went wrong:
         classifying each node as code or judgement, reporting what a capped
         list covers, and refusing a fuzzy text match as a substitute for
         resolution. The space was earned first by deleting a duplicated
-        ``ctx.agent()`` section and three restated paragraphs; raise it again
-        only after looking for the same.
+        ``ctx.agent()`` section and three restated paragraphs.
+
+        It moved a second time, from 8500 to 8900, after the prompt reached
+        9007 and the same search was run again. That search found 159
+        characters of real restatement, all deleted: an I/O rule stated twice
+        ("Do all I/O inside step functions" and "NEVER do I/O in the workflow
+        body"), VALIDATE and FIX as two steps of one loop, and four artifact
+        rules spread across eleven lines of prose.
+
+        Seven further candidates turned out not to be restatement. Every one is
+        pinned by a test that records why the phrase exists —
+        ``test_it_names_each_rung``, ``test_ambiguity_routes_to_an_agent_node``,
+        ``test_the_demo_block_prints_the_error`` (because "Status: failed /
+        Output: None" says nothing a reader can act on),
+        ``test_the_prompt_forbids_choosing_one``, and three more. Deleting them
+        shortened nothing and broke the suite, which is the signal that the
+        search is finished: what is left either carries a rule or carries the
+        reason a rule is followed.
+
+        It moved a third time, from 8900 to 9000, to pay for one corrected
+        rule. The step-functions section had told the model to call toolset
+        tools *inside* another ``@step`` rather than through ``ctx.step`` —
+        which two of the prompt's own code samples contradicted, and which
+        ``TestOnlyJournaledCallsAreGuarded`` shows is not merely less granular
+        on replay: ``broker.dispatch`` runs inside ``DurableCall._resolve``, so
+        a direct call is never weighed against the workflow's ``GrantSet`` at
+        all. The correction states the rule and the three things a direct call
+        skips.
+
+        The margin above the current length is about one sentence wide on
+        purpose, so the next addition has to run this search too.
         """
         from workflow_builder.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
 
-        assert len(DEFAULT_SYSTEM_PROMPT) < 8500, "the prompt is drifting long"
+        assert len(DEFAULT_SYSTEM_PROMPT) < 9000, "the prompt is drifting long"
 
 
 class TestRepeatedLookupsAreStopped:

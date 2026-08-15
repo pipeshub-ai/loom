@@ -13,16 +13,69 @@ from typing import Any
 # -----------------------------------------------------------------
 
 
-def build_create_workflow_prompt(description: str) -> str:
-    """Build a prompt that asks the model to create a workflow."""
+def build_create_workflow_prompt(description: str, *, authoring_enabled: bool = False) -> str:
+    """Build a prompt that asks the model to create a workflow.
+
+    ``authoring_enabled=False`` (the default) returns the original bare
+    template, unchanged — a client with no authoring tools registered would
+    otherwise be told to call tools that do not exist. Pass ``True`` when the
+    server also registered ``get_tool_contract``/``validate_workflow_code``/
+    etc., for the full discover -> generate -> verify -> save ladder.
+    """
+    if not authoring_enabled:
+        return (
+            f"Create a LOOM workflow that does:\n\n"
+            f"{description}\n\n"
+            f"Use @workflow and @step decorators. "
+            f"All API calls in @step functions. "
+            f"Use ctx.step() for durable execution, "
+            f"ctx.gather() for parallel, "
+            f"ctx.wait_for_event() for external events."
+        )
     return (
         f"Create a LOOM workflow that does:\n\n"
         f"{description}\n\n"
-        f"Use @workflow and @step decorators. "
-        f"All API calls in @step functions. "
-        f"Use ctx.step() for durable execution, "
-        f"ctx.gather() for parallel, "
-        f"ctx.wait_for_event() for external events."
+        "## Discover, generate, verify\n\n"
+        "1. DISCOVER: search_toolsets(keyword) to find integrations the spec "
+        "needs; show_toolset(id) to see their operations.\n"
+        "2. INSPECT: get_tool_contract(\"toolset.op\") for the exact schema of "
+        "each operation you will call; get_tool_docs(toolset_id) for import "
+        "lines and worked examples where available.\n"
+        "3. RESOLVE: call_read_operation(\"toolset.op\", args_json) to turn a "
+        "name in the spec (a project, a user) into the id the code needs — "
+        "never guess or invent one.\n"
+        "4. GENERATE: write the complete Python file. Use @workflow for the "
+        "entry point and @step for every I/O operation; ctx.step() for "
+        "durable calls, ctx.gather() for parallel ones, "
+        "ctx.wait_for_event()/ctx.wait_for_approval() for suspension. All API "
+        "calls belong inside a @step, never directly in the workflow body. "
+        "Never call datetime.now(), uuid4(), or random.* directly — use the "
+        "ctx.* equivalents.\n"
+        "5. VALIDATE: validate_workflow_code(code) — fix every error-severity "
+        "issue before continuing.\n"
+        "6. SMOKE: smoke_test_workflow(code) — runs it once in a sandbox with "
+        "every toolset faked. Fix a real failure; a result with "
+        "environmental=true is the sandbox having no credentials, not a bug "
+        "in the code, and does not need a fix.\n"
+        "7. SAVE: save_workflow(code, \"flows/<name>.py\").\n"
+        "8. RUN: run_workflow(name, input_json) to try it for real.\n\n"
+        "## Pagination\n\n"
+        "When get_tool_contract says pagination=true, the tool returns a "
+        "Results list — a list subclass with .complete (False when more "
+        "existed than max_results allowed), .total (how many matched), and "
+        ".cursor (where the next page starts). Generated code must:\n"
+        "- Set max_results high enough for the use case, or loop with the "
+        "cursor to fetch everything.\n"
+        "- Check .complete after the call; if false, either fetch more or "
+        "report the coverage (e.g. 'showing 50 of 120').\n"
+        "- Never silently drop results — a workflow that processes one page "
+        "and says nothing is the same failure as fetching the wrong data.\n\n"
+        "## Code or judgement\n\n"
+        "For each piece of the spec: can a rule be written that is right for "
+        "every input the spec allows? Yes -> @step. No, or unsure -> "
+        "ctx.agent(\"...\"). An invented constant — a keyword list, a "
+        "hand-written threshold nobody supplied — is the sign a rule should "
+        "have been an agent call instead."
     )
 
 

@@ -178,6 +178,32 @@ def build_workflow_tools(facade: Any) -> list[Any]:
             "next_fire": made.get("next_fire_at"),
         }, indent=2, default=str)
 
+    async def list_artifacts() -> str:
+        """List named artifacts, latest version of each."""
+        try:
+            items = await facade.list_artifacts()
+        except Exception as exc:
+            return json.dumps({"error": str(exc)})
+        return json.dumps(items, indent=2, default=str)
+
+    async def put_artifact(
+        name: str,
+        content_b64: str,
+        mime: str = "application/octet-stream",
+    ) -> str:
+        """Publish small base64-encoded content as a named artifact.
+
+        Args:
+            name: Artifact name.
+            content_b64: File bytes, base64-encoded.
+            mime: Content type.
+        """
+        try:
+            version = await facade.put_artifact(name, content_b64, mime=mime)
+        except Exception as exc:
+            return json.dumps({"error": str(exc)})
+        return json.dumps(version, indent=2, default=str)
+
     return [
         list_workflows,
         get_workflow_info,
@@ -186,6 +212,8 @@ def build_workflow_tools(facade: Any) -> list[Any]:
         get_run_status,
         cancel_run,
         schedule_workflow,
+        list_artifacts,
+        put_artifact,
     ]
 
 

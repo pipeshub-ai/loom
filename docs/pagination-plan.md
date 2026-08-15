@@ -1,5 +1,7 @@
 # Pagination: one view for the agent, one seam for toolset authors
 
+<!-- docs-illustrative -->
+
 **Goal.** A coding agent — including a small one — can see which operations
 page, and copy a pattern that is correct. A developer adding the 1000th toolset
 declares paging once, in the place they were already writing code, and gets the

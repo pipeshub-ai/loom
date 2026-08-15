@@ -251,3 +251,104 @@ class TestExpiry:
 
         assert refresher.calls == 1
         assert {r.reveal() for r in results} == {"refreshed-1"}
+
+
+# ---------------------------------------------------------------------------
+# LayeredCredentialStore
+# ---------------------------------------------------------------------------
+
+
+class TestLayeredCredentialStore:
+    """Layered is a protocol implementer that delegates ``get()``, so it is
+    not parametrized with the others — those tests poke ``_refresher`` and
+    ``clock`` on the store itself."""
+
+    async def test_it_satisfies_the_protocol(self) -> None:
+        from workflow_builder.connectors.credentials import LayeredCredentialStore
+
+        layered = LayeredCredentialStore(MemoryCredentialStore())
+        assert isinstance(layered, CredentialStore)
+
+    async def test_get_delegates_to_the_layer_so_refresh_still_runs(self) -> None:
+        from datetime import UTC, datetime
+
+        from workflow_builder.connectors.credentials import LayeredCredentialStore
+
+        inner = MemoryCredentialStore()
+        clock = ManualClock(datetime(2030, 1, 1, tzinfo=UTC))
+        refresher = _CountingRefresher()
+        inner.clock = clock
+        inner._refresher = refresher
+        await inner.put(
+            "jira", _cred("stale", expires_at=datetime(2020, 1, 1, tzinfo=UTC))
+        )
+        layered = LayeredCredentialStore(inner)
+
+        got = await layered.get("jira")
+
+        assert got.reveal() == "refreshed-1"
+        assert refresher.calls == 1
+
+    async def test_credential_not_found_falls_through(self) -> None:
+        from workflow_builder.connectors.credentials import LayeredCredentialStore
+
+        first = MemoryCredentialStore()
+        second = MemoryCredentialStore()
+        await second.put("jira", _cred("from-second"))
+        layered = LayeredCredentialStore(first, second)
+        assert (await layered.get("jira")).reveal() == "from-second"
+
+    async def test_auth_expired_does_not_fall_through(self) -> None:
+        from datetime import UTC, datetime
+
+        from workflow_builder.connectors.credentials import LayeredCredentialStore
+
+        first = MemoryCredentialStore()
+        first.clock = ManualClock(datetime(2030, 1, 1, tzinfo=UTC))
+        await first.put(
+            "jira", _cred("stale", expires_at=datetime(2020, 1, 1, tzinfo=UTC))
+        )
+        second = MemoryCredentialStore()
+        await second.put("jira", _cred("ambient"))
+        layered = LayeredCredentialStore(first, second)
+
+        with pytest.raises(AuthExpired, match="jira"):
+            await layered.get("jira")
+
+    async def test_required_name_raises_auth_expired_before_ambient(self) -> None:
+        from workflow_builder.connectors.credentials import LayeredCredentialStore
+
+        ambient = MemoryCredentialStore()
+        await ambient.put("jira", _cred("ambient"))
+        layered = LayeredCredentialStore(
+            required=frozenset({"jira"}), ambient=(ambient,)
+        )
+        with pytest.raises(AuthExpired, match="jira"):
+            await layered.get("jira")
+
+    async def test_unrequired_name_uses_ambient(self) -> None:
+        from workflow_builder.connectors.credentials import LayeredCredentialStore
+
+        ambient = MemoryCredentialStore()
+        await ambient.put("google", _cred("ambient-google"))
+        layered = LayeredCredentialStore(
+            required=frozenset({"jira"}), ambient=(ambient,)
+        )
+        assert (await layered.get("google")).reveal() == "ambient-google"
+
+    async def test_peek_finds_the_first_layer_with_a_record(self) -> None:
+        from workflow_builder.connectors.credentials import LayeredCredentialStore
+
+        first = MemoryCredentialStore()
+        second = MemoryCredentialStore()
+        await second.put("jira", _cred("hidden"))
+        layered = LayeredCredentialStore(first, second)
+        found = await layered.peek("jira")
+        assert found is not None
+        assert found.token.reveal() == "hidden"
+
+    def test_repr_reports_layer_count_only(self) -> None:
+        from workflow_builder.connectors.credentials import LayeredCredentialStore
+
+        layered = LayeredCredentialStore(MemoryCredentialStore(), MemoryCredentialStore())
+        assert repr(layered) == "<LayeredCredentialStore layers=2>"

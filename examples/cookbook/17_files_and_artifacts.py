@@ -79,6 +79,20 @@ async def daily_report(ctx: Context, day: str) -> str:
     return f"{summary} -> {version.qualified_name}"
 
 
+@workflow(name="staged_export")
+async def staged_export(ctx: Context, day: str) -> str:
+    """Stage a toolset-style Attachment, then commit it as a versioned artifact.
+
+    Gmail (and anything else that returns an Attachment) follows this pattern:
+    stage first so the bytes live in blob storage even if the run parks, then
+    commit when the document is ready to publish.
+    """
+    export = await ctx.step(fetch_export, day)
+    staged = await ctx.stage_artifact("export.csv", export)
+    version = await ctx.commit_staged("export.csv")
+    return f"staged {staged.sha256[:8]}… -> {version.qualified_name}"
+
+
 async def main() -> None:
     header("Files and Artifacts")
 
@@ -117,6 +131,11 @@ async def main() -> None:
         replayed = await rt.replay(first.run_id)
         log("replay", str(replayed.output))
         log("note", "Still v1 — a replay rehearses what happened, not what would.")
+
+        header("STAGING AN ATTACHMENT")
+        staged = await rt.run(staged_export, "monday")
+        log("run", str(staged.output))
+        log("note", "The CSV was staged from the Attachment, then committed.")
 
         await rt.shutdown()
 

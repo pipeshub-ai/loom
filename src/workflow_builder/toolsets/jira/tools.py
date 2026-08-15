@@ -401,8 +401,12 @@ Two things that make a JQL query return nothing rather than fail:
 
 ### Tools
 
-jira_search_issues(jql: str, max_results: int = 20) -> list[JiraIssue]
-  Search using a JQL string.
+jira_search_issues(jql: str, max_results: int = 20) -> Results[JiraIssue]
+  Search using a JQL string. Returns a Results list — a list subclass with
+  .complete (bool: False when the source had more and max_results cut it off),
+  .total (int | None: how many matched in all), and .summary() (str).
+  Always check .complete when the set could be large; raise max_results or
+  loop with the cursor to fetch everything.
   JiraIssue fields: {_fields(_JiraIssue)}
   Examples:
     issues = await ctx.step(jira_search_issues, \
@@ -411,6 +415,10 @@ jira_search_issues(jql: str, max_results: int = 20) -> list[JiraIssue]
 "assignee = currentUser() AND sprint in openSprints()")
     issues = await ctx.step(jira_search_issues, \
 "issuetype = Bug AND priority = High", 50)
+    # Check coverage:
+    if not issues.complete:
+        n, t = len(issues), issues.total
+        await ctx.report(f"showing {{n}} of {{t}}")
 
 jira_get_issue(issue_key: str) -> JiraIssue
   Fetch a single issue by key.
@@ -470,14 +478,16 @@ jira_get_project_metadata(project_key: str) -> ProjectMetadata
     print(meta.statuses, meta.priorities)
 
 jira_get_project(project_key: str) -> JiraProjectDetail
-jira_get_comments(issue_key: str, max_results: int = 20) -> list[Comment]
+jira_get_comments(issue_key: str, max_results: int = 20) -> Results[Comment]
+  Returns a Results list (.complete, .total, .summary()).
 jira_assign_issue(issue_key: str, account_id: str | None) -> JiraIssue
   Takes an accountId, not a name. None unassigns.
 jira_delete_issue(issue_key: str, delete_subtasks: bool = False) -> str
   Permanent. Not retried.
 
-jira_search_users(query: str, max_results: int = 10) -> list[JiraUser]
+jira_search_users(query: str, max_results: int = 10) -> Results[JiraUser]
   Resolve a person's name to an accountId before using them in JQL.
+  Returns a Results list (.complete, .total, .summary()).
   JiraUser fields: {_fields(_JiraUser)}
     users = await ctx.step(jira_search_users, "Vishwjeet")
     if users:

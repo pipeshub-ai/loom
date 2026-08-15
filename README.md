@@ -51,7 +51,8 @@ from workflow_builder.state.memory import MemoryStore
 async def main():
     agent = WorkflowCodingAgent(AnthropicProvider())
     result = await agent.generate(
-        "Fetch a URL and report how many words the response contains."
+        "Take a URL string as input, fetch it, and report how many words "
+        "the response contains."
     )
     print("verified:", result.is_clean)
     print(result.code)
@@ -197,6 +198,7 @@ pip install -e ".[dev]"
 | **[MCP server](#mcp-server)**              | `loom mcp` — drive workflows from Claude Code, Claude Desktop, or Cursor.                                   |
 | **[Paged reads](#paged-reads)**            | Search operations follow the API's pages and tell you whether they saw everything, so a page is never reported as a total. |
 | **[Testable time](#testable-time)**        | A virtual clock — a four-minute timer or a 9am cron, tested in milliseconds.                                |
+| **[Typed nodes](#typed-nodes)**            | Pydantic in, Pydantic out. Human approvals, guardrails, and a standard library — searchable, versioned, and yours to extend. |
 
 
 
@@ -293,6 +295,177 @@ so adding integrations does not tax unrelated generations.
 
 See `examples/cookbook/07_coding_agent.py`, and `09_jira_cli.py --debug` to
 watch every tool call it makes while resolving.
+
+## Typed nodes
+
+A `@step` is your function, journaled. A **node** is a shareable contract —
+Pydantic in, Pydantic out — that the coding agent can find, render the exact
+call for, and check before anyone runs it.
+
+```python
+import asyncio
+
+from workflow_builder import Context, Runtime, workflow
+from workflow_builder.nodes.human import ApprovalIn, LogChannel
+from workflow_builder.state import MemoryStore
+
+
+@workflow(name="refund")
+async def refund(ctx: Context, order: dict) -> str:
+    decision = await ctx.node("human.approval", ApprovalIn(
+        subject=f"refund-{order['id']}",
+        prompt=f"Approve a ${order['amount']} refund?",
+        assignees=["finance@acme.com"],
+        timeout=86400,
+    ))
+    return "sent" if decision.approved else "held"
+
+
+async def main():
+    rt = Runtime(store=MemoryStore(), human=LogChannel())
+    rt.register(refund)
+    parked = await rt.run(refund, {"id": "4821", "amount": 420})
+    print(parked.status.value)                      # suspended — costs nothing
+    await rt.approve(parked.run_id, "refund-4821")  # a person answers
+    done = await rt.resume(parked.run_id)
+    print(done.output)                              # sent
+
+
+asyncio.run(main())
+```
+
+Save it as `refund.py` and run `python refund.py`.
+
+```
+suspended
+sent
+```
+
+Twenty-one built in, across seven categories:
+
+| Category | What it covers |
+|---|---|
+| `human` | approval, choice, form, review_edit, escalate |
+| `guard` | schema, policy, pii, budget, content |
+| `control` | switch, filter, dedupe, batch, throttle |
+| `transform` | map_fields, template, extract, join, redact |
+| `io` | http_request, wait_for_webhook |
+| `agent` | classify, extract_structured, summarize, judge |
+| `custom` | whatever you register |
+
+`control` and `agent` are separate on purpose. `control.switch` is a rule you
+can write today; `agent.classify` is judgement. Keeping them apart makes
+choosing between them a decision rather than an accident.
+
+**A node adds no durability semantics.** `ctx.node()` journals exactly what the
+equivalent hand-written code would, and the body's own steps nest beneath it:
+
+```text
+0    step   node:custom.sla_check
+0.0  step   sla_window
+```
+
+### Human-in-the-loop, without the silence
+
+`ctx.wait_for_approval` parks a run correctly and tells nobody. The request
+exists only as a journal entry somebody has to go looking for, which in practice
+means it is found a day late.
+
+LOOM owns parking the run, journaling the request, and validating the answer.
+**Delivering it to a person is the provider's** — implement `HumanChannel` and
+pass `Runtime(human=...)`. `HumanRequest` carries the JSON Schema of the answer,
+so a Slack, email, or web provider renders a form from the request rather than
+special-casing node ids.
+
+```
+$ loom pending
+run                             subject  asked of      delivered  prompt
+run_01M02PB1TS6K1P978375TZ2JC2  refund   fin@acme.com  no (log)   Approve $420.0?
+  loom respond run_01M02PB1TS6K1P978375TZ2JC2 refund --approve
+```
+
+Note `no (log)` — the default channel records requests without claiming to have
+delivered them. A run parked with nobody listening is indistinguishable from a
+patient one, so the surface says which it is.
+
+Delivery runs inside a durable call, so it happens **exactly once per request
+across replays**: a restart does not re-ping the same person.
+
+### Guardrails, anywhere
+
+The four verdicts — ALLOW, REJECT, REPLACE, TRIPWIRE — are unchanged. What is
+new is that they attach to more than an agent's tool calls:
+
+```
+clean = await ctx.guard("guard.pii", PiiIn(value=draft, redact=True))   # REPLACE
+await ctx.node("io.http_request", request, guards=["guard.policy"])     # around a node
+```
+
+Outside an agent loop **REJECT raises**. There is nobody to hand the
+explanation to, and a falsy verdict a caller could ignore would let the guarded
+work proceed anyway. A guard that *raises* is treated as a tripwire, never an
+allow — a check that could not run has found nothing.
+
+### Writing your own
+
+One file. `@register_node` derives the schemas, the import line, and the
+rendered call from the class, so nothing is declared twice:
+
+```
+@register_node
+class SlaCheckNode(Node[SlaIn, SlaOut]):
+    spec = NodeSpec(id="custom.sla_check", category=NodeCategory.CONTROL,
+                    summary="Has this ticket breached its SLA?")
+    Input, Output = SlaIn, SlaOut
+
+    async def run(self, ctx, payload: SlaIn) -> SlaOut:
+        window = await ctx.step(sla_window, payload.plan)
+        return SlaOut(breached=payload.opened_hours_ago > window)
+```
+
+Ship it by entry point (`[project.entry-points.loom_node]`) and it reaches every
+Runtime. `docs/guides/nodes.md` is the walkthrough; every snippet on it runs in
+CI, and `tests/test_node_guide.py` builds the node by following it.
+
+### What the coding agent sees
+
+The prompt carries **category headers and counts — never the node list**, so
+registering the five-hundredth custom node lengthens no prompt. Detail arrives
+on demand:
+
+| Tool | Returns |
+|---|---|
+| `search_nodes(query, category=…)` | matching nodes; an empty query with a category lists it |
+| `show_node(id)` | schemas, examples, effect, requirements |
+| `node_contract(id)` | **the code to write** |
+
+That last one is the difference that matters. A schema is a *description of* a
+call, and the agent's next action is to write one — so it gets the invocation
+instead:
+
+```
+$ loom node human.approval
+# human.approval  v1.0.0  [human]   suspends: yes   effect: write   requires: human_channel
+
+from workflow_builder.nodes.human import ApprovalIn, ApprovalOut
+
+result: ApprovalOut = await ctx.node(
+    'human.approval',
+    ApprovalIn(
+        subject='refund-4821',                           # str — Identifies this decision within the run.
+        prompt='Approve a $420 refund for order 4821?',  # str, optional — What the person is being asked.
+        assignees=['finance@acme.com'],                  # list[str], optional — Who is being asked.
+        timeout=86400,                                   # float | int | timedelta | None, optional
+    ),
+)
+
+# ApprovalOut: approved: bool, responder: str, comment: str, decided_at: datetime | None
+```
+
+Rendered from the node's own models, so it cannot drift from the code.
+
+See `examples/cookbook/20_human_nodes.py`, `21_guardrail_nodes.py`, and
+`22_custom_nodes.py`.
 
 ## Paged reads
 

@@ -22,10 +22,13 @@ __all__ = [
     "MAX_RESPONSE_CHARS",
     "approve_run",
     "cancel_run",
+    "get_artifact_url",
     "get_run_journal",
     "get_run_status",
+    "list_artifacts",
     "list_runs",
     "list_workflows",
+    "put_artifact",
     "replay_run",
     "retry_run",
     "run_workflow",
@@ -291,6 +294,68 @@ async def replay_run(facade: RuntimeFacade, run_id: str) -> str:
     if await facade.get(run_id) is None:
         return _missing(run_id)
     return _run_json(await facade.replay(run_id))
+
+
+async def list_artifacts(facade: RuntimeFacade) -> str:
+    """List named artifacts, each at its latest version."""
+    try:
+        items = await facade.list_artifacts()
+    except Exception as exc:
+        return _json({"error": str(exc)})
+    payload = {"artifacts": items}
+    return _json(_cap_list(payload, "artifacts", 0))
+
+
+async def get_artifact_url(
+    facade: RuntimeFacade, name: str, version: int | None = None, expires_in: int = 3600
+) -> str:
+    """Mint a time-limited download URL for an artifact.
+
+    Falls back to a base64 payload when the blob backend cannot sign URLs.
+
+    Args:
+        name: Artifact name.
+        version: Specific version; omit for latest.
+        expires_in: URL lifetime in seconds.
+    """
+    try:
+        return _json(await facade.artifact_url(name, version, expires_in))
+    except Exception as exc:
+        try:
+            payload = await facade.read_artifact(name, version)
+        except Exception:
+            return _json({"error": str(exc)})
+        return _json(
+            {
+                "name": payload.get("name", name),
+                "version": payload.get("version"),
+                "mime": payload.get("mime"),
+                "size": payload.get("size"),
+                "content_b64": payload.get("content_b64"),
+                "note": "backend cannot sign URLs; content is inline",
+            }
+        )
+
+
+async def put_artifact(
+    facade: RuntimeFacade,
+    name: str,
+    content_b64: str,
+    mime: str = "application/octet-stream",
+) -> str:
+    """Publish small content as a named artifact.
+
+    For large files, ask the operator to use a presigned upload URL instead.
+
+    Args:
+        name: Artifact name.
+        content_b64: File bytes, base64-encoded.
+        mime: Content type.
+    """
+    try:
+        return _json(await facade.put_artifact(name, content_b64, mime=mime))
+    except Exception as exc:
+        return _json({"error": str(exc)})
 
 
 def _catalog() -> Any:

@@ -138,9 +138,20 @@ def resolve(
         client = LoomClient(base_url=server, token_provider=server_token_provider(server))
         return Target(RemoteFacade(client), target)
 
+    from workflow_builder.nodes.human import LogChannel
     from workflow_builder.runtime.engine import Runtime
 
-    runtime = Runtime.from_env()
+    # The CLI is a *host*, and a host chooses where human requests go — the same
+    # reason a workflow does not choose its store. A bare ``Runtime()`` still
+    # requires one, because a library that silently swallowed approval requests
+    # would be worse than one that refuses; but a CLI with no channel could not
+    # run a workflow containing an approval at all.
+    #
+    # LogChannel is the honest default: it records the request and reports
+    # ``delivered=False``, so `loom pending` finds it and the table says plainly
+    # that nobody was notified. Configure a real one in the host process for
+    # anything that should reach a person.
+    runtime = Runtime.from_env(human=LogChannel())
     loaded: list[str] = []
 
     explicit_name: str | None = None

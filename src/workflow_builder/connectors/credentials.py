@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -55,6 +55,7 @@ __all__ = [
     "CredentialStore",
     "EncryptedFileCredentialStore",
     "KeyringCredentialStore",
+    "LayeredCredentialStore",
     "MemoryCredentialStore",
     "Peekable",
     "Refresher",
@@ -487,6 +488,90 @@ class KeyringCredentialStore(EncryptedFileCredentialStore):
 
     def __repr__(self) -> str:
         return f"<KeyringCredentialStore {self._path}>"
+
+
+class LayeredCredentialStore:
+    """A :class:`CredentialStore` that checks multiple stores in priority order.
+
+    Implements the protocol directly rather than subclassing
+    :class:`BaseCredentialStore`: expiry and refresh live in each layer's
+    ``get()``, and reading through ``peek()`` would skip them.
+
+    ``CredentialNotFound`` from an identity layer falls through to the next
+    identity layer. :class:`AuthExpired` propagates — silently dropping from
+    a caller-supplied token to an ambient one is an identity swap. Names in
+    *required* that no identity layer can resolve raise ``AuthExpired``
+    *before* ambient stores are consulted, so the engine parks on
+    ``credential:<name>`` instead of continuing as a different principal.
+    Ambient stores (typically ``Runtime.credentials``) still resolve names
+    this run did not declare.
+    """
+
+    def __init__(
+        self,
+        *layers: CredentialStore,
+        ambient: Sequence[CredentialStore] = (),
+        required: frozenset[str] = frozenset(),
+    ) -> None:
+        self._layers = layers
+        self._ambient = tuple(ambient)
+        self._required = required
+
+    async def get(self, name: str) -> Secret[str]:
+        last_missing: CredentialNotFound | None = None
+        for layer in self._layers:
+            try:
+                return await layer.get(name)
+            except CredentialNotFound as exc:
+                last_missing = exc
+                continue
+        if name in self._required:
+            raise AuthExpired(
+                f"credential '{name}' was declared for this run but is not "
+                "available. Re-supply it via credentials= or a "
+                "credential_resolver.",
+                name=name,
+            )
+        for layer in self._ambient:
+            try:
+                return await layer.get(name)
+            except CredentialNotFound as exc:
+                last_missing = exc
+                continue
+        if last_missing is not None:
+            raise last_missing
+        raise CredentialNotFound(f"no credential named '{name}' is stored")
+
+    async def put(self, name: str, credential: StoredCredential) -> None:
+        writable = self._layers or self._ambient
+        if not writable:
+            raise CredentialNotFound("LayeredCredentialStore has no layers to write to")
+        await writable[0].put(name, credential)
+
+    async def forget(self, name: str) -> None:
+        writable = self._layers or self._ambient
+        if writable:
+            await writable[0].forget(name)
+
+    async def names(self) -> list[str]:
+        seen: set[str] = set()
+        for layer in (*self._layers, *self._ambient):
+            seen.update(await layer.names())
+        return sorted(seen)
+
+    async def peek(self, name: str) -> StoredCredential | None:
+        """The first layer that has a record for *name*, with no refresh."""
+        for layer in (*self._layers, *self._ambient):
+            peek = getattr(layer, "peek", None)
+            if peek is None:
+                continue
+            found = await peek(name)
+            if found is not None:
+                return found
+        return None
+
+    def __repr__(self) -> str:
+        return f"<LayeredCredentialStore layers={len(self._layers)}>"
 
 
 def _default_store_path() -> Path:

@@ -349,8 +349,14 @@ class TestRuntimeRBAC:
     name="p2_singleton",
     flow_control=FlowControlPolicy(singleton=SingletonPolicy(mode="skip")),
 )
-async def singleton_wf(ctx: Context, _input: str) -> str:
-    """Parks, so it stays in flight while a second submit is attempted."""
+async def singleton_wf(ctx: Context, _input: object = None) -> str:
+    """Parks, so it stays in flight while a second submit is attempted.
+
+    Declares ``object`` because both callers here supply different shapes — a
+    string from ``rt.run`` and a queue message dict from the consumer. An
+    annotation the callers do not honour is not a contract, and the ingress
+    gate now says so.
+    """
     await ctx.wait_for_event("release")
     return "done"
 
