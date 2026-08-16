@@ -81,4 +81,14 @@ logs/
 *.log
 tmp/
 temp/
+
+# Agent / editor local config. Both are per-machine: settings.local.json is
+# Claude Code's own "personal, not shared" convention, and .cursor/mcp.json
+# holds absolute paths to this checkout's virtualenv.
 .claude/settings.local.json
+.cursor/mcp.json
+
+# Local blob store. Content-addressed runtime output — the bounded-results
+# cookbook example writes here on every run, so committing it stores generated
+# test data that nothing reads back.
+.loom-blobs/
