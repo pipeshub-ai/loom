@@ -23,6 +23,7 @@ from loom.toolsets.microsoft.auth import (
     GRAPH_BASE_URL,
     MicrosoftAuth,
     get_default_auth,
+    graph_base_url,
 )
 from loom.toolsets.microsoft.errors import GraphPermanentError
 from loom.toolsets.microsoft.http import GraphSession
@@ -228,6 +229,55 @@ class SharePointClient:
         )
         return DriveItem.from_api(raw or {})
 
+    async def create_folder(
+        self,
+        folder_name: str,
+        *,
+        drive_id: str = "",
+        site: str = "",
+        parent_id: str = "",
+        parent_path: str = "",
+        on_conflict: str = "fail",
+    ) -> DriveItem:
+        raw = await self._session.post(
+            item_address(
+                self._library(site, drive_id),
+                item_id=parent_id,
+                path=parent_path,
+                suffix="children",
+            ),
+            json={
+                "name": folder_name,
+                "folder": {},
+                "@microsoft.graph.conflictBehavior": on_conflict,
+            },
+        )
+        return DriveItem.from_api(raw or {})
+
+    async def delete_item(
+        self, *, drive_id: str = "", site: str = "", item_id: str = "", path: str = ""
+    ) -> bool:
+        """Move a file or folder in a library to the site's recycle bin.
+
+        Present because without it this toolset could add documents to a
+        library and never remove one: the file lifecycle stopped halfway, and
+        the only way round it was to hold the OneDrive grant as well — which
+        is exactly the widening the split into two toolsets exists to avoid.
+        """
+        if not item_id and not path:
+            raise GraphPermanentError(
+                "delete_item needs item_id or path; with neither it would "
+                "address the library root.",
+                status=0,
+                code="nothingToDelete",
+            )
+        await self._session.delete(
+            item_address(
+                self._library(site, drive_id), item_id=item_id, path=path
+            )
+        )
+        return True
+
     async def create_share_link(
         self,
         *,
@@ -404,6 +454,7 @@ def get_default_client() -> SharePointClient:
         import os
 
         _default = SharePointClient(
+            base_url=graph_base_url(),
             default_site=os.environ.get("MS_SHAREPOINT_SITE", "")
         )
     return _default

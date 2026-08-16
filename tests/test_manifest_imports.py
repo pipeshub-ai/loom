@@ -29,7 +29,13 @@ from loom.toolsets.google import (
 from loom.toolsets.hubspot.manifest import HUBSPOT_MANIFEST
 from loom.toolsets.jira.manifest import JIRA_MANIFEST
 from loom.toolsets.microsoft.onedrive.manifest import ONEDRIVE_MANIFEST
+from loom.toolsets.microsoft.onenote.manifest import ONENOTE_MANIFEST
+from loom.toolsets.microsoft.outlook.calendar.manifest import (
+    OUTLOOK_CALENDAR_MANIFEST,
+)
+from loom.toolsets.microsoft.outlook.mail.manifest import OUTLOOK_MAIL_MANIFEST
 from loom.toolsets.microsoft.sharepoint.manifest import SHAREPOINT_MANIFEST
+from loom.toolsets.microsoft.teams.manifest import TEAMS_MANIFEST
 from loom.toolsets.salesforce.manifest import SALESFORCE_MANIFEST
 from loom.toolsets.slack.manifest import SLACK_MANIFEST
 from loom.toolsets.tavily.manifest import TAVILY_MANIFEST
@@ -50,6 +56,10 @@ FIRST_PARTY = [
     GITLAB_MANIFEST,
     ONEDRIVE_MANIFEST,
     SHAREPOINT_MANIFEST,
+    TEAMS_MANIFEST,
+    ONENOTE_MANIFEST,
+    OUTLOOK_MAIL_MANIFEST,
+    OUTLOOK_CALENDAR_MANIFEST,
     SLACK_MANIFEST,
     ZOOM_MANIFEST,
     EXA_MANIFEST,
@@ -300,6 +310,10 @@ class TestPaginationIsDeclaredWhereItHappens:
         "gitlab": "loom.toolsets.gitlab.client",
         "onedrive": "loom.toolsets.microsoft.onedrive.client",
         "sharepoint": "loom.toolsets.microsoft.sharepoint.client",
+        "teams": "loom.toolsets.microsoft.teams.client",
+        "onenote": "loom.toolsets.microsoft.onenote.client",
+        "outlook_mail": "loom.toolsets.microsoft.outlook.mail.client",
+        "outlook_calendar": "loom.toolsets.microsoft.outlook.calendar.client",
         "slack": "loom.toolsets.slack.client",
         "zoom": "loom.toolsets.zoom.client",
         "exa": "loom.toolsets.exa.client",

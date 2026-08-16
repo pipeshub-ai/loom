@@ -761,7 +761,7 @@ Tavily's own `timeout` parameter is exposed as `read_timeout`, because
 from — Graph API notes, schemas, and the decision each fact forced, with sources.
 
 `toolsets/microsoft/` — two separately-grantable toolsets (`onedrive`,
-`sharepoint`, 17 operations each) over one shared Graph layer, pure httpx, no
+`sharepoint`; 18 and 19 operations) over one shared Graph layer, pure httpx, no
 vendor SDK. **A SharePoint document library *is* a `drive` and its files *are*
 `driveItem`s**, so `models.py` is shared and a file moved between the two keeps
 one shape. They stay separate toolsets because the grant boundary is real.
@@ -806,6 +806,62 @@ construction, because a violation of that rule fails only after the last
 fragment. `onedrive_list_changes` wraps `delta` — Graph names polling as a
 leading cause of throttling — and returns the delta link beside the items,
 since a caller that drops it re-enumerates the whole drive next time.
+
+### Teams, OneNote, and Outlook Toolsets
+
+`docs/design/teams-onenote-outlook-toolsets.md` is the research these were built
+from. Four toolsets — `teams` (16 ops), `onenote` (12), `outlook_mail` (15),
+`outlook_calendar` (11) — over the same `toolsets/microsoft/` layer OneDrive and
+SharePoint use. **Outlook is two toolsets, not one**, for the reason the Google
+package already gives: reading a calendar should not confer sending mail.
+
+**The theme is that Microsoft restricts app-only auth inconsistently**, and the
+rule adopted is *refuse what cannot work, document what might not*.
+`microsoft/scope.py::user_root` is the shared refusal, now used by five clients:
+a `/me` path under client credentials cannot resolve, so it raises before the
+request naming `MS_TEAMS_USER`/`MS_ONENOTE_USER`/`MS_OUTLOOK_USER` and
+`MS_REFRESH_TOKEN`. A resource addressable without a user — `drive_id`, a
+OneNote `site_id`/`group_id` — bypasses it. Two restrictions are *not* refused:
+**sending a Teams message is delegated-only** (application permissions cover
+only `Teamwork.Migrate.All`, and a migration app is a real caller), and
+**OneNote's overview says app-only is unsupported while its per-operation pages
+list an application permission** — a contradiction quoted in the manifest rather
+than resolved by guessing.
+
+**Teams.** Graph's own docs say polling a resource more than once a day violates
+the Microsoft APIs Terms of Use; that is in the manifest because the coding
+agent is what would otherwise write the cron. Channel messages support **only**
+`$top` and `$expand` — no filter, no sort, silently ignored — so the client
+offers neither. `$top` caps at 50. Replies get their own operation because
+`$expand=replies` truncates at 200 behind a *nested* `replies@odata.nextLink`,
+and `$expand=members` on chats caps at 25 with no marker. Channel ids
+(`19:…@thread.tacv2`) carry a colon and an `@` through a path segment.
+
+**OneNote.** A page's content is an **HTML document, not JSON**: reading returns
+a string, and creating posts `Content-Type: text/html` whose `<title>` *becomes*
+the page title — there is no title field, so posting a bare fragment yields an
+untitled page and no error. `create_page` therefore assembles the document from
+a title and a body. Updates are `target`/`action`/`content` commands, and
+targeting anything but `body`/`title` needs `includeIDs=true` on the read.
+
+**Outlook mail.** Bodies come back as HTML unless `Prefer:
+outlook.body-content-type="text"` is sent, so the client sends it by default —
+and re-sends it per page, since a next-link carries parameters but not headers.
+`$filter` and `$orderby` have an ordering contract (sorted properties must
+appear in the filter, in order, first) or Graph answers `InefficientFilter`.
+Listings project a field set because a large page of full messages can hit a
+504. `sendMail` returns **202 = accepted, not delivered**, and the tool says so.
+
+**Outlook calendar.** `calendarView` versus `events` is the whole design:
+`/events` returns series *masters*, so "what is on Tuesday" asked there misses
+every recurring meeting and returns a plausible short list. `calendarView`
+expands occurrences over a required window — the same call `singleEvents=True`
+makes for Google Calendar. Times are UTC unless `Prefer: outlook.timezone` is
+set, and that header does *not* reinterpret the window, so the range values need
+their own offsets. `add_teams_meeting` sets `isOnlineMeeting` **and**
+`onlineMeetingProvider`; setting only the first yields an event that claims to
+be online and carries no join link. `cancel` notifies attendees where `delete`
+leaves their invitations in place.
 
 ### Slack and Zoom Toolsets
 

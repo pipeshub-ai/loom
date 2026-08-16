@@ -279,6 +279,21 @@ class ASTExtractor(ast.NodeVisitor):
     @staticmethod
     def _extract_label(node: ast.Call, method: str) -> str:
         """Try to extract a meaningful label from a ctx call."""
+        if method == "step":
+            # `ctx.step(fn, name="jira.create_issue")` overrides the step's
+            # journaled identity (`Context.step`'s `step_name = name or
+            # definition.name`) -- a host that dispatches many operations
+            # through one generic bridge function relies on exactly this to
+            # tell them apart, so the graph's label must agree with what
+            # actually got journaled rather than showing every call under
+            # the bridge function's own name.
+            for kw in node.keywords:
+                if (
+                    kw.arg == "name"
+                    and isinstance(kw.value, ast.Constant)
+                    and isinstance(kw.value.value, str)
+                ):
+                    return kw.value.value
         if method == "step" and node.args:
             first_arg = node.args[0]
             if isinstance(first_arg, ast.Name):

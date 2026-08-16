@@ -45,6 +45,9 @@ OFFLINE = [
     # neither the network nor a credential. Running it in CI therefore
     # exercises the workflow body, the grants, and the journal for real.
     "26_onedrive_sharepoint.py",
+    # Same dry-run branch: with no Microsoft variables it reports the reads
+    # and writes it would have made and returns, touching no network.
+    "27_meeting_prep.py",
 ]
 
 #: Needs the network but no credentials. Exercised for structure, not executed:

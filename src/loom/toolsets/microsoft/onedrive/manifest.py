@@ -43,6 +43,15 @@ ONEDRIVE_MANIFEST = ToolsetManifest(
             "MS_CLIENT_SECRET",
             "MS_REFRESH_TOKEN",
             "MS_GRAPH_ACCESS_TOKEN",
+            # Read by the shared auth layer, so declared here: the Azure SDK
+            # trio is what a host already has in its environment, and
+            # MS_AUTHORITY_HOST is the only way to reach a national cloud.
+            # Omitting them told `loom toolset` users to set MS_* variables
+            # they did not need.
+            "AZURE_TENANT_ID",
+            "AZURE_CLIENT_ID",
+            "AZURE_CLIENT_SECRET",
+            "MS_AUTHORITY_HOST",
             "MS_ONEDRIVE_USER",
             "MS_ONEDRIVE_DRIVE_ID",
         ],
@@ -119,6 +128,19 @@ ONEDRIVE_MANIFEST = ToolsetManifest(
                 id="files.recent",
                 function="onedrive_list_recent",
                 summary="Files this account touched recently, newest first.",
+                effect=EffectClass.READ,
+                idempotent=True,
+                pagination=True,
+                output_schema=_array(DriveItem),
+            ),
+            OperationSpec(
+                id="files.shared_with_me",
+                function="onedrive_list_shared_with_me",
+                summary="Files other people have shared with this user.",
+                description=(
+                    "Each item lives in ANOTHER person's drive — address it "
+                    "with the drive_id on the item, not this toolset's drive."
+                ),
                 effect=EffectClass.READ,
                 idempotent=True,
                 pagination=True,

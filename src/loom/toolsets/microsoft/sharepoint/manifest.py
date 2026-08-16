@@ -44,6 +44,15 @@ SHAREPOINT_MANIFEST = ToolsetManifest(
             "MS_CLIENT_SECRET",
             "MS_REFRESH_TOKEN",
             "MS_GRAPH_ACCESS_TOKEN",
+            # Read by the shared auth layer, so declared here: the Azure SDK
+            # trio is what a host already has in its environment, and
+            # MS_AUTHORITY_HOST is the only way to reach a national cloud.
+            # Omitting them told `loom toolset` users to set MS_* variables
+            # they did not need.
+            "AZURE_TENANT_ID",
+            "AZURE_CLIENT_ID",
+            "AZURE_CLIENT_SECRET",
+            "MS_AUTHORITY_HOST",
             "MS_SHAREPOINT_SITE",
         ],
     },
@@ -143,6 +152,26 @@ SHAREPOINT_MANIFEST = ToolsetManifest(
                 description="Not retried: no idempotency key.",
                 effect=EffectClass.WRITE,
                 output_schema=DriveItem.model_json_schema(),
+            ),
+            OperationSpec(
+                id="libraries.create_folder",
+                function="sharepoint_create_folder",
+                summary="Create a folder in a document library.",
+                description="Not retried; defaults to failing on a name clash.",
+                effect=EffectClass.WRITE,
+                output_schema=DriveItem.model_json_schema(),
+            ),
+            OperationSpec(
+                id="libraries.delete",
+                function="sharepoint_delete_file",
+                summary="Move a library file or folder to the recycle bin.",
+                description=(
+                    "Recoverable by a site administrator. Needs item_id or "
+                    "path — neither would address the library root."
+                ),
+                effect=EffectClass.DESTRUCTIVE,
+                idempotent=True,
+                output_schema={"type": "boolean"},
             ),
             OperationSpec(
                 id="libraries.create_link",

@@ -73,6 +73,22 @@ BUILTIN_TOOLSETS: tuple[tuple[str, str], ...] = (
         f"{_TOOLSETS}.microsoft.sharepoint.manifest.SHAREPOINT_MANIFEST",
         f"{_TOOLSETS}.microsoft.sharepoint.tools",
     ),
+    (
+        f"{_TOOLSETS}.microsoft.teams.manifest.TEAMS_MANIFEST",
+        f"{_TOOLSETS}.microsoft.teams.tools",
+    ),
+    (
+        f"{_TOOLSETS}.microsoft.onenote.manifest.ONENOTE_MANIFEST",
+        f"{_TOOLSETS}.microsoft.onenote.tools",
+    ),
+    (
+        f"{_TOOLSETS}.microsoft.outlook.mail.manifest.OUTLOOK_MAIL_MANIFEST",
+        f"{_TOOLSETS}.microsoft.outlook.mail.tools",
+    ),
+    (
+        f"{_TOOLSETS}.microsoft.outlook.calendar.manifest.OUTLOOK_CALENDAR_MANIFEST",
+        f"{_TOOLSETS}.microsoft.outlook.calendar.tools",
+    ),
     (f"{_TOOLSETS}.exa.manifest.EXA_MANIFEST", f"{_TOOLSETS}.exa.tools"),
     (f"{_TOOLSETS}.tavily.manifest.TAVILY_MANIFEST", f"{_TOOLSETS}.tavily.tools"),
     (

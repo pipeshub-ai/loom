@@ -46,6 +46,7 @@ __all__ = [
     "MicrosoftAuth",
     "MicrosoftCredentials",
     "get_default_auth",
+    "graph_base_url",
     "reset_default_auth",
 ]
 
@@ -262,6 +263,20 @@ class MicrosoftAuth:
             ) from None
         result: dict[str, Any] = response.json()
         return result
+
+
+def graph_base_url() -> str:
+    """The Graph host to call, honouring ``MS_GRAPH_BASE_URL``.
+
+    A national cloud moves **both** hosts: US Gov authenticates against
+    ``login.microsoftonline.us`` and serves data from ``graph.microsoft.us``.
+    Making only the authority overridable is worse than making neither, because
+    the tenant then authenticates correctly and calls the commercial Graph —
+    which fails with an authorization error that names the token, not the host.
+
+    Every default client reads this, so one variable moves a whole deployment.
+    """
+    return os.environ.get("MS_GRAPH_BASE_URL", "") or GRAPH_BASE_URL
 
 
 def _missing_message(credential_name: str) -> str:

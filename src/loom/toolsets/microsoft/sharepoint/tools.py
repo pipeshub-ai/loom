@@ -252,6 +252,72 @@ async def sharepoint_upload_file(
 
 
 @step(retry=_UNSAFE_WRITE)
+async def sharepoint_create_folder(
+    folder_name: str,
+    site: str = "",
+    drive_id: str = "",
+    parent_id: str = "",
+    parent_path: str = "",
+    on_conflict: str = "fail",
+) -> DriveItem:
+    """Create a folder in a document library.
+
+    Not retried: a retry with ``on_conflict="rename"`` would leave two
+    folders. The default is ``"fail"`` so a second attempt errors rather than
+    silently duplicating.
+
+    Args:
+        folder_name: Name for the new folder.
+        site: Site to create it in. Omit for the configured default.
+        drive_id: Library id. Omit for the site's default library.
+        parent_id: Parent folder id.
+        parent_path: Parent folder path. Omit both for the library root.
+        on_conflict: ``"fail"`` (default), ``"rename"``, or ``"replace"``.
+
+    Returns:
+        The created folder as a DriveItem.
+    """
+    from loom.toolsets.microsoft.sharepoint.client import get_default_client
+
+    return await get_default_client().create_folder(
+        folder_name,
+        site=site,
+        drive_id=drive_id,
+        parent_id=parent_id,
+        parent_path=parent_path,
+        on_conflict=on_conflict,
+    )
+
+
+@step(retry=_IDEMPOTENT_WRITE)
+async def sharepoint_delete_file(
+    site: str = "", drive_id: str = "", item_id: str = "", path: str = ""
+) -> bool:
+    """Move a file or folder in a document library to the recycle bin.
+
+    Recoverable — a site administrator can restore it.
+
+    Retried once: deleting something already deleted is a 404, not a second
+    deletion.
+
+    Args:
+        site: Site the file is in. Omit for the configured default.
+        drive_id: Library id. Omit for the site's default library.
+        item_id: Item id. Takes precedence over ``path``.
+        path: Item path within the library. One of the two is required —
+            passing neither would address the library root.
+
+    Returns:
+        True when the delete was accepted.
+    """
+    from loom.toolsets.microsoft.sharepoint.client import get_default_client
+
+    return await get_default_client().delete_item(
+        site=site, drive_id=drive_id, item_id=item_id, path=path
+    )
+
+
+@step(retry=_UNSAFE_WRITE)
 async def sharepoint_create_share_link(
     site: str = "",
     drive_id: str = "",

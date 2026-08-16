@@ -184,6 +184,19 @@ async def my_workflow(ctx, input):
         assert "fetch_data" in labels
         assert "process" in labels
 
+    def test_a_step_calls_explicit_name_kwarg_overrides_the_function_label(self) -> None:
+        """`ctx.step(bridge, "jira.create_issue", name="jira.create_issue")`
+        journals under `name`, not `bridge`'s own name -- the graph label
+        must match what a run trace actually shows for the same call."""
+        source = '''
+async def my_workflow(ctx, input):
+    a = await ctx.step(generic_bridge, "jira.create_issue", name="jira.create_issue")
+    b = await ctx.step(generic_bridge, "slack.post_message", name="slack.post_message")
+'''
+        ext = extract_from_source(source, flow_id="test")
+        labels = {n.label for n in ext.nodes if n.kind is not NodeKind.RETURN}
+        assert labels == {"jira.create_issue", "slack.post_message"}
+
     def test_extract_if_statement(self) -> None:
         source = '''
 async def my_workflow(ctx, input):

@@ -232,8 +232,12 @@ class CodeValidator:
         node: ast.AsyncFunctionDef,
         issues: list[CodeIssue],
     ) -> None:
-        """Flag bare I/O and nondeterminism inside a workflow body."""
+        """Flag bare I/O, nondeterminism, and control-signal-swallowing
+        `except` clauses inside a workflow body."""
         for child in ast.walk(node):
+            if isinstance(child, ast.ExceptHandler):
+                self._check_except_handler(child, issues)
+                continue
             if not isinstance(child, ast.Call):
                 continue
             name = self._call_name(child)
@@ -257,6 +261,67 @@ class CodeValidator:
                         "error",
                     ),
                 )
+
+    def _check_except_handler(
+        self,
+        handler: ast.ExceptHandler,
+        issues: list[CodeIssue],
+    ) -> None:
+        """`Suspend`/`WorkflowCancelled`/`ContinueAsNew` derive from
+        `BaseException` specifically so `except Exception` cannot swallow
+        them (see `core/exceptions.py`'s module docstring) -- but a bare
+        `except:` or an explicit `except BaseException:` catches
+        `BaseException` too. Inside a workflow body that clause sits between
+        the `ctx.*` call that raises the signal and the engine that is
+        supposed to see it propagate, so `ctx.wait_for_approval()` silently
+        never parks, `ctx.sleep()` silently never suspends, and a cancelled
+        run keeps running. This is the one case `except Exception` does not
+        already cover, so it is checked separately rather than folded into
+        `BARE_IO_CALLS`/`NONDETERMINISTIC_CALLS`, which key off call names,
+        not handler types.
+        """
+        if handler.type is None:
+            issues.append(
+                CodeIssue(
+                    "structure",
+                    "Bare 'except:' in workflow body catches BaseException, "
+                    "which silently swallows Suspend/WorkflowCancelled and "
+                    "strands the run instead of parking or cancelling it — "
+                    "catch a specific exception type instead",
+                    "error",
+                ),
+            )
+            return
+        caught_names = self._exception_type_names(handler.type)
+        if "BaseException" in caught_names:
+            issues.append(
+                CodeIssue(
+                    "structure",
+                    "'except BaseException' in workflow body silently "
+                    "swallows Suspend/WorkflowCancelled and strands the run "
+                    "instead of parking or cancelling it — catch a specific "
+                    "exception type instead",
+                    "error",
+                ),
+            )
+
+    @staticmethod
+    def _exception_type_names(node: ast.expr) -> set[str]:
+        """Bare names in an `except X:`/`except (X, Y):` clause. Does not
+        resolve aliases or subclassing — a workflow that imports
+        `BaseException` under another name is rare enough that a false
+        negative here is an acceptable trade for not needing an import
+        resolver in a syntax-level check."""
+        if isinstance(node, ast.Tuple):
+            names: set[str] = set()
+            for elt in node.elts:
+                names |= CodeValidator._exception_type_names(elt)
+            return names
+        if isinstance(node, ast.Name):
+            return {node.id}
+        if isinstance(node, ast.Attribute):
+            return {node.attr}
+        return set()
 
     def _is_workflow_func(
         self,

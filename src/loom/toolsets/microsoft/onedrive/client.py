@@ -15,6 +15,7 @@ from loom.toolsets.microsoft.auth import (
     GRAPH_BASE_URL,
     MicrosoftAuth,
     get_default_auth,
+    graph_base_url,
 )
 from loom.toolsets.microsoft.errors import GraphPermanentError
 from loom.toolsets.microsoft.http import GraphSession
@@ -26,6 +27,7 @@ from loom.toolsets.microsoft.models import (
     Permission,
     SharingLink,
 )
+from loom.toolsets.microsoft.scope import user_root
 from loom.toolsets.pagination import Results
 
 if TYPE_CHECKING:
@@ -84,28 +86,23 @@ class OneDriveClient:
     def _root(self) -> str:
         """The drive this client works in.
 
-        An app-only token has no user attached, so ``/me/drive`` does not exist
-        under it — Graph answers a 400 whose message is roughly "/me request is
-        only valid with delegated authentication flow". That surfaces from
-        inside whichever step happened to run first and reads as a broken
-        toolset rather than a missing argument, so it is refused here instead,
-        before the request, naming both ways to fix it.
+        A named drive short-circuits the user entirely — a ``drive_id`` is
+        addressable under an app-only token, which is why it is checked first.
+        Otherwise this reduces to "whose drive", and the app-only refusal is
+        the shared one in :mod:`loom.toolsets.microsoft.scope`.
         """
         if self._drive_id:
             return f"/drives/{quote(self._drive_id, safe='')}"
-        if self._user_id:
-            return f"/users/{quote(self._user_id, safe='')}/drive"
-        if self._auth.is_app_only:
-            raise GraphPermanentError(
-                "This token authenticates the application, not a person, so "
-                "'/me/drive' does not exist. Pass user_id= (a UPN or id, for "
-                "someone's OneDrive) or drive_id= (for a specific drive or "
-                "SharePoint library) — or authenticate as a person by setting "
-                "MS_REFRESH_TOKEN.",
-                status=0,
-                code="appOnlyNeedsDriveScope",
+        return (
+            user_root(
+                self._auth,
+                self._user_id,
+                workload="a drive",
+                env_hint="MS_ONEDRIVE_USER or MS_ONEDRIVE_DRIVE_ID",
+                alternatives="pass drive_id= for a specific drive or SharePoint library",
             )
-        return "/me/drive"
+            + "/drive"
+        )
 
     def _addr(self, item_id: str = "", path: str = "", suffix: str = "") -> str:
         """Address an item in this drive by id or by path."""
@@ -117,15 +114,11 @@ class OneDriveClient:
         return Drive.from_api(await self._session.get(self._root()))
 
     async def whoami(self) -> MicrosoftUser:
-        if self._auth.is_app_only:
-            raise GraphPermanentError(
-                "'/me' does not exist under an app-only token — there is no "
-                "signed-in user to report. Authenticate as a person by setting "
-                "MS_REFRESH_TOKEN, or look a user up by id instead.",
-                status=0,
-                code="appOnlyHasNoUser",
-            )
-        return MicrosoftUser.from_api(await self._session.get("/me"))
+        # No user_id here on purpose: "who am I" has no answer for an
+        # application, and returning some *other* user would answer a question
+        # nobody asked.
+        root = user_root(self._auth, workload="a signed-in user")
+        return MicrosoftUser.from_api(await self._session.get(root))
 
     # -- reading -------------------------------------------------------------
 
@@ -169,6 +162,28 @@ class OneDriveClient:
     async def list_recent(self, *, limit: int = 50) -> Results[DriveItem]:
         return await self._session.paginate(
             f"{self._root()}/recent",
+            limit=limit,
+            page_size=200,
+            row=DriveItem.from_api,
+        )
+
+    async def list_shared_with_me(self, *, limit: int = 100) -> Results[DriveItem]:
+        """Files and folders other people have shared with this user.
+
+        Deliberately reads ``/me/drive/sharedWithMe`` rather than the resolved
+        drive root: sharing is a property of the *person*, not of a drive, and
+        the endpoint does not exist under ``/drives/{id}``. Every item carries
+        its own ``drive_id`` because they live in other people's drives — using
+        this client's drive to address one afterwards would 404.
+        """
+        root = user_root(
+            self._auth,
+            self._user_id,
+            workload="items shared with a user",
+            env_hint="MS_ONEDRIVE_USER",
+        )
+        return await self._session.paginate(
+            f"{root}/drive/sharedWithMe",
             limit=limit,
             page_size=200,
             row=DriveItem.from_api,
@@ -495,6 +510,7 @@ def get_default_client() -> OneDriveClient:
         import os
 
         _default = OneDriveClient(
+            base_url=graph_base_url(),
             user_id=os.environ.get("MS_ONEDRIVE_USER", ""),
             drive_id=os.environ.get("MS_ONEDRIVE_DRIVE_ID", ""),
         )

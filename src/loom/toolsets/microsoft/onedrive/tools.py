@@ -165,6 +165,23 @@ async def onedrive_list_recent(limit: int = 50) -> Results[DriveItem]:
 
 
 @step(retry=_READ)
+async def onedrive_list_shared_with_me(limit: int = 100) -> Results[DriveItem]:
+    """List files and folders other people have shared with this user.
+
+    Args:
+        limit: Maximum items across pages. Defaults to 100.
+
+    Returns:
+        Results of DriveItem. Each lives in **another person's drive**, so use
+        the ``drive_id`` on the item to address it — this toolset's own drive
+        does not contain it.
+    """
+    from loom.toolsets.microsoft.onedrive.client import get_default_client
+
+    return await get_default_client().list_shared_with_me(limit=limit)
+
+
+@step(retry=_READ)
 async def onedrive_list_changes(
     delta_link: str = "", token: str = "", limit: int = 500
 ) -> DeltaPage:

@@ -468,28 +468,75 @@ tools = rt.toolsets.resolve_tools(["demo"])
 - **Zoom** (`toolsets/zoom/`) — 14 operations, meetings, attendance,
   recordings. Server-to-Server OAuth, and the only toolset with **no**
   refresh token — the client secret mints hourly tokens on demand
-- **OneDrive** (`toolsets/microsoft/onedrive/`) — 17 operations, files,
+- **OneDrive** (`toolsets/microsoft/onedrive/`) — 18 operations, files,
   sharing, and `delta` change tracking
-- **SharePoint Online** (`toolsets/microsoft/sharepoint/`) — 17 operations,
+- **SharePoint Online** (`toolsets/microsoft/sharepoint/`) — 19 operations,
   sites, document libraries, and lists
+- **Teams** (`toolsets/microsoft/teams/`) — 16 operations, channels, messages,
+  reply threads, and chats
+- **OneNote** (`toolsets/microsoft/onenote/`) — 12 operations, notebooks,
+  sections, and HTML page content
+- **Outlook mail** (`toolsets/microsoft/outlook/mail/`) — 15 operations,
+  messages, folders, sending, attachments
+- **Outlook calendar** (`toolsets/microsoft/outlook/calendar/`) — 11
+  operations, events, scheduling, availability
 
-### Microsoft Graph: OneDrive and SharePoint
+### Microsoft Graph: six toolsets over one layer
 
-Two toolsets over one API, sharing `microsoft/{auth,errors,http,addressing}.py`
-the way the four Google toolsets share theirs. **A SharePoint document library
-*is* a `drive` and its files *are* `driveItem`s**, so the file operations return
-the same models on both sides and a file moved between them keeps one shape.
-They stay separately grantable because the grant boundary is real — a workflow
-reading a team library has no business reading someone's personal OneDrive.
+OneDrive, SharePoint, Teams, OneNote, Outlook mail and Outlook calendar are one
+API. They share `microsoft/{auth,errors,http,addressing,scope}.py` the way the
+four Google toolsets share theirs, so adding a workload costs models, a client,
+tools and a manifest — no new auth, paging, or error handling.
 
-Three things are worth knowing before writing against them.
+Two of those shared files are worth naming. **A SharePoint document library *is*
+a `drive` and its files *are* `driveItem`s**, so `models.py` is shared and a
+file moved between OneDrive and a team library keeps one shape. And
+`addressing.py` holds Graph's colon escape once, because it is wrong in a way
+that is hard to see (`/root:/Reports:/children` needs the *second* colon).
 
-**Under app-only credentials, `/me` does not exist.** Client credentials
-authenticate the *application*, so there is no signed-in person and every
-`/me/drive` path fails with a 400 that reads as a broken toolset rather than a
-missing argument. The clients refuse **before the request**, naming both fixes:
-set `MS_ONEDRIVE_USER` / `MS_ONEDRIVE_DRIVE_ID`, or authenticate as a person
-with `MS_REFRESH_TOKEN`. Delegated credentials need none of this.
+They stay separately grantable because the grant boundary is real — reading a
+calendar should not confer the ability to send mail, and
+`GrantSet(toolsets=["outlook_calendar"])` should mean exactly that. Outlook is
+therefore two toolsets, not one.
+
+**Under app-only credentials, `/me` does not exist**, and this is the single
+most useful thing to know about the whole set. Client credentials authenticate
+the *application*, so there is no signed-in person and every `/me/…` path fails
+with a 400 that reads as a broken toolset rather than a missing argument. The
+shared `scope.user_root` refuses **before the request**, naming the fixes:
+`MS_ONEDRIVE_USER` / `MS_TEAMS_USER` / `MS_ONENOTE_USER` / `MS_OUTLOOK_USER`,
+or authenticate as a person with `MS_REFRESH_TOKEN`. Delegated credentials need
+none of it, and a resource addressable without a user — `drive_id`, a
+SharePoint `site_id`, a OneNote `group_id` — bypasses the check entirely.
+
+Microsoft restricts app-only auth in two further ways that are *not* refused,
+and the distinction is deliberate — **refuse what cannot work, document what
+might not**:
+
+- **Sending a Teams message needs delegated credentials.** Application
+  permissions are not supported for posting, only `Teamwork.Migrate.All` for
+  migration. A migration app is a legitimate caller, so this is stated in the
+  manifest rather than blocked.
+- **OneNote's own reference contradicts itself** — the overview says app-only
+  is unsupported, the per-operation pages list an application permission. The
+  contradiction is quoted in the manifest; refusing would break tenants where
+  it works.
+
+Three more per-workload traps, all pinned by tests:
+
+- **Teams forbids polling.** Graph's Teams documentation states that polling a
+  resource more than once a day violates the Microsoft APIs Terms of Use. That
+  is in the manifest because the coding agent is exactly the thing that would
+  otherwise write the five-minute cron.
+- **`calendarView`, not `events`.** `/events` returns series *masters*, so a
+  weekly stand-up appears once with a recurrence rule and not on the days it
+  happens — "what is on Tuesday" answered there returns a short list that looks
+  right. `outlook_list_calendar_view` expands occurrences over a window, which
+  is the same call `singleEvents=True` makes for Google Calendar.
+- **Outlook bodies arrive as HTML** unless `Prefer:
+  outlook.body-content-type="text"` is sent, so the mail client sends it by
+  default — and re-sends it on every follow-up page, because a next-link
+  carries query parameters but not headers.
 
 **A SharePoint column has two names, and writing the wrong one is silent.** A
 list item's values are keyed by the column's *internal* name — a column

@@ -84,6 +84,7 @@ class GraphSession:
         *,
         params: dict[str, Any] | None = None,
         json: Any = None,
+        headers: dict[str, str] | None = None,
     ) -> Any:
         """Perform one call and return the decoded body (``None`` for 204).
 
@@ -91,6 +92,11 @@ class GraphSession:
         retry policy in disguise — it is the one case where the same request,
         sent again immediately, legitimately succeeds: the cached token expired
         sooner than its stated lifetime.
+
+        ``headers`` carries the per-request ``Prefer`` values several Outlook
+        endpoints need — body format, response timezone — which are not query
+        parameters and change what the response *means* rather than which rows
+        come back.
         """
         import httpx
 
@@ -100,10 +106,12 @@ class GraphSession:
         async with httpx.AsyncClient(
             timeout=self._timeout, transport=self._transport
         ) as client:
-            response = await self._send(client, method, url, clean, json)
+            response = await self._send(client, method, url, clean, json, extra=headers)
             if response.status_code == 401:
                 self._auth.invalidate()
-                response = await self._send(client, method, url, clean, json)
+                response = await self._send(
+                    client, method, url, clean, json, extra=headers
+                )
             self._check(response, url)
             if response.status_code == 204 or not response.content:
                 return None
@@ -230,6 +238,7 @@ class GraphSession:
         params: dict[str, Any] | None = None,
         page_size: int = 200,
         row: Any = None,
+        headers: dict[str, str] | None = None,
     ) -> Results[Any]:
         """Follow ``@odata.nextLink`` until ``limit`` items are collected.
 
@@ -251,8 +260,14 @@ class GraphSession:
                 # $top included. Sending ours again would duplicate the query
                 # parameter on a URL that already carries it — and the
                 # reference says to use the entire URL as given.
-                return await self.request("GET", follow)
-            return await self.request("GET", path, params={**first, **asked})
+                #
+                # Headers are *not* in the link, though, so they are re-sent:
+                # a Prefer that shaped page one and not page two would give one
+                # result set in two formats.
+                return await self.request("GET", follow, headers=headers)
+            return await self.request(
+                "GET", path, params={**first, **asked}, headers=headers
+            )
 
         return await page_through(
             request,
@@ -305,8 +320,11 @@ class GraphSession:
         *,
         content: bytes | None = None,
         content_type: str = "",
+        extra: dict[str, str] | None = None,
     ) -> httpx.Response:
         headers = await self._auth.headers()
+        if extra:
+            headers.update(extra)
         # `params or None` is load-bearing, not tidiness. httpx *replaces* a
         # URL's query string whenever params is supplied — an empty dict clears
         # it. Every follow-up page is an absolute @odata.nextLink whose whole

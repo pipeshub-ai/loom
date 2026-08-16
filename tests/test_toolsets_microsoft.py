@@ -12,7 +12,8 @@ where Graph answers something plausible rather than an error.
 
 from __future__ import annotations
 
-from typing import Any
+import re
+from typing import Any, ClassVar
 
 import httpx
 import pytest
@@ -1220,3 +1221,76 @@ class TestListItemTranslation:
 
     def test_an_unexpanded_item_reports_no_fields_rather_than_guessing(self) -> None:
         assert ListItem.from_api({"id": "1"}).fields == {}
+
+
+class TestManifestsDeclareWhatTheyRead:
+    """A manifest's auth fields are what ``loom toolset`` prints.
+
+    The failure this pins is quiet and one-directional: the shared auth layer
+    accepts ``AZURE_TENANT_ID``/``AZURE_CLIENT_ID``/``AZURE_CLIENT_SECRET`` —
+    the trio a host running the Azure SDKs already has — and
+    ``MS_AUTHORITY_HOST``, the only way to reach a national cloud. All six
+    manifests originally listed none of them, so the CLI told a correctly
+    configured user to set ``MS_*`` variables they did not need, and gave a US
+    Gov tenant no way to discover the authority override.
+
+    Checked as a superset rather than equality: a manifest may reasonably
+    declare a variable only its own client reads.
+    """
+
+    #: Read by ``MicrosoftCredentials.from_env`` for every Microsoft toolset.
+    SHARED: ClassVar[frozenset[str]] = frozenset(
+        {
+            "MS_TENANT_ID",
+            "MS_CLIENT_ID",
+            "MS_CLIENT_SECRET",
+            "MS_REFRESH_TOKEN",
+            "MS_GRAPH_ACCESS_TOKEN",
+            "AZURE_TENANT_ID",
+            "AZURE_CLIENT_ID",
+            "AZURE_CLIENT_SECRET",
+            "MS_AUTHORITY_HOST",
+        }
+    )
+
+    def _microsoft_manifests(self):
+        import importlib
+
+        for module, attribute in (
+            ("loom.toolsets.microsoft.onedrive.manifest", "ONEDRIVE_MANIFEST"),
+            ("loom.toolsets.microsoft.sharepoint.manifest", "SHAREPOINT_MANIFEST"),
+            ("loom.toolsets.microsoft.teams.manifest", "TEAMS_MANIFEST"),
+            ("loom.toolsets.microsoft.onenote.manifest", "ONENOTE_MANIFEST"),
+            ("loom.toolsets.microsoft.outlook.mail.manifest", "OUTLOOK_MAIL_MANIFEST"),
+            (
+                "loom.toolsets.microsoft.outlook.calendar.manifest",
+                "OUTLOOK_CALENDAR_MANIFEST",
+            ),
+        ):
+            yield getattr(importlib.import_module(module), attribute)
+
+    def test_every_microsoft_manifest_declares_the_shared_credentials(self) -> None:
+        missing = {}
+        for manifest in self._microsoft_manifests():
+            absent = self.SHARED - set(manifest.auth.get("fields", []))
+            if absent:
+                missing[manifest.id] = sorted(absent)
+        assert not missing, f"manifests omit credentials the auth layer reads: {missing}"
+
+    def test_the_shared_set_matches_what_from_env_actually_reads(self) -> None:
+        """Guards the guard: if ``from_env`` learns a variable, this fails.
+
+        Without it the list above becomes a second source of truth that drifts
+        from the code the moment a credential shape is added.
+        """
+        import inspect
+
+        from loom.toolsets.microsoft import auth as auth_module
+
+        source = inspect.getsource(auth_module.MicrosoftCredentials.from_env)
+        read = set(re.findall(r'"((?:MS|AZURE)_[A-Z_]+)"', source))
+        assert read == self.SHARED, (
+            "MicrosoftCredentials.from_env reads a different set than this test "
+            f"declares; extra in code: {sorted(read - self.SHARED)}, "
+            f"stale here: {sorted(self.SHARED - read)}"
+        )
