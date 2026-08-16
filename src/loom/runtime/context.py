@@ -198,12 +198,7 @@ class DurableCall(Generic[T]):
             # Replay must surface the failure the workflow originally saw. To re-run the
             # step against fixed code use runtime.retry(), which prunes failed entries.
             return self._handle_failure(
-                StepError(
-                    recorded.error.message if recorded.error else "step failed",
-                    step_name=self.name,
-                    attempts=recorded.attempts,
-                ),
-                attempts=recorded.attempts,
+                self._recorded_failure(recorded), attempts=recorded.attempts
             )
 
         entry = JournalEntry(
@@ -247,6 +242,11 @@ class DurableCall(Generic[T]):
         )
         entry.status = EntryStatus.FAILED
         entry.error = ErrorInfo.from_exception(refusal, step_name=self.name)
+        if outcome.needs:
+            # `ErrorInfo` carries a type and a message and nothing else, so the
+            # grant that would have allowed this is recorded beside it — that is
+            # the half a replay needs to rebuild a denial worth acting on.
+            entry.metadata["denied_needs"] = outcome.needs
         entry.finished_at = self._clock.now()
         journal.put(entry)
         await ctx._maybe_flush(force=True)
@@ -303,6 +303,62 @@ class DurableCall(Generic[T]):
             "or use runtime.retry() to re-execute against current code."
         )
 
+    def _recorded_failure(self, recorded: JournalEntry) -> BaseException:
+        """The exception a replay should raise for a failure already journaled.
+
+        Reproducing the *message* is not enough. A workflow branches on the
+        exception **type** — ``except EffectDenied`` is how it tells "policy
+        refused this" from "this broke" — so rebuilding every recorded failure
+        as a generic :class:`StepError` sends a replay down a different branch
+        from the run it is supposed to be rehearsing. Journaling the denial was
+        meant to prevent exactly that divergence; losing the type reintroduced
+        it one layer down.
+
+        **Only failures the engine itself produced are rebuilt.** The engine
+        knows their constructors. A ``ValueError`` from inside a step is left as
+        a ``StepError`` carrying its message, because rebuilding an arbitrary
+        exception from a name and a string means guessing at a signature — and
+        the class may not even be importable in the process doing the replay.
+        That is a real remaining gap, and a narrower one than pretending to
+        close it would be.
+        """
+        message = recorded.error.message if recorded.error else "step failed"
+        if recorded.error is not None and recorded.error.type == "EffectDenied":
+            return EffectDenied(
+                message,
+                # Rebuilt from the entry rather than carried, so it describes
+                # the call the denial was actually about.
+                call=EffectCall(
+                    kind=_EFFECT_KINDS.get(self.kind, self.kind.value),
+                    target=self.name,
+                    run_id=self._ctx.run_id,
+                    path=self.path,
+                ),
+                # The actionable half — "add this grant and it works". A
+                # replayed denial without it is a worse object than the one the
+                # run saw.
+                needs=(recorded.metadata or {}).get("denied_needs", ""),
+            )
+        if recorded.status is EntryStatus.EXHAUSTED and recorded.attempts > 1:
+            # The run raised `RetriesExhausted` only when it actually retried —
+            # ``attempt > 1`` in the loop above — so the same condition rebuilds
+            # it, read from the attempt count the journal already carries.
+            # ``EntryStatus.EXHAUSTED`` is the purpose-built signal here: the
+            # journal records the *original* error's type, because that is the
+            # useful one to keep, so the status is what says a retry budget was
+            # spent rather than the type.
+            #
+            # Safe to widen an existing replay from `StepError` to this because
+            # `RetriesExhausted` **is** a `StepError` — anything already
+            # catching the base class keeps catching it.
+            return RetriesExhausted(
+                f"step '{self.name}' failed after {recorded.attempts} "
+                f"attempts: {message}",
+                step_name=self.name,
+                attempts=recorded.attempts,
+            )
+        return StepError(message, step_name=self.name, attempts=recorded.attempts)
+
     def _effect_call(self, entry: JournalEntry, span: Span) -> EffectCall:
         """Describe this operation for the broker, and how to carry it out."""
 
@@ -317,6 +373,9 @@ class DurableCall(Generic[T]):
             run_id=self._ctx.run_id,
             path=self.path,
             perform=perform,
+            # Local-only, like `perform`, and absent from `describe()`. Lets a
+            # hook journal its own work beneath this call's path.
+            context=self._ctx,
         )
 
     @property

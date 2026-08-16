@@ -16,10 +16,13 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
 from loom import Runtime, step, workflow
+from loom.runtime.clock import ManualClock
 from loom.runtime.context import Context
 from loom.runtime.effects import DirectBroker, EffectCall, EffectResult
 from loom.runtime.sandbox import (
@@ -408,6 +411,319 @@ class TestTheChannelIsTheOnlyWayOut:
 
         assert {"double", "add_ten", "detonate"} <= set(reachable)
         assert "gmail_send_message" not in reachable
+
+
+@step
+async def bridge_call(operation_id: str, **kwargs: Any) -> str:
+    """Stands in for `pipeshub_tool`: one generic step fronting many logical
+    operations, distinguished only by the `name=` override at the call site."""
+    return f"did {operation_id}"
+
+
+@workflow(name="bridged")
+async def bridged(ctx: Context, payload: dict) -> str:
+    return await ctx.step(bridge_call, name=payload["op"], operation_id=payload["op"])
+
+
+class TestNameOverrideOnTheWire:
+    """PipesHub journals a bridged call under its logical name, not the
+    generic step's own name. The override has to survive the wire or a
+    Docker/subprocess run's journal permanently diverges from an inline
+    one's."""
+
+    async def test_the_journal_uses_the_override_name(self) -> None:
+        rt = Runtime(store=MemoryStore(), sandbox=InlineSandbox())
+        rt.register(bridged)
+
+        result = await rt.run(bridged, {"op": "jira.create_issue"})
+
+        entries = await rt.store.load_journal(result.run_id)
+        assert [e.name for e in entries] == ["jira.create_issue"]
+
+    async def test_inline_and_subprocess_journal_identically_with_override(self) -> None:
+        async def shape_of(sandbox: ExecutionSandbox) -> list[tuple[str, str, object]]:
+            rt = Runtime(store=MemoryStore(), sandbox=sandbox)
+            rt.register(bridged)
+            result = await rt.run(bridged, {"op": "jira.create_issue"})
+            entries = await rt.store.load_journal(result.run_id)
+            return [(e.kind.value, e.name, e.output) for e in entries]
+
+        assert await shape_of(SubprocessSandbox()) == await shape_of(InlineSandbox())
+
+
+@step
+async def injected_step(x: int) -> int:
+    return x + 100
+
+
+class TestHostInjectedSteps:
+    """`Runtime(sandbox_steps=...)` is how a host makes a step reachable that
+    is not a name in the workflow's own module — a dynamically-bridged tool
+    step, in PipesHub's case."""
+
+    async def test_sandbox_steps_are_reachable_and_callable(self) -> None:
+        exec_source = (
+            "from loom import workflow\n"
+            "\n"
+            "@workflow(name='exec_flow')\n"
+            "async def flow(ctx, payload):\n"
+            "    return await ctx.step('injected_step', x=payload['x'])\n"
+        )
+        namespace: dict[str, Any] = {}
+        exec(compile(exec_source, "<test>", "exec"), namespace)
+        definition = namespace["flow"]
+
+        rt = Runtime(
+            store=MemoryStore(),
+            sandbox=SubprocessSandbox(),
+            sandbox_steps={"injected_step": injected_step},
+        )
+        await rt.publish(definition, source=exec_source)
+
+        result = await rt.run(definition, {"x": 5})
+
+        assert result.output == 105, result.error
+
+    async def test_a_step_outside_the_map_is_still_refused(self) -> None:
+        exec_source = (
+            "from loom import workflow\n"
+            "\n"
+            "@workflow(name='exec_flow_unreachable')\n"
+            "async def flow(ctx, payload):\n"
+            "    return await ctx.step('not_injected', x=1)\n"
+        )
+        namespace: dict[str, Any] = {}
+        exec(compile(exec_source, "<test>", "exec"), namespace)
+        definition = namespace["flow"]
+
+        rt = Runtime(
+            store=MemoryStore(),
+            sandbox=SubprocessSandbox(),
+            sandbox_steps={"injected_step": injected_step},
+        )
+        await rt.publish(definition, source=exec_source)
+
+        result = await rt.run(definition, {})
+
+        assert result.status.value == "failed"
+        assert "not_injected" in (result.error.message if result.error else "")
+
+    async def test_a_bare_callable_can_be_injected_too(self) -> None:
+        """PipesHub's bridge step (``pipeshub_tool``) is a plain async
+        function, not a ``@step``-decorated ``StepDefinition`` — the same
+        shape ``Context.step`` already accepts directly. Filtering the
+        injected map by ``isinstance(..., StepDefinition)`` would silently
+        make exactly that case unreachable."""
+
+        async def bare_bridge(operation_id: str, **kwargs: Any) -> str:
+            return f"bridged {operation_id}"
+
+        exec_source = (
+            "from loom import workflow\n"
+            "\n"
+            "@workflow(name='exec_flow_bare')\n"
+            "async def flow(ctx, payload):\n"
+            "    return await ctx.step("
+            "'bare_bridge', name=payload['op'], operation_id=payload['op'])\n"
+        )
+        namespace: dict[str, Any] = {}
+        exec(compile(exec_source, "<test>", "exec"), namespace)
+        definition = namespace["flow"]
+
+        rt = Runtime(
+            store=MemoryStore(),
+            sandbox=SubprocessSandbox(),
+            sandbox_steps={"bare_bridge": bare_bridge},
+        )
+        await rt.publish(definition, source=exec_source)
+
+        result = await rt.run(definition, {"op": "jira.create_issue"})
+
+        assert result.output == "bridged jira.create_issue", result.error
+        entries = await rt.store.load_journal(result.run_id)
+        assert [e.name for e in entries] == ["jira.create_issue"]
+
+    def test_local_step_helpers_in_exec_source_are_reachable(self) -> None:
+        """The `fn.__globals__` fix. A workflow compiled via `exec()` has no
+        module — `inspect.getmodule(fn)` is always `None` — so a helper
+        `@step` defined alongside it in the same exec'd namespace must be
+        found by scanning `fn.__globals__` instead."""
+        exec_source = (
+            "from loom import workflow, step\n"
+            "\n"
+            "@step\n"
+            "async def local_helper(x: int) -> int:\n"
+            "    return x\n"
+            "\n"
+            "@workflow(name='exec_flow_local_step')\n"
+            "async def flow(ctx, payload):\n"
+            "    return await ctx.step(local_helper, x=payload['x'])\n"
+        )
+        namespace: dict[str, Any] = {}
+        exec(compile(exec_source, "<test>", "exec"), namespace)
+        definition = namespace["flow"]
+
+        reachable = Runtime(store=MemoryStore())._sandbox_steps(definition)
+
+        assert "local_helper" in reachable
+
+
+@workflow(name="sleeps_durably")
+async def sleeps_durably(ctx: Context, payload: dict) -> str:
+    await ctx.sleep(300)
+    return "done"
+
+
+@workflow(name="reports_progress")
+async def reports_progress(ctx: Context, payload: dict) -> str:
+    await ctx.report("halfway there")
+    return "done"
+
+
+class TestTheChildCtxSurfaceIsComplete:
+    """`ctx.sleep` and `ctx.report` are ordinary parts of a workflow body —
+    without them in the child stub, any generated workflow that sleeps or
+    reports progress fails the moment it runs in a non-inline sandbox."""
+
+    async def test_sleep_parks_the_run_and_resume_completes_it(self) -> None:
+        clock = ManualClock(datetime(2030, 1, 1, tzinfo=UTC))
+        rt = Runtime(store=MemoryStore(), sandbox=SubprocessSandbox(), clock=clock)
+        rt.register(sleeps_durably)
+
+        parked = await rt.run(sleeps_durably, {})
+        assert parked.status.value == "suspended"
+
+        clock.advance(seconds=301)
+        resumed = await rt.resume(parked.run_id)
+
+        assert resumed.status.value == "completed"
+        assert resumed.output == "done"
+
+    async def test_report_reaches_the_parents_stream(self) -> None:
+        rt = Runtime(store=MemoryStore(), sandbox=SubprocessSandbox())
+        rt.register(reports_progress)
+
+        result = await rt.run(reports_progress, {})
+
+        seen = rt.stream.since(result.run_id)
+        assert any(r.message == "halfway there" for r in seen)
+
+
+class TestProtocolRobustness:
+    """Two latent bugs that only bite model-generated code: a stray `print()`
+    and a payload bigger than asyncio's default stream buffer."""
+
+    async def test_print_does_not_corrupt_the_wire(self) -> None:
+        outcome = await SubprocessSandbox().run(
+            body=SandboxBody(
+                invoke=_unused,
+                source=(
+                    "async def noisy(ctx, payload):\n"
+                    "    print('this would corrupt the wire if not redirected')\n"
+                    "    print({'not': 'necessarily json-safe either'})\n"
+                    "    return 'ok'\n"
+                ),
+                entrypoint="noisy",
+            ),
+            run_id="r1",
+            input={},
+            channel=_NoChannel(),
+            policy=SandboxPolicy(),
+        )
+
+        assert outcome.ok, outcome.error
+        assert outcome.value == "ok"
+
+    async def test_namespace_is_visible_to_the_source(self) -> None:
+        outcome = await SubprocessSandbox().run(
+            body=SandboxBody(
+                invoke=_unused,
+                source="async def read_it(ctx, payload):\n    return greeting\n",
+                entrypoint="read_it",
+                namespace={"greeting": "hello from the host"},
+            ),
+            run_id="r1",
+            input={},
+            channel=_NoChannel(),
+            policy=SandboxPolicy(),
+        )
+
+        assert outcome.ok, outcome.error
+        assert outcome.value == "hello from the host"
+
+    async def test_entrypoint_falls_back_to_the_sole_workflow(self) -> None:
+        """A renamed definition (PipesHub compiles every version under a
+        synthetic name) is still bound in the exec'd namespace under its
+        original function name — the fallback is what finds it anyway."""
+        outcome = await SubprocessSandbox().run(
+            body=SandboxBody(
+                invoke=_unused,
+                source=(
+                    "from loom import workflow\n"
+                    "\n"
+                    "@workflow(name='original')\n"
+                    "async def original_fn(ctx, payload):\n"
+                    "    return 'found via fallback'\n"
+                ),
+                entrypoint="pipeshub-v-does-not-match-fn-name",
+            ),
+            run_id="r1",
+            input={},
+            channel=_NoChannel(),
+            policy=SandboxPolicy(),
+        )
+
+        assert outcome.ok, outcome.error
+        assert outcome.value == "found via fallback"
+
+    async def test_entrypoint_refuses_rather_than_guesses_when_ambiguous(self) -> None:
+        outcome = await SubprocessSandbox().run(
+            body=SandboxBody(
+                invoke=_unused,
+                source=(
+                    "from loom import workflow\n"
+                    "\n"
+                    "@workflow(name='one')\n"
+                    "async def one_fn(ctx, payload):\n"
+                    "    return 1\n"
+                    "\n"
+                    "@workflow(name='two')\n"
+                    "async def two_fn(ctx, payload):\n"
+                    "    return 2\n"
+                ),
+                entrypoint="missing",
+            ),
+            run_id="r1",
+            input={},
+            channel=_NoChannel(),
+            policy=SandboxPolicy(),
+        )
+
+        assert not outcome.ok
+        assert "2 workflow-like candidates" in outcome.error
+
+
+@step
+async def big_result() -> str:
+    return "x" * (100 * 1024)
+
+
+@workflow(name="big_payload")
+async def big_payload(ctx: Context, payload: dict) -> str:
+    return await ctx.step(big_result)
+
+
+class TestLargePayloads:
+    async def test_a_step_result_over_64kib_round_trips(self) -> None:
+        """`create_subprocess_exec` defaults its stream buffer to 64 KiB;
+        without an explicit `limit=`, the child's final `_emit` of a larger
+        value raises `LimitOverrunError` on the parent's `readline()`."""
+        rt = Runtime(store=MemoryStore(), sandbox=SubprocessSandbox())
+        rt.register(big_payload)
+
+        result = await rt.run(big_payload, {})
+
+        assert result.output == "x" * (100 * 1024)
 
 
 async def _unused() -> None:  # pragma: no cover - the callable half is unused here

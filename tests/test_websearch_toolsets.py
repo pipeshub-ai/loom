@@ -674,6 +674,29 @@ class TestDuckDuckGoPaging:
         assert len(found) == DDG_MAX_PAGES * DDG_PAGE_SIZE
         assert found.complete is False
 
+    async def test_a_row_with_no_url_or_title_is_kept(self, ddgs) -> None:
+        """Deduplication must not become silent data loss.
+
+        Keying on ``url or title`` and skipping a falsy key dropped any row
+        with neither — quietly, inside a read whose entire purpose is to report
+        its own coverage honestly. A row that cannot be deduplicated against
+        anything is keyed by where it appeared instead.
+        """
+        ddgs([[{"title": "", "href": "", "body": "orphaned snippet"}, *rows(2)]])
+
+        found = await DuckDuckGoClient().search("q", max_results=10)
+
+        assert len(found) == 3
+        assert any(r.snippet == "orphaned snippet" for r in found)
+
+    async def test_two_untitled_rows_are_both_kept(self, ddgs) -> None:
+        """Positional keys must not collide with each other either."""
+        ddgs([[{"body": "first"}, {"body": "second"}]])
+
+        found = await DuckDuckGoClient().search("q", max_results=10)
+
+        assert [r.snippet for r in found] == ["first", "second"]
+
     async def test_zero_results_is_complete_and_empty(self, ddgs) -> None:
         ddgs([[]])
 
@@ -738,21 +761,37 @@ class TestDuckDuckGoMapsItsRows:
 
 
 class TestABlockIsAnErrorNotAnEmptyList:
-    """The failure that makes a scraped source dangerous rather than flaky."""
+    """The failure that makes a scraped source dangerous rather than flaky.
+
+    The stand-in exceptions below are declared here rather than imported from
+    ``ddgs``, and that is the point rather than a convenience. ``_classify``
+    matches on class *name* across the MRO precisely so this toolset imports
+    without its optional extra installed — importing the real ones to test it
+    would exercise the opposite, and would fail in any environment that has
+    ``loomflow[dev]`` but not ``loomflow[duckduckgo]``. Which is what CI
+    installs, and how this was found.
+    """
+
+    class DDGSException(Exception):  # noqa: N818 - mirrors the upstream name
+        """Stands in for ``ddgs.exceptions.DDGSException``."""
+
+    class RatelimitException(DDGSException):
+        """Stands in for ``ddgs.exceptions.RatelimitException``."""
+
+    class TimeoutException(DDGSException):
+        """Stands in for ``ddgs.exceptions.TimeoutException``."""
 
     async def test_a_rate_limit_raises(self, ddgs) -> None:
-        from ddgs.exceptions import RatelimitException
 
-        ddgs([RatelimitException("blocked")])
+        ddgs([self.RatelimitException("blocked")])
 
         with pytest.raises(DuckDuckGoRateLimited):
             await DuckDuckGoClient().search("q", max_results=5)
 
     async def test_a_rate_limit_stays_retryable(self, ddgs) -> None:
         """Backing off is usually all it takes, so the retry must survive."""
-        from ddgs.exceptions import RatelimitException
 
-        ddgs([RatelimitException("blocked")])
+        ddgs([self.RatelimitException("blocked")])
 
         with pytest.raises(DuckDuckGoRateLimited) as caught:
             await DuckDuckGoClient().search("q", max_results=5)
@@ -760,17 +799,15 @@ class TestABlockIsAnErrorNotAnEmptyList:
         assert not isinstance(caught.value, NonRetryableError)
 
     async def test_the_message_names_the_supported_alternatives(self, ddgs) -> None:
-        from ddgs.exceptions import RatelimitException
 
-        ddgs([RatelimitException("blocked")])
+        ddgs([self.RatelimitException("blocked")])
 
         with pytest.raises(DuckDuckGoRateLimited, match="exa or tavily"):
             await DuckDuckGoClient().search("q", max_results=5)
 
     async def test_a_timeout_is_retryable(self, ddgs) -> None:
-        from ddgs.exceptions import TimeoutException
 
-        ddgs([TimeoutException("slow")])
+        ddgs([self.TimeoutException("slow")])
 
         with pytest.raises(DuckDuckGoError) as caught:
             await DuckDuckGoClient().search("q", max_results=5)
@@ -778,9 +815,8 @@ class TestABlockIsAnErrorNotAnEmptyList:
         assert not isinstance(caught.value, NonRetryableError)
 
     async def test_any_other_ddgs_failure_is_permanent(self, ddgs) -> None:
-        from ddgs.exceptions import DDGSException
 
-        ddgs([DDGSException("no such backend")])
+        ddgs([self.DDGSException("no such backend")])
 
         with pytest.raises(DuckDuckGoPermanentError):
             await DuckDuckGoClient().search("q", max_results=5)
@@ -790,9 +826,8 @@ class TestABlockIsAnErrorNotAnEmptyList:
     ) -> None:
         """The subtle version. One good page then a block could plausibly be
         reported as a short-but-complete result; it must not be."""
-        from ddgs.exceptions import RatelimitException
 
-        ddgs([rows(DDG_PAGE_SIZE), RatelimitException("blocked")])
+        ddgs([rows(DDG_PAGE_SIZE), self.RatelimitException("blocked")])
 
         with pytest.raises(DuckDuckGoRateLimited):
             await DuckDuckGoClient().search("q", max_results=40)

@@ -439,6 +439,11 @@ class TestRuntimeFromEnvCanRunAgentNodes:
     def test_a_provider_key_configures_a_backend(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # A key alone is not enough: `_backend_from_env` returns None when the
+        # vendor SDK is absent, which is correct — "a Runtime without an agent
+        # backend is a valid Runtime" — so this asserts the wiring, not the
+        # install, and needs the extra present to say anything.
+        pytest.importorskip("anthropic", reason="needs the anthropic extra")
         from loom import Runtime
 
         for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):

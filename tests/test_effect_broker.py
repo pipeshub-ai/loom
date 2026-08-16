@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from loom import Context, Runtime, step, workflow
+from loom import Context, Retry, Runtime, step, workflow
 from loom.runtime.effects import (
     DirectBroker,
     EffectBroker,
@@ -511,6 +511,7 @@ def test_a_call_describes_itself_without_its_closure() -> None:
         "effect": "read",
         "run_id": "run_1",
         "path": "3",
+        "name": None,
     }
     assert call.toolset == "jira"
     assert call.operation == "issues.search"
@@ -599,3 +600,251 @@ async def test_an_agent_is_refused_a_sibling_operation_mid_turn() -> None:
     assert "jira.create" in transcript
     assert "not granted" in transcript
     assert "created x" not in transcript
+
+
+class TestADenialReplaysAsADenial:
+    """A refusal must come back as a refusal, not as a generic step failure.
+
+    ``_resolve`` journals a denial as FAILED so that "a replay sees what the
+    run saw" — but it rebuilt the failure from ``recorded.error.message``
+    alone, so the *type* was lost and ``EffectDenied`` came back as
+    ``StepError``. A workflow that tells "policy refused this" from "this
+    broke" therefore took a different branch on replay, which is precisely the
+    divergence journaling the denial was meant to prevent.
+
+    Narrow on purpose: the engine reproduces the exception types *it* produces,
+    because it knows how to rebuild them. A failure raised by user code stays a
+    ``StepError`` carrying its message, because reconstructing an arbitrary
+    exception means guessing at a constructor.
+    """
+
+    @staticmethod
+    def _refusing_runtime(store):
+        from loom.runtime.effects import DirectBroker, EffectResult
+
+        class Refuses(DirectBroker):
+            async def dispatch(self, call, authority):
+                if call.target == "danger":
+                    return EffectResult(
+                        ok=False,
+                        error="refused by policy",
+                        needs="billing.charge:write",
+                    )
+                return await super().dispatch(call, authority)
+
+        return Runtime(store=store, broker=Refuses())
+
+    async def test_the_type_survives_a_replay(self) -> None:
+        from loom.runtime.effects import EffectDenied
+
+        @step
+        async def danger(n: int) -> int:
+            return n * 100
+
+        @workflow(name="typed_denial")
+        async def typed_denial(ctx: Context, n: int) -> str:
+            try:
+                await ctx.step(danger, n)
+                return "ran"
+            except EffectDenied:
+                return "policy"
+            except Exception as exc:
+                return f"broke ({type(exc).__name__})"
+
+        store = MemoryStore()
+        strict = self._refusing_runtime(store)
+        strict.register(typed_denial)
+        first = await strict.run(typed_denial, 1)
+
+        # Replayed by a Runtime with no policy at all: the recorded denial is
+        # the truth, not the middleware that is installed now.
+        plain = Runtime(store=store)
+        plain.register(typed_denial)
+        replayed = await plain.replay(first.run_id)
+
+        assert first.output == "policy"
+        assert replayed.output == "policy", "a denial replayed as a plain failure"
+
+    async def test_the_reconstructed_denial_still_names_the_fix(self) -> None:
+        """``needs`` is the actionable half — "add this grant and it works".
+        A replayed denial without it is a worse object than the original."""
+        from loom.runtime.effects import EffectDenied
+
+        seen: list[str] = []
+
+        @step
+        async def danger(n: int) -> int:
+            return n
+
+        @workflow(name="needs_denial")
+        async def needs_denial(ctx: Context, n: int) -> str:
+            try:
+                await ctx.step(danger, n)
+            except EffectDenied as denied:
+                seen.append(denied.needs)
+            return "done"
+
+        store = MemoryStore()
+        strict = self._refusing_runtime(store)
+        strict.register(needs_denial)
+        first = await strict.run(needs_denial, 1)
+
+        plain = Runtime(store=store)
+        plain.register(needs_denial)
+        await plain.replay(first.run_id)
+
+        assert seen == ["billing.charge:write", "billing.charge:write"]
+
+    async def test_retries_exhausted_replays_as_retries_exhausted(self) -> None:
+        """The second row in the same table.
+
+        A step that spent its retry budget raises ``RetriesExhausted``, and a
+        replay rebuilt it as a plain ``StepError`` — so a workflow branching on
+        "this was transient and we gave up" took a different path the second
+        time.
+
+        Safe to widen an existing replay this way because ``RetriesExhausted``
+        **is** a ``StepError``: anything already catching the base class keeps
+        catching it, unlike ``EffectDenied``, which is not.
+        """
+        from loom.core.exceptions import RetriesExhausted
+
+        @step(retry=Retry(max_attempts=3, initial_delay=0.01))
+        async def flaky(n: int) -> int:
+            raise ConnectionError("upstream is down")
+
+        @workflow(name="exhausting")
+        async def exhausting(ctx: Context, n: int) -> str:
+            try:
+                await ctx.step(flaky, n)
+                return "ok"
+            except RetriesExhausted as exc:
+                return f"gave up after {exc.attempts}"
+            except Exception as exc:
+                return f"other ({type(exc).__name__})"
+
+        store = MemoryStore()
+        rt = Runtime(store=store)
+        rt.register(exhausting)
+        first = await rt.run(exhausting, 1)
+        replayed = await rt.replay(first.run_id)
+
+        assert first.output == "gave up after 3"
+        assert replayed.output == "gave up after 3"
+
+    async def test_the_replayed_message_matches_the_original(self) -> None:
+        """The reconstruction rebuilds the wrapper's message too.
+
+        The journal records the *original* error — ``ConnectionError`` and its
+        text — because that is the useful thing to keep. So the
+        ``RetriesExhausted`` wrapper around it has to be rebuilt rather than
+        read, and a mismatch here would surface as two different log lines for
+        one failure.
+        """
+        from loom.core.exceptions import RetriesExhausted
+
+        seen: list[str] = []
+
+        @step(retry=Retry(max_attempts=2, initial_delay=0.01))
+        async def flaky(n: int) -> int:
+            raise ConnectionError("upstream is down")
+
+        @workflow(name="message_match")
+        async def message_match(ctx: Context, n: int) -> str:
+            try:
+                await ctx.step(flaky, n)
+            except RetriesExhausted as exc:
+                seen.append(str(exc))
+            return "done"
+
+        store = MemoryStore()
+        rt = Runtime(store=store)
+        rt.register(message_match)
+        first = await rt.run(message_match, 1)
+        await rt.replay(first.run_id)
+
+        assert len(seen) == 2
+        assert seen[0] == seen[1], "the replayed failure read differently"
+        assert "failed after 2 attempts" in seen[0]
+
+    async def test_a_step_that_never_retried_is_not_reported_as_exhausted(
+        self,
+    ) -> None:
+        """The condition is ``attempts > 1``, matching the engine's own rule.
+
+        With retries off, the run raises the step's *original* exception rather
+        than ``RetriesExhausted`` — so claiming a retry budget was spent would
+        invent an attempt that never happened.
+        """
+        from loom.core.exceptions import RetriesExhausted
+
+        @step(retry=Retry(max_attempts=1))
+        async def once(n: int) -> int:
+            raise ConnectionError("down")
+
+        @workflow(name="single_attempt")
+        async def single_attempt(ctx: Context, n: int) -> str:
+            try:
+                await ctx.step(once, n)
+                return "ok"
+            except RetriesExhausted:
+                return "exhausted"
+            except Exception as exc:
+                return type(exc).__name__
+
+        store = MemoryStore()
+        rt = Runtime(store=store)
+        rt.register(single_attempt)
+        first = await rt.run(single_attempt, 1)
+        replayed = await rt.replay(first.run_id)
+
+        assert first.output == "ConnectionError"
+        assert replayed.output == "StepError", (
+            "a single attempt must not be dressed up as an exhausted retry"
+        )
+
+    async def test_a_user_exception_still_widens_to_a_step_error_on_replay(
+        self,
+    ) -> None:
+        """The gap this fix does **not** close, asserted so it stays visible.
+
+        A ``ValueError`` raised inside a step reaches the workflow as itself on
+        the first run and as a ``StepError`` on replay, so a workflow catching
+        its own domain exception still branches differently the second time.
+        The journal even records ``type: "ValueError"`` — what is missing is not
+        the information but a safe way to use it, since rebuilding an arbitrary
+        exception means guessing at a constructor and the class may not be
+        importable in the process doing the replay.
+
+        Closing it properly is a different piece of work (a declared, opt-in
+        replayable-error contract), and pretending to close it by calling
+        ``cls(message)`` would fail on any exception whose ``__init__`` takes
+        more than a string — silently, and only for the workflows unlucky
+        enough to have one.
+        """
+
+        @step
+        async def broken(n: int) -> int:
+            raise ValueError("genuinely broken")
+
+        @workflow(name="ordinary")
+        async def ordinary(ctx: Context, n: int) -> str:
+            try:
+                await ctx.step(broken, n)
+                return "ran"
+            except Exception as exc:
+                return type(exc).__name__
+
+        store = MemoryStore()
+        rt = Runtime(store=store)
+        rt.register(ordinary)
+        first = await rt.run(ordinary, 1)
+        replayed = await rt.replay(first.run_id)
+
+        assert first.output == "ValueError"
+        assert replayed.output == "StepError"
+
+        # The type is recorded; only the reconstruction is missing.
+        entries = await store.load_journal(first.run_id)
+        assert entries[0].error is not None
+        assert entries[0].error.type == "ValueError"

@@ -214,6 +214,80 @@ class OnEvent(TriggerSpec):
 
 
 @dataclass(frozen=True, slots=True)
+class OnAppEvent(TriggerSpec):
+    """Start this workflow when an event lands on a topic.
+
+    The pub/sub entry point: many workflows may subscribe to one topic, each
+    with its own filter and its own position, and none can hold up another.
+
+        @workflow(triggers=[
+            OnAppEvent("app.slack.message",
+                       where=FilterSpec(conditions={"channel": "C024BE91L"})),
+        ])
+
+    Distinct from :class:`OnEvent`, which consumes a *broker* topic through a
+    ``QueueBackend``. This one reads LOOM's own event log, so it resumes from a
+    checkpoint and a second subscriber can be added without disturbing the
+    first.
+
+    **Filter on ids, not names.** Slack's payload carries
+    ``"channel": "C024BE91L"``; a filter written as ``channel="tech"`` matches
+    nothing, forever, with no error — the same failure ``resolves=`` exists to
+    prevent in the toolsets, one layer up.
+    """
+
+    topic: str
+    where: Any | None = None
+    """A :class:`~loom.triggers.filter.FilterSpec`, evaluated against the event
+    payload before a run is created."""
+    subscription: str = ""
+    """Identity for the checkpoint. Defaults to the workflow name.
+
+    A workflow declaring **more than one** ``OnAppEvent`` must name each, or
+    they share a checkpoint and silently consume each other's backlog.
+    Deliberately *not* derived from the filter: an identity that changes when a
+    filter is edited re-fires every historical event."""
+    start_at: str = "latest"
+    """``"latest"`` only, in a declaration. Backfilling a retained log into a
+    workflow with side effects performs all of them at once, and the dispatch
+    key cannot help — a new subscriber has legitimately seen none of them. That
+    makes it an operational act with bounds, not a line in a workflow file."""
+    max_attempts: int = 3
+    kind: TriggerKind = field(default=TriggerKind.EVENT, init=False)
+
+    @property
+    def name(self) -> str:
+        return f"app_event:{self.topic}"
+
+    def subscription_for(self, workflow: str) -> Any:
+        """The :class:`~loom.events.subscription.Subscription` this declares."""
+        from loom.events.subscription import StartAt, Subscription
+
+        built = Subscription(
+            subscriber=self.subscription or workflow,
+            topic=self.topic,
+            workflow=workflow,
+            filter=self.where,
+            start_at=StartAt(self.start_at),
+            max_attempts=self.max_attempts,
+        )
+        built.validate_declarable()
+        return built
+
+    def describe(self) -> JSONDict:
+        return {
+            "kind": self.kind.value,
+            "name": self.name,
+            "topic": self.topic,
+            "subscription": self.subscription,
+            "start_at": self.start_at,
+            "filter": (
+                self.where.conditions if self.where is not None else None
+            ),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class Manual(TriggerSpec):
     """Invocable from the CLI, a test, or the dev UI. Implied when no trigger is declared."""
 

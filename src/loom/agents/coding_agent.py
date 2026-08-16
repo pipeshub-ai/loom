@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import textwrap
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -1059,13 +1060,58 @@ def _summarise_smoke(result: SmokeResult) -> str:
     return f"{'ok' if result.ok else 'failed'} at {result.phase}"
 
 
+#: One fenced block, wherever it sits in the response. Non-greedy, so several
+#: blocks in one answer stay separate rather than merging into one.
+_FENCE = re.compile(r"```[ \t]*([\w+.-]*)[ \t]*\r?\n(.*?)```", re.DOTALL)
+
+#: An opening fence with nothing closing it — what a response truncated at the
+#: token limit looks like.
+_OPEN_FENCE = re.compile(r"```[ \t]*([\w+.-]*)[ \t]*\r?\n")
+
+_PYTHON_TAGS = frozenset({"", "python", "py", "python3"})
+
+
 def _extract_code(text: str) -> str:
-    """Strip markdown code fences if the model wrapped the output."""
+    """The Python out of a model response, fenced or not.
+
+    Tolerant about *where* the fence is, and that is the whole point. An earlier
+    version stripped fences only when the response **began** with one, so a
+    single sentence of preamble — which every model writes sometimes, and which
+    no prompt reliably suppresses — was handed to ``compile()`` as if it were
+    Python.
+
+    The symptom was memorable and pointed at the wrong thing: ``invalid
+    character '—' (U+2014) ... line 1``. Prose contains em-dashes; Python may
+    not, outside a string. So a working model, working tools and working code
+    presented as a syntax error in the generated workflow, and the repair loop
+    could not converge on it because the code was never what was broken.
+
+    Trailing prose was the same bug from the other end: the closing fence was
+    only dropped when it was the very last line, so "This uses JQL — …" after
+    the block was compiled too.
+    """
     text = text.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        inner = lines[1:] if lines[0].startswith("```") else lines
-        if inner and inner[-1].strip() == "```":
-            inner = inner[:-1]
-        return "\n".join(inner).strip()
+
+    blocks: list[tuple[str, str]] = [
+        (str(tag).lower(), str(body))
+        for tag, body in _FENCE.findall(text)
+        if str(body).strip()
+    ]
+    if blocks:
+        python = [body for tag, body in blocks if tag in _PYTHON_TAGS]
+        # Prefer a block the model *labelled* python. Among several, the longest
+        # — a response that shows a snippet before the real workflow puts the
+        # workflow last and makes it much the larger. Guessing wrong here yields
+        # code that compiles and is wrong, which is worse than a syntax error,
+        # so the rule stays blunt and explicable rather than clever.
+        candidates: list[str] = python or [body for _, body in blocks]
+        return max(candidates, key=len).strip()
+
+    opening = _OPEN_FENCE.search(text)
+    if opening is not None:
+        # An unclosed fence: the response was cut off at the token limit. What
+        # follows is still the best available code, and returning it lets the
+        # repair loop see a truncated function rather than a stray ``` line.
+        return text[opening.end() :].strip()
+
     return text

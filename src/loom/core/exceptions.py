@@ -228,6 +228,23 @@ class MaxTurnsExceeded(AgentError):  # noqa: N818
     """The agent loop hit its turn budget without producing a final output."""
 
 
+class AgentStopped(AgentError):  # noqa: N818 - names a state, not a fault
+    """A hook ended the turn loop before the agent produced a final output.
+
+    Raised rather than returned, deliberately. The loop's only other early exit
+    — the turn budget — raises, and a partial result handed back quietly would
+    make "a stall detector gave up on this" indistinguishable from "the agent
+    finished", which is the same failure as a blocked search returning an empty
+    list. A caller wanting a soft landing catches it.
+    """
+
+    def __init__(self, message: str, *, turn: int = 0, reason: str = "") -> None:
+        super().__init__(message)
+        self.turn = turn
+        self.reason = reason
+        """Whatever the hook passed to ``ctx.stop(...)``."""
+
+
 class ModelBehaviorError(AgentError):
     """The model returned something structurally invalid (bad tool name, bad JSON)."""
 

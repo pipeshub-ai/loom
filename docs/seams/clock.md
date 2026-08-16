@@ -20,6 +20,7 @@ Wait for *seconds*, however this clock understands waiting.
 
 ## Implementations
 
+- `events.watch._SystemClock`
 - `runtime.clock.SystemClock`
 - `runtime.clock.ManualClock`
 
@@ -28,6 +29,7 @@ Wait for *seconds*, however this clock understands waiting.
 - `connectors.credentials`
 - `connectors.oauth_client`
 - `connectors.refresh`
+- `events.watch`
 - `runtime.engine`
 - `toolsets.connections`
 

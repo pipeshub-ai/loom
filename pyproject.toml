@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "loomflow"
-version = "0.11.0"
+version = "0.1.0"
 description = "Library-first durable execution SDK for AI-powered workflows"
 readme = "README.md"
 license = {text = "MIT"}
@@ -102,6 +102,13 @@ mcp = ["mcp>=1.2"]
 # Terminal UI (`loom ui`)
 tui = ["loomflow[cli]", "textual>=0.80"]
 
+# Conformance kits — `loom.testing.conformance`, for proving a third-party
+# EventLog/Checkpoints adapter correct. The kits ship in the main wheel so they
+# assert *this* version's contract; a separately versioned package could be
+# installed against a different LOOM and would then silently pass an adapter
+# that is wrong. Only the test runner is optional.
+testing = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+
 # Development
 dev = [
     "pytest>=8.0",
@@ -126,7 +133,7 @@ dev = [
 
 # Install everything
 all = [
-    "loomflow[mongo,postgres,s3,azure,gcs,google,identity,credentials,anthropic,openai,gemini,langchain,duckduckgo,api,cli,tui,mcp]"
+    "loomflow[mongo,postgres,s3,azure,gcs,google,identity,credentials,anthropic,openai,gemini,langchain,duckduckgo,api,cli,tui,mcp,testing]"
 ]
 
 [project.urls]

@@ -57,15 +57,27 @@ __all__ = ["SubprocessSandbox"]
 #: permanently cap the host process that asked.
 _MEMORY_LIMIT_SUPPORTED = hasattr(resource, "RLIMIT_AS") and sys.platform != "darwin"
 
+#: `create_subprocess_exec` defaults `StreamReader`'s buffer to 64 KiB, so a
+#: single tool result over that raises `LimitOverrunError` mid-conversation —
+#: routine for a connector fetching a page of real data. 16 MiB comfortably
+#: covers everything the wire protocol carries a line at a time.
+_STREAM_LIMIT = 16 * 1024 * 1024
+
 #: Runs inside the child. A string rather than a module so the child imports
 #: nothing of Loom's — it needs no store, no credentials, and no engine, and
 #: giving it any of those would put trusted code on the untrusted side.
 _CHILD = textwrap.dedent('''\
     import asyncio, json, sys
 
+    # The real stdout, captured before user source can touch `sys.stdout`. A
+    # body that calls `print()` (routine in model-generated code) would
+    # otherwise write straight into the JSON protocol channel and corrupt
+    # every message after it.
+    _wire_out = sys.stdout
+
     def _emit(message):
-        sys.stdout.write(json.dumps(message) + "\\n")
-        sys.stdout.flush()
+        _wire_out.write(json.dumps(message) + "\\n")
+        _wire_out.flush()
 
     def _await_reply():
         line = sys.stdin.readline()
@@ -96,15 +108,18 @@ _CHILD = textwrap.dedent('''\
                 target, "__name__", None
             ) or str(target)
 
-        async def _call(self, kind, target, arguments, effect):
-            _emit({"t": "call", "kind": kind, "target": self._named(target),
-                   "arguments": arguments, "effect": effect})
+        async def _call(self, kind, target, arguments, effect, *, name=None):
+            message = {"t": "call", "kind": kind, "target": self._named(target),
+                       "arguments": arguments, "effect": effect}
+            if name is not None:
+                message["name"] = name
+            _emit(message)
             reply = _await_reply()
             if not reply.get("ok", False):
                 raise RuntimeError(reply.get("error") or "refused")
             return reply.get("value")
 
-        async def step(self, name, *positional, **arguments):
+        async def step(self, target, *positional, name=None, **arguments):
             if positional:
                 # The wire carries a named mapping, and guessing parameter
                 # names here would bind arguments to the wrong ones silently.
@@ -112,7 +127,7 @@ _CHILD = textwrap.dedent('''\
                     "a sandboxed body must pass step arguments by keyword; "
                     "got %d positional" % len(positional)
                 )
-            return await self._call("step", name, arguments, "write")
+            return await self._call("step", target, arguments, "write", name=name)
 
         async def tool(self, target, **arguments):
             return await self._call("tool", target, arguments, "write")
@@ -154,15 +169,60 @@ _CHILD = textwrap.dedent('''\
                 "event", "approval:" + str(subject), arguments, "read"
             )
 
+        async def sleep(self, seconds, *, name="sleep"):
+            """Durably pause. Dies with this process like any other suspend:
+            the parent's `Suspend` propagates out, the child exits, and
+            re-entry resumes from the journaled wake time."""
+            return await self._call(
+                "sleep", "sleep", {"seconds": seconds, "name": name}, "write"
+            )
+
+        async def report(self, message, **arguments):
+            """Not durable — mirrors `Context.report`, which is not journaled
+            either. Reaches the parent's run stream and nothing else."""
+            return await self._call("report", message, arguments, "read")
+
+    def _find_entrypoint(namespace, name):
+        """The workflow to run: by name, else the sole workflow-like object.
+
+        A host that renamed the definition (PipesHub compiles every version
+        under a synthetic name so its `code_hash` is unique) binds it in the
+        exec'd namespace under the *original* function name, not the one the
+        engine sent as ``entrypoint`` — so the direct lookup misses. Falling
+        back to "the only thing here that looks like a workflow" is safe
+        specifically because the host's own compiler already enforces exactly
+        one `@workflow` per source; if that ever stops being true, refusing
+        rather than guessing which of several to run is the correct failure.
+        """
+        entry = namespace.get(name)
+        if entry is not None:
+            return entry
+        candidates = [
+            value
+            for value in namespace.values()
+            # `hasattr(value, "triggers")` is what tells a WorkflowDefinition
+            # from a StepDefinition: both wrap a callable under `.fn`, but
+            # only a workflow carries trigger specs. Without this a module
+            # exporting local `@step` helpers alongside its one `@workflow`
+            # (the ordinary shape) would see more than one "candidate" and
+            # refuse to fall back at all.
+            if callable(value) and hasattr(value, "fn") and hasattr(value, "triggers")
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+        raise RuntimeError(
+            "no %r in the sandboxed source, and %d workflow-like candidates "
+            "were found (need exactly 1 to fall back)" % (name, len(candidates))
+        )
+
     async def _main():
         request = json.loads(sys.stdin.readline())
-        namespace = {}
+        namespace = dict(request.get("namespace") or {})
+        # User source runs with stdout redirected to stderr: only `_emit`
+        # (bound to the real stdout above) may write to the wire.
+        sys.stdout = sys.stderr
         exec(compile(request["source"], "<sandboxed>", "exec"), namespace)
-        entry = namespace.get(request["entrypoint"])
-        if entry is None:
-            raise RuntimeError(
-                "no %r in the sandboxed source" % request["entrypoint"]
-            )
+        entry = _find_entrypoint(namespace, request["entrypoint"])
         result = entry(Ctx(request["run_id"]), request["input"])
         if hasattr(result, "__await__"):
             result = await result
@@ -256,11 +316,14 @@ class SubprocessSandbox:
             stderr=asyncio.subprocess.PIPE,
             env=self._environment(active),
             preexec_fn=self._limits(active) if os.name == "posix" else None,
+            limit=_STREAM_LIMIT,
         )
 
         try:
             return await asyncio.wait_for(
-                self._converse(process, source, entrypoint, run_id, input, channel),
+                self._converse(
+                    process, source, entrypoint, run_id, input, channel, body.namespace
+                ),
                 timeout=active.max_wall_seconds,
             )
         except TimeoutError:
@@ -289,12 +352,14 @@ class SubprocessSandbox:
         run_id: str,
         input: Any,
         channel: ContextChannel,
+        namespace: dict[str, Any] | None = None,
     ) -> SandboxOutcome:
         process.stdin.write(
             (
                 json.dumps(
                     {"source": source, "entrypoint": entrypoint,
-                     "run_id": run_id, "input": input}
+                     "run_id": run_id, "input": input,
+                     "namespace": namespace or {}}
                 )
                 + "\n"
             ).encode()
@@ -339,6 +404,7 @@ class SubprocessSandbox:
                     arguments=message.get("arguments") or {},
                     effect=EffectClass(message.get("effect", "write")),
                     run_id=run_id,
+                    name=message.get("name"),
                 )
             )
             process.stdin.write(

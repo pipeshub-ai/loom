@@ -143,6 +143,12 @@ class RegistryCollector:
 
 
 class ASTExtractor(ast.NodeVisitor):
+    #: ``visit_*`` methods below keep their CamelCase suffixes because that is
+    #: the name ``ast.NodeVisitor`` dispatches on — renaming one silently stops
+    #: it being called. Suppressed per line, with the reason here rather than
+    #: repeated: stating it inline pushed every signature past the line limit,
+    #: and shortening those lines is how the suppressions were lost once already.
+
     """Extract control flow and ``ctx.*`` calls from workflow body source.
 
     Extraction is scoped to workflow bodies. Walking a whole module instead
@@ -164,7 +170,7 @@ class ASTExtractor(ast.NodeVisitor):
 
     # -- scoping -------------------------------------------------------------
 
-    def visit_Module(self, node: ast.Module) -> None:  # noqa: N802 - the name ast.NodeVisitor dispatches on
+    def visit_Module(self, node: ast.Module) -> None:  # noqa: N802
         """Descend only into the module's workflow functions."""
         for fn in _flow_functions(node):
             # Each flow starts its own control chain rather than continuing the
@@ -175,10 +181,10 @@ class ASTExtractor(ast.NodeVisitor):
                 self.visit(stmt)
             self._depth = 0
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802 - the name ast.NodeVisitor dispatches on
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
         self._visit_nested_def(node)
 
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: N802 - the name ast.NodeVisitor dispatches on
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: N802
         self._visit_nested_def(node)
 
     def _visit_nested_def(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
@@ -215,34 +221,34 @@ class ASTExtractor(ast.NodeVisitor):
         self._last_node_id = node.id
         return node.id
 
-    def visit_If(self, node: ast.If) -> None:  # noqa: N802 - the name ast.NodeVisitor dispatches on
+    def visit_If(self, node: ast.If) -> None:  # noqa: N802
         nid = self._alloc_id("switch")
         self._add_node(
             WGIRNode(id=nid, kind=NodeKind.SWITCH, label="if"), node
         )
         self.generic_visit(node)
 
-    def visit_For(self, node: ast.For) -> None:  # noqa: N802 - the name ast.NodeVisitor dispatches on
+    def visit_For(self, node: ast.For) -> None:  # noqa: N802
         nid = self._alloc_id("loop")
         self._add_node(
             WGIRNode(id=nid, kind=NodeKind.LOOP, label="for"), node
         )
         self.generic_visit(node)
 
-    def visit_While(self, node: ast.While) -> None:  # noqa: N802 - the name ast.NodeVisitor dispatches on
+    def visit_While(self, node: ast.While) -> None:  # noqa: N802
         nid = self._alloc_id("loop")
         self._add_node(
             WGIRNode(id=nid, kind=NodeKind.LOOP, label="while"), node
         )
         self.generic_visit(node)
 
-    def visit_Return(self, node: ast.Return) -> None:  # noqa: N802 - the name ast.NodeVisitor dispatches on
+    def visit_Return(self, node: ast.Return) -> None:  # noqa: N802
         nid = self._alloc_id("return")
         self._add_node(
             WGIRNode(id=nid, kind=NodeKind.RETURN, label="return"), node
         )
 
-    def visit_Assign(self, node: ast.Assign) -> None:  # noqa: N802 - the name ast.NodeVisitor dispatches on
+    def visit_Assign(self, node: ast.Assign) -> None:  # noqa: N802
         # Track which variable is assigned by which node
         self.generic_visit(node)
         # After visiting the value side, the last_node_id is the producer
@@ -251,7 +257,7 @@ class ASTExtractor(ast.NodeVisitor):
                 if isinstance(target, ast.Name):
                     self._var_defs[target.id] = self._last_node_id
 
-    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802 - the name ast.NodeVisitor dispatches on
+    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
         call_name = self._resolve_call_name(node)
         if call_name and call_name.startswith("ctx."):
             method = call_name.split(".", 1)[1]

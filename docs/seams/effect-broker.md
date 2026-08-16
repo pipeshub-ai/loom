@@ -18,11 +18,13 @@ Carry out *call* under *authority*, or refuse it.
 
 - `runtime.effects.DirectBroker`
 - `runtime.effects.GuardedBroker`
+- `runtime.hooks.HookBroker`
 - `runtime.taint.TaintBroker`
 
 ## Consumers
 
 - `runtime.engine`
+- `runtime.hooks`
 - `runtime.taint`
 
 <!-- END GENERATED -->

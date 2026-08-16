@@ -110,6 +110,17 @@ class SandboxBody:
     entrypoint: str = ""
     """The name to call within :attr:`source`."""
 
+    namespace: dict[str, Any] = field(default_factory=dict)
+    """Extra bindings seeded into the child's exec namespace before its source
+    runs, alongside whatever the source itself defines. Values must be plain,
+    wire-safe data (typically strings) — this crosses to a subprocess as JSON,
+    not a Python object, so it cannot carry a callable or closure across the
+    boundary. Its purpose is a *sentinel*: a host whose generated code
+    references a step by bare name (because the import that would otherwise
+    bind it has been stripped for sandboxing) pre-binds that name to itself,
+    so ``Ctx._named(sentinel)`` recovers the same name the parent's
+    ``sandbox_steps`` map already keys on."""
+
 
 @dataclass
 class SandboxOutcome:
@@ -277,7 +288,9 @@ class RuntimeChannel:
                         f"sandbox. Available: {', '.join(sorted(self.steps)) or 'none'}"
                     ),
                 )
-            return EffectResult(value=await self.ctx.step(target, **call.arguments))
+            return EffectResult(
+                value=await self.ctx.step(target, name=call.name, **call.arguments)
+            )
 
         if call.kind == "agent":
             return EffectResult(
@@ -303,6 +316,23 @@ class RuntimeChannel:
                 )
             return EffectResult(
                 value=await self.ctx.wait_for_event(call.target, **call.arguments)
+            )
+
+        if call.kind == "sleep":
+            # Also parks: the Suspend raised by `ctx.sleep` propagates out
+            # exactly like an event wait, and for the same reason — the child
+            # holds no durable state, so re-entry replays the wake from the
+            # journal rather than resuming a suspended child process.
+            arguments = dict(call.arguments)
+            seconds = arguments.pop("seconds", None)
+            return EffectResult(value=await self.ctx.sleep(seconds, **arguments))
+
+        if call.kind == "report":
+            # Not journaled, same as an inline `ctx.report` — this reaches the
+            # run's stream and nothing else, so there is nothing here to make
+            # replay-safe.
+            return EffectResult(
+                value=await self.ctx.report(call.target, **call.arguments)
             )
 
         return EffectResult(

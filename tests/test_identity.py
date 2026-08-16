@@ -8,6 +8,8 @@ isolation — scope matching on ``Principal``, and the narrowing invariant
 
 from __future__ import annotations
 
+from importlib.util import find_spec
+
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
@@ -18,6 +20,9 @@ from loom.identity.scopes import Scope, scopes_to_grant
 from loom.security.grants import GrantSet
 
 
+@pytest.mark.skipif(
+    find_spec("mcp") is None, reason="needs the mcp extra"
+)
 class TestFromAccessToken:
     """What a `Principal` is derived from, including tokens we did not shape.
 

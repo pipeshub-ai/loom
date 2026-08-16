@@ -354,7 +354,7 @@ class _GrantVisitor(ast.NodeVisitor):
     def __init__(self) -> None:
         self.grants = GrantSet()
 
-    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802 - the name ast.NodeVisitor dispatches on
+    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
         # Detect ctx.agent(..., agent_name) or ctx.child(workflow_name, ...)
         if isinstance(node.func, ast.Attribute):
             attr = node.func.attr
@@ -368,14 +368,14 @@ class _GrantVisitor(ast.NodeVisitor):
                     self.grants.subflows.append(name)
         self.generic_visit(node)
 
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802 - the name ast.NodeVisitor dispatches on
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
         # Detect toolset imports like: from loom_toolset_jira import ...
         if node.module and node.module.startswith("loom_toolset_"):
             toolset_id = node.module.replace("loom_toolset_", "", 1)
             self.grants.toolsets.append(toolset_id)
         self.generic_visit(node)
 
-    def visit_Import(self, node: ast.Import) -> None:  # noqa: N802 - the name ast.NodeVisitor dispatches on
+    def visit_Import(self, node: ast.Import) -> None:  # noqa: N802
         for alias in node.names:
             if alias.name.startswith("loom_toolset_"):
                 toolset_id = alias.name.replace("loom_toolset_", "", 1)

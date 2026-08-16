@@ -23,7 +23,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import RedirectResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field, field_validator
 
 from loom.core.exceptions import (
@@ -34,6 +34,8 @@ from loom.core.exceptions import (
     RegistryError,
 )
 from loom.core.models import ExecutionStatus
+from loom.events.ingress import WebhookIngress
+from loom.events.sources import MalformedDelivery, VerificationFailed
 from loom.facade import LocalFacade, RuntimeFacade
 from loom.identity.principal import Principal
 from loom.security.rbac import AuthorizationError
@@ -42,6 +44,7 @@ from loom.server.auth import (
     build_principal_dependency,
     mount_protected_resource_metadata,
 )
+from loom.triggers.specs import Webhook
 
 if TYPE_CHECKING:
     from loom.identity.config import IdentitySettings
@@ -579,4 +582,168 @@ def create_app(
         except Exception as exc:
             raise _fail(exc) from exc
 
+    # -- ingress ------------------------------------------------------------
+    #
+    # Two routes, because two contracts exist and neither can be dropped.
+    # `/webhook{path}` is what `Webhook.describe()` has been publishing all
+    # along — an advertised URL is a promise, and providers are configured
+    # against it. `/hooks/{source}` is the provider-typed one, where LOOM knows
+    # who is calling and can therefore verify a signature, answer a handshake,
+    # and fan one delivery out to every subscriber instead of to one workflow.
+    #
+    # Both are thirty lines over a transport-free core, so a host on Lambda or
+    # a Django view calls the same `WebhookIngress.receive` and cannot drift
+    # from what this serves.
+
+    concrete: _Runtime | None = runtime if isinstance(runtime, _Runtime) else None
+
+    @app.post("/hooks/{source_id}")
+    async def receive_hook(source_id: str, request: Request) -> Response:
+        """Accept a provider delivery, verify it, and append it to the log.
+
+        Answers before any workflow runs, deliberately: Slack retries anything
+        slower than three seconds, and a dispatcher that had to start runs
+        inline would turn a slow workflow into a duplicate delivery. The append
+        *is* the durable accept — everything after it is the log's problem, and
+        the log survives this process dying one line later.
+        """
+        ingress = _ingress_or_503(concrete)
+        body = await request.body()
+        try:
+            result = await ingress.receive(source_id, dict(request.headers), body)
+        except VerificationFailed as exc:
+            # 401 and never retried. Distinguished from 400 because the two mean
+            # different things to whoever is watching the dashboard: this one is
+            # somebody lying about who they are.
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        except MalformedDelivery as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ConfigurationError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        if result.challenge is not None:
+            # Verbatim, with the provider's own content type. Slack wants the
+            # bare challenge string and will not enable the endpoint for
+            # anything else, JSON-wrapped included.
+            return Response(
+                content=result.challenge.body,
+                media_type=result.challenge.content_type,
+                status_code=result.challenge.status,
+            )
+        return JSONResponse(
+            status_code=202,
+            content={
+                "accepted": result.accepted,
+                "events": result.event_ids,
+                "topics": result.topics,
+                "reason": result.reason,
+            },
+        )
+
+    async def _fire_webhook(path: str, request: Request, test: bool) -> JSONResponse:
+        """Start every workflow whose ``Webhook`` trigger matches *path*."""
+        if concrete is None:
+            raise HTTPException(
+                status_code=503,
+                detail="webhook triggers need a local Runtime; this app is a "
+                "proxy in front of another server, which serves them itself",
+            )
+        body = await request.body()
+        payload = _webhook_payload(body, request)
+        headers = {k.lower(): v for k, v in request.headers.items()}
+        started: list[str] = []
+
+        for definition in concrete.workflows.values():
+            for spec in getattr(definition, "triggers", ()):
+                if not isinstance(spec, Webhook) or spec.path != path:
+                    continue
+                if request.method.upper() not in {m.upper() for m in spec.methods}:
+                    continue
+                key = (
+                    headers.get(spec.idempotency_header.lower())
+                    if spec.idempotency_header
+                    else None
+                )
+                run_id = await concrete.submit(
+                    definition.name,
+                    payload,
+                    idempotency_key=key,
+                    metadata={
+                        "loom.webhook_path": path,
+                        "loom.webhook_test": test,
+                    },
+                )
+                started.append(run_id)
+
+        if not started:
+            # 404 rather than a quiet 202: a provider pointed at a path nothing
+            # listens on looks identical to a working integration otherwise, and
+            # is discovered when somebody asks why nothing happened.
+            raise HTTPException(
+                status_code=404,
+                detail=f"no workflow declares a Webhook trigger on '{path}'",
+            )
+        return JSONResponse(status_code=202, content={"runs": started})
+
+    # Test first, and the order is load-bearing: `{path:path}` is greedy, so
+    # `/webhook{path:path}` registered ahead of this one matches
+    # `/webhook-test/x` with path="-test/x", finds no trigger, and 404s. The
+    # test URL would silently stop working — which is the failure it exists to
+    # prevent, since the alternative is pointing a provider at production.
+    @app.api_route("/webhook-test{path:path}", methods=["POST", "GET", "PUT"])
+    async def webhook_test(path: str, request: Request) -> JSONResponse:
+        """The test URL ``Webhook.describe()`` advertises, kept separate so
+        that pointing a provider at a laptop cannot fire production runs."""
+        return await _fire_webhook(path, request, test=True)
+
+    @app.api_route("/webhook{path:path}", methods=["POST", "GET", "PUT"])
+    async def webhook(path: str, request: Request) -> JSONResponse:
+        """The production URL `Webhook.describe()` advertises."""
+        return await _fire_webhook(path, request, test=False)
+
     return app
+
+
+def _ingress_or_503(runtime: Runtime | None) -> WebhookIngress:
+    """The ingress for this app, or a 503 saying exactly what is missing."""
+    if runtime is None:
+        raise HTTPException(
+            status_code=503,
+            detail="provider ingress needs a local Runtime; this app is a proxy "
+            "in front of another server, which serves /hooks itself",
+        )
+    existing = getattr(runtime, "_ingress", None)
+    if existing is not None:
+        return existing  # type: ignore[no-any-return]
+    if getattr(runtime, "events", None) is None:
+        raise HTTPException(
+            status_code=503,
+            detail="no event log is configured, so a delivery cannot be "
+            "durably recorded and accepting one would lose it. Construct the "
+            "Runtime with events=StoreBackedEventLog(store).",
+        )
+    built = WebhookIngress(runtime)
+    runtime._ingress = built  # type: ignore[attr-defined]
+    return built
+
+
+def _webhook_payload(body: bytes, request: Request) -> dict[str, Any]:
+    """A `Webhook` trigger's input: the decoded body, plus what it arrived with.
+
+    Headers and query are carried alongside rather than merged, because a
+    provider that posts a field called ``headers`` would otherwise overwrite
+    them and the workflow would read the wrong thing with nothing to notice.
+    """
+    import json as _json
+
+    decoded: Any
+    try:
+        decoded = _json.loads(body) if body else {}
+    except ValueError:
+        decoded = {"body": body.decode("utf-8", errors="replace")}
+    return {
+        "body": decoded,
+        "headers": {k.lower(): v for k, v in request.headers.items()},
+        "query": dict(request.query_params),
+        "method": request.method,
+    }

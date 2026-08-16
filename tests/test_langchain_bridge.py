@@ -6,6 +6,8 @@ import asyncio
 
 import pytest
 
+pytest.importorskip("langchain_core", reason="needs the langchain extra")
+
 
 class TestLangChainAgentExecutorProtocol:
     def test_has_agent_id(self) -> None:

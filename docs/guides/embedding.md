@@ -326,6 +326,99 @@ For this to see anything, your toolset manifests must declare each operation's
 `EffectClass` — that declaration is what tells a read from a write at the call
 site.
 
+## Middleware around every operation
+
+`rt.hooks` runs your code around each durable operation — step, node, tool,
+agent, child. Empty by default and **free while it stays that way**: the first
+registration is what installs the broker, so a Runtime with no hooks runs
+exactly the chain it ran before.
+
+```python
+from loom.runtime.hooks import HookContext
+from loom.toolsets.manifest import EffectClass
+
+audited = Runtime(store=MemoryStore())
+
+
+@audited.hooks.before_step
+async def note(ctx: HookContext) -> None:
+    print("about to run", ctx.target)
+
+
+@audited.hooks.before_any(effect=EffectClass.DESTRUCTIVE)
+async def confirm(ctx: HookContext) -> None:
+    ctx.deny("deletes are not allowed from this deployment")
+
+
+assert audited.hooks.names() == ["note", "confirm"]
+```
+
+Three shapes. `before` and `after` observe, mutate and decide; `around` receives
+the rest of the chain and may call it zero, one, or many times — which is what
+retry and caching need and what a single-pass hook cannot express. `before` runs
+in registration order and `after` in reverse, because they compile to nested
+wrappers and that is what nesting means.
+
+**Decisions escalate and never descend.** A middleware calls `ctx.deny(...)` or
+`ctx.ask(...)`; there is no setter. So a permissive middleware registered after
+a strict one is a no-op rather than a silent hole, and registration order is not
+something you have to keep in your head.
+
+```python
+from loom.runtime.hooks import Decision, HookContext
+from loom.runtime.effects import EffectCall
+
+ctx = HookContext(EffectCall(kind="step", target="charge"))
+ctx.deny("over threshold")
+ctx.allow()                       # cannot undo it
+
+assert ctx.decision is Decision.DENY
+```
+
+`ctx.ask(reason)` **parks the run** rather than blocking — the answer is
+journaled, and the resumed run performs the call exactly once.
+
+### Which hook to reach for
+
+Three families, and picking the wrong one is the mistake worth avoiding:
+
+| You want to | Use | Runs on replay |
+|---|---|---|
+| gate, cache, retry, or rewrite a call | `before_/after_/around_*` | no |
+| know a run started, resumed, or ended | `on_workflow_start/end` | **yes** |
+| shape messages, count turns, watch an agent | `on_agent_*`, `on_turn_*`, `on_model_*` | no |
+
+Only the first family can decide. The body family fires on **every** re-entry —
+resume, retry, replay — so it is observation only, and `ctx.re_entry` tells
+"began" from "resumed". That restriction is what keeps middleware out of the
+workflow version: it can change what is *observed* on a replay, never what
+happened.
+
+```python
+started: list[bool] = []
+watched = Runtime(store=MemoryStore())
+
+
+@watched.hooks.on_workflow_start
+async def began(ctx) -> None:
+    started.append(ctx.re_entry)
+
+
+assert watched.hooks.has_body
+```
+
+A hook that needs to journal its own work — a supervisor, a critique, a
+verification model call — uses `ctx.ctx`, a context scoped beneath the call it
+is hooking. Its `ctx.step(...)` calls journal against a **stable** path, so the
+model is paid for once rather than on every retry and resume.
+
+**Middleware is recorded on the run, never in the version.**
+`ExecutionRecord.metadata["loom.middleware"]` names what was in force, because a
+denial has to be explicable months later. It stays out of `content_hash`
+deliberately: middleware says what a *deployment* enforces, not what a workflow
+*is*, so folding it in would give one commit as many versions as it has
+environments.
+
 ## Shutting down
 
 Your process will be told to stop, and on a deploy that means SIGTERM. Loom's

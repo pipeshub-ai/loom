@@ -1037,6 +1037,138 @@ to the version of the code that ran. A final test greps the file for
 has found a seam that is not finished — and that creeps back one underscore at a
 time.
 
+### Hooks and middleware
+
+`rt.hooks` (`runtime/hooks.py`) runs middleware around every durable operation —
+step, node, tool, agent, child, artifact, event. Empty by default, and **free
+while it stays that way**: the first registration is what installs a
+`HookBroker`, so a Runtime with no hooks runs exactly the chain it ran before.
+
+```python
+@rt.hooks.before_tool(effect=EffectClass.DESTRUCTIVE)
+async def confirm(ctx): ctx.ask("deletes data")
+
+@rt.hooks.around_step(target="jira.*")
+async def cached(ctx, next): ...
+```
+
+**One primitive, three shapes.** Everything compiles to `async def (ctx, next)`,
+the onion — `before` and `after` are that shape with a fixed structure. Nesting
+is what makes `before` run forward and `after` run in reverse, so the ordering
+is a consequence rather than something enforced.
+
+Two bugs the compilation makes unavailable. **`before`/`after` never receive
+`next`** — a sequential middleware that forgets to continue silently drops
+everything behind it, invisibly, so the wrapper calls it instead; refusing is
+`ctx.deny(...)`. And **a decision cannot be assigned**, only escalated along
+`allow < ask < deny` via `max()`, so a permissive middleware registered after a
+strict one is a no-op rather than a silent hole.
+
+**Replay never reaches a hook**, because `DurableCall._resolve` serves a
+completed entry from the journal before the broker. That is what makes it safe
+for these to perform I/O and to refuse — and it is why hooks that fire on every
+body re-entry will be a *different family* with different rules, not more
+events on this one.
+
+`ctx.ask()` **parks the run** rather than blocking: the hook's nested context
+calls `wait_for_approval`, the run suspends costing nothing, and on resume the
+hook asks again and finds the journaled answer. `ctx.ctx` is
+`nested(f"{path}#hook")` — a path derived from the hooked call rather than a
+sequence counter, so a supervisor or critique that calls a model journals once
+instead of being paid for on every retry.
+
+Fail policy differs by shape and both directions are deliberate: `before` fails
+**closed** (a gate that could not run has not passed), `after` fails **open**
+(the work already happened; a broken formatter must not destroy a valid result).
+
+`HookRegistry` is **per-Runtime and deliberately not chained to a process-global
+parent**, unlike `toolsets` and `nodes`. Those answer "what exists?"; this
+answers "what does this deployment enforce?", and sharing that means one test's
+gate silently applies to another's run.
+
+One inherited sharp edge: `ctx.arguments` reports **keyword arguments only** —
+a positionally-invoked step has no argument names to report. Deciding on *what*
+is called is unaffected; deciding on *values* needs the call to use keywords.
+
+**Three families, and the split comes from where journaling sits.** The effect
+family above is one; the other two exist because a hook can otherwise mean two
+different things.
+
+`on_workflow_start` / `on_workflow_end` are the **body family**, in
+`_invoke_body`. They fire on *every* body entry, replay included — so
+`ctx.re_entry` tells "this run began" from "this run resumed", and `ctx.status`
+names how the body exited (`completed`, `suspended`, `cancelled`, `failed`,
+`rotated`, `abandoned`; parking is not failure). **They cannot decide**, and that
+absence is the design: a body hook that could refuse would let a replay
+re-derive an outcome from middleware that has since changed, which is also what
+would force middleware into the workflow version.
+
+`on_agent_start/end`, `on_turn_start/end`, `on_model_start/end` are the **agent
+family**, in the runner. Replay-free by containment — an agent run is a single
+journal entry. Also non-deciding, but for a different reason: "may this agent
+run?" and "may this tool call run?" are *already* effect hooks on `kind="agent"`
+and `kind="tool"`. What is left is shaping and observing, which is most of what
+middleware does. `on_model_start` mutates `ctx.messages` **in place** — that is
+the compaction/trimming/redaction point, and rebinding the list does nothing.
+`ctx.stop(reason)` ends the loop — the runner raises `AgentStopped` at the top of the next turn, because the loop's only other early exit (the turn budget) raises too, and a partial result handed back quietly would make "a stall detector gave up" indistinguishable from "the agent finished". First stop wins, reason included, matching the escalate-only decision rule.
+
+Both non-deciding families **always fail open**: they cannot change what a run
+does, so a broken logger must not become a failed workflow — least of all one
+that fails only where that logger is installed.
+
+`rt.hooks.use_guardrail(g)` registers an existing `Guardrail` as a hook. An
+**adapter, not a migration**: `Agent(guardrails=[...])` is untouched, because an
+agent can run with no Runtime and so no registry. Node `guards` are left alone
+too — a guard validates a *payload* across input/output phases, where a hook
+gates *dispatch*, and merging them would make two different things share a name.
+
+`ExecutionRecord.metadata["loom.middleware"]` records what was in force when a
+run opened. On the **run**, never in the version: middleware states what a
+deployment enforces, not what a workflow is, so folding it into `content_hash`
+would give one commit as many versions as it has environments.
+
+Design and the research behind it: `docs/design/hooks-middleware.md` and
+`docs/design/hooks-middleware-design.md`.
+
+### Replaying a failure
+
+A replay reproduces a recorded failure's **type**, not only its message, for the
+failures the engine itself produced. A workflow branches on the type —
+`except EffectDenied` is how it tells "policy refused this" from "this broke" —
+so rebuilding every recorded failure as a generic `StepError` sent a replay down
+a different branch from the run it was rehearsing. Journaling the denial existed
+to prevent that divergence; losing the type reintroduced it one layer down.
+
+`DurableCall._recorded_failure` owns the reconstruction, and it is deliberately
+narrow: **only failures the engine produced**, because it knows their
+constructors. Two rows today:
+
+| Recorded | Replays as | Read from |
+|---|---|---|
+| `error.type == "EffectDenied"` | `EffectDenied`, `needs` intact | `denied_needs` on the entry |
+| `EXHAUSTED` and `attempts > 1` | `RetriesExhausted` | the entry's own attempt count |
+
+`EffectDenied` keeps its `needs` — the actionable half — recorded alongside as
+`denied_needs`, because `ErrorInfo` carries a type and a message and nothing
+else. `RetriesExhausted` is keyed on **`EntryStatus.EXHAUSTED`** rather than on
+the error type, because the journal deliberately records the *original* error
+(`ConnectionError` and its text) and the status is what says a retry budget was
+spent. Its message is rebuilt rather than read, for the same reason. The
+`attempts > 1` condition mirrors the engine's own rule: a step that never
+retried raises its original exception, so claiming exhaustion would invent an
+attempt that never happened.
+
+The two differ in blast radius, which is why they shipped separately.
+`RetriesExhausted` **is** a `StepError`, so widening a replay to it is invisible
+to anything already catching the base class. `EffectDenied` is not — but the
+first run already raised it, so only the replay ever disagreed.
+
+**A user exception is still widened to `StepError` on replay**, and that gap is
+asserted rather than papered over. The journal records `type: "ValueError"`, so
+what is missing is not the information but a safe way to use it: rebuilding an
+arbitrary exception means guessing at a constructor, and the class may not be
+importable in the process doing the replay.
+
 ### Read-to-write taint
 
 `Runtime(broker=TaintBroker(GuardedBroker()))`. One rule: **once a run has read
@@ -1574,6 +1706,177 @@ where you can; one model reviewing itself mostly agrees with itself.
 
 `CodingResult.is_clean` means the code validates, runs, *and* passes review. Code
 that merely parses is a weak claim; so is code that runs but charges twice.
+
+### Event backbone
+
+`loom/events/`, designed in `docs/design/event-backbone.md`. **A log, not a
+bus.** A bus makes *delivery* durable, so a subscriber that was down missed
+those events permanently and one added tomorrow sees nothing from today. A log
+makes *the record* durable and delivery a resumable read — the only shape where
+many workflows independently consume one event and every one of them survives
+being killed.
+
+**The package ships no broker.** Two Protocols (`EventLog`, `Checkpoints`), one
+reference implementation over capabilities every store already has
+(`StoreBackedEventLog` on `CacheStore` + `LockProvider`), and conformance kits
+(`loom.testing.conformance.verify_event_log` / `verify_checkpoints`) so a host
+proves its own Kafka, Redis Streams, or Postgres adapter correct. Sixteen
+integration matrices is not a maintainable position in year three.
+
+```python
+@workflow(triggers=[OnAppEvent("app.slack.message",
+                               where=FilterSpec(conditions={"channel": "C_TECH"}))])
+async def triage(ctx, message: dict) -> str: ...
+
+rt = Runtime(store=store, events=StoreBackedEventLog(store))
+dispatcher = EventDispatcher(rt)
+await dispatcher.register(triage)      # async: it pins where LATEST starts
+await dispatcher.start()               # supervised, so shutdown() stops it
+```
+
+**One rule, everywhere: do the durable idempotent thing first, advance the
+marker last.** `drain()` reads a batch, filters, submits under
+`{event_id}#{subscriber}`, and commits the checkpoint *after*. Committing early
+loses events permanently — the marker says "handled", nothing ran, and no
+provider resends. Committing late costs a re-read the dispatch key absorbs. A
+deferral stops the batch rather than skipping ahead, so the checkpoint sits just
+before the event that failed.
+
+Four decisions worth knowing:
+
+- **Identity is a stable name and never the filter.** Hashing a filter in makes
+  every filter edit a new subscriber, which changes every historical event's
+  dispatch key, deduplicates nothing, and re-runs everything. With a stable name
+  widening a filter forward is an edit, and widening it retroactively is a
+  replay that is safe *by construction* — already-handled events re-derive their
+  original key and dedupe away.
+- **`LATEST` is pinned at `subscribe()`, not at the first poll.** Hence the
+  `async`. Resolving it lazily looks equivalent and silently drops everything
+  that arrived in the gap.
+- **`EARLIEST` is reachable programmatically and refused in a declaration.**
+  Backfilling a week of Slack into a workflow that replies means a week of
+  replies at once, and the dispatch key does *not* protect a genuinely new
+  subscriber. Backfill is an operational act with bounds, not a line in a
+  workflow file.
+- **Bounded attempts, then a real dead-letter topic** (`<topic>.dead`). Retrying
+  forever stalls a subscriber behind one bad event; skipping silently loses it.
+  `CHAIN_DEPTH_CAP = 5` stops a workflow that publishes an event that
+  re-triggers it.
+
+**A dead letter is about delivery, not execution.** An event nobody could
+dispatch — an unknown workflow, a permanent admission rejection — is
+dead-lettered and stepped over. A workflow that *was* dispatched and then raised
+is an ordinary **failed run**, with a journal and `retry`/`replay` semantics a
+dead-letter would throw away; `loom runs --status failed` is where it lives. The
+same asymmetry `QueueConsumer` already has, and getting it backwards means
+either losing the journal or stalling the stream.
+
+An event both *starts* runs and *resumes* those parked on
+`ctx.wait_for_event` — a trigger creates a run, a wait continues one, and one
+event can legitimately do both.
+
+### Event sources and ingress
+
+`docs/guides/event-sources.md` is the end-to-end walkthrough, and every snippet
+on it executes in CI. `EventSource` is four small methods — `verify`,
+`challenge`, `delivery_id`, `expand` — rather than one `handle()`, so a provider
+with no handshake writes `return None` instead of re-implementing a dispatch
+loop. **Adding a provider costs a verifier and a normaliser**; if it ever costs
+more, the seam is in the wrong place.
+
+Registered by name, discovered through the `loom_event_source` entry point, and
+`rt.sources` chains to the process-global registry exactly as `toolsets` and
+`nodes` do. Shipped: `slack`, `jira`, `gmail`.
+
+**`verify` is handed the raw body**, because every scheme in use signs bytes. A
+source that parses first and verifies the re-serialised form accepts anything —
+and passes every hand-written test, since a JSON round trip is lossless in the
+happy case. `loom.testing.conformance.verify_event_source` is the kit that
+catches it, along with an unstable `delivery_id` and an un-namespaced event
+type.
+
+**Verify, then answer a handshake — never the other way round.** A challenge
+answered before verification is an oracle: anyone who guesses the URL gets a
+signed-looking reply and can complete somebody else's endpoint registration.
+
+**The ingress owns identity, not the source.** `{topic}/{source}:{delivery_id}`,
+and the topic is not decoration — Slack's `app_mention` is also a `message`, so
+an id without it would make those one event and whichever landed second would
+deduplicate away. A provider publishing no delivery id (Jira) falls back to a
+body hash, which deduplicates an identical redelivery and honestly cannot tell
+two identical events apart.
+
+**Two HTTP routes, because two contracts exist.** `/hooks/{source}` is the
+provider-typed one; `/webhook{path}` is what `Webhook.describe()` has been
+publishing all along, and an advertised URL is a promise. `/webhook-test` is
+registered *first*, because `{path:path}` is greedy and would otherwise swallow
+it. Both are thirty lines over `WebhookIngress.receive`, which is transport-free
+— a Lambda or a Django view gets identical behaviour.
+
+**Shape B — a payload that is a position.** Gmail posts a `historyId`, not an
+email. `expand` returns one *pointer* event; a `Reconciler` driven by
+`PointerReconciler` asks the provider what changed and appends the data events
+back. Downstream reads `app.gmail.message` and never learns Gmail is different.
+Nothing is fetched inside `expand` — an API round trip inside Pub/Sub's
+three-second budget makes a slow mailbox produce duplicate pushes *as well as* a
+slow response. The provider cursor lives in `SourceState`, not in a checkpoint:
+the checkpoint says how far the reconciler read *our* log, the cursor how far it
+read *theirs*.
+
+**A dead cursor is an event, not an exception.** Gmail keeps about a week of
+history, Salesforce 72 hours; past that the provider cannot say what was missed.
+Jumping silently to now is the failure where "nothing arrived today" and "we lost
+a day" are indistinguishable — so a `*.gap` event is appended and the cursor
+resets forward, and a workflow can subscribe to lost visibility.
+
+**A lapsing subscription is the highest-severity silent failure.** Gmail's watch
+dies in 7 days, Graph's in ~3; nothing errors, and the inbox looks quiet.
+`WatchRenewer` re-registers at a *fraction* of the lifetime (declared via
+`lifetime_hint`, since assuming a week renews a three-day watch after it died),
+sweeps immediately on start, and appends `*.watch_lapsed` **once** a watch is
+actually dead — not on each failed renewal, because alerting on survivable
+failures trains people to ignore the one that matters. `stop()` deliberately does
+not tear the subscription down: a rolling restart must not deafen the mailbox.
+
+### Operating the backbone
+
+`SubscriptionManager` holds the durable registry and answers "who is reading, and
+how far behind". Separate from the dispatcher because that is meant to be a hot
+loop with no storage of its own. Lag is **counted by reading**, never subtracted
+— `Position` is opaque, and subtracting works here and is wrong on every
+partitioned backend.
+
+A subscriber whose checkpoint has not moved past `subscriber_ttl` is
+**quarantined, not retired**: retention proceeds past it, its position is kept,
+and resuming it raises `GapDetected` naming what it missed. Reading health has no
+side effects — quarantining is an operator's act, and a status command that
+changed what it reports by reporting it is useless.
+
+```bash
+loom events topics                 # what exists, and its head
+loom events tail <topic>           # is the webhook even reaching us?
+loom events subscriptions          # who is reading, and their lag
+loom events status                 # exit 1 when anything is unhealthy
+loom events dead [topic]           # what could not be processed
+loom events replay --subscriber s --topic t --since 7d --max-events 1000 [--yes]
+```
+
+`status` exits non-zero on purpose: a status command that always succeeds can
+only be read by a person, and the failure this subsystem exists to catch is the
+one nobody is looking at.
+
+`replay` is what `start_at=EARLIEST` is refused in favour of. It prints the plan
+and needs `--yes`, the ceiling keeps the **newest** (as `max_catch_up` does for a
+missed cron, so the plan and the rewind agree), and it does not dispatch — it
+rewinds a checkpoint and lets the ordinary loop do the work, so a backfill goes
+through the same admission, grants and dead-lettering as everything else. It is
+safe by construction rather than by care: each re-read event re-derives its
+original `{event_id}#{subscriber}` key, so everything already handled
+deduplicates away and only newly-matching events start runs.
+
+There is deliberately **no** `loom events install`. Registering a webhook with a
+provider means owning N provider admin APIs forever for a once-per-deployment
+act; provider registration stays in the host's deployment.
 
 ### Queue Ingress
 

@@ -25,7 +25,7 @@ import signal
 import sys
 
 from loom import __version__
-from loom.cli import auth_commands, commands, mcp_setup
+from loom.cli import auth_commands, commands, event_commands, mcp_setup
 from loom.cli.output import Exit
 
 __all__ = ["main"]
@@ -56,6 +56,7 @@ _HANDLERS = {
     "mcp": commands.cmd_mcp,
     "ui": commands.cmd_ui,
     "artifacts": commands.cmd_artifacts,
+    "events": event_commands.cmd_events,
     "login": auth_commands.cmd_login,
     "logout": auth_commands.cmd_logout,
     "whoami": auth_commands.cmd_whoami,
@@ -117,6 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
     _acting(sub)
     _serving(sub)
     _authenticating(sub)
+    event_commands.add_parser(sub)
     return parser
 
 

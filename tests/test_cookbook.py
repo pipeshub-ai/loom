@@ -39,6 +39,10 @@ OFFLINE = [
     "22_custom_nodes.py",
     "23_bounded_tool_results.py",
     "24_crm_pipeline.py",
+    # Needs no broker and no credentials: `StoreBackedEventLog` rides the store
+    # already in play, so the whole backbone — ingress, fan-out, restart,
+    # dead-letter — runs against one temporary SQLite file.
+    "29_event_backbone.py",
     # Belongs here rather than under NEEDS_CREDENTIALS because it takes a
     # deliberate dry-run branch when the Microsoft variables are absent: it
     # reports the reads and writes it would have made and returns, touching
@@ -48,6 +52,7 @@ OFFLINE = [
     # Same dry-run branch: with no Microsoft variables it reports the reads
     # and writes it would have made and returns, touching no network.
     "27_meeting_prep.py",
+    "28_hooks.py",
 ]
 
 #: Needs the network but no credentials. Exercised for structure, not executed:

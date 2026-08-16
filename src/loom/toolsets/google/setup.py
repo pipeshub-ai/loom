@@ -245,7 +245,7 @@ def _serve(
     port: int, state: str, received: dict[str, str]
 ) -> http.server.HTTPServer:
     class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802 - the name BaseHTTPRequestHandler dispatches on
+        def do_GET(self) -> None:  # noqa: N802
             params = urllib.parse.parse_qs(
                 urllib.parse.urlparse(self.path).query
             )

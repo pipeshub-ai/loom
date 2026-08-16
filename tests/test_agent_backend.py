@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from importlib.util import find_spec
+
 import pytest
 
 
@@ -118,6 +120,9 @@ class TestCtxAgentPromptOnly:
         assert "old-style: hello" in result.output
 
 
+@pytest.mark.skipif(
+    find_spec("langchain") is None, reason="needs the langchain extra"
+)
 class TestLangChainBackendMocked:
     @pytest.mark.asyncio
     async def test_run_returns_agent_result(self) -> None:

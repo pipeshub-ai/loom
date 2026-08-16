@@ -10,6 +10,40 @@ from loom import Context, Runtime, step, workflow
 from loom.stores.memory import MemoryStore
 
 
+@pytest.fixture(autouse=True, scope="session")
+def never_touch_the_real_keychain() -> Iterator[None]:
+    """Keep the whole suite away from the developer's OS keychain.
+
+    ``default_key_provider`` prefers ``LOOM_CREDENTIAL_KEY``, then the OS
+    keyring, then a generated file. So any test constructing an
+    ``EncryptedFileCredentialStore`` without an explicit provider reaches the
+    second one — and on macOS that is a modal password prompt, which does not
+    fail the test so much as stop it: the run hangs until somebody notices a
+    dialog and knows the login password.
+
+    Two files already defended themselves with a fake keyring backend. Doing it
+    here instead means a test cannot forget, which is the only version of this
+    that survives someone adding the next credential test. Pinning the key
+    rather than faking the backend also takes the priority order's own first
+    branch — "explicit, portable, what CI and containers use".
+
+    Session-scoped and set only when absent, so a developer or CI that has
+    deliberately exported one keeps it. The value is a well-formed Fernet
+    key spelling out what it is — the store validates it, so a placeholder
+    that merely looks like base64 fails at construction.
+    """
+    import os
+
+    previous = os.environ.get("LOOM_CREDENTIAL_KEY")
+    if previous is None:
+        os.environ["LOOM_CREDENTIAL_KEY"] = "bG9vbS10ZXN0cy1vbmx5LW5vdC1hLXJlYWwtc2VjcmU="
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("LOOM_CREDENTIAL_KEY", None)
+
+
 @pytest.fixture(autouse=True)
 def isolated_catalog() -> Iterator[object]:
     """Snapshot and restore the process-global toolset catalog.

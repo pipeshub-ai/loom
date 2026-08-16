@@ -63,6 +63,13 @@ class AgentContext(BaseModel):
     results too large to put in front of the model. Passed in rather than
     discovered, so the agent layer keeps no reference to the Runtime."""
 
+    hooks: Any = None
+    """Optional :class:`~loom.runtime.hooks.HookRegistry`, when this agent runs
+    inside a workflow. Passed in rather than discovered, for the same reason
+    ``spill`` is: the agent layer keeps no reference to the Runtime, so an agent
+    invoked directly simply has no hooks rather than needing a Runtime to say
+    so."""
+
 
 @runtime_checkable
 class AgentExecutor(Protocol):

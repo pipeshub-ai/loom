@@ -122,6 +122,72 @@ Response modes: `ACK` (return 202 immediately), `RESULT` (hold connection for ou
 
 Requires `pip install loomflow[api]` for the FastAPI server.
 
+`loom.server.create_app(runtime)` serves the two URLs `Webhook.describe()`
+advertises — `/webhook{path}` and `/webhook-test{path}` — and the second exists
+so that pointing a provider at a laptop cannot fire production runs. One
+delivery starts every workflow whose trigger matches the path; a path nothing
+listens on answers **404** rather than a quiet 202, because a silent accept
+looks exactly like a working integration until somebody asks why nothing
+happened.
+
+Reach for `OnAppEvent` instead when the event comes from a provider LOOM knows
+(Slack, Jira, Gmail) or when more than one workflow wants it — see below.
+
+### OnAppEvent
+
+An event from the outside world, recorded in a durable log that many workflows
+read independently:
+
+```python
+from loom.triggers.filter import FilterSpec
+from loom.triggers.specs import OnAppEvent
+
+
+@workflow(name="triage", triggers=[
+    OnAppEvent(
+        "app.slack.message",
+        where=FilterSpec(conditions={"channel": "C_TECH"}),
+    ),
+])
+async def triage(ctx: Context, message: dict) -> str:
+    return message["text"]
+```
+
+The difference from `Webhook` is fan-out and resume. A `Webhook` trigger routes
+one delivery to one workflow; `OnAppEvent` appends it to a topic, and **every**
+subscriber reads that topic at its own pace with its own cursor. A subscriber
+that was down catches up; a slow one holds nobody back; a redelivery
+deduplicates.
+
+The payload is the second parameter, as it is for any workflow — not
+`ctx.trigger_event`.
+
+Wire it up with an `EventDispatcher`, and give the Runtime a log:
+
+```python
+from loom.events import EventDispatcher, StoreBackedEventLog
+
+store = MemoryStore()
+runtime = Runtime(store=store, events=StoreBackedEventLog(store))
+dispatcher = EventDispatcher(runtime)
+```
+
+`await dispatcher.register(triage)` reads the trigger and subscribes — it is
+async because `start_at=LATEST` is pinned *then*, so nothing arriving between
+subscribing and the first poll is skipped. `await dispatcher.start()` polls
+until `runtime.shutdown()`.
+
+`start_at=EARLIEST` is deliberately **refused** in a declaration: replaying a
+retained backlog into a workflow that replies performs every one of those
+replies at once, and the author cannot see how many. Backfill is
+`loom events replay --subscriber s --topic t --since 7d --max-events 1000`,
+which prints the number before it does anything.
+
+Where the events come from — a signed webhook, a Pub/Sub pointer, a pull-log
+like Salesforce — is the *source's* business, and adding one costs a verifier
+and a normaliser: `docs/guides/event-sources.md`. Worked end to end in
+`examples/cookbook/29_event_backbone.py`.
+
 ### OnEvent
 
 Consume from a queue or event bus:
@@ -192,9 +258,23 @@ async def feedback(ctx: Context) -> str:
     ...
 ```
 
-## TriggerDispatcher
+## Three dispatchers, and which one you want
 
-The `TriggerDispatcher` routes incoming events to registered workflows:
+The names are close enough to be worth stating plainly, because picking the
+wrong one is a silent mistake rather than an error:
+
+| | Drives | Use it for |
+|---|---|---|
+| `TriggerDispatcher` (`runtime/dispatcher.py`) | `Schedule`, `Interval` | cron — persists a `TriggerRecord`, so schedules survive a restart |
+| `EventDispatcher` (`events/dispatcher.py`) | `OnAppEvent` | the event log — per-subscriber cursors, fan-out, replay |
+| `EventRouter` (`triggers/routing.py`) | in-process `OnEvent` | embedded routing with no log behind it |
+
+`start_scheduler` puts the first on the same loop and lease as due timers and
+orphan recovery; the second is started with `await dispatcher.start()`, and both
+stop with `runtime.shutdown()`.
+
+`EventRouter` is the in-process one, and it keeps no position — an event nobody
+was listening for is gone:
 
 ```python
 from loom.triggers.routing import EventRouter, RoutingEvent
@@ -208,6 +288,9 @@ router.subscribe("orders.created", "order_handler")
 event = RoutingEvent(name="orders.created", payload={"order_id": "123"})
 matched = router.route(event)
 ```
+
+That is the whole reason `OnAppEvent` and the log exist: durability and resume
+are properties of the *record*, not of the delivery.
 
 ## Multiple Triggers
 

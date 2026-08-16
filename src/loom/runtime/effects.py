@@ -93,9 +93,27 @@ class EffectCall:
     run_id: str = ""
     path: str = ""
     """Journal path, so a denial can be traced to the exact call site."""
+    name: str | None = None
+    """The journal/grant name override, when the caller passed ``ctx.step(fn,
+    name=...)`` — a bridged step whose semantic identity (``<toolset>.<op>``)
+    differs from the Python function that implements it. Carried on the wire
+    so a sandboxed body's proxied call journals and grant-checks under the
+    same name an inline one would, rather than under the generic step's own
+    name (e.g. ``pipeshub_tool`` for every bridged operation alike)."""
     perform: Callable[[], Awaitable[Any]] | None = field(
         default=None, compare=False, repr=False
     )
+    context: Any = field(default=None, compare=False, repr=False)
+    """The workflow ``Context`` this call came from, when it came from one.
+
+    Local-only, exactly like ``perform``, and excluded from equality and repr
+    for the same reason: it is how the *local* side reaches back into the run,
+    not part of what a call *is*. :meth:`describe` whitelists its fields, so the
+    wire projection a sandboxed child sends is unaffected by this existing.
+
+    A hook uses it to journal its own durable work beneath the call it is
+    hooking — a supervisor or a critique that must be paid for once rather than
+    on every retry."""
 
     @property
     def toolset(self) -> str:
@@ -120,6 +138,7 @@ class EffectCall:
             "effect": self.effect.value,
             "run_id": self.run_id,
             "path": self.path,
+            "name": self.name,
         }
 
 

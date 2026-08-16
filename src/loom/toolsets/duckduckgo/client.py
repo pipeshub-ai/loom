@@ -175,10 +175,15 @@ class DuckDuckGoClient:
                 category, query, page=number, max_results=DDG_PAGE_SIZE, **kwargs
             )
             fresh = []
-            for item in raw:
+            for index, item in enumerate(raw):
                 model = row(item)
-                key = model.url or model.title
-                if key and key not in seen:
+                # A row with neither a URL nor a title cannot be deduplicated
+                # against anything, so it is keyed by where it appeared instead
+                # of being dropped. Dropping was the first version, and it was
+                # silent data loss inside a read whose entire purpose is to
+                # report its own coverage honestly.
+                key = model.url or model.title or f"#{number}.{index}"
+                if key not in seen:
                     seen.add(key)
                     fresh.append(model)
             exhausted = len(raw) < DDG_PAGE_SIZE or not fresh

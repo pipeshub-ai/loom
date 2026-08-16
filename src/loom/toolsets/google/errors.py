@@ -15,6 +15,7 @@ from typing import Any
 from loom.core.exceptions import NonRetryableError, WorkflowError
 
 __all__ = [
+    "GmailHistoryExpired",
     "GoogleAPIError",
     "GoogleAuthError",
     "GooglePermanentError",
@@ -93,3 +94,13 @@ def classify(status: int, body: Any, url: str = "") -> GoogleAPIError:
     if 400 <= status < 500:
         return GooglePermanentError(described, status=status, reason=reason, url=url)
     return GoogleAPIError(described, status=status, reason=reason, url=url)
+
+
+class GmailHistoryExpired(GooglePermanentError):  # noqa: N818 - names the state
+    """A Gmail history id is older than Gmail still holds.
+
+    Its own type because it is not a failure to be retried, and it is not
+    "nothing happened" either — it is *we cannot say what happened*, which is
+    the one answer a caller must handle rather than log. The recovery is a full
+    resync plus a recorded gap, and nothing else produces the same obligation.
+    """

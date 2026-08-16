@@ -14,7 +14,7 @@ import inspect
 import logging
 import uuid
 import weakref
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -80,6 +80,18 @@ from loom.stores.memory import MemoryStore
 logger = logging.getLogger("workflow.engine")
 
 
+#: How a body exited, keyed by the exception that carried it out. Parking is
+#: not failure and cancellation is not failure, and a body hook is the one place
+#: those are distinguishable without re-reading the record afterwards.
+_BODY_EXITS = {
+    "Suspend": "suspended",
+    "AuthExpired": "suspended",
+    "ContinueAsNew": "rotated",
+    "WorkflowCancelled": "cancelled",
+    "CancelledError": "abandoned",
+}
+
+
 #: Statuses meaning "somebody should still be working on this run". A record
 #: left in one of these with an expired lease is nobody's, and only
 #: ``reclaim_orphans`` covers it — no timer is watching, because it is not
@@ -133,6 +145,9 @@ class Runtime:
         staging: Any | None = None,
         catalog: Any | None = None,
         versions: Any | None = None,
+        events: Any | None = None,
+        checkpoints: Any | None = None,
+        sources: Any | None = None,
         node_id: str | None = None,
         lease_ttl: Duration = 60.0,
         journal_warn_entries: int = 5_000,
@@ -147,6 +162,7 @@ class Runtime:
         strict_determinism: bool = False,
         sandbox: ExecutionSandbox | None = None,
         sandbox_policy: SandboxPolicy | None = None,
+        sandbox_steps: Mapping[str, Any] | None = None,
     ) -> None:
         if backend is not None:
             self.backend = backend
@@ -180,6 +196,34 @@ class Runtime:
         self.blobs = blobs
         """Optional :class:`BlobService`. When set, journal payloads over its
         threshold are stored by content hash and referenced from the journal."""
+
+        self.events = events
+        """Optional :class:`~loom.events.log.EventLog`. Off by default: a
+        Runtime that nobody feeds events has no reason to hold a log, and
+        wiring one implicitly would put a topic's worth of keys in every
+        store. ``StoreBackedEventLog(rt.store)`` needs no infrastructure
+        beyond the store already here; a host with Kafka or Redis Streams
+        passes its own adapter and proves it with
+        :func:`loom.testing.conformance.verify_event_log`."""
+        self.checkpoints = checkpoints
+        """Optional :class:`~loom.events.log.Checkpoints` — where each
+        subscriber has read to. Defaults, when an ``EventDispatcher`` needs
+        one, to the store-backed implementation; separate from ``events``
+        because a host may well keep the log in Kafka and the cursors in its
+        own database."""
+
+        if sources is not None:
+            self.sources = sources
+        else:
+            from loom.events.source_registry import (
+                EventSourceRegistry,
+                get_source_catalog,
+            )
+
+            # Chains to the process-global registry, exactly as `toolsets` and
+            # `nodes` do: a `loom_event_source` entry point reaches every
+            # Runtime, while rt.sources.register(...) stays local to this one.
+            self.sources = EventSourceRegistry(parent=get_source_catalog())
 
         if toolsets is not None:
             self.toolsets = toolsets
@@ -265,6 +309,14 @@ class Runtime:
         self.sandbox_policy: SandboxPolicy = sandbox_policy or SandboxPolicy()
         """What a sandboxed body may reach. Ignored by ``InlineSandbox``, which
         enforces nothing and says so through ``enforces``."""
+
+        self._sandbox_steps_extra: Mapping[str, Any] = dict(sandbox_steps or {})
+        """Steps a sandboxed body can call that are not reachable by scanning
+        the workflow function's own globals — the case for a step a host
+        bridges in dynamically (one ``@step`` fronting many operations, since
+        the operations are not known until a task resolves its tools) rather
+        than importing by name into the workflow module. Merged into, and
+        overridden by, whatever :meth:`_sandbox_steps` finds by scanning."""
 
         self.state: StateStore = state or StoreBackedState(self.store)
         """Backs ``ctx.state`` — workflow-scoped key-value state that outlives a
@@ -392,6 +444,22 @@ class Runtime:
         self._background: set[asyncio.Task[Any]] = set()
         self._scheduler_task: asyncio.Task[None] | None = None
         self._services: weakref.WeakSet[Any] = weakref.WeakSet()
+
+        from loom.runtime.hooks import HookRegistry
+
+        self.hooks = HookRegistry(self)
+        """Middleware around every durable operation.
+
+        Empty by default and free while it stays that way: the first
+        registration is what puts a ``HookBroker`` in the broker chain, so a
+        Runtime with no hooks runs exactly the chain it ran before this existed.
+
+            @rt.hooks.before_tool(effect=EffectClass.DESTRUCTIVE)
+            async def confirm(ctx): ctx.ask("deletes data")
+
+        Per-Runtime and deliberately not chained to a process-global registry —
+        see :class:`~loom.runtime.hooks.HookRegistry`.
+        """
 
     @classmethod
     def from_env(cls, **overrides: Any) -> Runtime:
@@ -1087,6 +1155,14 @@ class Runtime:
             tags=list(tags),
             metadata=meta,
         )
+        if self.hooks:
+            # Recorded on the *run*, never in the workflow version. Middleware
+            # states what this deployment enforces, not what the workflow is —
+            # folding it into `content_hash` would give one commit as many
+            # versions as it has environments. But a denial still has to be
+            # explicable months later, so what was in force gets written down
+            # here. See docs/design/hooks-middleware.md, Q10.
+            record.metadata["loom.middleware"] = self.hooks.names()
         if run_id:
             record.run_id = run_id
         await self.store.create_execution(record)
@@ -1348,6 +1424,48 @@ class Runtime:
         record: ExecutionRecord,
         payload: Any,
     ) -> Any:
+        """Invoke the workflow body, with body hooks around it.
+
+        The hooks wrap here rather than at each of ``_drive_inner``'s seven
+        exits, so "the body ended" is one place and every way out of it —
+        parking, cancellation, rotation, failure, abandonment — is covered by
+        construction rather than by remembering to add a call.
+        """
+        if not self.hooks.has_body:
+            return await self._run_body(definition, ctx, record, payload)
+
+        from loom.runtime.hooks import BodyContext
+
+        hook_ctx = BodyContext(
+            run_id=record.run_id,
+            workflow=record.workflow,
+            attempt=record.attempt,
+            # The journal having entries is the honest signal, and it is true
+            # for a resume, a retry and a replay alike — all the cases where
+            # "this workflow started" would be a lie.
+            re_entry=len(ctx._journal) > 0,
+            input=payload,
+        )
+        await self.hooks.dispatch_body("start", hook_ctx)
+        try:
+            output = await self._run_body(definition, ctx, record, payload)
+        except BaseException as exc:
+            hook_ctx.status = _BODY_EXITS.get(type(exc).__name__, "failed")
+            hook_ctx.error = exc
+            await self.hooks.dispatch_body("end", hook_ctx)
+            raise
+        hook_ctx.status = "completed"
+        hook_ctx.output = output
+        await self.hooks.dispatch_body("end", hook_ctx)
+        return output
+
+    async def _run_body(
+        self,
+        definition: WorkflowDefinition[Any, Any, Any],
+        ctx: Context[Any],
+        record: ExecutionRecord,
+        payload: Any,
+    ) -> Any:
         """Invoke the workflow body through the sandbox seam.
 
         The default path is the one every existing Runtime already took —
@@ -1368,6 +1486,11 @@ class Runtime:
                 invoke=lambda: definition.invoke(ctx, payload),
                 source=await self._sandbox_source(definition, record),
                 entrypoint=definition.name,
+                # A string sentinel per host-injected step: generated source
+                # whose import of the step was stripped for sandboxing still
+                # references it by bare name, and `Ctx._named(sentinel)`
+                # recovers exactly that name from the string itself.
+                namespace={name: name for name in self._sandbox_steps_extra},
             )
 
         outcome = await self.sandbox.run(
@@ -1417,25 +1540,40 @@ class Runtime:
             # something else.
             return ""
 
-    @staticmethod
     def _sandbox_steps(
+        self,
         definition: WorkflowDefinition[Any, Any, Any],
     ) -> dict[str, Any]:
         """The steps a sandboxed body is allowed to reach.
 
-        Taken from the workflow's own module rather than from a global registry:
-        the map is also the allowlist — a body can only invoke what is in it —
-        and a process-wide registry would hand every sandboxed workflow every
-        step any import had ever defined.
-        """
-        module = inspect.getmodule(definition.fn)
-        if module is None:
-            return {}
-        return {
+        Taken from the workflow function's own globals rather than from a
+        global registry: the map is also the allowlist — a body can only
+        invoke what is in it — and a process-wide registry would hand every
+        sandboxed workflow every step any import had ever defined.
+
+        ``fn.__globals__`` rather than ``inspect.getmodule(fn)``: a workflow
+        compiled from a string with ``exec()`` (the coding agent's output, or
+        a definition rebuilt from a published source) has no module — its
+        function's ``__globals__`` *is* the exec'd namespace, and is where its
+        steps live either way. A real module's functions have their module's
+        ``__dict__`` as ``__globals__``, so this is a strict generalisation
+        of the previous lookup, not a different one.
+
+        ``Runtime(sandbox_steps=...)`` is merged in on top, for a step the
+        workflow reaches without it being a name in its own globals — a host
+        bridging a dynamic tool registry through one shared step, which the
+        code calls by import but which the *sandbox* needs handed to it
+        explicitly because there is no fixed module to scan for it either.
+        Unfiltered, deliberately: an injected value need not be a
+        ``StepDefinition`` — ``Context.step`` accepts a bare async callable
+        too, wrapping it the same way it would wrap one found by scanning."""
+        steps = {
             value.name: value
-            for value in vars(module).values()
+            for value in definition.fn.__globals__.values()
             if isinstance(value, StepDefinition)
         }
+        steps.update(self._sandbox_steps_extra)
+        return steps
 
     async def _park(self, record: ExecutionRecord, suspension: Suspend, journal: Journal) -> bool:
         """Persist a suspension. Returns True if we should immediately re-enter the body."""

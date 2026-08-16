@@ -1,0 +1,53 @@
+name: Release
+
+# Triggered by pushing a tag (`git tag v0.12.0 && git push --tags`) or by
+# publishing a GitHub Release. Building and publishing are separate jobs so a
+# broken build fails loudly with no PyPI credentials in scope, and publishing
+# runs with the *build* job's artifact rather than rebuilding — what gets
+# uploaded is byte-for-byte what got checked.
+on:
+  push:
+    tags: ["v*.*.*"]
+  release:
+    types: [published]
+  workflow_dispatch: {} # manual re-run, e.g. after a PyPI outage
+
+permissions: {} # default-deny; each job grants only what it needs
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install --upgrade build twine
+      - run: python -m build
+      - run: python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  # Trusted Publishing (OIDC): no PyPI token lives in this repo. The `pypi`
+  # environment is a GitHub environment you can require reviewers on, so a tag
+  # push can build automatically while the actual upload still waits for a
+  # human — see the setup note in RELEASING.md.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/loomflow/
+    permissions:
+      id-token: write # required for PyPI Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

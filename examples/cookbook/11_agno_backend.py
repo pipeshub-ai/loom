@@ -30,7 +30,7 @@ async def lookup_release_notes(product: str) -> str:
         product: Product name to look up.
     """
     notes = {
-        "loom": "0.11.0 — unified toolset registry, saga compensation, blob offload.",
+        "loom": "0.0.1 — unified toolset registry, saga compensation, blob offload.",
         "python": "3.13 — free-threaded build, improved REPL, JIT groundwork.",
     }
     return notes.get(product.lower(), f"No release notes on file for {product!r}.")

@@ -50,6 +50,14 @@ SEAMS: dict[str, tuple[str, str]] = {
     "SpillStore": ("agents/bounds.py", "Where an oversized tool result is kept"),
     "EffectBroker": ("runtime/effects.py", "What every durable operation is weighed against"),
     "ExecutionSandbox": ("runtime/sandbox.py", "Where a workflow body is invoked"),
+    "EventLog": ("events/log.py", "The durable, resumable record of what the world said"),
+    "Checkpoints": ("events/log.py", "Where each subscriber has read to"),
+    "EventSource": ("events/sources.py", "Whether a delivery is really from the provider"),
+    "Reconciler": (
+        "events/reconcile.py",
+        "Turning a provider pointer into the events it stands for",
+    ),
+    "Watch": ("events/watch.py", "A provider-side subscription that expires"),
 }
 
 MARKER_BEGIN = "<!-- BEGIN GENERATED — do not edit below this line -->"

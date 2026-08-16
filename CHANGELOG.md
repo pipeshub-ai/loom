@@ -685,7 +685,7 @@ value — so the override is a narrow list rather than a family prefix. An expli
 - `ExecutionStore` gains `delete_execution`; `truncate_journal` is declared as
   `from_path: str`, matching every implementation.
 
-## [0.11.0] - 2026-08-11
+## [0.1.0] - 2026-08-11
 
 ### Added
 - `TriggerDispatcher` for routing events to workflow triggers
@@ -702,21 +702,21 @@ value — so the override is a narrow list rather than a family prefix. An expli
 - 14 cookbook examples covering sequential, parallel, durable sleep, error handling, human-in-the-loop, AI agents, coding agent, Jira, LangChain, Agno, PydanticAI, cron triggers, and workflow management
 - Workflow management tools (`list_runs`, `get_run`, `cancel_run`, `retry_run`)
 
-## [0.10.0]
+## [0.0.10]
 
 ### Added
 - Agent framework integration adapters (LangGraph, CrewAI, Pydantic AI, OpenAI Agents SDK, Claude SDK, Agno, AutoGen)
 - Conformance test suite for adapter correctness
 - Bi-directional tool conversion (LOOM tools to/from framework-native tools)
 
-## [0.9.0]
+## [0.0.9]
 
 ### Added
 - MCP server with tools, resources, and prompts for Claude Desktop and Cursor
 - stdio and SSE transports
 - Workflow introspection via MCP resources
 
-## [0.8.0]
+## [0.0.8]
 
 ### Added
 - 10 reference workflows ported from n8n/Gumloop patterns
@@ -724,7 +724,7 @@ value — so the override is a narrow list rather than a family prefix. An expli
 - Doc extraction, battle cards, meeting prep, Stripe ETL, PDF chatbot
 - Reference specs and reference test suite
 
-## [0.7.0]
+## [0.0.7]
 
 ### Added
 - Small model compatibility layer
@@ -733,7 +733,7 @@ value — so the override is a narrow list rather than a family prefix. An expli
 - Scaffolding engine for guided code generation
 - Code validator and repair pipeline
 
-## [0.6.0]
+## [0.0.6]
 
 ### Added
 - Template system for common workflow patterns
@@ -743,7 +743,7 @@ value — so the override is a narrow list rather than a family prefix. An expli
 - Drift detection for toolset manifests
 - Eval framework for generated workflows
 
-## [0.5.0]
+## [0.0.5]
 
 ### Added
 - `PostgresStore` and `MongoStore` (initial implementations)
@@ -755,7 +755,7 @@ value — so the override is a narrow list rather than a family prefix. An expli
 - Structural Replay for safe schema migration
 - RBAC grant system
 
-## [0.4.0]
+## [0.0.4]
 
 ### Added
 - Graph visualization via WGIR (Workflow Graph Intermediate Representation)
@@ -764,7 +764,7 @@ value — so the override is a narrow list rather than a family prefix. An expli
 - CI golden-set checks for visualization output
 - Canvas and run-trace views
 
-## [0.3.0]
+## [0.0.3]
 
 ### Added
 - Three-tier toolset disclosure (index, manifest, full docs)
@@ -774,7 +774,7 @@ value — so the override is a narrow list rather than a family prefix. An expli
 - Grant system for capability-based access control
 - `loom certify` CLI command
 
-## [0.2.0]
+## [0.0.2]
 
 ### Added
 - `AgentExecutor` protocol and `AgentDefinition` registry
@@ -784,7 +784,7 @@ value — so the override is a narrow list rather than a family prefix. An expli
 - Coding agent (initial version)
 - Mock run system for testing agent workflows
 
-## [0.1.0]
+## [0.0.1]
 
 ### Added
 - Core runtime engine with deterministic re-entry

@@ -38,6 +38,7 @@ from loom.agents.output import FINAL_OUTPUT_TOOL, OutputMode, OutputSpec
 from loom.agents.result import AgentResult, ItemKind, RunItem
 from loom.agents.tools import Tool, ToolContext
 from loom.core.exceptions import (
+    AgentStopped,
     GuardrailTripwire,
     ModelBehaviorError,
     ModelRetry,
@@ -93,6 +94,73 @@ class BuiltInAgentRuntime:
         output_type: type[BaseModel] | None = None,
         settings: AgentSettings | None = None,
         context: AgentContext | None = None,
+    ) -> AgentResult[Any]:
+        """Run the turn loop, with agent-family hooks around it.
+
+        Wrapping here rather than at each of the loop's three returns means
+        "the agent finished" is one place and every exit is covered by
+        construction. The whole run is a single journal entry, so none of this
+        is reached on a replay.
+        """
+        hooks = getattr(context, "hooks", None)
+        if hooks is None or not hooks.has_agent:
+            return await self._execute_inner(
+                input,
+                tools=tools,
+                output_type=output_type,
+                settings=settings,
+                context=context,
+            )
+
+        from loom.runtime.hooks import AgentHookContext
+
+        run_id = getattr(context, "run_id", "")
+        opening = AgentHookContext(
+            agent_name=self._agent.name, run_id=run_id, input=input
+        )
+        await hooks.dispatch_agent("agent_start", opening)
+
+        turns = _Turns(hooks, self._agent.name, run_id)
+        try:
+            result = await self._execute_inner(
+                input,
+                tools=tools,
+                output_type=output_type,
+                settings=settings,
+                context=context,
+                turns=turns,
+            )
+        except BaseException as exc:
+            await turns.close()
+            await hooks.dispatch_agent(
+                "agent_end",
+                AgentHookContext(
+                    agent_name=self._agent.name, run_id=run_id, input=input, error=exc
+                ),
+            )
+            raise
+        await turns.close()
+        await hooks.dispatch_agent(
+            "agent_end",
+            AgentHookContext(
+                agent_name=self._agent.name,
+                run_id=run_id,
+                input=input,
+                result=result,
+                turn=result.turns,
+            ),
+        )
+        return result
+
+    async def _execute_inner(
+        self,
+        input: Any,
+        *,
+        tools: list[Tool] | None = None,
+        output_type: type[BaseModel] | None = None,
+        settings: AgentSettings | None = None,
+        context: AgentContext | None = None,
+        turns: _Turns | None = None,
     ) -> AgentResult[Any]:
         """Run the turn loop to completion."""
         agent = self._agent
@@ -188,6 +256,9 @@ class BuiltInAgentRuntime:
             turn += 1
             limits.check_turn(turn)
             limits.check_usage(cumulative_usage)
+            if turns is not None:
+                await turns.begin(turn, messages)
+                turns.check(turn)
 
             # Model call
             request = ModelRequest(
@@ -201,7 +272,14 @@ class BuiltInAgentRuntime:
                     else None
                 ),
             )
+            if turns is not None:
+                # `messages` is mutated in place by the hook, so the request is
+                # rebuilt from it rather than reusing the one composed above.
+                await turns.before_model(turn, messages)
+                request = request.model_copy(update={"messages": messages})
             response = await agent.model.complete(request)
+            if turns is not None:
+                await turns.after_model(turn, messages, response)
             cumulative_usage.add(response.usage)
             cumulative_usage.cost_usd = estimate_cost(
                 response.model or agent.model.model_name, cumulative_usage
@@ -409,6 +487,98 @@ class BuiltInAgentRuntime:
             )
 
 
+class _Turns:
+    """Fires ``turn_start``/``turn_end`` exactly once per turn.
+
+    A ``try/finally`` around the loop body would be the obvious implementation
+    and would mean re-indenting two hundred lines of working turn loop. This
+    closes the previous turn when the next one opens, and the caller closes the
+    last one on the way out — so every exit from the loop, including the three
+    ``return``s and any raise, still produces exactly one ``turn_end`` per
+    ``turn_start``.
+    """
+
+    __slots__ = (
+        "_agent_name",
+        "_hooks",
+        "_messages",
+        "_open",
+        "_run_id",
+        "stop_reason",
+        "stopped",
+    )
+
+    def __init__(self, hooks: Any, agent_name: str, run_id: str) -> None:
+        self._hooks = hooks
+        self._agent_name = agent_name
+        self._run_id = run_id
+        self._open = 0
+        self._messages: list[Any] = []
+        self.stopped = False
+        self.stop_reason = ""
+
+    def _ctx(self, turn: int, **kw: Any) -> Any:
+        from loom.runtime.hooks import AgentHookContext
+
+        return AgentHookContext(
+            agent_name=self._agent_name, run_id=self._run_id, turn=turn, **kw
+        )
+
+    async def begin(self, turn: int, messages: list[Any]) -> None:
+        await self.close()
+        self._open = turn
+        self._messages = messages
+        await self._hooks.dispatch_agent(
+            "turn_start", self._ctx(turn, messages=messages)
+        )
+
+    async def close(self, response: Any = None) -> None:
+        if not self._open:
+            return
+        turn, self._open = self._open, 0
+        ctx = self._ctx(turn, messages=self._messages, response=response)
+        await self._hooks.dispatch_agent("turn_end", ctx)
+        self._note_stop(ctx)
+
+    def _note_stop(self, ctx: Any) -> None:
+        """Remember a hook's request to end the loop.
+
+        Recorded rather than acted on here, because a hook asking to stop is
+        asking for the loop to end after this turn — not for the turn it is
+        observing to be abandoned halfway through.
+        """
+        if getattr(ctx, "stopped", False) and not self.stopped:
+            self.stopped = True
+            self.stop_reason = ctx.stop_reason
+
+    def check(self, turn: int) -> None:
+        """Raise if a hook asked to stop. Called at the top of the next turn."""
+        if self.stopped:
+            raise AgentStopped(
+                f"agent '{self._agent_name}' was stopped by a hook after turn "
+                f"{turn - 1}" + (f": {self.stop_reason}" if self.stop_reason else ""),
+                turn=turn - 1,
+                reason=self.stop_reason,
+            )
+
+    async def before_model(self, turn: int, messages: list[Any]) -> None:
+        """Where message shaping happens — compaction, trimming, redaction.
+
+        The list is mutated in place by the hook and the request rebuilt from
+        it, so a middleware that reassigns rather than mutates is a no-op. That
+        is the one sharp edge of this event and it is documented on
+        ``AgentHookContext.messages``.
+        """
+        await self._hooks.dispatch_agent(
+            "model_start", self._ctx(turn, messages=messages)
+        )
+
+    async def after_model(self, turn: int, messages: list[Any], response: Any) -> None:
+        ctx = self._ctx(turn, messages=messages, response=response)
+        await self._hooks.dispatch_agent("model_end", ctx)
+        self._note_stop(ctx)
+
+
 async def _dispatch_tool(
     tool: Tool,
     call: ToolCall,
@@ -494,5 +664,6 @@ async def run_agent_durably(
         deps=ctx.deps,
         workflow_ctx=ctx,
         spill=ctx._runtime.spill,
+        hooks=ctx._runtime.hooks,
     )
     return await agent(input, settings=settings, context=context)

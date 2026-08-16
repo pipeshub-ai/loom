@@ -540,7 +540,9 @@ class TestCmdServeRefusesUnauthenticatedNetworkBinds:
             ran["called"] = True
 
         monkeypatch.setattr(commands, "resolve", lambda *a, **k: _fake_target())
-        import uvicorn
+        uvicorn = pytest.importorskip(
+            "uvicorn", reason="cmd_serve imports it; the api extra brings it"
+        )
 
         monkeypatch.setattr(uvicorn, "run", fake_run)
 

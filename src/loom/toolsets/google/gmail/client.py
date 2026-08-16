@@ -9,17 +9,21 @@ sending.
 from __future__ import annotations
 
 import base64
+from datetime import UTC, datetime
 from email.message import EmailMessage as MIMEMessage
 from email.utils import getaddresses
 from typing import TYPE_CHECKING, Any
 
+from loom.toolsets.google.errors import GmailHistoryExpired, GoogleAPIError
 from loom.toolsets.google.gmail.models import (
     AttachmentRef,
     EmailMessage,
     EmailThread,
     GmailDraft,
+    GmailHistory,
     GmailLabel,
     GmailProfile,
+    GmailWatch,
     MessageRef,
     SentMessage,
 )
@@ -498,10 +502,145 @@ class GmailClient:
             threads_total=int(data.get("threadsTotal", 0) or 0),
         )
 
+    # -- push notifications --------------------------------------------------
+    #
+    # Not exposed as agent tools. Registering a mailbox for push and reading
+    # its change history are *operational* acts performed by the event source
+    # and its renewal task; putting them in front of a model would let one
+    # re-point a production mailbox's notifications at another Pub/Sub topic.
+
+    async def watch(
+        self,
+        topic_name: str,
+        *,
+        label_ids: list[str] | None = None,
+        label_filter_behavior: str = "include",
+    ) -> GmailWatch:
+        """Register this mailbox for push notifications. **Expires in 7 days.**
+
+        The expiry is the single most important fact about this call: Google
+        stops sending, nothing errors, and an idle mailbox is indistinguishable
+        from a broken one. Google's own guidance is to re-call this at least
+        daily, which is what :class:`~loom.events.watch.WatchRenewer` does — a
+        cadence well inside the lifetime, so several consecutive failures are
+        survivable.
+
+        *topic_name* is the full Pub/Sub resource
+        (``projects/{project}/topics/{topic}``), and the Gmail service account
+        must hold Publish on it; without that the call fails with a permission
+        error that names the topic rather than the grant.
+
+        ``label_ids`` is provider-side filtering — the cheapest of the three
+        placements, because a rejected event is never sent at all.
+        """
+        body: dict[str, Any] = {"topicName": topic_name}
+        if label_ids:
+            body["labelIds"] = label_ids
+            body["labelFilterBehavior"] = label_filter_behavior.upper()
+        data = await self._session.post(f"users/{self._user}/watch", json=body)
+        return GmailWatch(
+            history_id=str(data.get("historyId", "")),
+            expiration=_epoch_ms(data.get("expiration")),
+        )
+
+    async def stop_watch(self) -> None:
+        """Stop push notifications for this mailbox."""
+        await self._session.post(f"users/{self._user}/stop")
+
+    async def list_history(
+        self,
+        start_history_id: str,
+        *,
+        max_results: int = 100,
+        history_types: list[str] | None = None,
+        label_id: str = "",
+    ) -> GmailHistory:
+        """What changed since *start_history_id*.
+
+        The other half of the pointer shape: a push notification carries only a
+        ``historyId``, so this is what turns it back into events.
+
+        **A history id Google no longer holds raises**
+        :class:`GmailHistoryExpired`, not an empty list. Gmail retains history
+        for about a week and less under heavy mailbox activity, and it answers
+        404 for anything older. Returning ``[]`` there would read as "nothing
+        happened", which is exactly the case where a great deal happened and we
+        cannot say what.
+        """
+        params: dict[str, Any] = {
+            "startHistoryId": start_history_id,
+            "maxResults": max_results,
+        }
+        if history_types:
+            params["historyTypes"] = history_types
+        if label_id:
+            params["labelId"] = label_id
+
+        # Paged by hand rather than through `paginate`, because the value that
+        # matters most is not in the items: `historyId` sits at the top level of
+        # each page and is the *next* cursor to store. `paginate` returns rows
+        # and a page token, so the field a caller must persist would be dropped
+        # — and the next poll would then re-read from the old id forever.
+        records: list[dict[str, Any]] = []
+        latest = start_history_id
+        token: str | None = None
+        complete = True
+
+        while True:
+            query = dict(params)
+            if token:
+                query["pageToken"] = token
+            try:
+                page = await self._session.get(
+                    f"users/{self._user}/history", **query
+                )
+            except GoogleAPIError as exc:
+                if exc.status == 404:
+                    raise GmailHistoryExpired(
+                        f"Gmail no longer holds history from "
+                        f"{start_history_id}. History is retained for about a "
+                        "week, and less on a busy mailbox, so this means "
+                        "changes happened that cannot be enumerated — not that "
+                        "none did. Recover with a full resync from the current "
+                        "historyId and record the gap.",
+                        status=404,
+                    ) from exc
+                raise
+
+            records.extend(page.get("history") or [])
+            latest = str(page.get("historyId") or latest)
+            token = page.get("nextPageToken")
+            if not token:
+                break
+            if len(records) >= max_results:
+                complete = False
+                break
+
+        return GmailHistory(
+            start_history_id=start_history_id,
+            history_id=latest,
+            records=records,
+            complete=complete,
+        )
+
 
 # ---------------------------------------------------------------------------
 # MIME
 # ---------------------------------------------------------------------------
+
+
+def _epoch_ms(value: Any) -> datetime | None:
+    """Gmail returns ``expiration`` as epoch **milliseconds**, as a string.
+
+    Both halves catch people out: read as seconds it lands in 1970, and it
+    arrives quoted, so arithmetic on it silently concatenates.
+    """
+    if value in (None, ""):
+        return None
+    try:
+        return datetime.fromtimestamp(int(value) / 1000, tz=UTC)
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
 
 
 def build_mime(

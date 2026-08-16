@@ -26,7 +26,7 @@ from loom.toolsets.manifest import ToolsetManifest
 from loom.toolsets.registry import register_toolset
 from loom.triggers.filter import FilterSpec
 
-__version__ = "0.11.0"
+__version__ = "0.1.0"
 
 __all__ = [
     "AdmissionController",

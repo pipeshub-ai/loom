@@ -9,6 +9,8 @@ say". These models are the flattened form, and the client does the walk once.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
@@ -16,8 +18,10 @@ __all__ = [
     "EmailMessage",
     "EmailThread",
     "GmailDraft",
+    "GmailHistory",
     "GmailLabel",
     "GmailProfile",
+    "GmailWatch",
     "MessageRef",
     "SentMessage",
 ]
@@ -164,3 +168,65 @@ class GmailDraft(BaseModel):
 
 EmailMessage.model_rebuild()
 EmailThread.model_rebuild()
+
+
+class GmailWatch(BaseModel):
+    """A registration for push notifications on one mailbox.
+
+    Two fields, and both are load-bearing. ``history_id`` is where reading
+    should start — a watch established *now* says nothing about what happened
+    before it. ``expiration`` is when Google stops sending, which it does
+    silently: no error, no final notification, just an inbox that appears to
+    have gone quiet.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    history_id: str
+    expiration: datetime | None = None
+    """Never more than seven days out. Renewal cadence must be a fraction of
+    it, so that several consecutive failures do not add up to a lapse."""
+
+    def expires_within(self, seconds: float, *, now: datetime | None = None) -> bool:
+        """Whether this needs renewing. ``True`` when the expiry is unknown —
+        a watch that cannot prove it is alive is treated as dying, because the
+        cost of an unnecessary renewal is one API call and the cost of a missed
+        one is a silent week."""
+        if self.expiration is None:
+            return True
+        current = now or datetime.now(UTC)
+        return (self.expiration - current).total_seconds() <= seconds
+
+
+class GmailHistory(BaseModel):
+    """What changed in a mailbox between two history ids."""
+
+    model_config = ConfigDict(frozen=True)
+
+    start_history_id: str
+    history_id: str
+    """Where the next read starts. Persist this, not ``start_history_id``."""
+    records: list[dict] = Field(default_factory=list)
+    """Raw history records. Deliberately not flattened into typed models: Gmail
+    adds history types over time, and a model that dropped an unknown one would
+    silently lose changes rather than pass them through."""
+    complete: bool = True
+    """``False`` when the read stopped at its limit. The caller must page again
+    before advancing anything, or it will skip what it did not fetch."""
+
+    @property
+    def message_ids(self) -> list[str]:
+        """Every message id mentioned, in order, without duplicates.
+
+        One message appears under several history records — added, then
+        labelled, then labelled again — and a workflow wants the message once.
+        """
+        seen: dict[str, None] = {}
+        for record in self.records:
+            for kind in ("messagesAdded", "messagesDeleted",
+                         "labelsAdded", "labelsRemoved"):
+                for item in record.get(kind) or []:
+                    message = item.get("message") or {}
+                    if message.get("id"):
+                        seen.setdefault(str(message["id"]), None)
+        return list(seen)
