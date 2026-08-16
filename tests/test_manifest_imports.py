@@ -13,15 +13,48 @@ from typing import ClassVar
 
 import pytest
 
+from loom.toolsets.asana.manifest import ASANA_MANIFEST
+from loom.toolsets.clickup.manifest import CLICKUP_MANIFEST
 from loom.toolsets.confluence.manifest import CONFLUENCE_MANIFEST
-from loom.toolsets.google import GMAIL_MANIFEST, GOOGLE_CALENDAR_MANIFEST
+from loom.toolsets.duckduckgo.manifest import DUCKDUCKGO_MANIFEST
+from loom.toolsets.exa.manifest import EXA_MANIFEST
+from loom.toolsets.github.manifest import GITHUB_MANIFEST
+from loom.toolsets.gitlab.manifest import GITLAB_MANIFEST
+from loom.toolsets.google import (
+    GMAIL_MANIFEST,
+    GOOGLE_CALENDAR_MANIFEST,
+    GOOGLE_DRIVE_MANIFEST,
+    GOOGLE_MEET_MANIFEST,
+)
+from loom.toolsets.hubspot.manifest import HUBSPOT_MANIFEST
 from loom.toolsets.jira.manifest import JIRA_MANIFEST
+from loom.toolsets.microsoft.onedrive.manifest import ONEDRIVE_MANIFEST
+from loom.toolsets.microsoft.sharepoint.manifest import SHAREPOINT_MANIFEST
+from loom.toolsets.salesforce.manifest import SALESFORCE_MANIFEST
+from loom.toolsets.slack.manifest import SLACK_MANIFEST
+from loom.toolsets.tavily.manifest import TAVILY_MANIFEST
+from loom.toolsets.zoom.manifest import ZOOM_MANIFEST
 
 FIRST_PARTY = [
     GMAIL_MANIFEST,
     GOOGLE_CALENDAR_MANIFEST,
+    GOOGLE_DRIVE_MANIFEST,
+    GOOGLE_MEET_MANIFEST,
     JIRA_MANIFEST,
     CONFLUENCE_MANIFEST,
+    CLICKUP_MANIFEST,
+    ASANA_MANIFEST,
+    SALESFORCE_MANIFEST,
+    HUBSPOT_MANIFEST,
+    GITHUB_MANIFEST,
+    GITLAB_MANIFEST,
+    ONEDRIVE_MANIFEST,
+    SHAREPOINT_MANIFEST,
+    SLACK_MANIFEST,
+    ZOOM_MANIFEST,
+    EXA_MANIFEST,
+    TAVILY_MANIFEST,
+    DUCKDUCKGO_MANIFEST,
 ]
 
 
@@ -138,6 +171,89 @@ class TestGeneratedDocs:
         assert "Import:" not in docs
 
 
+@pytest.mark.parametrize("manifest", FIRST_PARTY, ids=lambda m: m.id)
+class TestDeclaredOutputSchemasAreWellFormed:
+    """What every manifest's ``_array`` helper exists to produce.
+
+    Each toolset builds its ``output_schema`` from a Pydantic model, through a
+    two-line local helper. The helper was annotated ``model: type`` — wide
+    enough to accept any class at all, while calling ``model_json_schema()``,
+    a Pydantic classmethod, on it. Passing the wrong thing was therefore an
+    ``AttributeError`` raised from inside a manifest at *import* time, which is
+    the moment the toolset registry reads it: the toolset does not fail to
+    describe itself, it fails to exist.
+
+    Typing it ``type[BaseModel]`` moves that to the type checker. This checks
+    the property from the other end — that what comes out is a JSON Schema the
+    coding agent and the fake generator can actually use — because the
+    annotation only constrains the callers mypy can see.
+    """
+
+    def test_every_declared_schema_is_a_json_schema(self, manifest) -> None:
+        bad = [
+            f"{op.id}: {op.output_schema!r}"
+            for op in manifest.all_operations()
+            if op.output_schema and "type" not in op.output_schema
+        ]
+        assert not bad, f"{manifest.id} declares a schema with no type:\n  " + "\n  ".join(bad)
+
+    def test_an_array_schema_says_what_it_is_an_array_of(self, manifest) -> None:
+        """The half a bare ``{"type": "array"}`` loses.
+
+        ``Results[T]`` and ``list[T]`` are where the fake generator learns what
+        a row looks like; an array with no ``items`` generates fakes of nothing
+        and the smoke test proves correspondingly little.
+        """
+        bad = []
+        for op in manifest.all_operations():
+            schema = op.output_schema
+            if schema.get("type") != "array":
+                continue
+            items = schema.get("items")
+            if not isinstance(items, dict) or not (
+                items.get("type") or items.get("properties") or items.get("$ref")
+            ):
+                bad.append(f"{op.id}: items={items!r}")
+        assert not bad, f"{manifest.id} declares a shapeless array:\n  " + "\n  ".join(bad)
+
+    def test_a_typed_return_is_not_declared_as_a_shapeless_object(
+        self, manifest
+    ) -> None:
+        """``{"type": "object"}`` is honest for a genuinely free-form return.
+
+        ``salesforce_describe_object`` hands back an org's own field metadata
+        and ``zoom_get_past_meeting`` whatever Zoom sends; both are annotated
+        ``dict``, and inventing properties for them would be worse than
+        declaring none. So the check is not "objects must have properties" —
+        it is that an operation whose tool returns a *Pydantic model* must say
+        so, because there the schema was available and got dropped.
+        """
+        import importlib
+        import typing
+
+        from pydantic import BaseModel
+
+        module = importlib.import_module(manifest.tools_module)
+        bad = []
+        for op in manifest.all_operations():
+            schema = op.output_schema
+            if schema.get("type") != "object" or schema.get("properties"):
+                continue
+            fn = getattr(module, op.function, None) if op.function else None
+            if fn is None:
+                continue
+            try:
+                returns = typing.get_type_hints(getattr(fn, "fn", fn)).get("return")
+            except Exception:
+                continue
+            if isinstance(returns, type) and issubclass(returns, BaseModel):
+                bad.append(f"{op.id}: {op.function} returns {returns.__name__}")
+        assert not bad, (
+            f"{manifest.id} declares a shapeless object for a typed return:\n  "
+            + "\n  ".join(bad)
+        )
+
+
 class TestPaginationIsDeclaredWhereItHappens:
     """One rule, checked mechanically, across every toolset there will ever be.
 
@@ -152,12 +268,15 @@ class TestPaginationIsDeclaredWhereItHappens:
     """
 
     def _manifests(self):
-        return [
-            JIRA_MANIFEST,
-            CONFLUENCE_MANIFEST,
-            GMAIL_MANIFEST,
-            GOOGLE_CALENDAR_MANIFEST,
-        ]
+        """The same list the rest of this file checks.
+
+        It used to be a second copy, and the copies drifted the moment a
+        toolset was added: the new one appeared in FIRST_PARTY, passed every
+        import check, and was silently skipped by the paging checks here —
+        which are the ones that found six real drifts. One list, so adding a
+        toolset cannot half-enrol it.
+        """
+        return FIRST_PARTY
 
     def _resolve(self, manifest, op):
         import importlib
@@ -171,6 +290,21 @@ class TestPaginationIsDeclaredWhereItHappens:
         "confluence": "loom.toolsets.confluence.client",
         "gmail": "loom.toolsets.google.gmail.client",
         "google_calendar": "loom.toolsets.google.calendar.client",
+        "google_drive": "loom.toolsets.google.drive.client",
+        "google_meet": "loom.toolsets.google.meet.client",
+        "clickup": "loom.toolsets.clickup.client",
+        "asana": "loom.toolsets.asana.client",
+        "salesforce": "loom.toolsets.salesforce.client",
+        "hubspot": "loom.toolsets.hubspot.client",
+        "github": "loom.toolsets.github.client",
+        "gitlab": "loom.toolsets.gitlab.client",
+        "onedrive": "loom.toolsets.microsoft.onedrive.client",
+        "sharepoint": "loom.toolsets.microsoft.sharepoint.client",
+        "slack": "loom.toolsets.slack.client",
+        "zoom": "loom.toolsets.zoom.client",
+        "exa": "loom.toolsets.exa.client",
+        "tavily": "loom.toolsets.tavily.client",
+        "duckduckgo": "loom.toolsets.duckduckgo.client",
     }
 
     def _client_pages(self, module_name: str) -> set[str]:
@@ -272,3 +406,73 @@ class TestPaginationIsDeclaredWhereItHappens:
         # The how-to is in the catalog header, once, not once per toolset.
         assert ".complete" in docs
         assert docs.count("Bounded set — one call") == 1
+
+
+class TestNoToolShadowsCtxStepsOwnArguments:
+    """A tool parameter that ``ctx.step`` already claims cannot be passed.
+
+    ``Context.step(target, /, *args, name=…, retry=…, timeout=…, on_error=…,
+    fallback=…)`` takes those names for itself, so a tool declaring one of them
+    is unreachable by keyword: ``ctx.step(create_task, name="Fix login")`` binds
+    ``name`` to the *step name override* and the tool is then called with the
+    argument missing. The failure is a TypeError deep inside the step, which
+    reads as a broken tool rather than as a shadowed keyword.
+
+    Positional calls still work, which is exactly why this survives review.
+    """
+
+    #: Reserved by ``ctx.step`` itself.
+    SHADOWED: ClassVar[frozenset[str]] = frozenset(
+        {"name", "retry", "timeout", "on_error", "fallback"}
+    )
+
+    #: Offenders that predate this check, named rather than excluded silently.
+    #:
+    #: Each of these is genuinely unreachable by keyword today. Renaming them
+    #: changes a published signature, so it is a decision to take deliberately
+    #: rather than as a drive-by fix — and Meet's ``name`` is the API's own
+    #: resource name (``spaces/abc``), so the rename there is not obvious
+    #: either. Listing them keeps the gap visible: an empty exclusion list and
+    #: a green test would claim coverage this does not have.
+    KNOWN: ClassVar[frozenset[str]] = frozenset(
+        {
+            # gmail
+            "gmail_create_label",
+            "gmail_rename_label",
+            # google_drive
+            "drive_copy_file",
+            "drive_create_folder",
+            "drive_find_folder",
+            "drive_rename_file",
+            "drive_upload_file",
+            # google_meet — `name` is the API's own resource name (spaces/abc),
+            # so even the rename is not obvious here.
+            "meet_end_active_conference",
+            "meet_get_conference_record",
+            "meet_get_space",
+            "meet_update_space",
+            # jira
+            "jira_resolve_user",
+        }
+    )
+
+    def test_no_first_party_tool_declares_a_shadowed_parameter(self) -> None:
+        import importlib
+        import inspect
+
+        offenders: list[str] = []
+        for manifest in FIRST_PARTY:
+            module = importlib.import_module(manifest.tools_module)
+            for op in manifest.all_operations():
+                fn = getattr(module, op.function, None) if op.function else None
+                if fn is None or op.function in self.KNOWN:
+                    continue
+                target = getattr(fn, "fn", fn)
+                shadowed = self.SHADOWED & set(inspect.signature(target).parameters)
+                if shadowed:
+                    offenders.append(f"{op.function}: {sorted(shadowed)}")
+
+        assert not offenders, (
+            "these tools declare a parameter ctx.step reserves, so it cannot "
+            "be passed by keyword:\n  " + "\n  ".join(offenders)
+        )

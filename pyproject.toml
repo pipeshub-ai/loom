@@ -60,6 +60,13 @@ identity = ["pyjwt[crypto]>=2.9"]
 # and works with the core install alone.
 credentials = ["keyring>=25", "cryptography>=43"]
 
+# Web search. Exa and Tavily are plain HTTP APIs and need nothing extra;
+# DuckDuckGo publishes no web-search API, so that toolset rides on `ddgs`,
+# which parses search result pages. Optional for exactly that reason — it is a
+# different reliability contract from the other two, and nobody should acquire
+# it by installing the core package.
+duckduckgo = ["ddgs>=9.0"]
+
 # Model providers
 anthropic = ["anthropic>=0.40"]
 openai = ["openai>=1.60"]
@@ -119,7 +126,7 @@ dev = [
 
 # Install everything
 all = [
-    "loomflow[mongo,postgres,s3,azure,gcs,google,identity,credentials,anthropic,openai,gemini,langchain,api,cli,tui,mcp]"
+    "loomflow[mongo,postgres,s3,azure,gcs,google,identity,credentials,anthropic,openai,gemini,langchain,duckduckgo,api,cli,tui,mcp]"
 ]
 
 [project.urls]
@@ -144,6 +151,9 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "slow: spawns a real process (signal handling); deselect with -m 'not slow'",
+]
 
 [tool.ruff]
 target-version = "py311"

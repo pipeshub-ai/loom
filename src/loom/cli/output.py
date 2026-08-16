@@ -27,6 +27,11 @@ class Exit(IntEnum):
     ``SUSPENDED`` is the one that matters. A run parked for three weeks waiting
     on a human has neither succeeded nor failed, and collapsing it into either
     makes calling scripts do the wrong thing.
+
+    ``INTERRUPTED`` follows the shell's convention of ``128 + signum`` rather
+    than joining the small numbers above, and is 130 for a Ctrl+C and 143 for a
+    ``docker stop``. Reporting either as ``USAGE`` — which is what happened
+    before — tells a calling script to go fix its arguments.
     """
 
     OK = 0
@@ -34,6 +39,7 @@ class Exit(IntEnum):
     USAGE = 2
     SUSPENDED = 3
     CANCELLED = 4
+    INTERRUPTED = 130
 
 
 #: Terminal run statuses mapped to the code the process should exit with.

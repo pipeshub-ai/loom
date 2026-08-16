@@ -27,6 +27,7 @@ Wait for *seconds*, however this clock understands waiting.
 
 - `connectors.credentials`
 - `connectors.oauth_client`
+- `connectors.refresh`
 - `runtime.engine`
 - `toolsets.connections`
 

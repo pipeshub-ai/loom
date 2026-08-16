@@ -19,8 +19,6 @@ Run:
 
 from __future__ import annotations
 
-import asyncio
-
 from pydantic import BaseModel, Field
 
 from loom import Context, Runtime, step, workflow
@@ -120,25 +118,25 @@ async def main() -> None:
     print("\nAnd this is what the coding agent writes from — code, not schema:\n")
     print(catalog.contract("custom.sla_check"))
 
-    runtime = Runtime(store=MemoryStore())
-    runtime.register(triage_ticket)
+    async with Runtime(store=MemoryStore()) as runtime:
+        runtime.register(triage_ticket)
 
-    print("\nCalling it:\n")
-    for age in (20.0, 30.0):
-        result = await runtime.run(triage_ticket, age)
-        print(f"  {age:>4}h open -> {result.output}")
+        print("\nCalling it:\n")
+        for age in (20.0, 30.0):
+            result = await runtime.run(triage_ticket, age)
+            print(f"  {age:>4}h open -> {result.output}")
 
-    # The body's own step journals *beneath* the node, so a node adds packaging
-    # and no new durability semantics.
-    entries = await runtime.store.load_journal(result.run_id)
-    print("\nJournal:")
-    for entry in entries:
-        print(f"  {entry.path:<5} {entry.kind.value:<6} {entry.name}")
+        # The body's own step journals *beneath* the node, so a node adds
+        # packaging and no new durability semantics.
+        entries = await runtime.store.load_journal(result.run_id)
+        print("\nJournal:")
+        for entry in entries:
+            print(f"  {entry.path:<5} {entry.kind.value:<6} {entry.name}")
 
     print("\nRegistration is global by default. Keep one local to a Runtime:")
-    isolated = Runtime(store=MemoryStore(), nodes=NodeRegistry())
-    isolated.nodes.register_node(SlaCheckNode)
-    print(f"  local registry sees: {isolated.nodes.node_ids()}")
+    async with Runtime(store=MemoryStore(), nodes=NodeRegistry()) as isolated:
+        isolated.nodes.register_node(SlaCheckNode)
+        print(f"  local registry sees: {isolated.nodes.node_ids()}")
 
     print("\nTo ship it in a package, one entry point makes it installable:")
     print('  [project.entry-points.loom_node]')
@@ -146,4 +144,9 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    from loom.runtime.shutdown import run_main
+
+    # run_main is asyncio.run plus the two things a program needs: SIGINT and
+    # SIGTERM cancel main() so its cleanup runs, and an interrupt becomes an
+    # exit code instead of a traceback.
+    raise SystemExit(run_main(main()))

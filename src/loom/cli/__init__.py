@@ -21,6 +21,7 @@ Exit codes are part of the contract:
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
 
 from loom import __version__
@@ -41,6 +42,8 @@ _HANDLERS = {
     "approve": commands.cmd_approve,
     "pending": commands.cmd_pending,
     "respond": commands.cmd_respond,
+    "toolsets": commands.cmd_toolsets,
+    "toolset": commands.cmd_toolset,
     "nodes": commands.cmd_nodes,
     "node": commands.cmd_node,
     "send": commands.cmd_send,
@@ -56,6 +59,7 @@ _HANDLERS = {
     "login": auth_commands.cmd_login,
     "logout": auth_commands.cmd_logout,
     "whoami": auth_commands.cmd_whoami,
+    "refresh": auth_commands.cmd_refresh,
     "connect": auth_commands.cmd_connect,
     "disconnect": auth_commands.cmd_disconnect,
     "providers": auth_commands.cmd_providers,
@@ -64,7 +68,32 @@ _HANDLERS = {
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Parse arguments and dispatch. Returns a process exit code."""
+    """Parse arguments and dispatch. Returns a process exit code.
+
+    Wrapped so that no window is uncovered. ``run_async`` handles a signal that
+    lands while a command's event loop is running, which is most of them; this
+    covers the rest — the startup imports (long enough that a Ctrl+C there used
+    to print forty frames of ``dataclasses.py``), argument parsing, and the
+    commands that never open a loop at all.
+
+    ``terminate_on`` is a fallback, not a claim on the process: a server started
+    below installs its own handlers and gets them back on the way out. uvicorn
+    and FastMCP both do, and both already shut down cleanly.
+    """
+    from loom.runtime.shutdown import Interrupted, terminate_on
+
+    with terminate_on(signal.SIGTERM):
+        try:
+            return _dispatch(argv)
+        except Interrupted as stop:
+            commands.interrupted(stop.exit_code)
+            return stop.exit_code
+        except KeyboardInterrupt:
+            commands.interrupted(Exit.INTERRUPTED)
+            return Exit.INTERRUPTED
+
+
+def _dispatch(argv: list[str] | None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -307,6 +336,18 @@ def _serving(sub: argparse._SubParsersAction) -> None:
     _add_backend(workflows)
     _add_output(workflows)
 
+    toolsets = sub.add_parser(
+        "toolsets", help="List integrations a workflow or agent can call"
+    )
+    toolsets.add_argument("query", nargs="?", help="Keywords to match")
+    _add_output(toolsets)
+
+    toolset = sub.add_parser(
+        "toolset", help="Show one toolset, its operations and import line"
+    )
+    toolset.add_argument("toolset_id", help="Toolset id, e.g. salesforce")
+    _add_output(toolset)
+
     nodes = sub.add_parser("nodes", help="List catalogued nodes a workflow can call")
     nodes.add_argument("query", nargs="?", help="Keywords to match")
     nodes.add_argument(
@@ -439,6 +480,21 @@ def _authenticating(sub: argparse._SubParsersAction) -> None:
 
     whoami = sub.add_parser("whoami", help="Show what this CLI is connected to")
     _add_output(whoami)
+
+    refresh = sub.add_parser(
+        "refresh", help="Renew stored OAuth credentials that are near expiry"
+    )
+    refresh.add_argument(
+        "name",
+        nargs="*",
+        help="Credential names to renew. Defaults to every stored credential.",
+    )
+    refresh.add_argument(
+        "--force",
+        action="store_true",
+        help="Renew even when not yet due, ignoring the retry backoff",
+    )
+    _add_output(refresh)
 
     connect = sub.add_parser(
         "connect", help="Authenticate a named credential (e.g. a toolset) via OAuth"

@@ -155,6 +155,26 @@ class ResourceUnavailable(WorkflowError):  # noqa: N818
     """A required resource (connection pool, external service, lock) is unavailable."""
 
 
+class ConcurrentUpdateError(WorkflowError):
+    """A conditional ``update_execution(..., expected_status=...)`` lost a race.
+
+    Raised when another process already moved the record off the status this
+    caller expected — most commonly two instances both resuming the same
+    ``SUSPENDED`` run from the same delivered event. The loser must not
+    re-enter the workflow body: doing so would replay from a journal the
+    winner is concurrently appending to, corrupting it via last-writer-wins.
+    """
+
+    def __init__(self, run_id: str, *, expected: str, actual: str | None = None) -> None:
+        super().__init__(
+            f"run {run_id}: expected status {expected!r} but store has "
+            f"{actual!r} — another process already advanced this run"
+        )
+        self.run_id = run_id
+        self.expected = expected
+        self.actual = actual
+
+
 # --------------------------------------------------------------------------------------
 # Control-flow signals (BaseException on purpose)
 # --------------------------------------------------------------------------------------
@@ -330,6 +350,7 @@ __all__ = [
     "BackendCapabilityError",
     "BudgetExceeded",
     "ConcurrencyLimitExceeded",
+    "ConcurrentUpdateError",
     "ConfigurationError",
     "ContinueAsNew",
     "ContractChanged",

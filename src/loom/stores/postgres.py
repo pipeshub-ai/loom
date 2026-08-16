@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from loom.core.exceptions import ConcurrentUpdateError
 from loom.core.models import (
     Event,
     ExecutionRecord,
@@ -172,8 +173,37 @@ class PostgresStore:
             return None
         return ExecutionRecord.model_validate_json(row["data"])
 
-    async def update_execution(self, record: ExecutionRecord) -> None:
-        await self.create_execution(record)
+    async def update_execution(
+        self, record: ExecutionRecord, *, expected_status: ExecutionStatus | None = None
+    ) -> None:
+        if expected_status is None:
+            await self.create_execution(record)
+            return
+        data = record.model_dump_json()
+        async with self._pool.acquire() as conn:
+            tag = await conn.execute(
+                """UPDATE executions
+                   SET workflow=$2, status=$3, parent_run_id=$4,
+                       idempotency_key=$5, wake_at=$6, awaiting_event=$7, data=$8
+                   WHERE run_id=$1 AND status=$9""",
+                record.run_id,
+                record.workflow,
+                record.status.value,
+                record.parent_run_id,
+                record.idempotency_key,
+                record.wake_at,
+                record.awaiting_event,
+                data,
+                expected_status.value,
+            )
+        # asyncpg's execute() returns a tag like "UPDATE 1" / "UPDATE 0".
+        if tag.endswith(" 0"):
+            current = await self.get_execution(record.run_id)
+            raise ConcurrentUpdateError(
+                record.run_id,
+                expected=expected_status.value,
+                actual=current.status.value if current is not None else None,
+            )
 
     async def delete_execution(self, run_id: str) -> None:
         async with self._pool.acquire() as conn:
@@ -534,6 +564,45 @@ class PostgresStore:
             for r in rows
         ]
 
+    async def claim_due_triggers(
+        self,
+        now: datetime,
+        *,
+        owner: str,
+        lease_seconds: float = 60.0,
+        limit: int = 50,
+    ) -> list[TriggerRecord]:
+        until = now + timedelta(seconds=lease_seconds)
+        async with self._pool.acquire() as conn:
+            # A single statement, so selecting and marking cannot be
+            # interleaved. SKIP LOCKED makes a second dispatcher step over
+            # rows this one is taking rather than block behind them: with the
+            # rows already narrowed by the due index, waiting would serialise
+            # every dispatcher in the fleet behind the slowest one.
+            rows = await conn.fetch(
+                """UPDATE triggers SET data = jsonb_set(
+                       jsonb_set(data, '{claimed_by}', to_jsonb($1::text)),
+                       '{claimed_until}', to_jsonb($2::text))
+                   WHERE trigger_id IN (
+                       SELECT trigger_id FROM triggers
+                       WHERE enabled AND next_fire_at IS NOT NULL
+                         AND next_fire_at <= $3
+                         AND (
+                             data->>'claimed_until' IS NULL
+                             OR (data->>'claimed_until')::timestamptz <= $3
+                         )
+                       ORDER BY next_fire_at
+                       LIMIT $4
+                       FOR UPDATE SKIP LOCKED
+                   )
+                   RETURNING data""",
+                owner,
+                until.isoformat(),
+                now,
+                limit,
+            )
+        return [TriggerRecord.model_validate_json(r["data"]) for r in rows]
+
     async def update_after_fire(
         self,
         trigger_id: str,
@@ -547,13 +616,21 @@ class PostgresStore:
                    next_fire_at = $2,
                    data = jsonb_set(
                        jsonb_set(
-                           jsonb_set(data, '{last_fire_at}',
-                               to_jsonb($3::text)),
-                           '{next_fire_at}',
-                           CASE WHEN $4::text IS NULL THEN 'null'::jsonb
-                                ELSE to_jsonb($4::text) END),
-                       '{run_count}',
-                       to_jsonb(COALESCE((data->>'run_count')::int, 0) + 1))
+                           jsonb_set(
+                               jsonb_set(
+                                   jsonb_set(data, '{last_fire_at}',
+                                       to_jsonb($3::text)),
+                                   '{next_fire_at}',
+                                   CASE WHEN $4::text IS NULL THEN 'null'::jsonb
+                                        ELSE to_jsonb($4::text) END),
+                               '{run_count}',
+                               to_jsonb(COALESCE((data->>'run_count')::int, 0) + 1)),
+                           -- Release the claim in the same statement that
+                           -- advances: a lease outliving the fire would block
+                           -- the next occurrence whenever it exceeds the
+                           -- interval.
+                           '{claimed_by}', to_jsonb(''::text)),
+                       '{claimed_until}', 'null'::jsonb)
                    WHERE trigger_id = $1""",
                 trigger_id,
                 next_fire,

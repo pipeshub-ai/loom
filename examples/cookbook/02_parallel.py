@@ -42,17 +42,20 @@ async def parallel_digest(ctx: Context, post_ids: list[int]) -> str:
 
 
 async def main() -> None:
-    rt = Runtime(store=MemoryStore())
-    result = await rt.run(parallel_digest, [1, 2, 3, 4, 5])
+    async with Runtime(store=MemoryStore()) as rt:
+        result = await rt.run(parallel_digest, [1, 2, 3, 4, 5])
 
-    print(f"Status : {result.status.value}")
-    print()
-    print("=== Digest ===")
-    print(result.output)
-    print(f"\nRun ID : {result.run_id}")
+        print(f"Status : {result.status.value}")
+        print()
+        print("=== Digest ===")
+        print(result.output)
+        print(f"\nRun ID : {result.run_id}")
 
 
 if __name__ == "__main__":
-    import asyncio
+    from loom.runtime.shutdown import run_main
 
-    asyncio.run(main())
+    # run_main is asyncio.run plus the two things a program needs: SIGINT and
+    # SIGTERM cancel main() so its cleanup runs, and an interrupt becomes an
+    # exit code instead of a traceback.
+    raise SystemExit(run_main(main()))

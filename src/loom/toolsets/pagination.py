@@ -47,8 +47,11 @@ from loom.core.serde import encode, register_wire_type
 
 __all__ = [
     "CursorPaging",
+    "HeaderPaging",
+    "LinkPaging",
     "OffsetPaging",
     "Page",
+    "PageNumberPaging",
     "PagingStyle",
     "Results",
     "TokenPaging",
@@ -376,7 +379,10 @@ class TokenPaging:
     items: str | None = None
     size_param: str = "maxResults"
     token_param: str = "pageToken"
-    token_field: str = "nextPageToken"
+    token_field: str | tuple[str, ...] = "nextPageToken"
+    """Where the next token lives. A tuple addresses a nested field —
+    HubSpot's is at ``paging.next.after`` — which is the same dialect at a
+    deeper address rather than a new one."""
     last_field: str | None = None
     total_field: str | None = None
 
@@ -391,7 +397,7 @@ class TokenPaging:
         finished = bool(self.last_field and body.get(self.last_field))
         return Page(
             items=_rows(body, self.items),
-            cursor=None if finished else (body.get(self.token_field) or None),
+            cursor=None if finished else (_dig(body, self.token_field) or None),
             total=body.get(self.total_field) if self.total_field else None,
         )
 
@@ -424,6 +430,181 @@ class CursorPaging:
         link = (body.get(outer) or {}).get(inner)
         found = parse_qs(urlparse(link).query).get(self.param) if link else None
         return Page(items=_rows(body, self.items), cursor=found[0] if found else None)
+
+
+def _dig(body: Any, field: str | tuple[str, ...]) -> Any:
+    """Read a flat or nested field. ``("paging", "next", "after")``."""
+    if isinstance(field, str):
+        return body.get(field)
+    found: Any = body
+    for step in field:
+        if not isinstance(found, dict):
+            return None
+        found = found.get(step)
+    return found
+
+
+@dataclass(frozen=True)
+class HeaderPaging:
+    """The next page is named in a response *header*. GitHub, GitLab.
+
+    Every other dialect here reads the body, which is why this one needs its
+    own class: by the time ``page_through`` hands a style the response, headers
+    are gone. So the client returns a plain envelope — ``{"items": rows,
+    "headers": {...}}`` — and this reads both halves. Plain data on purpose: an
+    httpx response object must not leak into a paging style, or the style
+    becomes untestable without a transport.
+
+    Two forms, because the two services disagree:
+
+    - **GitLab** sends ``x-next-page``, empty on the last page. Direct.
+    - **GitHub** sends ``link: <…>; rel="next", <…>; rel="last"``, and the last
+      page is the one with no ``rel="next"`` at all.
+
+    ``total_header`` is read when present and left as ``None`` when absent —
+    GitLab omits ``x-total`` past 10,000 records, which is exactly when a total
+    matters most, and reading a missing header as zero would report an empty
+    result set for the largest queries.
+    """
+
+    items: str = "items"
+    headers_field: str = "headers"
+    page_param: str = "page"
+    size_param: str = "per_page"
+    next_header: str = ""
+    """A header naming the next page number directly. GitLab's ``x-next-page``."""
+    link_header: str = ""
+    """A header carrying RFC 5988 links. GitHub's ``link``."""
+    total_header: str = ""
+    first_page: int = 1
+
+    def params(self, cursor: str | None, size: int) -> dict[str, Any]:
+        return {
+            self.page_param: int(cursor) if cursor else self.first_page,
+            self.size_param: size,
+        }
+
+    def read(self, response: Any, cursor: str | None, size: int) -> Page:
+        body = response or {}
+        rows = _rows(body, self.items)
+        headers = {
+            str(k).lower(): v for k, v in (body.get(self.headers_field) or {}).items()
+        }
+
+        following: str | None = None
+        if self.next_header:
+            # GitLab sends an empty string on the last page, which is a
+            # different thing from the header being absent — both mean stop.
+            following = str(headers.get(self.next_header) or "").strip() or None
+        elif self.link_header:
+            following = _link_page(headers.get(self.link_header) or "", self.page_param)
+        elif len(rows) >= size:
+            following = str((int(cursor) if cursor else self.first_page) + 1)
+
+        total = headers.get(self.total_header) if self.total_header else None
+        return Page(
+            items=rows,
+            cursor=following,
+            total=int(total) if str(total or "").isdigit() else None,
+        )
+
+
+def _link_page(header: str, page_param: str) -> str | None:
+    """The page number from a ``rel="next"`` link, or ``None`` if there is none.
+
+    Absence of ``rel="next"`` is GitHub's documented end-of-results signal, so
+    it is read as the end rather than as a malformed header.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    for part in header.split(","):
+        section, _, rest = part.partition(";")
+        if 'rel="next"' not in rest.replace(" ", "").replace("\'", '"'):
+            continue
+        url = section.strip().strip("<>")
+        found = parse_qs(urlparse(url).query).get(page_param)
+        return found[0] if found else None
+    return None
+
+
+@dataclass(frozen=True)
+class LinkPaging:
+    """The response names the *next request* outright. Salesforce.
+
+    ``nextRecordsUrl`` is a complete path that takes no query parameters, so the
+    cursor here is the path itself rather than a value to send as one. None of
+    the other dialects can say that: a token is a parameter, a cursor is parsed
+    *out* of a link, and offsets and page numbers are computed.
+
+    The path is handed to the request callable under :attr:`path_param`, which
+    the client pops and uses as the URL. Naming it explicitly is the honest
+    version of a style whose "parameter" is not a parameter at all.
+    """
+
+    items: str = "records"
+    path_param: str = "__next_path"
+    link_field: str = "nextRecordsUrl"
+    done_field: str | None = "done"
+    total_field: str | None = "totalSize"
+    size_param: str | None = None
+
+    def params(self, cursor: str | None, size: int) -> dict[str, Any]:
+        asked: dict[str, Any] = {}
+        if self.size_param:
+            asked[self.size_param] = size
+        if cursor:
+            asked[self.path_param] = cursor
+        return asked
+
+    def read(self, response: Any, cursor: str | None, size: int) -> Page:
+        body = response or {}
+        finished = bool(self.done_field and body.get(self.done_field))
+        return Page(
+            items=_rows(body, self.items),
+            cursor=None if finished else (body.get(self.link_field) or None),
+            total=body.get(self.total_field) if self.total_field else None,
+        )
+
+
+@dataclass(frozen=True)
+class PageNumberPaging:
+    """Ordinal pages — ``page=0``, ``page=1`` — with a flag for the last one.
+
+    ClickUp. Distinct from :class:`OffsetPaging` because the parameter counts
+    *pages*, not rows: sending a row offset where a page number is expected is
+    accepted and silently returns the wrong window, which reads as missing data
+    rather than as an error.
+
+    ``last_field`` is the reliable end signal where an API sends one. Without
+    it a short page is the only evidence, and a full final page is then
+    indistinguishable from more data — so ``collect`` reports ``complete=False``
+    rather than claiming coverage it cannot verify.
+    """
+
+    items: str | None = None
+    page_param: str = "page"
+    size_param: str | None = None
+    last_field: str | None = "last_page"
+    first_page: int = 0
+
+    def params(self, cursor: str | None, size: int) -> dict[str, Any]:
+        asked: dict[str, Any] = {
+            self.page_param: int(cursor) if cursor else self.first_page
+        }
+        if self.size_param:
+            asked[self.size_param] = size
+        return asked
+
+    def read(self, response: Any, cursor: str | None, size: int) -> Page:
+        body = response or {}
+        rows = _rows(body, self.items)
+        page = int(cursor) if cursor else self.first_page
+
+        if self.last_field is not None and self.last_field in body:
+            more = not body.get(self.last_field)
+        else:
+            more = len(rows) >= size
+        return Page(items=rows, cursor=str(page + 1) if more else None)
 
 
 @dataclass(frozen=True)

@@ -18,7 +18,6 @@ Run:
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from pathlib import Path
 
@@ -68,49 +67,52 @@ async def main() -> None:
 
     header("HTTP Server")
 
-    rt = Runtime(store=MemoryStore())
-    rt.register_all([onboard_lead, refund_request])
-    app = create_app(rt, title="LOOM Cookbook")
+    async with Runtime(store=MemoryStore()) as rt:
+        rt.register_all([onboard_lead, refund_request])
+        app = create_app(rt, title="LOOM Cookbook")
 
-    # ASGITransport speaks to the app directly, so this is a real request/response
-    # cycle without binding a socket. Swap for base_url="http://host:8000" to
-    # talk to a uvicorn process instead.
-    transport = httpx.ASGITransport(app=app)
-    http = httpx.AsyncClient(transport=transport, base_url="http://loom.local")
+        # ASGITransport speaks to the app directly, so this is a real request/response
+        # cycle without binding a socket. Swap for base_url="http://host:8000" to
+        # talk to a uvicorn process instead.
+        transport = httpx.ASGITransport(app=app)
+        http = httpx.AsyncClient(transport=transport, base_url="http://loom.local")
 
-    async with LoomClient(http=http) as loom:
-        header("DISCOVERY")
-        for definition in await loom.workflows():
-            log("GET /workflows", f"{definition['name']}: {definition['description']}")
+        async with LoomClient(http=http) as loom:
+            header("DISCOVERY")
+            for definition in await loom.workflows():
+                log("GET /workflows", f"{definition['name']}: {definition['description']}")
 
-        header("START A RUN")
-        run = await loom.start("onboard_lead", "ada@mit.edu", wait=True)
-        log("POST /runs", f"{run['run_id'][:12]}… {run['status']}")
-        log("output", str(run["output"]))
+            header("START A RUN")
+            run = await loom.start("onboard_lead", "ada@mit.edu", wait=True)
+            log("POST /runs", f"{run['run_id'][:12]}… {run['status']}")
+            log("output", str(run["output"]))
 
-        header("READ ITS JOURNAL")
-        for entry in await loom.journal(run["run_id"]):
-            log("GET /journal", f"{entry['seq']}. {entry['name']} → {entry['status']}")
+            header("READ ITS JOURNAL")
+            for entry in await loom.journal(run["run_id"]):
+                log("GET /journal", f"{entry['seq']}. {entry['name']} → {entry['status']}")
 
-        header("HUMAN IN THE LOOP, FROM OUTSIDE PYTHON")
-        pending = await loom.start("refund_request", 42.5, wait=True)
-        log("POST /runs", f"{pending['run_id'][:12]}… {pending['status']}")
+            header("HUMAN IN THE LOOP, FROM OUTSIDE PYTHON")
+            pending = await loom.start("refund_request", 42.5, wait=True)
+            log("POST /runs", f"{pending['run_id'][:12]}… {pending['status']}")
 
-        # Any HTTP client can resolve the approval — a Slack bot, a web UI, curl.
-        await loom.approve(pending["run_id"], "refund")
-        log("POST /events", "approval:refund delivered")
+            # Any HTTP client can resolve the approval — a Slack bot, a web UI, curl.
+            await loom.approve(pending["run_id"], "refund")
+            log("POST /events", "approval:refund delivered")
 
-        final = await loom.wait(pending["run_id"], timeout=5, poll_interval=0.05)
-        log("GET /runs/{id}", f"{final['status']}: {final['output']}")
+            final = await loom.wait(pending["run_id"], timeout=5, poll_interval=0.05)
+            log("GET /runs/{id}", f"{final['status']}: {final['output']}")
 
-        header("IDEMPOTENCY")
-        first = await loom.start("onboard_lead", "grace@navy.gov", idempotency_key="lead-7")
-        second = await loom.start("onboard_lead", "grace@navy.gov", idempotency_key="lead-7")
-        same = first["run_id"] == second["run_id"]
-        log("POST /runs", f"Retried request reused the original run: {same}")
-
-    await rt.shutdown()
+            header("IDEMPOTENCY")
+            first = await loom.start("onboard_lead", "grace@navy.gov", idempotency_key="lead-7")
+            second = await loom.start("onboard_lead", "grace@navy.gov", idempotency_key="lead-7")
+            same = first["run_id"] == second["run_id"]
+            log("POST /runs", f"Retried request reused the original run: {same}")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    from loom.runtime.shutdown import run_main
+
+    # run_main is asyncio.run plus the two things a program needs: SIGINT and
+    # SIGTERM cancel main() so its cleanup runs, and an interrupt becomes an
+    # exit code instead of a traceback.
+    raise SystemExit(run_main(main()))

@@ -52,7 +52,9 @@ Atomically consume the oldest matching buffered event.
 
 Drop entries at or after ``from_path``; used by retry-from-failure.
 
-### `update_execution(self, record: 'ExecutionRecord') -> 'None'`
+### `update_execution(self, record: 'ExecutionRecord', *, expected_status: 'ExecutionStatus | None' = None) -> 'None'`
+
+Persist *record*.
 
 ## Implementations
 

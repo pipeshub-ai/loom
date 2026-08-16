@@ -10,7 +10,6 @@ Run:
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -59,38 +58,41 @@ async def main() -> None:
     header("Cron Trigger Example")
 
     # Fixed start time, so the example prints the same thing every run.
-    rt = Runtime(store=MemoryStore(), clock=ManualClock(START))
-    dispatcher = TriggerDispatcher(rt)
+    async with Runtime(store=MemoryStore(), clock=ManualClock(START)) as rt:
+        dispatcher = TriggerDispatcher(rt)
 
-    log("setup", "Registering heartbeat workflow (cron: */1 * * * *)")
-    await dispatcher.register_workflow_async(heartbeat)
+        log("setup", "Registering heartbeat workflow (cron: */1 * * * *)")
+        await dispatcher.register_workflow_async(heartbeat)
 
-    # A ManualClock is the Runtime's own clock, so moving it moves everything
-    # that reads the time — the dispatcher's schedule and any ctx.sleep alike.
-    # `advance()` moves it, ticks both schedulers, and waits for the runs it
-    # started, which is what "let a minute pass" actually has to mean.
-    #
-    # Real deployments pass no clock and call `dispatcher.start(interval=...)`.
-    header("FIRING THE SCHEDULE")
-    log("setup", "Advancing the clock a minute at a time")
+        # A ManualClock is the Runtime's own clock, so moving it moves everything
+        # that reads the time — the dispatcher's schedule and any ctx.sleep alike.
+        # `advance()` moves it, ticks both schedulers, and waits for the runs it
+        # started, which is what "let a minute pass" actually has to mean.
+        #
+        # Real deployments pass no clock and call `dispatcher.start(interval=...)`.
+        header("FIRING THE SCHEDULE")
+        log("setup", "Advancing the clock a minute at a time")
 
-    for _ in range(3):
-        fired = await advance(rt, minutes=1, dispatcher=dispatcher)
-        log("tick", f"{rt.clock.now():%H:%M} -> fired {len(fired)} run(s)")
+        for _ in range(3):
+            fired = await advance(rt, minutes=1, dispatcher=dispatcher)
+            log("tick", f"{rt.clock.now():%H:%M} -> fired {len(fired)} run(s)")
 
-    runs = await rt.list_runs(workflow="heartbeat")
-    header("RUNS")
-    for run in runs:
-        log("run", f"{run.run_id[:16]}…  status={run.status.value}")
-    log("total", f"{len(runs)} heartbeat run(s)")
+        runs = await rt.list_runs(workflow="heartbeat")
+        header("RUNS")
+        for run in runs:
+            log("run", f"{run.run_id[:16]}…  status={run.status.value}")
+        log("total", f"{len(runs)} heartbeat run(s)")
 
-    header("IN PRODUCTION")
-    log("note", "await dispatcher.start(interval=5.0)   # scans every 5s")
-    log("note", "The dispatcher is the only thing that needs to be running;")
-    log("note", "the workflow itself has no timer and costs nothing idle.")
-
-    await rt.shutdown()
+        header("IN PRODUCTION")
+        log("note", "await dispatcher.start(interval=5.0)   # scans every 5s")
+        log("note", "The dispatcher is the only thing that needs to be running;")
+        log("note", "the workflow itself has no timer and costs nothing idle.")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    from loom.runtime.shutdown import run_main
+
+    # run_main is asyncio.run plus the two things a program needs: SIGINT and
+    # SIGTERM cancel main() so its cleanup runs, and an interrupt becomes an
+    # exit code instead of a traceback.
+    raise SystemExit(run_main(main()))

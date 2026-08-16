@@ -38,6 +38,22 @@ OFFLINE = [
     "21_guardrail_nodes.py",
     "22_custom_nodes.py",
     "23_bounded_tool_results.py",
+    "24_crm_pipeline.py",
+    # Belongs here rather than under NEEDS_CREDENTIALS because it takes a
+    # deliberate dry-run branch when the Microsoft variables are absent: it
+    # reports the reads and writes it would have made and returns, touching
+    # neither the network nor a credential. Running it in CI therefore
+    # exercises the workflow body, the grants, and the journal for real.
+    "26_onedrive_sharepoint.py",
+]
+
+#: Needs the network but no credentials. Exercised for structure, not executed:
+#: running it in CI would hit a live third-party search engine on every commit,
+#: which is both flaky and rude. The distinction from OFFLINE is real — that
+#: list promises "no credentials *and* no network" — so it gets its own name
+#: rather than being filed under a heading that would be a lie.
+NEEDS_NETWORK = [
+    "25_web_search.py",
 ]
 
 #: Needs an API key. Exercised for structure, not executed.
@@ -65,7 +81,7 @@ def test_every_example_is_classified() -> None:
 
     Otherwise it silently escapes both the run check and the structure check.
     """
-    known = set(OFFLINE) | set(NEEDS_CREDENTIALS)
+    known = set(OFFLINE) | set(NEEDS_CREDENTIALS) | set(NEEDS_NETWORK)
     actual = {p.name for p in _examples()}
 
     assert actual == known, f"unclassified: {sorted(actual - known)}"
@@ -95,7 +111,7 @@ def test_example_does_not_hardcode_a_store_at_import(name: str) -> None:
     assert issues == [], f"{name}: {[i.message for i in issues]}"
 
 
-@pytest.mark.parametrize("name", NEEDS_CREDENTIALS)
+@pytest.mark.parametrize("name", NEEDS_CREDENTIALS + NEEDS_NETWORK)
 def test_credentialed_example_imports_cleanly(name: str) -> None:
     """Catch API drift without spending an API call.
 

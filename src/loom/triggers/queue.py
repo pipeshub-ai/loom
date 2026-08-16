@@ -320,9 +320,22 @@ class QueueConsumer:
                 await asyncio.sleep(delay)
 
         self._task = asyncio.create_task(loop())
+        # So Runtime.shutdown() stops taking messages before it drains the runs
+        # already in flight, rather than turning new messages into new runs on
+        # the way out.
+        self._runtime.supervise(self)
 
     async def stop(self) -> None:
-        """Stop polling. In-flight submissions are allowed to finish."""
+        """Stop polling.
+
+        Cancels mid-poll rather than finishing the batch in hand, and that is
+        safe in exactly one direction: :meth:`poll_once` acks a message only
+        after its run is durably recorded, so a cancellation between the two
+        redelivers a message whose run already exists — and the idempotency key
+        derived from that message resolves the redelivery to it. Cancelling
+        after the ack loses nothing; the run is recorded.
+        """
+        self._runtime.unsupervise(self)
         if self._task is None:
             return
         self._task.cancel()

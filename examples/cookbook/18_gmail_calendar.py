@@ -30,7 +30,6 @@ Run:
 
 from __future__ import annotations
 
-import asyncio
 import os
 import sys
 from collections.abc import Callable
@@ -171,17 +170,17 @@ async def execute(code: str, spec: Spec) -> None:
         log("run", "the generated file declares no @workflow")
         return
 
-    runtime = Runtime(store=MemoryStore())
-    runtime.register(definition)
+    async with Runtime(store=MemoryStore()) as runtime:
+        runtime.register(definition)
 
-    log("run", f"executing {definition.name} with input {spec.input!r}")
-    result = await runtime.run(definition.name, spec.input)
+        log("run", f"executing {definition.name} with input {spec.input!r}")
+        result = await runtime.run(definition.name, spec.input)
 
-    if result.status.value == "failed":
-        log("run", f"failed: {str(result.error.message if result.error else '')[:300]}")
-        return
-    log("run", f"{result.status.value}")
-    box(str(result.output)[:1200], "output")
+        if result.status.value == "failed":
+            log("run", f"failed: {str(result.error.message if result.error else '')[:300]}")
+            return
+        log("run", f"{result.status.value}")
+        box(str(result.output)[:1200], "output")
 
 
 def pick_model() -> object:
@@ -237,4 +236,9 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    from loom.runtime.shutdown import run_main
+
+    # run_main is asyncio.run plus the two things a program needs: SIGINT and
+    # SIGTERM cancel main() so its cleanup runs, and an interrupt becomes an
+    # exit code instead of a traceback.
+    raise SystemExit(run_main(main()))

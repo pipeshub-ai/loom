@@ -204,6 +204,18 @@ class TriggerRecord(BaseModel):
     enabled: bool = True
     run_count: int = 0
     timezone: str = "UTC"
+    claimed_by: str = ""
+    """Which dispatcher currently holds this trigger, if any."""
+    claimed_until: datetime | None = None
+    """When that claim lapses.
+
+    A lease rather than a lock: a dispatcher that dies mid-tick must not park a
+    trigger permanently. That is the difference between a crash costing one late
+    run and costing every run after it.
+
+    Lives here, inside the record, rather than in a column of its own — every
+    store already persists this model whole, so claiming needed no migration on
+    a deployed table."""
 
 
 def _clip(value: Any, limit: int = 80) -> str:

@@ -69,31 +69,34 @@ async def content_moderation(ctx: Context, content: str) -> str:
 
 
 async def main() -> None:
-    rt = Runtime(store=MemoryStore())
-    await rt.start_scheduler(interval=1.0)
+    async with Runtime(store=MemoryStore()) as rt:
+        await rt.start_scheduler(interval=1.0)
 
-    content = "Check out this amazing new product launch!"
+        content = "Check out this amazing new product launch!"
 
-    print(f"Submitting content for moderation: '{content}'")
-    result = await rt.run(content_moderation, content)
+        print(f"Submitting content for moderation: '{content}'")
+        result = await rt.run(content_moderation, content)
 
-    run_id = result.run_id
-    print(f"Run ID  : {run_id}")
-    print(f"Status  : {result.status.value}")
+        run_id = result.run_id
+        print(f"Run ID  : {run_id}")
+        print(f"Status  : {result.status.value}")
 
-    if result.status.value == "suspended":
-        print("\n  [main] Simulating human reviewer approving after 1 second…")
-        await asyncio.sleep(1)
+        if result.status.value == "suspended":
+            print("\n  [main] Simulating human reviewer approving after 1 second…")
+            await asyncio.sleep(1)
 
-        # Human sends their decision as an event
-        await rt.send_event(run_id, "review_decision", {"approved": True})
+            # Human sends their decision as an event
+            await rt.send_event(run_id, "review_decision", {"approved": True})
 
-        result = await rt.wait(run_id, timeout=10)
-        print(f"\nFinal Status : {result.status.value}")
-        print(f"Final Output : {result.output}")
-
-    await rt.shutdown()
+            result = await rt.wait(run_id, timeout=10)
+            print(f"\nFinal Status : {result.status.value}")
+            print(f"Final Output : {result.output}")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    from loom.runtime.shutdown import run_main
+
+    # run_main is asyncio.run plus the two things a program needs: SIGINT and
+    # SIGTERM cancel main() so its cleanup runs, and an interrupt becomes an
+    # exit code instead of a traceback.
+    raise SystemExit(run_main(main()))

@@ -46,6 +46,39 @@ BUILTIN_TOOLSETS: tuple[tuple[str, str], ...] = (
         f"{_TOOLSETS}.google.calendar.manifest.GOOGLE_CALENDAR_MANIFEST",
         f"{_TOOLSETS}.google.calendar.tools",
     ),
+    (
+        f"{_TOOLSETS}.google.drive.manifest.GOOGLE_DRIVE_MANIFEST",
+        f"{_TOOLSETS}.google.drive.tools",
+    ),
+    (
+        f"{_TOOLSETS}.google.meet.manifest.GOOGLE_MEET_MANIFEST",
+        f"{_TOOLSETS}.google.meet.tools",
+    ),
+    (f"{_TOOLSETS}.slack.manifest.SLACK_MANIFEST", f"{_TOOLSETS}.slack.tools"),
+    (f"{_TOOLSETS}.zoom.manifest.ZOOM_MANIFEST", f"{_TOOLSETS}.zoom.tools"),
+    (f"{_TOOLSETS}.clickup.manifest.CLICKUP_MANIFEST", f"{_TOOLSETS}.clickup.tools"),
+    (f"{_TOOLSETS}.asana.manifest.ASANA_MANIFEST", f"{_TOOLSETS}.asana.tools"),
+    (
+        f"{_TOOLSETS}.salesforce.manifest.SALESFORCE_MANIFEST",
+        f"{_TOOLSETS}.salesforce.tools",
+    ),
+    (f"{_TOOLSETS}.hubspot.manifest.HUBSPOT_MANIFEST", f"{_TOOLSETS}.hubspot.tools"),
+    (f"{_TOOLSETS}.github.manifest.GITHUB_MANIFEST", f"{_TOOLSETS}.github.tools"),
+    (f"{_TOOLSETS}.gitlab.manifest.GITLAB_MANIFEST", f"{_TOOLSETS}.gitlab.tools"),
+    (
+        f"{_TOOLSETS}.microsoft.onedrive.manifest.ONEDRIVE_MANIFEST",
+        f"{_TOOLSETS}.microsoft.onedrive.tools",
+    ),
+    (
+        f"{_TOOLSETS}.microsoft.sharepoint.manifest.SHAREPOINT_MANIFEST",
+        f"{_TOOLSETS}.microsoft.sharepoint.tools",
+    ),
+    (f"{_TOOLSETS}.exa.manifest.EXA_MANIFEST", f"{_TOOLSETS}.exa.tools"),
+    (f"{_TOOLSETS}.tavily.manifest.TAVILY_MANIFEST", f"{_TOOLSETS}.tavily.tools"),
+    (
+        f"{_TOOLSETS}.duckduckgo.manifest.DUCKDUCKGO_MANIFEST",
+        f"{_TOOLSETS}.duckduckgo.tools",
+    ),
 )
 
 

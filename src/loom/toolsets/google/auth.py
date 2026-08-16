@@ -96,7 +96,11 @@ class GoogleAuth:
         credential_name: str = "google",
     ) -> None:
         self._credentials = credentials or GoogleCredentials.from_env()
-        self._scopes = scopes or []
+        # Copied, not aliased: callers pass their module-level ``SCOPES``
+        # constant, and add_scopes() extends this list — so sharing it would
+        # let one toolset's scopes accumulate onto another toolset's constant
+        # for the life of the process.
+        self._scopes = list(scopes or [])
         self._credential_name = credential_name
         self._token = ""
         self._expires_at = 0.0
@@ -118,6 +122,34 @@ class GoogleAuth:
     @property
     def mode(self) -> str:
         return self._credentials.mode
+
+    @property
+    def scopes(self) -> list[str]:
+        return list(self._scopes)
+
+    def add_scopes(self, scopes: list[str] | None) -> None:
+        """Widen this auth's scope set, dropping a token minted without them.
+
+        One :class:`GoogleAuth` serves every Google toolset in the process, and
+        it is built by whichever one is called first. For a service account the
+        scopes are *in the signed assertion*, so without this the second toolset
+        to be used gets a token carrying only the first one's scopes — a Drive
+        call authenticated for Gmail, which fails 403 ``insufficient scopes``
+        and reads as a misconfigured credential rather than a shared cache.
+
+        Invalidates the cached token only when something was actually added, so
+        the common case — every toolset asking for what it already has — does
+        not remint on each call.
+        """
+        fresh = [scope for scope in scopes or [] if scope not in self._scopes]
+        if not fresh:
+            return
+        self._scopes.extend(fresh)
+        # Only the service-account flow bakes scopes into the token it mints;
+        # the other two mint against whatever the grant carries, so throwing
+        # away a live token there would buy nothing.
+        if self._credentials.mode == "service_account":
+            self.invalidate()
 
     async def token(self) -> str:
         """Return a valid access token, minting or refreshing if needed.
@@ -256,12 +288,19 @@ _default: GoogleAuth | None = None
 def get_default_auth(scopes: list[str] | None = None) -> GoogleAuth:
     """Return the process-wide :class:`GoogleAuth`, building it on first use.
 
-    Shared between Gmail and Calendar deliberately: they authenticate against
-    the same account, and one cached token serves both.
+    Shared between Gmail, Calendar, Drive and Meet deliberately: they
+    authenticate against the same account, and one cached token serves all four.
+
+    A later caller's scopes are *added* rather than ignored — see
+    :meth:`GoogleAuth.add_scopes`. Ignoring them is the shape of bug that only
+    appears in the service-account deployment and only for whichever toolset
+    happened to be used second.
     """
     global _default
     if _default is None:
         _default = GoogleAuth(scopes=scopes)
+    else:
+        _default.add_scopes(scopes)
     return _default
 
 

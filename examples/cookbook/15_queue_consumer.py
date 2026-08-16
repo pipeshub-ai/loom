@@ -63,37 +63,39 @@ async def main() -> None:
     # Swap InMemoryQueue for a QueueBackend over Redis Streams, SQS, or Kafka —
     # the consumer only needs poll / ack / nack.
     queue = InMemoryQueue()
-    rt = Runtime(store=MemoryStore())
+    async with Runtime(store=MemoryStore()) as rt:
+        # Reads batch_size and idempotency_field from the OnEvent trigger above.
+        consumer = QueueConsumer.for_workflow(rt, queue, process_order)
 
-    # Reads batch_size and idempotency_field from the OnEvent trigger above.
-    consumer = QueueConsumer.for_workflow(rt, queue, process_order)
+        log("producer", "Publishing 4 messages for 3 distinct orders")
+        queue.publish({"order_id": "A-1", "sku": "widget"})
+        queue.publish({"order_id": "A-2", "sku": "gizmo"})
+        queue.publish({"order_id": "A-1", "sku": "widget"})  # duplicate delivery
+        queue.publish({"order_id": "A-3"})  # no SKU — will fail in the workflow
 
-    log("producer", "Publishing 4 messages for 3 distinct orders")
-    queue.publish({"order_id": "A-1", "sku": "widget"})
-    queue.publish({"order_id": "A-2", "sku": "gizmo"})
-    queue.publish({"order_id": "A-1", "sku": "widget"})  # duplicate delivery
-    queue.publish({"order_id": "A-3"})  # no SKU — will fail in the workflow
+        report = await consumer.poll_once()
+        log("consumer", f"Handled {report.handled} message(s)")
+        log("consumer", f"Started {len(set(report.submitted))} distinct run(s)")
 
-    report = await consumer.poll_once()
-    log("consumer", f"Handled {report.handled} message(s)")
-    log("consumer", f"Started {len(set(report.submitted))} distinct run(s)")
+        # Let the background runs settle before reading their outcomes.
+        await asyncio.sleep(0.1)
 
-    # Let the background runs settle before reading their outcomes.
-    await asyncio.sleep(0.1)
+        header("RUNS")
+        for record in await rt.list_runs(workflow="process_order"):
+            detail = record.error.message if record.error else record.output
+            log("run", f"{record.run_id[:12]}… {record.status.value:<10} {detail}")
 
-    header("RUNS")
-    for record in await rt.list_runs(workflow="process_order"):
-        detail = record.error.message if record.error else record.output
-        log("run", f"{record.run_id[:12]}… {record.status.value:<10} {detail}")
-
-    header("WHAT HAPPENED")
-    log("note", "4 messages, 3 runs — the duplicate A-1 message resolved")
-    log("note", "to the run that already existed, via its idempotency key.")
-    log("note", "A-3 failed inside the workflow: that is a recorded failure,")
-    log("note", "not lost work, so it is not redelivered.")
-
-    await rt.shutdown()
+        header("WHAT HAPPENED")
+        log("note", "4 messages, 3 runs — the duplicate A-1 message resolved")
+        log("note", "to the run that already existed, via its idempotency key.")
+        log("note", "A-3 failed inside the workflow: that is a recorded failure,")
+        log("note", "not lost work, so it is not redelivered.")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    from loom.runtime.shutdown import run_main
+
+    # run_main is asyncio.run plus the two things a program needs: SIGINT and
+    # SIGTERM cancel main() so its cleanup runs, and an interrupt becomes an
+    # exit code instead of a traceback.
+    raise SystemExit(run_main(main()))

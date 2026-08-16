@@ -81,13 +81,22 @@ REDIRECT_PORT_ENV = "LOOM_OAUTH_REDIRECT_PORT"
 # ---------------------------------------------------------------------------
 
 
-def _store() -> CredentialStore:
+def _store(lock: Any | None = None, *, owner: str = "") -> CredentialStore:
     """The CLI's own credential store: keyring-backed, self-refreshing.
 
     A module-level function rather than a singleton so tests can monkeypatch
     it wholesale (typically with a shared in-memory store instance, since
     each call otherwise gets an independent one backed by the real
     keyring/file — see ``tests/test_cli_auth.py``).
+
+    *lock* is a :class:`~loom.stores.base.LockProvider` — every LOOM store
+    implements one — and is what makes refresh safe across processes. Without
+    it, a ``loom serve`` and a ``loom run`` sharing this credential file can
+    refresh the same credential simultaneously; servers that rotate the refresh
+    token on use then invalidate each other's, which surfaces as an
+    intermittent ``invalid_grant`` that only happens under concurrency. It is
+    optional because most commands have no store to borrow one from, and one
+    process refreshing alone was always correct.
     """
     from loom.connectors.credentials import KeyringCredentialStore
     from loom.connectors.oauth_client import MetadataRefresher
@@ -96,8 +105,30 @@ def _store() -> CredentialStore:
     # Doc'd wiring in oauth_client.py: the refresher needs the store it is
     # refreshing for (peek/put during a lock race), and the store needs its
     # refresher — so one is built, then wired into the other.
-    store._refresher = MetadataRefresher(store=store)
+    store._refresher = MetadataRefresher(
+        store=store,
+        lock=lock,
+        owner=owner,
+        # One policy for both halves: the store decides when a credential is
+        # due, and the refresher decides whether someone else already handled
+        # it. Two policies would let those disagree.
+        refresh_policy=store.refresh_policy,
+    )
     return store
+
+
+def credential_store_for(runtime: Any) -> CredentialStore:
+    """This CLI's credential store, locked against *runtime*'s store.
+
+    Used where the CLI builds a Runtime, so that (a) a workflow's toolsets can
+    read what ``loom connect`` stored, and (b) concurrent refreshes across
+    processes serialize through the same lock every LOOM store already provides.
+    """
+    from loom.stores.base import LockProvider
+
+    store = getattr(runtime, "store", None)
+    lock = store if isinstance(store, LockProvider) else None
+    return _store(lock, owner=getattr(runtime, "node_id", "") or "")
 
 
 def _server_credential_name(server: str) -> str:
@@ -596,7 +627,7 @@ def cmd_whoami(args: argparse.Namespace) -> int:
     out = printer_for(args)
 
     async def body() -> int:
-        from loom.connectors.credentials import Peekable
+        from loom.connectors.credentials import Peekable, RefreshPolicy
         from loom.runtime.clock import SystemClock
 
         store = _store()
@@ -609,6 +640,7 @@ def cmd_whoami(args: argparse.Namespace) -> int:
             return int(Exit.OK)
 
         clock = SystemClock()
+        policy = getattr(store, "refresh_policy", None) or RefreshPolicy()
         rows: list[list[str]] = []
         connected: list[dict[str, Any]] = []
         for name in names:
@@ -616,7 +648,13 @@ def cmd_whoami(args: argparse.Namespace) -> int:
             if stored is None:
                 continue
             expires_at = stored.expires_at.isoformat() if stored.expires_at else "-"
-            status = "expired" if stored.is_expired(clock) else "ok"
+            expired = stored.is_expired(clock)
+            due = policy.is_due(stored, clock)
+            # Three states, not two. "due" is the one worth surfacing: the
+            # credential works, and the next call will try to renew it — so an
+            # operator seeing repeated "due" knows renewal is failing, long
+            # before it becomes "expired" and something breaks.
+            status = "expired" if expired else ("due" if due else "ok")
             scopes = ", ".join(sorted(stored.scopes)) or "-"
             rows.append([name, scopes, expires_at, status])
             connected.append(
@@ -624,7 +662,9 @@ def cmd_whoami(args: argparse.Namespace) -> int:
                     "name": name,
                     "scopes": sorted(stored.scopes),
                     "expires_at": stored.expires_at.isoformat() if stored.expires_at else None,
-                    "expired": stored.is_expired(clock),
+                    "expired": expired,
+                    "refresh_due": due,
+                    "can_refresh": stored.refresh_token is not None,
                 }
             )
         out.table(["name", "scopes", "expires_at", "status"], rows, status_column=3)
@@ -675,6 +715,81 @@ def cmd_disconnect(args: argparse.Namespace) -> int:
             else f"  '{name}' was not connected."
         )
         out.json({"name": name, "disconnected": existed})
+        return int(Exit.OK)
+
+    return run_async(body())
+
+
+def cmd_refresh(args: argparse.Namespace) -> int:
+    """Renew stored OAuth credentials that are near expiry.
+
+    The hook for "on restart": run it from a login profile, a systemd unit, or
+    a machine's own cron, and every stored credential is renewed before
+    anything needs it. Long-lived ``loom serve`` / ``loom mcp`` processes do
+    the same thing on a timer without being asked.
+
+    Exit codes follow the CLI's contract: ``0`` when nothing failed, ``1`` when
+    at least one credential could not be renewed — so a scheduled invocation
+    reports a dead refresh token instead of succeeding quietly.
+    """
+    out = printer_for(args)
+    names: list[str] = list(getattr(args, "name", None) or [])
+
+    async def body() -> int:
+        from loom.connectors.refresh import CredentialRefreshService
+
+        store = _store()
+        known = await store.names()
+        if not known:
+            out.line("Nothing connected, so nothing to refresh.")
+            out.hint("loom connect <name>")
+            out.json({"refreshed": [], "failed": []})
+            return int(Exit.OK)
+
+        unknown = [name for name in names if name not in known]
+        if unknown:
+            raise ConfigurationError(
+                f"not connected: {', '.join(unknown)}. Known: "
+                f"{', '.join(known)}. Run 'loom connect <name>' first."
+            )
+
+        service = CredentialRefreshService(store)
+        report = await service.sweep(names or None, force=bool(getattr(args, "force", False)))
+
+        out.table(
+            ["name", "result", "expires_at", "detail"],
+            [
+                [
+                    outcome.name,
+                    outcome.status,
+                    outcome.expires_at.isoformat() if outcome.expires_at else "-",
+                    outcome.detail or "-",
+                ]
+                for outcome in report.outcomes
+            ],
+            status_column=1,
+        )
+        # Never the token itself — the report carries names and expiries only.
+        out.json(
+            {
+                "refreshed": [o.name for o in report.refreshed],
+                "failed": [{"name": o.name, "error": o.detail} for o in report.failed],
+                "checked": [
+                    {
+                        "name": o.name,
+                        "status": o.status,
+                        "expires_at": o.expires_at.isoformat() if o.expires_at else None,
+                    }
+                    for o in report.outcomes
+                ],
+            }
+        )
+        if report.failed:
+            out.error(
+                f"{len(report.failed)} credential(s) could not be refreshed. "
+                "Reauthorize with 'loom connect <name>'."
+            )
+            return int(Exit.FAILED)
         return int(Exit.OK)
 
     return run_async(body())

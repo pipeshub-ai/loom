@@ -63,15 +63,18 @@ async def fetch_and_summarise(ctx: Context, post_id: int) -> str:
 
 
 async def main() -> None:
-    rt = Runtime(store=MemoryStore())
-    result = await rt.run(fetch_and_summarise, 1)
+    async with Runtime(store=MemoryStore()) as rt:
+        result = await rt.run(fetch_and_summarise, 1)
 
-    print(f"Status : {result.status.value}")
-    print(f"Output : {result.output}")
-    print(f"Run ID : {result.run_id}")
+        print(f"Status : {result.status.value}")
+        print(f"Output : {result.output}")
+        print(f"Run ID : {result.run_id}")
 
 
 if __name__ == "__main__":
-    import asyncio
+    from loom.runtime.shutdown import run_main
 
-    asyncio.run(main())
+    # run_main is asyncio.run plus the two things a program needs: SIGINT and
+    # SIGTERM cancel main() so its cleanup runs, and an interrupt becomes an
+    # exit code instead of a traceback.
+    raise SystemExit(run_main(main()))

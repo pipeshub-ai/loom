@@ -53,7 +53,7 @@ from datetime import datetime, timedelta
 from typing import Any, Protocol
 from urllib.parse import urlencode
 
-from loom.connectors.credentials import StoredCredential
+from loom.connectors.credentials import RefreshPolicy, StoredCredential
 from loom.core.exceptions import AuthExpired, ConfigurationError
 from loom.core.secret import Secret
 from loom.runtime.clock import Clock, SystemClock
@@ -168,6 +168,7 @@ class OAuthClient:
         poll_interval: float = 1.0,
         clock: Clock | None = None,
         pkce: bool = True,
+        refresh_policy: RefreshPolicy | None = None,
     ) -> None:
         self._client_id = client_id
         self._authorization_endpoint = authorization_endpoint
@@ -183,6 +184,7 @@ class OAuthClient:
         self._poll_interval = poll_interval
         self.clock = clock or SystemClock()
         self._pkce = pkce
+        self._policy = refresh_policy or RefreshPolicy()
 
     # -- PKCE authorization-code flow ----------------------------------------
 
@@ -372,13 +374,25 @@ class OAuthClient:
             await self.clock.sleep(self._poll_interval)
 
     async def _peek_if_fresh(self, name: str) -> StoredCredential | None:
-        """The stored record via ``store.peek()`` if it is present and not
-        expired — never :meth:`CredentialStore.get`, which would recurse
-        back into this same refresher if still expired."""
+        """The stored record via ``store.peek()`` if another process already
+        renewed it — never :meth:`CredentialStore.get`, which would recurse
+        back into this same refresher.
+
+        Judged by the same :class:`RefreshPolicy` ``get()`` used to decide a
+        refresh was needed, not by hard expiry. Otherwise a caller that came
+        here *because* a credential was due would accept a peek showing that
+        same still-unexpired credential, conclude the work was done, and return
+        without renewing anything — early refresh would silently never happen
+        whenever two callers overlapped.
+
+        Safe against ping-ponging because the policy clamps its window to a
+        fraction of the token's lifetime: a freshly minted token has its whole
+        lifetime ahead of it and so is never immediately due.
+        """
         if self._store is None:
             return None
         current = await self._store.peek(name)
-        if current is not None and not current.is_expired(self.clock):
+        if current is not None and not self._policy.is_due(current, self.clock):
             return current
         return None
 
@@ -461,9 +475,10 @@ class OAuthClient:
         else:
             refresh_token_secret = None
 
+        issued_at = self.clock.now()
         expires_in = data.get("expires_in")
         expires_at = (
-            self.clock.now() + timedelta(seconds=int(expires_in))
+            issued_at + timedelta(seconds=int(expires_in))
             if expires_in is not None
             else None
         )
@@ -479,6 +494,7 @@ class OAuthClient:
             token=Secret(str(access_token)),
             refresh_token=refresh_token_secret,
             expires_at=expires_at,
+            issued_at=issued_at,
             scopes=scopes,
             token_type=str(data.get("token_type", "bearer")),
             metadata=dict(previous.metadata) if previous is not None else {},
@@ -517,6 +533,7 @@ class MetadataRefresher:
         lease_ttl: float = 30.0,
         poll_interval: float = 1.0,
         clock: Clock | None = None,
+        refresh_policy: RefreshPolicy | None = None,
     ) -> None:
         self._store = store
         self._lock = lock
@@ -524,6 +541,7 @@ class MetadataRefresher:
         self._lease_ttl = lease_ttl
         self._poll_interval = poll_interval
         self._clock = clock
+        self._policy = refresh_policy
 
     async def refresh(self, name: str, stored: StoredCredential) -> StoredCredential:
         meta = stored.metadata
@@ -547,6 +565,7 @@ class MetadataRefresher:
             lease_ttl=self._lease_ttl,
             poll_interval=self._poll_interval,
             clock=self._clock,
+            refresh_policy=self._policy,
         )
         return await client.refresh(name, stored)
 

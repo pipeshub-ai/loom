@@ -302,6 +302,36 @@ class GuardedBroker:
                 held=grant.toolsets,
             )
 
+        if call.kind == "step" and "." in call.target:
+            # A bridged step whose semantic name is `<toolset>.<operation>`
+            # (see `Context.step(fn, name="jira.create_issue", ...)`) is a
+            # tool call in every way that matters to a grant -- only the
+            # journal calls it "step" because it was dispatched through
+            # `ctx.step()` rather than a native `Toolset`. Without this, a
+            # host bridging a dynamic tool registry (one `@step` wrapping
+            # many operations, since the operations are not known until a
+            # task resolves its tools) could never be grant-checked: the
+            # existing "tool" branch only ever sees `kind == "tool"`, which
+            # native Loom toolsets produce and bridged ones do not.
+            # Undotted step names (an ordinary local `@step`) fall through
+            # unchecked, exactly as before this branch existed.
+            toolset_id, _, op_id = call.target.partition(".")
+            if not grant.toolsets:
+                if grant.strict:
+                    return self._denied(
+                        call, f"'{call.target}' is not granted",
+                        needs=f"{call.target}:{call.effect.value}", held=[],
+                    )
+                return None
+            if grant.allows_operation(toolset_id, op_id, call.effect.value):
+                return None
+            return self._denied(
+                call,
+                f"'{call.target}' is not granted",
+                needs=f"{call.target}:{call.effect.value}",
+                held=grant.toolsets,
+            )
+
         if call.kind == "agent":
             if not grant.agents:
                 if grant.strict:

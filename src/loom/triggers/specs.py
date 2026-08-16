@@ -85,15 +85,27 @@ class Webhook(TriggerSpec):
 class Schedule(TriggerSpec):
     """Cron-driven execution.
 
-    In a multi-replica deployment the host must run schedules only on the elected leader;
-    see :mod:`loom.worker.leader`. Double-firing crons is the classic way a
-    horizontally scaled scheduler corrupts data.
+    Safe to run on every replica: each occurrence is submitted under a
+    deterministic idempotency key (``trigger_id@scheduled_for``), so two
+    dispatchers produce one run rather than two. To avoid the *duplicated work*
+    — and to keep one process advancing the schedule — pass a dispatcher to
+    :meth:`Runtime.start_scheduler` with a
+    :class:`~loom.runtime.leader.LeaderElector`.
     """
 
     cron: str
     timezone: str = "UTC"
     catch_up: bool = False
     """Replay fire times missed while the scheduler was down, instead of skipping them."""
+    max_catch_up: int = 10
+    """Ceiling on a backfill, counted in occurrences.
+
+    Only consulted when ``catch_up`` is set. The newest occurrences are the ones
+    kept — after a two-week outage the last ten days of a daily report are worth
+    more than the first ten — and the remainder are dropped with a warning
+    naming the count. Without a ceiling, a per-minute schedule and a week of
+    downtime submits ten thousand runs at once, which is a second outage caused
+    by recovering from the first."""
     jitter: Duration = 0.0
     kind: TriggerKind = field(default=TriggerKind.SCHEDULE, init=False)
 
@@ -118,6 +130,11 @@ class Schedule(TriggerSpec):
             "cron": self.cron,
             "timezone": self.timezone,
             "catch_up": self.catch_up,
+            "max_catch_up": self.max_catch_up,
+            # Carried like the rest of the policy: a field the dispatcher
+            # cannot read is a field that does nothing, however clearly it is
+            # declared on the spec.
+            "jitter": to_seconds(self.jitter),
             "next_fire": self.next_fire().isoformat(),
         }
 

@@ -112,21 +112,24 @@ async def ai_research(ctx: Context, query: str) -> dict:
 async def main() -> None:
     require_env("ANTHROPIC_API_KEY")
 
-    rt = Runtime(store=MemoryStore())
-    query = "AI workflow automation"
+    async with Runtime(store=MemoryStore()) as rt:
+        query = "AI workflow automation"
 
-    print(f"Researching HN stories about: '{query}'")
-    result = await rt.run(ai_research, query)
+        print(f"Researching HN stories about: '{query}'")
+        result = await rt.run(ai_research, query)
 
-    print(f"\nStatus : {result.status.value}")
-    if result.output:
-        print(f"Query  : {result.output['url']}")
-        print(f"Summary: {result.output['summary']}")
-        print(f"Length : {result.output['chars']} chars")
-    print(f"Run ID : {result.run_id}")
+        print(f"\nStatus : {result.status.value}")
+        if result.output:
+            print(f"Query  : {result.output['url']}")
+            print(f"Summary: {result.output['summary']}")
+            print(f"Length : {result.output['chars']} chars")
+        print(f"Run ID : {result.run_id}")
 
 
 if __name__ == "__main__":
-    import asyncio
+    from loom.runtime.shutdown import run_main
 
-    asyncio.run(main())
+    # run_main is asyncio.run plus the two things a program needs: SIGINT and
+    # SIGTERM cancel main() so its cleanup runs, and an interrupt becomes an
+    # exit code instead of a traceback.
+    raise SystemExit(run_main(main()))

@@ -19,6 +19,8 @@ Usage in a generated workflow::
 
 from __future__ import annotations
 
+from pydantic import BaseModel
+
 from loom import Retry, step
 from loom.toolsets.confluence.models import (
     ConfluenceComment,
@@ -259,7 +261,14 @@ def _build_tool_docs() -> str:
         SearchResult as _Search,
     )
 
-    def _fields(model: type) -> str:
+    def _fields(model: type[BaseModel]) -> str:
+        """The field names a model declares, for the agent-facing docs.
+
+        ``type[BaseModel]`` rather than ``type``: the bare form accepts any
+        class and then calls a Pydantic classmethod on it, so passing the wrong
+        thing is an AttributeError from inside a docs generator rather than an
+        error where the mistake was made.
+        """
         props = model.model_json_schema().get("properties", {})
         return ", ".join(props)
 

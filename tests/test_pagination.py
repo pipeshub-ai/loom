@@ -657,3 +657,82 @@ class TestAThirdPartyToolsetGetsTheSameView:
         assert restored.complete is False
         assert restored.total == 250
         assert restored.summary() == "50 of 250"
+
+
+# ---------------------------------------------------------------------------
+# Slack's nested cursor, through the existing token dialect
+# ---------------------------------------------------------------------------
+
+
+class TestSlacksNestedCursor:
+    """Slack puts its cursor at ``response_metadata.next_cursor``.
+
+    Deliberately *not* a fourth dialect: ``TokenPaging`` already addresses a
+    nested field through a tuple ``token_field`` (HubSpot's is at
+    ``paging.next.after``), and already treats an empty token as exhausted. A
+    new class here would have been the same dialect written twice.
+    """
+
+    def _style(self):
+        from loom.toolsets.pagination import TokenPaging
+
+        return TokenPaging(
+            items="channels",
+            size_param="limit",
+            token_param="cursor",
+            token_field=("response_metadata", "next_cursor"),
+        )
+
+    def test_the_first_request_asks_for_a_size_and_no_cursor(self) -> None:
+        assert self._style().params(None, 200) == {"limit": 200}
+
+    def test_a_later_request_carries_the_cursor(self) -> None:
+        assert self._style().params("abc=", 50) == {"limit": 50, "cursor": "abc="}
+
+    def test_it_reads_a_cursor_out_of_the_envelope(self) -> None:
+        page = self._style().read(
+            {"channels": [1, 2], "response_metadata": {"next_cursor": "n1"}}, None, 2
+        )
+        assert page.items == [1, 2]
+        assert page.cursor == "n1"
+
+    def test_an_empty_string_cursor_is_the_end(self) -> None:
+        """Slack sends "" as often as it omits the field; reading only for
+        absence would loop to the page ceiling against a real workspace."""
+        page = self._style().read(
+            {"channels": [1], "response_metadata": {"next_cursor": ""}}, None, 1
+        )
+        assert page.cursor is None
+
+    def test_an_absent_envelope_is_the_end(self) -> None:
+        assert self._style().read({"channels": [1]}, None, 1).cursor is None
+
+    def test_a_null_envelope_does_not_crash(self) -> None:
+        page = self._style().read(
+            {"channels": [], "response_metadata": None}, None, 1
+        )
+        assert page.cursor is None
+
+    def test_a_missing_rows_key_is_an_empty_page(self) -> None:
+        assert self._style().read({"ok": True}, None, 5).items == []
+
+    async def test_it_drives_collect_to_exhaustion(self) -> None:
+        from loom.toolsets.pagination import page_through
+
+        pages = [
+            {"channels": [1, 2], "response_metadata": {"next_cursor": "c2"}},
+            {"channels": [3], "response_metadata": {"next_cursor": ""}},
+        ]
+        seen: list[dict] = []
+
+        async def request(asked):
+            seen.append(asked)
+            return pages[len(seen) - 1]
+
+        found = await page_through(
+            request, style=self._style(), limit=10, page_size=2
+        )
+
+        assert list(found) == [1, 2, 3]
+        assert found.complete is True
+        assert seen[1]["cursor"] == "c2"

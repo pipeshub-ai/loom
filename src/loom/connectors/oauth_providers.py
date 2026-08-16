@@ -170,6 +170,15 @@ _BUILTIN_PROVIDERS = (
         docs_url="https://api.slack.com/authentication/oauth-v2",
     ),
     OAuthProviderConfig(
+        id="zoom",
+        display_name="Zoom",
+        authorization_endpoint="https://zoom.us/oauth/authorize",
+        token_endpoint="https://zoom.us/oauth/token",
+        default_scopes=("meeting:read", "meeting:write", "user:read"),
+        supports_pkce=True,
+        docs_url="https://developers.zoom.us/docs/integrations/oauth/",
+    ),
+    OAuthProviderConfig(
         id="microsoft",
         display_name="Microsoft (Azure AD)",
         authorization_endpoint=(

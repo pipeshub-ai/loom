@@ -12,11 +12,12 @@ from typing import TYPE_CHECKING, Any
 
 from loom.toolsets.google.calendar.models import (
     BusyPeriod,
+    CalendarAccessRule,
     CalendarEvent,
     CalendarSummary,
     EventAttendee,
 )
-from loom.toolsets.google.http import GoogleSession
+from loom.toolsets.google.http import DEFAULT_TIMEOUT, GoogleSession
 from loom.toolsets.pagination import Results
 
 if TYPE_CHECKING:
@@ -41,11 +42,13 @@ class CalendarClient:
         auth: GoogleAuth | None = None,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
+        timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
         from loom.toolsets.google.auth import get_default_auth
 
         self._session = GoogleSession(
-            auth or get_default_auth(SCOPES), API_BASE, transport=transport
+            auth or get_default_auth(SCOPES), API_BASE,
+            transport=transport, timeout=timeout,
         )
 
     # -- calendars -----------------------------------------------------------
@@ -125,13 +128,21 @@ class CalendarClient:
         time_zone: str = "",
         all_day: bool = False,
         send_updates: str = "none",
+        add_meet: bool = False,
+        recurrence: list[str] | None = None,
     ) -> CalendarEvent:
-        """Create an event.
+        """Create an event, optionally with a Google Meet link.
 
         ``send_updates`` decides whether Google emails the attendees: ``none``
         (default), ``all``, or ``externalOnly``. It defaults to ``none`` because
         a workflow that creates a hundred events should not, as a side effect of
         a default, send a hundred invitations.
+
+        ``add_meet=True`` is how a *scheduled* Meet meeting is created — the
+        Meet API itself cannot schedule anything. It needs the
+        ``conferenceDataVersion=1`` parameter below; without it Google accepts
+        the request, ignores the conference block, and returns an event with no
+        link and no error.
         """
         body = _event_body(
             summary=summary,
@@ -142,11 +153,34 @@ class CalendarClient:
             attendees=attendees,
             time_zone=time_zone,
             all_day=all_day,
+            recurrence=recurrence,
         )
+        if add_meet:
+            body["conferenceData"] = _conference_request(
+                calendar_id, summary, start, end
+            )
+
         data = await self._session.post(
             f"calendars/{_quote(calendar_id)}/events",
             body,
             sendUpdates=send_updates,
+            conferenceDataVersion=1 if add_meet else None,
+        )
+        return flatten_event(data, calendar_id)
+
+    async def add_meet_link(
+        self, event_id: str, *, calendar_id: str = "primary"
+    ) -> CalendarEvent:
+        """Attach a Google Meet link to an event that has none.
+
+        Idempotent in practice: the request id is derived from the event, so a
+        second call reuses Google's own dedup rather than provisioning a second
+        conference on the same event.
+        """
+        data = await self._session.patch(
+            f"calendars/{_quote(calendar_id)}/events/{event_id}",
+            {"conferenceData": _conference_request(calendar_id, event_id, "", "")},
+            conferenceDataVersion=1,
         )
         return flatten_event(data, calendar_id)
 
@@ -178,6 +212,95 @@ class CalendarClient:
             f"calendars/{_quote(calendar_id)}/events/{event_id}",
             sendUpdates=send_updates,
         )
+
+    async def list_event_instances(
+        self,
+        event_id: str,
+        *,
+        calendar_id: str = "primary",
+        time_min: str = "",
+        time_max: str = "",
+        max_results: int = 50,
+    ) -> Results[CalendarEvent]:
+        """Expand one recurring series into its individual occurrences.
+
+        Distinct from ``list_events`` with ``singleEvents``: that expands every
+        series in a window, this expands *one* series and is how a single
+        occurrence is found in order to cancel or move it. Editing the master
+        instead changes every occurrence, past ones included.
+        """
+        items = await self._session.paginate(
+            f"calendars/{_quote(calendar_id)}/events/{event_id}/instances",
+            items_key="items",
+            limit=max_results,
+            params={"timeMin": time_min or None, "timeMax": time_max or None},
+        )
+        return items.mapped(lambda item: flatten_event(item, calendar_id))
+
+    async def move_event(
+        self,
+        event_id: str,
+        destination_calendar_id: str,
+        *,
+        calendar_id: str = "primary",
+        send_updates: str = "none",
+    ) -> CalendarEvent:
+        """Move an event to another calendar, keeping its id and attendees.
+
+        Not a delete-and-recreate: that would drop every RSVP and re-notify
+        everyone invited.
+        """
+        data = await self._session.post(
+            f"calendars/{_quote(calendar_id)}/events/{event_id}/move",
+            None,
+            destination=destination_calendar_id,
+            sendUpdates=send_updates,
+        )
+        return flatten_event(data, destination_calendar_id)
+
+    async def respond_to_event(
+        self,
+        event_id: str,
+        response: str,
+        *,
+        calendar_id: str = "primary",
+        comment: str = "",
+    ) -> CalendarEvent:
+        """RSVP to an invitation as the authenticated user.
+
+        The Calendar API has no RSVP call: an attendee list is patched whole, so
+        answering means reading the current list, editing one entry, and sending
+        all of them back. Sending only the changed attendee removes everyone
+        else from the event — which is why this reads first rather than letting
+        a caller construct the patch.
+        """
+        if response not in {"accepted", "declined", "tentative", "needsAction"}:
+            raise ValueError(
+                f"response must be accepted, declined, tentative or needsAction, "
+                f"got {response!r}"
+            )
+
+        raw = await self._session.get(
+            f"calendars/{_quote(calendar_id)}/events/{event_id}"
+        )
+        attendees = list((raw or {}).get("attendees") or [])
+        mine = [person for person in attendees if person.get("self")]
+        if not mine:
+            raise ValueError(
+                f"this account is not an attendee of event {event_id!r}, so it "
+                "has nothing to RSVP to. The organiser changes an event with "
+                "calendar_update_event instead."
+            )
+        for person in mine:
+            person["responseStatus"] = response
+            if comment:
+                person["comment"] = comment
+
+        data = await self._session.patch(
+            f"calendars/{_quote(calendar_id)}/events/{event_id}",
+            {"attendees": attendees},
+        )
+        return flatten_event(data, calendar_id)
 
     async def quick_add_event(
         self, text: str, calendar_id: str = "primary"
@@ -220,6 +343,131 @@ class CalendarClient:
                 )
         return periods
 
+    # -- calendar management -------------------------------------------------
+
+    async def get_calendar(self, calendar_id: str = "primary") -> CalendarSummary:
+        """Fetch one calendar's metadata, including its timezone.
+
+        The timezone matters: an event created without one is interpreted in
+        the calendar's zone, so a workflow that schedules "9am" has to know
+        which 9am that is.
+        """
+        data = await self._session.get(f"calendars/{_quote(calendar_id)}")
+        return CalendarSummary(
+            id=data.get("id", ""),
+            summary=data.get("summary", ""),
+            description=data.get("description", ""),
+            time_zone=data.get("timeZone", ""),
+            # `calendars.get` describes the calendar itself and carries neither
+            # field — they belong to this account's *entry* in its list. Left
+            # at their defaults rather than invented.
+            primary=False,
+            access_role="",
+        )
+
+    async def find_calendar(self, name: str) -> CalendarSummary | None:
+        """The calendar with exactly this summary (name), or ``None``.
+
+        Every other call takes a calendar *id* — which for a secondary calendar
+        is an opaque ``...@group.calendar.google.com`` address nobody types.
+        A person says "the Team calendar", and passing that where an id belongs
+        is a 404 rather than a search.
+
+        A scan that ran out before finding it **raises** rather than answering
+        ``None``: "not found" is a fact a caller acts on, and it is only a fact
+        if the whole list was searched.
+        """
+        wanted = name.strip().lower()
+        found = await self.list_calendars()
+        for calendar in found:
+            if calendar.summary.lower() == wanted:
+                return calendar
+        if not found.complete:
+            raise ValueError(
+                f"searched the first {len(found)} calendars without finding "
+                f"{name!r}, and this account has more. Pass the calendar id "
+                "directly — a 'not found' from a partial scan is not a "
+                "'does not exist'."
+            )
+        return None
+
+    async def create_calendar(
+        self, summary: str, *, time_zone: str = "", description: str = ""
+    ) -> CalendarSummary:
+        """Create a secondary calendar."""
+        body: dict[str, Any] = {"summary": summary}
+        if time_zone:
+            body["timeZone"] = time_zone
+        if description:
+            body["description"] = description
+
+        data = await self._session.post("calendars", body)
+        return CalendarSummary(
+            id=data.get("id", ""),
+            summary=data.get("summary", ""),
+            description=data.get("description", ""),
+            time_zone=data.get("timeZone", ""),
+            access_role="owner",
+        )
+
+    async def delete_calendar(self, calendar_id: str) -> None:
+        """Delete a secondary calendar, and every event on it. Not recoverable.
+
+        Refuses ``"primary"``: that request deletes every event on the account's
+        main calendar rather than the calendar, and no workflow means it.
+        """
+        if calendar_id == "primary":
+            raise ValueError(
+                'refusing to delete the primary calendar. Deleting "primary" '
+                "clears every event on the account's main calendar; to remove a "
+                "secondary calendar, pass its own id."
+            )
+        await self._session.delete(f"calendars/{_quote(calendar_id)}")
+
+    # -- calendar sharing ----------------------------------------------------
+
+    async def list_acl(
+        self, calendar_id: str = "primary", max_results: int = 100
+    ) -> Results[CalendarAccessRule]:
+        """Who has standing access to a calendar, following every page."""
+        items = await self._session.paginate(
+            f"calendars/{_quote(calendar_id)}/acl",
+            items_key="items",
+            limit=max_results,
+        )
+        return items.mapped(_access_rule)
+
+    async def share_calendar(
+        self,
+        calendar_id: str,
+        *,
+        email: str = "",
+        role: str = "reader",
+        scope_type: str = "user",
+        domain: str = "",
+    ) -> CalendarAccessRule:
+        """Grant standing access to a whole calendar.
+
+        Much wider than inviting someone to an event, and permanent until
+        revoked. ``scope_type="default"`` makes the calendar public.
+        """
+        scope: dict[str, Any] = {"type": scope_type}
+        if scope_type in {"user", "group"} and email:
+            scope["value"] = email
+        elif scope_type == "domain" and domain:
+            scope["value"] = domain
+
+        data = await self._session.post(
+            f"calendars/{_quote(calendar_id)}/acl", {"role": role, "scope": scope}
+        )
+        return _access_rule(data)
+
+    async def unshare_calendar(self, calendar_id: str, rule_id: str) -> None:
+        """Revoke one access rule, by the id from :meth:`list_acl`."""
+        await self._session.delete(
+            f"calendars/{_quote(calendar_id)}/acl/{rule_id}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Shaping
@@ -255,11 +503,45 @@ def flatten_event(raw: dict[str, Any], calendar_id: str = "") -> CalendarEvent:
             for person in raw.get("attendees") or []
         ],
         recurring_event_id=raw.get("recurringEventId", ""),
+        recurrence=list(raw.get("recurrence") or []),
         hangout_link=raw.get("hangoutLink", ""),
+        conference_id=(raw.get("conferenceData") or {}).get("conferenceId", ""),
         url=raw.get("htmlLink", ""),
         created=raw.get("created", ""),
         updated=raw.get("updated", ""),
     )
+
+
+def _access_rule(raw: dict[str, Any]) -> CalendarAccessRule:
+    scope = raw.get("scope") or {}
+    return CalendarAccessRule(
+        id=raw.get("id", ""),
+        scope_type=scope.get("type", "user"),
+        scope_value=scope.get("value", ""),
+        role=raw.get("role", "reader"),
+    )
+
+
+def _conference_request(
+    calendar_id: str, summary: str, start: str, end: str
+) -> dict[str, Any]:
+    """The ``createRequest`` that asks Google to provision a Meet link.
+
+    ``requestId`` is *derived* rather than random, and that is the whole point:
+    Google treats it as an idempotency key, so a step retried after a timeout
+    reuses the conference it already created instead of provisioning a second
+    one on the same event. A ``uuid4()`` here would also make the request
+    non-deterministic, which is the thing a workflow body may never be.
+    """
+    import hashlib
+
+    seed = "|".join((calendar_id, summary, start, end))
+    return {
+        "createRequest": {
+            "requestId": f"loom-{hashlib.sha256(seed.encode()).hexdigest()[:24]}",
+            "conferenceSolutionKey": {"type": "hangoutsMeet"},
+        }
+    }
 
 
 def _event_body(
@@ -272,6 +554,7 @@ def _event_body(
     attendees: list[str] | None,
     time_zone: str,
     all_day: bool,
+    recurrence: list[str] | None = None,
 ) -> dict[str, Any]:
     key = "date" if all_day else "dateTime"
     start_field: dict[str, Any] = {key: start}
@@ -291,6 +574,8 @@ def _event_body(
         body["location"] = location
     if attendees:
         body["attendees"] = [{"email": address} for address in attendees]
+    if recurrence:
+        body["recurrence"] = list(recurrence)
     return body
 
 

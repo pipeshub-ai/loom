@@ -138,6 +138,7 @@ def resolve(
         client = LoomClient(base_url=server, token_provider=server_token_provider(server))
         return Target(RemoteFacade(client), target)
 
+    from loom.cli.auth_commands import credential_store_for
     from loom.nodes.human import LogChannel
     from loom.runtime.engine import Runtime
 
@@ -152,6 +153,19 @@ def resolve(
     # that nobody was notified. Configure a real one in the host process for
     # anything that should reach a person.
     runtime = Runtime.from_env(human=LogChannel())
+
+    # What `loom connect <name>` stored is what a workflow's toolsets read via
+    # ctx.credential(name) — without this the CLI could authenticate a
+    # credential it then could not use, which is indistinguishable from the
+    # connect having silently failed.
+    #
+    # Attached as Runtime-level credentials, which `Runtime._credentials_for`
+    # treats as *ambient*: a per-run `credentials=` still wins, and a name the
+    # run declared is never satisfied from here. So this widens what an
+    # unspecified run can reach, and never swaps an identity a caller supplied.
+    # Built after the Runtime so the store's LockProvider serializes refreshes
+    # across processes sharing this credential file.
+    runtime.credentials = credential_store_for(runtime)
     loaded: list[str] = []
 
     explicit_name: str | None = None

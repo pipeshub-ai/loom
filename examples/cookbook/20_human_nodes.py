@@ -18,8 +18,6 @@ Run:
 
 from __future__ import annotations
 
-import asyncio
-
 from loom import Context, Runtime, step, workflow
 from loom.facade import LocalFacade
 from loom.nodes.human import (
@@ -119,39 +117,44 @@ async def handle_complaint(ctx: Context, complaint: str) -> str:
 
 async def main() -> None:
     channel = DemoChannel()
-    runtime = Runtime(store=MemoryStore(), human=channel)
-    runtime.register(handle_complaint)
-    facade = LocalFacade(runtime)
+    async with Runtime(store=MemoryStore(), human=channel) as runtime:
+        runtime.register(handle_complaint)
+        facade = LocalFacade(runtime)
 
-    print("Starting the run — it will park on the first question.\n")
-    result = await runtime.run(handle_complaint, "double-charged on invoice 4821")
-    print(f"\nstatus: {result.status.value}")
+        print("Starting the run — it will park on the first question.\n")
+        result = await runtime.run(handle_complaint, "double-charged on invoice 4821")
+        print(f"\nstatus: {result.status.value}")
 
-    # `loom pending` is this, from the command line. It is what turns a parked
-    # run into a queue item rather than something you have to already know about.
-    for waiting in await facade.pending():
-        print(f"waiting: {waiting['subject']} — {waiting['prompt']}")
-        print(f"         {waiting['next_action']}")
+        # `loom pending` is this, from the command line. It is what turns a parked
+        # run into a queue item rather than something you have to already know about.
+        for waiting in await facade.pending():
+            print(f"waiting: {waiting['subject']} — {waiting['prompt']}")
+            print(f"         {waiting['next_action']}")
 
-    print("\nAnswering each question in turn.\n")
+        print("\nAnswering each question in turn.\n")
 
-    result = await facade.respond(
-        result.run_id, "route", {"selected": ["billing"], "responder": "dana"}
-    )
-    result = await facade.respond(
-        result["run_id"],
-        "reply",
-        {"content": "Hi — sorry about this, a refund is on the way.", "responder": "sam"},
-    )
-    run = await facade.respond(
-        result["run_id"], "send", {"approved": True, "responder": "lead"}
-    )
+        result = await facade.respond(
+            result.run_id, "route", {"selected": ["billing"], "responder": "dana"}
+        )
+        result = await facade.respond(
+            result["run_id"],
+            "reply",
+            {"content": "Hi — sorry about this, a refund is on the way.", "responder": "sam"},
+        )
+        run = await facade.respond(
+            result["run_id"], "send", {"approved": True, "responder": "lead"}
+        )
 
-    print(f"\nstatus: {run['status']}")
-    print(f"output: {run['output']}")
-    print(f"\nrequests raised: {len(channel.raised)} (one per question, never repeated)")
-    print(f"still waiting:   {len(await facade.pending())}")
+        print(f"\nstatus: {run['status']}")
+        print(f"output: {run['output']}")
+        print(f"\nrequests raised: {len(channel.raised)} (one per question, never repeated)")
+        print(f"still waiting:   {len(await facade.pending())}")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    from loom.runtime.shutdown import run_main
+
+    # run_main is asyncio.run plus the two things a program needs: SIGINT and
+    # SIGTERM cancel main() so its cleanup runs, and an interrupt becomes an
+    # exit code instead of a traceback.
+    raise SystemExit(run_main(main()))

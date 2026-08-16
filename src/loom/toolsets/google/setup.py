@@ -32,27 +32,68 @@ DEFAULT_PORT = 8931
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 
+#: Per-toolset scope sets, and the two combinations worth having by name.
+#:
+#: ``read`` and ``write`` are composed from the per-toolset entries below rather
+#: than written out again, so adding a scope to a toolset cannot leave the
+#: combined set behind — which would hand out a credential that works for three
+#: toolsets and 403s on the fourth, at the point of use rather than of setup.
+_GMAIL_READ = ["https://www.googleapis.com/auth/gmail.readonly"]
+_GMAIL_WRITE = [
+    *_GMAIL_READ,
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.compose",
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.labels",
+]
+_CALENDAR_READ = ["https://www.googleapis.com/auth/calendar.readonly"]
+_CALENDAR_WRITE = [
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/calendar.events",
+]
+_DRIVE_READ = ["https://www.googleapis.com/auth/drive.readonly"]
+_DRIVE_WRITE = [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/drive.file",
+]
+#: Meet has no separate read/write split worth making: reading a transcript and
+#: creating a space are two different scopes, not two halves of one.
+_MEET_READ = ["https://www.googleapis.com/auth/meetings.space.readonly"]
+_MEET_WRITE = [
+    *_MEET_READ,
+    "https://www.googleapis.com/auth/meetings.space.created",
+    "https://www.googleapis.com/auth/meetings.space.settings",
+]
+
+
+def _unique(*groups: list[str]) -> list[str]:
+    """Concatenate scope lists, keeping the first occurrence of each.
+
+    Google rejects nothing for a repeat, but the consent screen lists what it
+    is given, and a duplicate reads as a mistake to whoever is approving it.
+    """
+    seen: dict[str, None] = {}
+    for group in groups:
+        for scope in group:
+            seen.setdefault(scope, None)
+    return list(seen)
+
+
+_GMAIL = _GMAIL_WRITE
+_CALENDAR = _unique(_CALENDAR_READ, _CALENDAR_WRITE)
+_DRIVE = _unique(_DRIVE_READ, _DRIVE_WRITE)
+_MEET = _MEET_WRITE
+
 SCOPE_SETS: dict[str, list[str]] = {
-    "read": [
-        "https://www.googleapis.com/auth/gmail.readonly",
-        "https://www.googleapis.com/auth/calendar.readonly",
-    ],
-    "write": [
-        "https://www.googleapis.com/auth/gmail.readonly",
-        "https://www.googleapis.com/auth/gmail.send",
-        "https://www.googleapis.com/auth/gmail.modify",
-        "https://www.googleapis.com/auth/calendar",
-        "https://www.googleapis.com/auth/calendar.events",
-    ],
-    "gmail": [
-        "https://www.googleapis.com/auth/gmail.readonly",
-        "https://www.googleapis.com/auth/gmail.send",
-        "https://www.googleapis.com/auth/gmail.modify",
-    ],
-    "calendar": [
-        "https://www.googleapis.com/auth/calendar",
-        "https://www.googleapis.com/auth/calendar.events",
-    ],
+    "read": _unique(_GMAIL_READ, _CALENDAR_READ, _DRIVE_READ, _MEET_READ),
+    # The union of the four, not a hand-kept parallel list — so ``--scopes
+    # write`` cannot mint a credential that is missing whatever a per-toolset
+    # set gained most recently.
+    "write": _unique(_GMAIL, _CALENDAR, _DRIVE, _MEET),
+    "gmail": _GMAIL,
+    "calendar": _CALENDAR,
+    "drive": _DRIVE,
+    "meet": _MEET,
 }
 
 _PAGE = b"""<!doctype html><meta charset="utf-8">
@@ -272,6 +313,8 @@ Need a client id and secret first. Once, in the Google Cloud console:
   2. Enable the APIs you want:
        https://console.cloud.google.com/apis/library/gmail.googleapis.com
        https://console.cloud.google.com/apis/library/calendar-json.googleapis.com
+       https://console.cloud.google.com/apis/library/drive.googleapis.com
+       https://console.cloud.google.com/apis/library/meet.googleapis.com
   3. Configure the OAuth consent screen (External is fine) and add your own
      Google account under "Test users" — an app in Testing will not let anyone
      else through.

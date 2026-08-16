@@ -564,12 +564,33 @@ class TestRegisterAvailableToolsets:
     """``loom mcp`` seeds the catalog; a bare Runtime does not."""
 
     def test_seeds_every_shipped_toolset(self) -> None:
+        """Derived from BUILTIN_TOOLSETS, not repeated from it.
+
+        This assertion used to be a literal list of four ids, and it had
+        already gone stale — ``google.drive`` and ``google.meet`` were shipping
+        and unnamed here, so "every shipped toolset" was checking four of six.
+        A list that has to be edited in step with the source it describes gets
+        edited late or not at all.
+        """
+        from loom.toolsets.registry import BUILTIN_TOOLSETS
+
         ids = register_available_toolsets()
-        assert ids == ["confluence", "gmail", "google_calendar", "jira"]
         catalog = get_catalog()
+
         for toolset_id in ids:
             assert catalog.get(toolset_id) is not None
             assert catalog.get_toolset(toolset_id) is not None
+
+        shipped = {
+            getattr(
+                __import__(path.rsplit(".", 1)[0], fromlist=["x"]),
+                path.rsplit(".", 1)[1],
+            ).id
+            for path, _ in BUILTIN_TOOLSETS
+        }
+        assert shipped <= set(catalog.toolset_ids), (
+            f"shipped but not seeded: {sorted(shipped - set(catalog.toolset_ids))}"
+        )
 
     def test_a_second_call_does_not_duplicate_or_replace(self) -> None:
         first = register_available_toolsets()

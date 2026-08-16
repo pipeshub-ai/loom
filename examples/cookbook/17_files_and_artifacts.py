@@ -14,7 +14,6 @@ Run:
 
 from __future__ import annotations
 
-import asyncio
 import csv
 import io
 import sys
@@ -99,46 +98,48 @@ async def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         # Swap LocalBlobBackend for S3BlobBackend in production; nothing else changes.
         blobs = BlobService(LocalBlobBackend(Path(tmp) / "blobs"))
-        rt = Runtime(store=MemoryStore(), blobs=blobs)
+        async with Runtime(store=MemoryStore(), blobs=blobs) as rt:
+            header("RUN 1")
+            first = await rt.run(daily_report, "monday")
+            log("run", str(first.output))
 
-        header("RUN 1")
-        first = await rt.run(daily_report, "monday")
-        log("run", str(first.output))
+            header("RUN 2 — same content")
+            second = await rt.run(daily_report, "monday")
+            log("run", str(second.output))
+            log("note", "Identical bytes, so it resolved to v1 rather than making v2.")
 
-        header("RUN 2 — same content")
-        second = await rt.run(daily_report, "monday")
-        log("run", str(second.output))
-        log("note", "Identical bytes, so it resolved to v1 rather than making v2.")
+            header("RUN 3 — content changed")
+            # A different day produces a different summary, so a real new version.
+            third = await rt.run(daily_report, "tuesday")
+            log("run", str(third.output))
 
-        header("RUN 3 — content changed")
-        # A different day produces a different summary, so a real new version.
-        third = await rt.run(daily_report, "tuesday")
-        log("run", str(third.output))
+            header("VERSION HISTORY")
+            for version in await rt.artifacts.history("daily-report.md"):
+                log(
+                    "artifact",
+                    f"{version.qualified_name}  {version.size:>4}B  "
+                    f"by {version.created_by_run[:12]}…",
+                )
 
-        header("VERSION HISTORY")
-        for version in await rt.artifacts.history("daily-report.md"):
-            log(
-                "artifact",
-                f"{version.qualified_name}  {version.size:>4}B  "
-                f"by {version.created_by_run[:12]}…",
-            )
+            header("READING AN OLD VERSION")
+            original = await rt.artifacts.read("daily-report.md", 1)
+            log("v1", original.decode().strip().replace("\n\n", " | "))
 
-        header("READING AN OLD VERSION")
-        original = await rt.artifacts.read("daily-report.md", 1)
-        log("v1", original.decode().strip().replace("\n\n", " | "))
+            header("REPLAY PINS WHAT IT ORIGINALLY READ")
+            replayed = await rt.replay(first.run_id)
+            log("replay", str(replayed.output))
+            log("note", "Still v1 — a replay rehearses what happened, not what would.")
 
-        header("REPLAY PINS WHAT IT ORIGINALLY READ")
-        replayed = await rt.replay(first.run_id)
-        log("replay", str(replayed.output))
-        log("note", "Still v1 — a replay rehearses what happened, not what would.")
-
-        header("STAGING AN ATTACHMENT")
-        staged = await rt.run(staged_export, "monday")
-        log("run", str(staged.output))
-        log("note", "The CSV was staged from the Attachment, then committed.")
-
-        await rt.shutdown()
+            header("STAGING AN ATTACHMENT")
+            staged = await rt.run(staged_export, "monday")
+            log("run", str(staged.output))
+            log("note", "The CSV was staged from the Attachment, then committed.")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    from loom.runtime.shutdown import run_main
+
+    # run_main is asyncio.run plus the two things a program needs: SIGINT and
+    # SIGTERM cancel main() so its cleanup runs, and an interrupt becomes an
+    # exit code instead of a traceback.
+    raise SystemExit(run_main(main()))

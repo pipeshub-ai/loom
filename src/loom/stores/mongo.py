@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
+from loom.core.exceptions import ConcurrentUpdateError
 from loom.core.models import (
     Event,
     ExecutionRecord,
@@ -147,11 +148,31 @@ class MongoStore:
         doc = await self._db.executions.find_one({"_id": run_id})
         return _doc_to_exec(doc) if doc else None
 
-    async def update_execution(self, record: ExecutionRecord) -> None:
+    async def update_execution(
+        self, record: ExecutionRecord, *, expected_status: ExecutionStatus | None = None
+    ) -> None:
         doc = _exec_to_doc(record)
-        await self._db.executions.replace_one(
-            {"_id": record.run_id}, doc, upsert=True
+        if expected_status is None:
+            await self._db.executions.replace_one(
+                {"_id": record.run_id}, doc, upsert=True
+            )
+            return
+        # find_one_and_update with a status precondition is what makes two
+        # instances racing to resume the same SUSPENDED run resolve to
+        # exactly one winner: Mongo evaluates the filter and applies the
+        # replacement atomically, so the loser's filter simply matches
+        # nothing rather than clobbering the winner's in-flight journal.
+        fields = {k: v for k, v in doc.items() if k != "_id"}
+        result = await self._db.executions.find_one_and_update(
+            {"_id": record.run_id, "status": expected_status.value},
+            {"$set": fields},
         )
+        if result is None:
+            current = await self._db.executions.find_one({"_id": record.run_id})
+            actual = current.get("status") if current else None
+            raise ConcurrentUpdateError(
+                record.run_id, expected=expected_status.value, actual=actual,
+            )
 
     async def delete_execution(self, run_id: str) -> None:
         await self._db.journal.delete_many({"run_id": run_id})
@@ -450,6 +471,44 @@ class MongoStore:
             async for doc in cursor
         ]
 
+    async def claim_due_triggers(
+        self,
+        now: datetime,
+        *,
+        owner: str,
+        lease_seconds: float = 60.0,
+        limit: int = 50,
+    ) -> list[TriggerRecord]:
+        until = now + timedelta(seconds=lease_seconds)
+        won: list[TriggerRecord] = []
+        while len(won) < limit:
+            # One document at a time: `find_one_and_update` is atomic per
+            # document, and `update_many` would not tell us *which* documents
+            # this caller won — which is the entire answer being asked for.
+            doc = await self._db.triggers.find_one_and_update(
+                {
+                    "enabled": True,
+                    "next_fire_at": {"$lte": now, "$ne": None},
+                    "$or": [
+                        {"data.claimed_until": None},
+                        {"data.claimed_until": {"$lte": now.isoformat()}},
+                        {"data.claimed_until": {"$exists": False}},
+                    ],
+                },
+                {
+                    "$set": {
+                        "data.claimed_by": owner,
+                        "data.claimed_until": until.isoformat(),
+                    }
+                },
+                sort=[("next_fire_at", 1)],
+                return_document=True,
+            )
+            if doc is None:
+                break
+            won.append(TriggerRecord.model_validate(doc["data"]))
+        return won
+
     async def update_after_fire(
         self,
         trigger_id: str,
@@ -461,6 +520,10 @@ class MongoStore:
             {
                 "$set": {
                     "next_fire_at": next_fire,
+                    # Release the claim; see MemoryStore for why at advance
+                    # time rather than at expiry.
+                    "data.claimed_by": "",
+                    "data.claimed_until": None,
                     "data.last_fire_at": (
                         last_fire.isoformat() if last_fire else None
                     ),

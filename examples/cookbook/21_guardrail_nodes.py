@@ -19,8 +19,6 @@ Run:
 
 from __future__ import annotations
 
-import asyncio
-
 from loom import Context, Runtime, step, workflow
 from loom.core.exceptions import GuardrailTripwire
 from loom.nodes import GuardrailRejected
@@ -76,40 +74,45 @@ async def guarded_node(ctx: Context, rows: list[str]) -> int:
 
 
 async def main() -> None:
-    runtime = Runtime(store=MemoryStore())
-    for flow in (redact_then_publish, blocked_publish, guarded_node):
-        runtime.register(flow)
+    async with Runtime(store=MemoryStore()) as runtime:
+        for flow in (redact_then_publish, blocked_publish, guarded_node):
+            runtime.register(flow)
 
-    print("REPLACE — the secret is rewritten and the run continues:")
-    result = await runtime.run(
-        redact_then_publish, "deploy with sk-abcdefghijklmnop1234 tonight"
-    )
-    print(f"  {result.status.value}: {result.output}\n")
+        print("REPLACE — the secret is rewritten and the run continues:")
+        result = await runtime.run(
+            redact_then_publish, "deploy with sk-abcdefghijklmnop1234 tonight"
+        )
+        print(f"  {result.status.value}: {result.output}\n")
 
-    print("ALLOW — nothing to redact, the value passes through untouched:")
-    result = await runtime.run(redact_then_publish, "deploy tonight")
-    print(f"  {result.status.value}: {result.output}\n")
+        print("ALLOW — nothing to redact, the value passes through untouched:")
+        result = await runtime.run(redact_then_publish, "deploy tonight")
+        print(f"  {result.status.value}: {result.output}\n")
 
-    print("REJECT — raises, so `publish` is never called:")
-    result = await runtime.run(blocked_publish, "'; DROP TABLE users; --")
-    print(f"  {result.status.value}: {result.error.message}")
-    print(f"  the failure is a {GuardrailRejected.__name__}, not a quiet False\n")
+        print("REJECT — raises, so `publish` is never called:")
+        result = await runtime.run(blocked_publish, "'; DROP TABLE users; --")
+        print(f"  {result.status.value}: {result.error.message}")
+        print(f"  the failure is a {GuardrailRejected.__name__}, not a quiet False\n")
 
-    print("A guard attached to a node runs before the node body:")
-    result = await runtime.run(guarded_node, ["a", "b", "c", "d", "e"])
-    print(f"  {result.status.value}: {result.output} batches\n")
+        print("A guard attached to a node runs before the node body:")
+        result = await runtime.run(guarded_node, ["a", "b", "c", "d", "e"])
+        print(f"  {result.status.value}: {result.output} batches\n")
 
-    print("TRIPWIRE aborts the run outright — reserve it for policy violations:")
-    from loom.nodes.guard import GuardVerdict, enforce
+        print("TRIPWIRE aborts the run outright — reserve it for policy violations:")
+        from loom.nodes.guard import GuardVerdict, enforce
 
-    try:
-        enforce(GuardVerdict.tripwire("exfiltration attempt"), guard="demo", value=1)
-    except GuardrailTripwire as stopped:
-        print(f"  {stopped}")
+        try:
+            enforce(GuardVerdict.tripwire("exfiltration attempt"), guard="demo", value=1)
+        except GuardrailTripwire as stopped:
+            print(f"  {stopped}")
 
-    print("\nA guard that *raises* is a tripwire too — a check that cannot run")
-    print("has found nothing, and must not be read as having found nothing wrong.")
+        print("\nA guard that *raises* is a tripwire too — a check that cannot run")
+        print("has found nothing, and must not be read as having found nothing wrong.")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    from loom.runtime.shutdown import run_main
+
+    # run_main is asyncio.run plus the two things a program needs: SIGINT and
+    # SIGTERM cancel main() so its cleanup runs, and an interrupt becomes an
+    # exit code instead of a traceback.
+    raise SystemExit(run_main(main()))

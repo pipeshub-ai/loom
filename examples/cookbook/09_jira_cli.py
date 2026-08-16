@@ -24,7 +24,6 @@ Requires env vars (add to .env):
 from __future__ import annotations
 
 import argparse
-import asyncio
 import logging
 import os
 import subprocess
@@ -423,4 +422,9 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    from loom.runtime.shutdown import run_main
+
+    # run_main is asyncio.run plus the two things a program needs: SIGINT and
+    # SIGTERM cancel main() so its cleanup runs, and an interrupt becomes an
+    # exit code instead of a traceback.
+    raise SystemExit(run_main(main()))

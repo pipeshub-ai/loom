@@ -16,12 +16,14 @@ from typing import TYPE_CHECKING, Any
 from loom.toolsets.google.gmail.models import (
     AttachmentRef,
     EmailMessage,
+    EmailThread,
+    GmailDraft,
     GmailLabel,
     GmailProfile,
     MessageRef,
     SentMessage,
 )
-from loom.toolsets.google.http import GoogleSession
+from loom.toolsets.google.http import DEFAULT_TIMEOUT, GoogleSession
 from loom.toolsets.pagination import Results
 
 if TYPE_CHECKING:
@@ -33,6 +35,9 @@ if TYPE_CHECKING:
 __all__ = ["GmailClient", "build_mime", "flatten_message", "get_default_client"]
 
 API_BASE = "https://gmail.googleapis.com/gmail/v1"
+
+#: Gmail's ceiling for one ``messages.batchModify`` call.
+BATCH_LIMIT = 1000
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
@@ -49,12 +54,14 @@ class GmailClient:
         *,
         user_id: str = "me",
         transport: httpx.AsyncBaseTransport | None = None,
+        timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
         from loom.toolsets.google.auth import get_default_auth
 
         self._user = user_id
         self._session = GoogleSession(
-            auth or get_default_auth(SCOPES), API_BASE, transport=transport
+            auth or get_default_auth(SCOPES), API_BASE,
+            transport=transport, timeout=timeout,
         )
 
     # -- messages ------------------------------------------------------------
@@ -65,8 +72,12 @@ class GmailClient:
         max_results: int = 20,
         label_ids: list[str] | None = None,
         include_spam_trash: bool = False,
-    ) -> list[MessageRef]:
-        """Search, returning ids only — which is all the list endpoint gives."""
+    ) -> Results[MessageRef]:
+        """Search, returning ids only — which is all the list endpoint gives.
+
+        ``Results`` rather than ``list``: it pages, and :meth:`search_messages`
+        reads the coverage off it to carry through to its own answer.
+        """
         params: dict[str, Any] = {"q": query or None}
         if label_ids:
             params["labelIds"] = label_ids
@@ -132,6 +143,7 @@ class GmailClient:
         thread_id: str = "",
         in_reply_to: str = "",
         references: str = "",
+        attachments: list[Attachment] | None = None,
     ) -> SentMessage:
         """Send a message. Returns the receipt, not the stored message."""
         mime = build_mime(
@@ -143,6 +155,7 @@ class GmailClient:
             html=html,
             in_reply_to=in_reply_to,
             references=references,
+            attachments=attachments,
         )
         payload: dict[str, Any] = {"raw": mime}
         if thread_id:
@@ -150,6 +163,36 @@ class GmailClient:
 
         data = await self._session.post(f"users/{self._user}/messages/send", payload)
         return _sent(data)
+
+    async def forward_message(
+        self,
+        message_id: str,
+        to: list[str] | str,
+        *,
+        comment: str = "",
+        html: bool = False,
+    ) -> SentMessage:
+        """Forward a message, quoting the original beneath any comment.
+
+        Sends a *new* message rather than adding a recipient to the existing
+        thread: adding one would deliver the whole prior conversation to
+        someone who was never part of it, and would do so silently.
+        """
+        original = await self.get_message(message_id)
+        quoted = (
+            f"{comment}\n\n" if comment else ""
+        ) + (
+            "---------- Forwarded message ----------\n"
+            f"From: {original.sender}\n"
+            f"Date: {original.date}\n"
+            f"Subject: {original.subject}\n"
+            f"To: {', '.join(original.to)}\n\n"
+            f"{original.body}"
+        )
+        subject = original.subject
+        if not subject.lower().startswith("fwd:"):
+            subject = f"Fwd: {subject}"
+        return await self.send_message(to, subject, quoted, html=html)
 
     async def reply_to_message(self, message_id: str, body: str, *, html: bool = False,
                                reply_all: bool = False) -> SentMessage:
@@ -200,12 +243,179 @@ class GmailClient:
         )
         return flatten_message(data)
 
+    async def batch_modify_labels(
+        self,
+        message_ids: list[str],
+        add: list[str] | None = None,
+        remove: list[str] | None = None,
+    ) -> int:
+        """Label many messages in one request.
+
+        Gmail's quota is per *request*, not per message, so archiving 200
+        messages one call at a time is 200 units against a per-minute budget
+        and this is one. The endpoint answers 204 with no body, so the count is
+        what was asked for — Gmail reports no per-id outcome.
+        """
+        if not message_ids:
+            return 0
+        if len(message_ids) > BATCH_LIMIT:
+            # Gmail answers 400 for more, which surfaces as "Precondition
+            # check failed" and names neither the limit nor the argument.
+            raise ValueError(
+                f"batch_modify_labels takes at most {BATCH_LIMIT} ids at a "
+                f"time, got {len(message_ids)}. Chunk the list — each call is "
+                "one quota unit, so the chunking is cheap."
+            )
+        await self._session.post(
+            f"users/{self._user}/messages/batchModify",
+            {
+                "ids": message_ids,
+                "addLabelIds": add or [],
+                "removeLabelIds": remove or [],
+            },
+        )
+        return len(message_ids)
+
     async def trash_message(self, message_id: str) -> EmailMessage:
-        """Move to trash. Recoverable for 30 days; ``delete`` is not exposed."""
+        """Move to trash. Recoverable for 30 days."""
         data = await self._session.post(
             f"users/{self._user}/messages/{message_id}/trash"
         )
         return flatten_message(data)
+
+    async def untrash_message(self, message_id: str) -> EmailMessage:
+        """Take a message back out of the trash."""
+        data = await self._session.post(
+            f"users/{self._user}/messages/{message_id}/untrash"
+        )
+        return flatten_message(data)
+
+    # Permanent delete is deliberately not exposed. Gmail's ``messages.delete``
+    # requires ``https://mail.google.com/`` — a *restricted* scope granting full
+    # mailbox access — so shipping one unrecoverable operation would widen what
+    # every Gmail workflow has to be granted, and put the toolset into Google's
+    # restricted-scope verification. Trash is recoverable for 30 days and is
+    # what a workflow means by "delete"; ``untrash_message`` undoes it.
+
+    # -- threads -------------------------------------------------------------
+
+    async def list_threads(
+        self,
+        query: str = "",
+        max_results: int = 20,
+        label_ids: list[str] | None = None,
+    ) -> Results[EmailThread]:
+        """Search conversations, returning ids and snippets only.
+
+        Cheap, unlike :meth:`search_messages`: one request per page rather than
+        one per hit. Fetch the ones that matter with :meth:`get_thread`.
+        """
+        params: dict[str, Any] = {"q": query or None}
+        if label_ids:
+            params["labelIds"] = label_ids
+
+        raw = await self._session.paginate(
+            f"users/{self._user}/threads",
+            items_key="threads",
+            limit=max_results,
+            params=params,
+        )
+        return raw.mapped(
+            lambda item: EmailThread(
+                id=item.get("id", ""),
+                snippet=item.get("snippet", ""),
+                # A list response carries no messages and no count; leaving
+                # message_count at 0 says "unknown" rather than "empty thread".
+            )
+        )
+
+    async def get_thread(self, thread_id: str) -> EmailThread:
+        """Fetch a whole conversation, every message flattened."""
+        data = await self._session.get(
+            f"users/{self._user}/threads/{thread_id}", format="full"
+        )
+        return _thread(data)
+
+    async def modify_thread_labels(
+        self,
+        thread_id: str,
+        add: list[str] | None = None,
+        remove: list[str] | None = None,
+    ) -> EmailThread:
+        """Label an entire conversation.
+
+        What inbox triage almost always wants: labelling one message of a
+        thread leaves the conversation looking untouched in the Gmail UI, which
+        groups by thread.
+        """
+        data = await self._session.post(
+            f"users/{self._user}/threads/{thread_id}/modify",
+            {"addLabelIds": add or [], "removeLabelIds": remove or []},
+        )
+        return _thread(data)
+
+    async def trash_thread(self, thread_id: str) -> EmailThread:
+        """Move a whole conversation to the trash. Recoverable for 30 days."""
+        data = await self._session.post(
+            f"users/{self._user}/threads/{thread_id}/trash"
+        )
+        return _thread(data)
+
+    # -- drafts --------------------------------------------------------------
+
+    async def create_draft(
+        self,
+        to: list[str] | str,
+        subject: str,
+        body: str,
+        *,
+        cc: list[str] | str | None = None,
+        bcc: list[str] | str | None = None,
+        html: bool = False,
+        thread_id: str = "",
+        attachments: list[Attachment] | None = None,
+    ) -> GmailDraft:
+        """Compose without sending.
+
+        The safe half of sending, and what makes a draft-then-approve workflow
+        possible: an agent writes the mail, ``ctx.wait_for_approval()`` parks
+        the run, and a human sends it — or does not.
+        """
+        mime = build_mime(
+            to=to,
+            subject=subject,
+            body=body,
+            cc=cc,
+            bcc=bcc,
+            html=html,
+            attachments=attachments,
+        )
+        message: dict[str, Any] = {"raw": mime}
+        if thread_id:
+            message["threadId"] = thread_id
+
+        data = await self._session.post(
+            f"users/{self._user}/drafts", {"message": message}
+        )
+        return _draft(data, to=to, subject=subject)
+
+    async def list_drafts(self, max_results: int = 20) -> Results[GmailDraft]:
+        """List unsent drafts, following every page."""
+        raw = await self._session.paginate(
+            f"users/{self._user}/drafts", items_key="drafts", limit=max_results
+        )
+        return raw.mapped(lambda item: _draft(item))
+
+    async def send_draft(self, draft_id: str) -> SentMessage:
+        """Send an existing draft. The half a human approves."""
+        data = await self._session.post(
+            f"users/{self._user}/drafts/send", {"id": draft_id}
+        )
+        return _sent(data)
+
+    async def delete_draft(self, draft_id: str) -> None:
+        """Discard a draft. It was never delivered, so nothing is recalled."""
+        await self._session.delete(f"users/{self._user}/drafts/{draft_id}")
 
     async def get_attachment(
         self, message_id: str, attachment_id: str, filename: str = "attachment"
@@ -226,16 +436,59 @@ class GmailClient:
 
     async def list_labels(self) -> list[GmailLabel]:
         data = await self._session.get(f"users/{self._user}/labels")
-        return [
-            GmailLabel(
-                id=item.get("id", ""),
-                name=item.get("name", ""),
-                type=item.get("type", ""),
-                messages_total=int(item.get("messagesTotal", 0) or 0),
-                messages_unread=int(item.get("messagesUnread", 0) or 0),
-            )
-            for item in (data or {}).get("labels", [])
-        ]
+        return [_label(item) for item in (data or {}).get("labels", [])]
+
+    async def find_label(self, name: str) -> GmailLabel | None:
+        """The label with exactly this name, or ``None``.
+
+        Gmail has no lookup-by-name, so this lists and matches. Exactly, and
+        case-insensitively: labelling takes ``Label_7``, a person says
+        "Urgent", and ``add=["Urgent"]`` is not an error — Gmail accepts it and
+        applies nothing, which is the silent no-op this resolver exists to
+        prevent. Nested labels are matched on their full path
+        (``"Clients/Acme"``), because that is what the id refers to.
+        """
+        wanted = name.strip().lower()
+        for label in await self.list_labels():
+            if label.name.lower() == wanted:
+                return label
+        return None
+
+    async def create_label(
+        self,
+        name: str,
+        *,
+        label_list_visibility: str = "labelShow",
+        message_list_visibility: str = "show",
+    ) -> GmailLabel:
+        """Create a user label.
+
+        Nested labels are a naming convention, not a structure: ``"Clients/Acme"``
+        creates ``Acme`` under ``Clients``, and the parent must already exist.
+        """
+        data = await self._session.post(
+            f"users/{self._user}/labels",
+            {
+                "name": name,
+                "labelListVisibility": label_list_visibility,
+                "messageListVisibility": message_list_visibility,
+            },
+        )
+        return _label(data)
+
+    async def update_label(self, label_id: str, name: str) -> GmailLabel:
+        """Rename a user label. System labels cannot be renamed."""
+        data = await self._session.patch(
+            f"users/{self._user}/labels/{label_id}", {"name": name}
+        )
+        return _label(data)
+
+    async def delete_label(self, label_id: str) -> None:
+        """Delete a user label, removing it from every message that had it.
+
+        The messages themselves survive — this deletes the label, not the mail.
+        """
+        await self._session.delete(f"users/{self._user}/labels/{label_id}")
 
     async def get_profile(self) -> GmailProfile:
         data = await self._session.get(f"users/{self._user}/profile")
@@ -261,12 +514,19 @@ def build_mime(
     html: bool = False,
     in_reply_to: str = "",
     references: str = "",
+    attachments: list[Attachment] | None = None,
 ) -> str:
     """Build an RFC 2822 message, base64url-encoded as the API wants it.
 
     ``email.message.EmailMessage`` handles the parts that are easy to get subtly
-    wrong by hand: non-ASCII subjects, header folding, and quoting a display
-    name that contains a comma.
+    wrong by hand: non-ASCII subjects, header folding, quoting a display name
+    that contains a comma, and base64-encoding a binary attachment into a part
+    with the right transfer encoding.
+
+    An **offloaded** attachment raises rather than sending an empty file: its
+    bytes live in blob storage and this function has no blob service, so the
+    caller must ``await attachment.read(blobs)`` first. Silently attaching zero
+    bytes would produce a mail that looks sent and delivers nothing.
     """
     message = MIMEMessage()
     message["To"] = _joined(to)
@@ -285,6 +545,22 @@ def build_mime(
         message.add_alternative(body, subtype="html")
     else:
         message.set_content(body)
+
+    for attachment in attachments or []:
+        if attachment.data is None:
+            raise ValueError(
+                f"attachment {attachment.filename!r} has no inline bytes "
+                f"(it is stored at {attachment.ref}). Call "
+                "`await attachment.read(blobs)` and rebuild it with "
+                "Attachment.from_bytes before sending."
+            )
+        main, _, sub = (attachment.mime or "application/octet-stream").partition("/")
+        message.add_attachment(
+            attachment.data,
+            maintype=main or "application",
+            subtype=sub or "octet-stream",
+            filename=attachment.filename,
+        )
 
     return base64.urlsafe_b64encode(message.as_bytes()).decode()
 
@@ -400,6 +676,55 @@ def _strip_html(html: str) -> str:
     ):
         text = text.replace(entity, char)
     return re.sub(r"[ \t]{2,}", " ", text)
+
+
+def _thread(raw: dict[str, Any]) -> EmailThread:
+    """Flatten a thread resource, messages and all."""
+    messages = [flatten_message(item) for item in (raw or {}).get("messages") or []]
+    labels: list[str] = []
+    for message in messages:
+        # The union across the conversation, which is what Gmail shows on it —
+        # a thread is unread if any single message in it is.
+        labels.extend(label for label in message.label_ids if label not in labels)
+
+    return EmailThread(
+        id=raw.get("id", ""),
+        snippet=raw.get("snippet", ""),
+        messages=messages,
+        message_count=len(messages),
+        label_ids=labels,
+    )
+
+
+def _draft(
+    raw: dict[str, Any], *, to: list[str] | str | None = None, subject: str = ""
+) -> GmailDraft:
+    """Flatten a draft resource.
+
+    A create response carries only ids, so ``to`` and ``subject`` are taken
+    from the call that made it — echoing back what was asked for rather than
+    leaving the caller with a draft it cannot identify. A *list* response has
+    neither, and both stay empty rather than being guessed at.
+    """
+    message = raw.get("message") or {}
+    return GmailDraft(
+        id=raw.get("id", ""),
+        message_id=message.get("id", ""),
+        thread_id=message.get("threadId", ""),
+        subject=subject,
+        to=[to] if isinstance(to, str) else list(to or []),
+        snippet=message.get("snippet", ""),
+    )
+
+
+def _label(raw: dict[str, Any]) -> GmailLabel:
+    return GmailLabel(
+        id=raw.get("id", ""),
+        name=raw.get("name", ""),
+        type=raw.get("type", ""),
+        messages_total=int(raw.get("messagesTotal", 0) or 0),
+        messages_unread=int(raw.get("messagesUnread", 0) or 0),
+    )
 
 
 def _sent(data: dict[str, Any]) -> SentMessage:

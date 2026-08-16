@@ -29,12 +29,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -52,18 +53,34 @@ from loom.core.secret import Secret
 from loom.runtime.clock import Clock, SystemClock
 
 __all__ = [
+    "DEFAULT_REFRESH_SKEW",
+    "REFRESH_SKEW_ENV",
     "CredentialStore",
     "EncryptedFileCredentialStore",
     "KeyringCredentialStore",
     "LayeredCredentialStore",
     "MemoryCredentialStore",
     "Peekable",
+    "RefreshPolicy",
     "Refresher",
     "StoredCredential",
     "credential_store_scope",
     "current_credential_store",
     "resolve_bearer_token",
 ]
+
+logger = logging.getLogger("workflow.credentials")
+
+#: Renew this long before a credential actually expires.
+#:
+#: Refreshing at the moment of expiry is refreshing too late: a token with two
+#: seconds left passes every check here and then 401s on the request it was
+#: fetched for. The window also absorbs modest clock drift between this machine
+#: and the authorization server, which is otherwise indistinguishable from a
+#: token that expired early.
+DEFAULT_REFRESH_SKEW = timedelta(minutes=10)
+
+REFRESH_SKEW_ENV = "LOOM_OAUTH_REFRESH_SKEW"
 
 
 # ---------------------------------------------------------------------------
@@ -151,9 +168,24 @@ class StoredCredential:
     scopes: frozenset[str] = frozenset()
     token_type: str = "bearer"
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    issued_at: datetime | None = None
+    """When this token was minted, when the minter recorded it.
+
+    Only used to derive the token's *lifetime*, which is what stops a fixed
+    refresh window from being wrong for a short-lived token — see
+    :meth:`RefreshPolicy.effective_skew`. Optional because a credential written
+    before this field existed has none, and inventing one would manufacture a
+    lifetime nobody measured.
+    """
 
     def is_expired(self, clock: Clock | None = None) -> bool:
-        """Whether ``expires_at`` has passed, per an injected clock.
+        """Whether ``expires_at`` has actually passed, per an injected clock.
+
+        The hard fact, deliberately distinct from
+        :meth:`RefreshPolicy.is_due`, which is the *policy* — "renew it soon".
+        A credential can be due for renewal and perfectly usable, and the two
+        callers of these want different answers: ``loom whoami`` reports this
+        one, ``get()`` acts on the other.
 
         Same reasoning as ``Credential.expired`` in ``toolsets/connections.py``
         — a credential store is read from inside a run, so its notion of
@@ -161,11 +193,7 @@ class StoredCredential:
         """
         if self.expires_at is None:
             return False
-        now = (clock or SystemClock()).now()
-        expires_at = self.expires_at
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=UTC)
-        return now >= expires_at
+        return (clock or SystemClock()).now() >= _aware(self.expires_at)
 
     def to_dict(self) -> dict[str, Any]:
         """The plain-dict projection a store encrypts and writes.
@@ -179,6 +207,7 @@ class StoredCredential:
             "token": self.token.reveal(),
             "refresh_token": self.refresh_token.reveal() if self.refresh_token else None,
             "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "issued_at": self.issued_at.isoformat() if self.issued_at else None,
             "scopes": sorted(self.scopes),
             "token_type": self.token_type,
             "metadata": dict(self.metadata),
@@ -187,15 +216,116 @@ class StoredCredential:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> StoredCredential:
         expires_at = data.get("expires_at")
+        # Absent from every record written before this field existed. Read with
+        # a default rather than indexed, so an existing encrypted store loads
+        # unchanged instead of raising on the first read after an upgrade.
+        issued_at = data.get("issued_at")
         refresh_token = data.get("refresh_token")
         return cls(
             token=Secret(data["token"]),
             refresh_token=Secret(refresh_token) if refresh_token else None,
             expires_at=datetime.fromisoformat(expires_at) if expires_at else None,
+            issued_at=datetime.fromisoformat(issued_at) if issued_at else None,
             scopes=frozenset(data.get("scopes", [])),
             token_type=data.get("token_type", "bearer"),
             metadata=dict(data.get("metadata", {})),
         )
+
+
+def _aware(when: datetime) -> datetime:
+    """A naive timestamp read as UTC. Stores round-trip ISO strings, and one
+    written without an offset must not compare as local time."""
+    return when if when.tzinfo is not None else when.replace(tzinfo=UTC)
+
+
+@dataclass(frozen=True)
+class RefreshPolicy:
+    """When a stored credential should be renewed — a policy, not a fact.
+
+    Split from :class:`StoredCredential` because it is a *decision* about a
+    credential rather than a property of one, and hosts legitimately differ:
+    a laptop CLI wants a generous window, a fleet talking to a rate-limited
+    authorization server wants a tight one.
+
+    ``max_fraction`` is the part that is not obvious, and the reason a flat
+    skew is not enough on its own. A provider issuing **five-minute** tokens
+    under a ten-minute window would report *every* token as due the moment it
+    was minted: every call refreshes, the authorization server sees a refresh
+    storm, and on a server that rotates refresh tokens each of those rotations
+    invalidates the last — turning a helpful default into an outage. Clamping
+    the window to a fraction of the token's own lifetime makes the policy scale
+    with whatever the provider actually issues.
+
+    That clamp is also what makes it safe for
+    :class:`~loom.connectors.oauth_client.OAuthClient` to use this policy when
+    checking whether another process already refreshed: a freshly minted token
+    has its whole lifetime ahead of it, so it can never be immediately due, so
+    two processes cannot bounce a credential back and forth.
+    """
+
+    skew: timedelta = DEFAULT_REFRESH_SKEW
+    max_fraction: float = 0.5
+    """Never claim more than this much of a token's total lifetime."""
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> RefreshPolicy:
+        """Read :data:`REFRESH_SKEW_ENV` (seconds), or use the defaults.
+
+        An unparseable or negative value is a misconfiguration that would
+        silently disable early refresh, so it warns and falls back rather than
+        being adopted.
+        """
+        source = os.environ if env is None else env
+        raw = source.get(REFRESH_SKEW_ENV)
+        if not raw:
+            return cls()
+        try:
+            seconds = float(raw)
+        except ValueError:
+            logger.warning(
+                "%s=%r is not a number of seconds; using the default of %ss",
+                REFRESH_SKEW_ENV, raw, int(DEFAULT_REFRESH_SKEW.total_seconds()),
+            )
+            return cls()
+        if seconds < 0:
+            logger.warning(
+                "%s=%r is negative; using the default of %ss",
+                REFRESH_SKEW_ENV, raw, int(DEFAULT_REFRESH_SKEW.total_seconds()),
+            )
+            return cls()
+        return cls(skew=timedelta(seconds=seconds))
+
+    def effective_skew(self, credential: StoredCredential) -> timedelta:
+        """:attr:`skew`, clamped to a fraction of this token's own lifetime.
+
+        Falls back to the unclamped window when the lifetime is unknown — a
+        credential stored before ``issued_at`` existed. That is the pre-existing
+        behaviour for those records and cannot be improved by guessing.
+        """
+        if credential.expires_at is None or credential.issued_at is None:
+            return self.skew
+        lifetime = _aware(credential.expires_at) - _aware(credential.issued_at)
+        if lifetime <= timedelta(0):
+            return timedelta(0)
+        return min(self.skew, lifetime * self.max_fraction)
+
+    def due_at(self, credential: StoredCredential) -> datetime | None:
+        """When *credential* becomes due for renewal, or ``None`` if never."""
+        if credential.expires_at is None:
+            return None
+        return _aware(credential.expires_at) - self.effective_skew(credential)
+
+    def is_due(self, credential: StoredCredential, clock: Clock | None = None) -> bool:
+        """Whether *credential* should be renewed now.
+
+        A credential with no ``expires_at`` is never due: the issuer said
+        nothing about a lifetime, and renewing on a schedule this code invented
+        would spend a refresh token to answer a question nobody asked.
+        """
+        due = self.due_at(credential)
+        if due is None:
+            return False
+        return (clock or SystemClock()).now() >= due
 
 
 @runtime_checkable
@@ -268,9 +398,16 @@ class BaseCredentialStore:
     invites getting wrong.
     """
 
-    def __init__(self, *, refresher: Refresher | None = None, clock: Clock | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        refresher: Refresher | None = None,
+        clock: Clock | None = None,
+        refresh_policy: RefreshPolicy | None = None,
+    ) -> None:
         self._refresher = refresher
         self.clock = clock or SystemClock()
+        self.refresh_policy = refresh_policy or RefreshPolicy.from_env()
         self._locks: dict[str, asyncio.Lock] = {}
 
     def _lock_for(self, name: str) -> asyncio.Lock:
@@ -280,10 +417,27 @@ class BaseCredentialStore:
         return lock
 
     async def get(self, name: str) -> Secret[str]:
+        """The current token for *name*, renewed early if it is close to expiry.
+
+        Two thresholds, and the gap between them is the point:
+
+        **Due** (:meth:`RefreshPolicy.is_due`) is when renewal is *attempted*.
+        Waiting for actual expiry means renewing too late — a token with two
+        seconds left passes every check here and then 401s on the request it
+        was fetched for.
+
+        **Expired** (:meth:`StoredCredential.is_expired`) is when failing to
+        renew becomes an error. In between, a refresh that cannot happen — no
+        refresher configured, the network is down, the authorization server is
+        having an outage — returns the credential that is *still valid*, logs,
+        and lets the next call try again. Raising there instead would take a
+        working token away from a caller ten minutes before it needed to,
+        turning a transient upstream failure into a hard failure of our own.
+        """
         stored = await self._read(name)
         if stored is None:
             raise CredentialNotFound(f"no credential named '{name}' is stored")
-        if not stored.is_expired(self.clock):
+        if not self.refresh_policy.is_due(stored, self.clock):
             return stored.token
 
         async with self._lock_for(name):
@@ -292,17 +446,69 @@ class BaseCredentialStore:
             stored = await self._read(name)
             if stored is None:
                 raise CredentialNotFound(f"no credential named '{name}' is stored")
-            if not stored.is_expired(self.clock):
+            if not self.refresh_policy.is_due(stored, self.clock):
                 return stored.token
-            if self._refresher is None:
-                raise AuthExpired(
-                    f"credential '{name}' has expired and no refresher is "
-                    f"configured. Run 'loom connect {name}' to reauthorize.",
-                    name=name,
-                )
+            # Soft only while the token still works. Once it has expired there
+            # is nothing to fall back to and the caller must hear about it.
+            return await self._renew(
+                name, stored, soft=not stored.is_expired(self.clock)
+            )
+
+    async def refresh(self, name: str) -> Secret[str]:
+        """Renew *name* now, whether or not it is due.
+
+        What an explicit ``loom refresh`` runs. Distinct from :meth:`get`,
+        which renews only when the policy says so — but the renewal itself is
+        the same code, so the two cannot drift into different answers about
+        locking, rotation, or write-back.
+
+        Unlike :meth:`get`, a failure here always raises: the caller asked for
+        this to happen, so reporting success because the old token still works
+        would be answering a different question.
+        """
+        async with self._lock_for(name):
+            stored = await self._read(name)
+            if stored is None:
+                raise CredentialNotFound(f"no credential named '{name}' is stored")
+            return await self._renew(name, stored, soft=False)
+
+    async def _renew(
+        self, name: str, stored: StoredCredential, *, soft: bool
+    ) -> Secret[str]:
+        """Refresh and persist, holding this name's lock.
+
+        *soft* is the early-window rule: a renewal that cannot happen — no
+        refresher configured, the network down, the authorization server having
+        an outage — returns the credential that is *still valid* and lets the
+        next call try again. Raising instead would take a working token away
+        from a caller ten minutes before it needed to, turning a transient
+        upstream failure into a hard failure of our own.
+        """
+        if self._refresher is None:
+            if soft:
+                return stored.token
+            raise AuthExpired(
+                f"credential '{name}' has expired and no refresher is "
+                f"configured. Run 'loom connect {name}' to reauthorize.",
+                name=name,
+            )
+
+        try:
             refreshed = await self._refresher.refresh(name, stored)
-            await self._write(name, refreshed)
-            return refreshed.token
+        except Exception as exc:
+            if not soft:
+                raise
+            # Warning rather than debug: a credential that keeps failing here
+            # becomes a hard failure at expiry, and that is worth seeing coming.
+            logger.warning(
+                "early refresh of credential '%s' failed (%s); the current "
+                "token is still valid until %s and will be retried",
+                name, type(exc).__name__, stored.expires_at,
+            )
+            return stored.token
+
+        await self._write(name, refreshed)
+        return refreshed.token
 
     async def put(self, name: str, credential: StoredCredential) -> None:
         await self._write(name, credential)
@@ -324,6 +530,22 @@ class BaseCredentialStore:
         """
         return await self._read(name)
 
+    async def peek_all(self) -> dict[str, StoredCredential]:
+        """Every stored record at once, no expiry check and no refresh.
+
+        Exists for the background sweep, which asks "is anything due?" about
+        the whole store on a timer. Doing that as ``names()`` plus a ``peek()``
+        each costs one full decrypt-and-parse of the credential file *per
+        credential*, forever, on a loop — so the encrypted store overrides this
+        to read once.
+        """
+        found: dict[str, StoredCredential] = {}
+        for name in await self._list():
+            stored = await self._read(name)
+            if stored is not None:
+                found[name] = stored
+        return found
+
     async def _read(self, name: str) -> StoredCredential | None:
         raise NotImplementedError
 
@@ -342,9 +564,15 @@ class MemoryCredentialStore(BaseCredentialStore):
     that need no persistence across a restart."""
 
     def __init__(
-        self, *, refresher: Refresher | None = None, clock: Clock | None = None
+        self,
+        *,
+        refresher: Refresher | None = None,
+        clock: Clock | None = None,
+        refresh_policy: RefreshPolicy | None = None,
     ) -> None:
-        super().__init__(refresher=refresher, clock=clock)
+        super().__init__(
+            refresher=refresher, clock=clock, refresh_policy=refresh_policy
+        )
         self._data: dict[str, StoredCredential] = {}
 
     async def _read(self, name: str) -> StoredCredential | None:
@@ -390,8 +618,11 @@ class EncryptedFileCredentialStore(BaseCredentialStore):
         key_provider: KeyProvider | None = None,
         refresher: Refresher | None = None,
         clock: Clock | None = None,
+        refresh_policy: RefreshPolicy | None = None,
     ) -> None:
-        super().__init__(refresher=refresher, clock=clock)
+        super().__init__(
+            refresher=refresher, clock=clock, refresh_policy=refresh_policy
+        )
         self._path = Path(path) if path else _default_store_path()
         self._envelope = Envelope(
             key_provider or default_key_provider(app_dir=self._path.parent)
@@ -448,6 +679,11 @@ class EncryptedFileCredentialStore(BaseCredentialStore):
             data = await self._load()
         return sorted(data)
 
+    async def peek_all(self) -> dict[str, StoredCredential]:
+        """One decrypt for the whole store, rather than one per credential."""
+        async with self._io_lock:
+            return await self._load()
+
     def __repr__(self) -> str:
         return f"<EncryptedFileCredentialStore {self._path}>"
 
@@ -476,6 +712,7 @@ class KeyringCredentialStore(EncryptedFileCredentialStore):
         service: str = "loom-credential-store",
         refresher: Refresher | None = None,
         clock: Clock | None = None,
+        refresh_policy: RefreshPolicy | None = None,
     ) -> None:
         resolved_path = Path(path) if path else _default_store_path()
         key_provider = KeyringKeyProvider(
@@ -483,7 +720,11 @@ class KeyringCredentialStore(EncryptedFileCredentialStore):
             fallback=GeneratedFileKeyProvider(resolved_path.parent / "credentials.key"),
         )
         super().__init__(
-            resolved_path, key_provider=key_provider, refresher=refresher, clock=clock
+            resolved_path,
+            key_provider=key_provider,
+            refresher=refresher,
+            clock=clock,
+            refresh_policy=refresh_policy,
         )
 
     def __repr__(self) -> str:

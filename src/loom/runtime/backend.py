@@ -108,7 +108,9 @@ class DurabilityBackend(Protocol):
 
     async def get_execution(self, run_id: str) -> ExecutionRecord | None: ...
 
-    async def update_execution(self, record: ExecutionRecord) -> None: ...
+    async def update_execution(
+        self, record: ExecutionRecord, *, expected_status: ExecutionStatus | None = None
+    ) -> None: ...
 
     async def list_executions(
         self,
@@ -189,8 +191,10 @@ class EmbeddedBackend:
     async def get_execution(self, run_id: str) -> ExecutionRecord | None:
         return await self._store.get_execution(run_id)
 
-    async def update_execution(self, record: ExecutionRecord) -> None:
-        await self._store.update_execution(record)
+    async def update_execution(
+        self, record: ExecutionRecord, *, expected_status: ExecutionStatus | None = None
+    ) -> None:
+        await self._store.update_execution(record, expected_status=expected_status)
 
     async def list_executions(
         self,

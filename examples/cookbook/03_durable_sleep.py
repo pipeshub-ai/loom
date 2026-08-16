@@ -49,26 +49,27 @@ async def delayed_reminder(ctx: Context, params: dict) -> dict:
 
 
 async def main() -> None:
-    rt = Runtime(store=MemoryStore())
-    # Scheduler polls every second so the run resumes promptly after sleep
-    await rt.start_scheduler(interval=1.0)
+    async with Runtime(store=MemoryStore()) as rt:
+        # Scheduler polls every second so the run resumes promptly after sleep
+        await rt.start_scheduler(interval=1.0)
 
-    print("Starting delayed reminder workflow (5-second sleep)…")
-    result = await rt.run(delayed_reminder, {"recipient": "Alice", "delay_seconds": 5})
+        print("Starting delayed reminder workflow (5-second sleep)…")
+        result = await rt.run(delayed_reminder, {"recipient": "Alice", "delay_seconds": 5})
 
-    # If the runtime parked the run (sleep > inline threshold), wait for it
-    if result.status.value == "suspended":
-        print(f"  Run {result.run_id} suspended — waiting for scheduler to resume…")
-        result = await rt.wait(result.run_id, timeout=30)
+        # If the runtime parked the run (sleep > inline threshold), wait for it
+        if result.status.value == "suspended":
+            print(f"  Run {result.run_id} suspended — waiting for scheduler to resume…")
+            result = await rt.wait(result.run_id, timeout=30)
 
-    print(f"\nStatus : {result.status.value}")
-    print(f"Output : {result.output}")
-    print(f"Run ID : {result.run_id}")
-
-    await rt.shutdown()
+        print(f"\nStatus : {result.status.value}")
+        print(f"Output : {result.output}")
+        print(f"Run ID : {result.run_id}")
 
 
 if __name__ == "__main__":
-    import asyncio
+    from loom.runtime.shutdown import run_main
 
-    asyncio.run(main())
+    # run_main is asyncio.run plus the two things a program needs: SIGINT and
+    # SIGTERM cancel main() so its cleanup runs, and an interrupt becomes an
+    # exit code instead of a traceback.
+    raise SystemExit(run_main(main()))

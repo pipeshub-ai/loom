@@ -10,7 +10,6 @@ Run:
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from pathlib import Path
 
@@ -109,20 +108,25 @@ async def main() -> None:
         summary="HN search + web fetch",
     )
 
-    rt = Runtime(store=MemoryStore(), agent_backend=backend)
-    rt.toolsets.register(toolset)
-    log("runtime", "Ready with Pydantic AI backend + research toolset")
+    async with Runtime(store=MemoryStore(), agent_backend=backend) as rt:
+        rt.toolsets.register(toolset)
+        log("runtime", "Ready with Pydantic AI backend + research toolset")
 
-    query = "workflow automation AI agents"
-    log("runtime", f"Query: {query}")
+        query = "workflow automation AI agents"
+        log("runtime", f"Query: {query}")
 
-    result = await rt.run(pydantic_ai_research, query)
+        result = await rt.run(pydantic_ai_research, query)
 
-    header("RESULT")
-    log("runtime", f"Status: {result.status.value}")
-    if result.output:
-        print(f"\n{result.output}\n")
+        header("RESULT")
+        log("runtime", f"Status: {result.status.value}")
+        if result.output:
+            print(f"\n{result.output}\n")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    from loom.runtime.shutdown import run_main
+
+    # run_main is asyncio.run plus the two things a program needs: SIGINT and
+    # SIGTERM cancel main() so its cleanup runs, and an interrupt becomes an
+    # exit code instead of a traceback.
+    raise SystemExit(run_main(main()))

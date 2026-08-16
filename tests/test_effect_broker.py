@@ -296,6 +296,40 @@ async def test_strict_still_permits_what_is_explicitly_granted() -> None:
     assert allowed.ok
 
 
+def _dotted_step_call(target: str, effect: EffectClass = EffectClass.WRITE) -> EffectCall:
+    async def perform() -> str:
+        return "did it"
+
+    return EffectCall(kind="step", target=target, effect=effect, perform=perform)
+
+
+async def test_a_dotted_step_target_is_grant_checked_like_a_tool() -> None:
+    """A bridged step (one `@step` fronting a dynamic tool registry, since the
+    operations are not known until a task resolves its tools) names its
+    semantic operation via `ctx.step(fn, name="jira.create_issue", ...)`
+    rather than `ctx.tool(...)`. Without this branch that call reaches
+    `GuardedBroker` as `kind="step"`, which `_check_grant` fell through
+    unchecked -- a toolset-scoped grant would never apply to it."""
+    who = Authority(grant=GrantSet(toolsets=["jira:write"]))
+
+    allowed = await GuardedBroker().dispatch(_dotted_step_call("jira.create_issue"), who)
+    assert allowed.ok
+
+    refused = await GuardedBroker().dispatch(_dotted_step_call("slack.send_message"), who)
+    assert not refused.ok
+    assert "slack.send_message" in refused.error
+    assert refused.needs == "slack.send_message:write"
+
+
+async def test_an_undotted_step_target_is_not_grant_checked() -> None:
+    """An ordinary local `@step` (no manifest, no toolset) is not a
+    declaration a grant can speak to -- it must stay unchecked exactly as it
+    was before the dotted-step branch existed."""
+    who = Authority(grant=GrantSet(toolsets=["jira:write"], strict=True))
+    allowed = await GuardedBroker().dispatch(_dotted_step_call("format_address"), who)
+    assert allowed.ok
+
+
 async def test_strict_with_nothing_declared_denies_everything() -> None:
     """``is_empty`` must not swallow ``strict`` — a strict grant with no
     entries anywhere means deny-everything, the opposite of unrestricted."""

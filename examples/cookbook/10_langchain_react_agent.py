@@ -18,7 +18,6 @@ Run:
 
 from __future__ import annotations
 
-import asyncio
 import re
 import sys
 import time
@@ -115,25 +114,30 @@ async def main() -> None:
 
     # ── Phase B: execute with LangChain backend ─────────────────────
     header("Phase B: Execute")
-    rt = Runtime(store=MemoryStore(), agent_backend=backend)
-    rt.toolsets.register(web_toolset)
-    log("runtime", "Runtime ready with LangChain backend + web toolset")
+    async with Runtime(store=MemoryStore(), agent_backend=backend) as rt:
+        rt.toolsets.register(web_toolset)
+        log("runtime", "Runtime ready with LangChain backend + web toolset")
 
-    wf = load_workflow(result.code)
-    if wf is None:
-        log("runtime", "ERROR: no @workflow found")
-        return
-    log("runtime", f"Loaded workflow: {wf.name}")
+        wf = load_workflow(result.code)
+        if wf is None:
+            log("runtime", "ERROR: no @workflow found")
+            return
+        log("runtime", f"Loaded workflow: {wf.name}")
 
-    t1 = time.perf_counter()
-    run = await rt.run(wf, "latest AI breakthroughs August 2026")
+        t1 = time.perf_counter()
+        run = await rt.run(wf, "latest AI breakthroughs August 2026")
 
-    header("RESULT")
-    log("runtime", f"Status : {run.status.value}")
-    log("runtime", f"Time   : {time.perf_counter() - t1:.0f}s (gen {gen_time:.0f}s)")
-    if run.output:
-        print(run.output if isinstance(run.output, str) else str(run.output))
+        header("RESULT")
+        log("runtime", f"Status : {run.status.value}")
+        log("runtime", f"Time   : {time.perf_counter() - t1:.0f}s (gen {gen_time:.0f}s)")
+        if run.output:
+            print(run.output if isinstance(run.output, str) else str(run.output))
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    from loom.runtime.shutdown import run_main
+
+    # run_main is asyncio.run plus the two things a program needs: SIGINT and
+    # SIGTERM cancel main() so its cleanup runs, and an interrupt becomes an
+    # exit code instead of a traceback.
+    raise SystemExit(run_main(main()))

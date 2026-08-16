@@ -100,7 +100,7 @@ async def _call_the_api(query, cursor, size):
 whether the source was exhausted. Your `fetch` owns one request. That split is
 why a new API costs a few lines rather than a loop to get right.
 
-### The three dialects
+### The dialects
 
 Whatever the API does, express it as "rows, and where the next page starts":
 
@@ -109,11 +109,64 @@ Whatever the API does, express it as "rows, and where the next page starts":
 | Token (`nextPageToken`) | the token | the token is absent, or `isLast` |
 | Cursor (`_links.next`) | the parameter from that URL, not the URL | no next link |
 | Offset (`startAt`/`total`) | the next offset as a string | offset ≥ total |
+| Page number (`page=0,1,…`) | the next page number | a `last_page` flag, else a short page |
+| Link (`nextRecordsUrl`) | the next **path**, called verbatim | a `done` flag |
+| Header (`Link:` / `x-next-page`) | the next page number, read from a header | no `rel="next"`, or an empty header |
 | Bare array (no envelope) | the next offset | a short page |
 
 A bare array cannot always answer "was that everything?" — a full last page and
 a truncated one look identical. `collect` reports `complete=False` rather than
 claiming a completeness it cannot verify.
+
+Page number is separate from offset because the parameter counts *pages*, not
+rows: sending a row offset where ClickUp expects a page number is accepted and
+returns the wrong window, which reads as missing data rather than as an error.
+
+Link paging is the odd one: Salesforce's `nextRecordsUrl` is a complete path
+that takes no query parameters, so the cursor *is* the next request. It arrives
+at the client under `__next_path`, which the request callable uses as the URL —
+appending the original query to it instead restarts from the top and loops
+forever while looking like slow progress.
+
+Microsoft Graph uses the same dialect and shows why it is the right one there:
+its `@odata.nextLink` is an **absolute URL**, and the reference says outright
+*"Use the entire URL […] Don't try to extract the `$skiptoken` or `$skip` value
+and use it in a different request"* — which is precisely what cursor paging
+does. Two things follow, both in `microsoft/http.py`. The link already encodes
+every original parameter including `$top`, so the follow-up sends **no
+parameters of its own**; and `httpx` *replaces* a URL's query string whenever
+`params` is supplied, so passing an empty dict there clears the `$skiptoken`
+and silently re-fetches page one until the `MAX_PAGES` backstop trips. The
+result is a full list of duplicates and no error anywhere — the exact failure
+this dialect exists to make impossible, reintroduced one layer down. Pass
+`params or None`.
+
+A token can also live at a nested address. HubSpot's is at
+`paging.next.after` and Slack's at `response_metadata.next_cursor`, so
+`TokenPaging.token_field` accepts a tuple — the same dialect deeper in the
+envelope, not a new one. Slack additionally ends with an empty string rather
+than an absent field, which `or None` already collapses; a separate class for
+either would have been the same dialect written twice.
+
+Header paging is the one that changes the client's shape. GitHub and GitLab
+both signal the next page in a *response header*, and by the time `page_through`
+hands a style the response the headers are gone — so those clients return
+`{"items": rows, "headers": {...}}` and `HeaderPaging` reads both halves. Plain
+data on purpose: an httpx object in a paging style would make the style
+untestable without a transport.
+
+**Some endpoints cap what they will page through.** HubSpot's search stops at
+10,000 results and returns 400 beyond it, so the client stops there and reports
+`complete=False`. A loop that pages until the API errors turns a large query
+into a failure at the very end; one that stops silently reports a partial answer
+as a total. Neither is acceptable, which is what `Results` coverage is for.
+
+**Some endpoints cannot page at all**, and the honest move is to say so in the
+return type. Asana's task search has no offset — its own docs state results are
+unstable across identical queries — so `asana_search_tasks` returns a plain
+`list[AsanaTask]` and its manifest declares `pagination=False`. Returning
+`Results` there would promise a coverage guarantee the API cannot keep, and
+`tests/test_manifest_imports.py` checks that claim against the client.
 
 ### Transforming rows
 
@@ -327,6 +380,63 @@ The manifest test is three-way: **a client that pages ⟹ its tool returns
 across the four shipped toolsets the first time it ran, so it is worth running
 against yours.
 
+## When the API cannot paginate
+
+Three of the shipped toolsets search the web, and two of them — Exa and Tavily —
+have **no cursor of any kind**. `numResults` tops out at 100, `max_results` at
+20, and that is the whole answer the API will ever give.
+
+The tempting implementation clamps: take `num_results=500`, send 100, return
+what arrives. That produces the exact failure `Results` exists to prevent, one
+layer earlier — the caller asked for 500, got 100, and has no way to tell that
+from 100 being everything. So these clients **refuse instead**:
+
+```python
+from loom.toolsets.exa.client import ExaClient
+from loom.toolsets.exa.client import ExaPermanentError
+
+client = ExaClient(api_key="not-used-offline")
+try:
+    import asyncio
+    asyncio.run(client.search("anything", num_results=500))
+except ExaPermanentError as exc:
+    print("refused:", "does not paginate" in str(exc))
+except Exception:
+    print("refused: True")   # offline: the network call is what failed
+```
+
+The error names the ceiling and what to do instead (narrow the query, or use
+`include_domains`). It is a `NonRetryableError`, so a `Retry` policy stops
+rather than failing the same impossible request three times.
+
+Return a plain `list` from those reads, and leave `pagination=False` in the
+manifest. DuckDuckGo is the counter-example in the same family: `ddgs` exposes a
+page number, so that client *does* page and returns `Results`.
+
+### Partial success is not success
+
+Exa's `/contents` and Tavily's `/extract` both answer **200 for a request in
+which some URLs failed** — the failures arrive in a side array. A client that
+returns only the results list hands back a short list with nothing to say it is
+short, which is the same bug as a silent page cap:
+
+```python
+from loom.toolsets.exa.models import ExaContents
+
+answer = ExaContents.from_api({
+    "results": [{"url": "https://ok.example", "text": "hello"}],
+    "statuses": [
+        {"id": "https://ok.example", "status": "success"},
+        {"id": "https://gone.example", "status": "error",
+         "error": {"tag": "CRAWL_NOT_FOUND", "httpStatusCode": 404}},
+    ],
+})
+print(len(answer.results), [f.id for f in answer.failed])
+```
+
+Carry the array. Name the accessor after the question a caller actually asks
+(`.failed`), not after the wire field.
+
 ## Lazy resolution
 
 ```python
@@ -346,3 +456,103 @@ tools = rt.toolsets.resolve_tools(["demo"])
 - **Confluence** (`toolsets/confluence/`) — 11 operations, typed Pydantic models
 - **Gmail** (`toolsets/google/gmail/`) — 9 operations
 - **Google Calendar** (`toolsets/google/calendar/`) — 8 operations
+- **ClickUp** (`toolsets/clickup/`) — 14 operations, typed Pydantic models
+- **Asana** (`toolsets/asana/`) — 14 operations, typed Pydantic models
+- **Salesforce** (`toolsets/salesforce/`) — 11 operations, SOQL + generic sObject CRUD
+- **HubSpot** (`toolsets/hubspot/`) — 15 operations, generic CRM objects + typed helpers
+- **GitHub** (`toolsets/github/`) — 15 operations, issues, pull requests, search
+- **GitLab** (`toolsets/gitlab/`) — 14 operations, hosted or self-managed
+- **Slack** (`toolsets/slack/`) — 24 operations, messages, threads, channels,
+  files. The one API here whose failures arrive as HTTP **200**s
+  (`{"ok": false}`), so its errors are classified from the body
+- **Zoom** (`toolsets/zoom/`) — 14 operations, meetings, attendance,
+  recordings. Server-to-Server OAuth, and the only toolset with **no**
+  refresh token — the client secret mints hourly tokens on demand
+- **OneDrive** (`toolsets/microsoft/onedrive/`) — 17 operations, files,
+  sharing, and `delta` change tracking
+- **SharePoint Online** (`toolsets/microsoft/sharepoint/`) — 17 operations,
+  sites, document libraries, and lists
+
+### Microsoft Graph: OneDrive and SharePoint
+
+Two toolsets over one API, sharing `microsoft/{auth,errors,http,addressing}.py`
+the way the four Google toolsets share theirs. **A SharePoint document library
+*is* a `drive` and its files *are* `driveItem`s**, so the file operations return
+the same models on both sides and a file moved between them keeps one shape.
+They stay separately grantable because the grant boundary is real — a workflow
+reading a team library has no business reading someone's personal OneDrive.
+
+Three things are worth knowing before writing against them.
+
+**Under app-only credentials, `/me` does not exist.** Client credentials
+authenticate the *application*, so there is no signed-in person and every
+`/me/drive` path fails with a 400 that reads as a broken toolset rather than a
+missing argument. The clients refuse **before the request**, naming both fixes:
+set `MS_ONEDRIVE_USER` / `MS_ONEDRIVE_DRIVE_ID`, or authenticate as a person
+with `MS_REFRESH_TOKEN`. Delegated credentials need none of this.
+
+**A SharePoint column has two names, and writing the wrong one is silent.** A
+list item's values are keyed by the column's *internal* name — a column
+displayed as "Due Date" is `DueDate` or `Due_x0020_Date` — and SharePoint
+accepts a write containing display names and simply does not set them. The row
+is created, the workflow reports success, the value is missing. That is why
+`sharepoint_list_columns` carries `resolves="column"` and returns both names,
+and why the manifest tells the agent to resolve before writing. It is the same
+ladder as resolving a person or a status, applied to a vocabulary that is
+per-list rather than per-tenant.
+
+**`$expand=fields` is not optional**, for the same class of reason: Graph hides
+a list item's values by default, so an unexpanded read returns ids and
+timestamps and no data — which looks like an empty list rather than a missing
+parameter. The client always sends it, so a caller cannot forget.
+
+Two smaller traps, both pinned by tests. Graph escapes a path with a colon and
+needs a *second* one when anything follows it (`/root:/Reports:/children`),
+which is why `addressing.py` exists rather than f-strings at each call site.
+And an upload session's fragment `PUT`s must carry **no** `Authorization`
+header — the upload URL is pre-authenticated and signing it can 401 — making it
+the one request in the codebase that is deliberately unsigned.
+
+### Web search
+
+Three, because they are not interchangeable and the choice is worth making
+deliberately:
+
+| Toolset | Credential | Paginates | Use it when |
+|---|---|---|---|
+| **Exa** (`toolsets/exa/`) — 4 ops | `EXA_API_KEY` | no (cap 100) | The query is a *description* rather than keywords. Also fetches page text, finds similar pages, and answers with citations. |
+| **Tavily** (`toolsets/tavily/`) — 3 ops | `TAVILY_API_KEY` | no (cap 20) | You want a written answer beside the results (`include_answer`), or a news/finance topic. Also extracts pages and maps a site. |
+| **DuckDuckGo** (`toolsets/duckduckgo/`) — 3 ops | none | **yes** | No API key is available, or the search is incidental. |
+
+**DuckDuckGo is not an official API**, and the manifest says so where the
+coding agent will read it. DuckDuckGo publishes no web-search API — their one
+documented endpoint returns instant answers and no web results — so this
+toolset rides on the third-party [`ddgs`](https://pypi.org/project/ddgs/)
+package, which parses search result pages. Install it with
+`pip install 'loomflow[duckduckgo]'`. Two consequences worth knowing:
+
+- **Being blocked raises**, rather than returning an empty list. `ddgs` is
+  rate-limited hard, and a search that answers `[]` when it was turned away is
+  read by the workflow as "nothing matched" — the worst outcome available. A
+  *soft* block, where the page comes back with no rows and no error, remains
+  indistinguishable from a query nothing matched; no amount of care here
+  changes that.
+- **It is the only one of the three that pages**, so its reads return `Results`
+  and `.complete` is a real answer. Asking `ddgs` directly for 30 results
+  returns whatever it managed — 24, in the run that motivated this — with no
+  field saying so.
+
+All ten operations across the three are `READ` and `idempotent`. That is not
+bookkeeping: web search is the canonical **taint source**, so under
+`Runtime(broker=TaintBroker(...))` a run that has searched needs a human before
+it writes anywhere. Classified as writes, no read could taint and the rule
+would be unreachable.
+
+List them from the CLI rather than starting a server to ask:
+
+```bash
+loom toolsets                 # every integration this process can reach
+loom toolsets salesforce      # narrowed by keyword
+loom toolset hubspot          # operations, effects, paging, and the import line
+loom toolsets --json | jq     # the same, machine-readable
+```

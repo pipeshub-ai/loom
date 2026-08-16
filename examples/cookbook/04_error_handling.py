@@ -66,15 +66,18 @@ async def resilient_pipeline(ctx: Context, service: str) -> dict:
 
 
 async def main() -> None:
-    rt = Runtime(store=MemoryStore())
-    result = await rt.run(resilient_pipeline, "payments-api")
+    async with Runtime(store=MemoryStore()) as rt:
+        result = await rt.run(resilient_pipeline, "payments-api")
 
-    print(f"\nStatus : {result.status.value}")
-    print(f"Output : {result.output}")
-    print(f"Run ID : {result.run_id}")
+        print(f"\nStatus : {result.status.value}")
+        print(f"Output : {result.output}")
+        print(f"Run ID : {result.run_id}")
 
 
 if __name__ == "__main__":
-    import asyncio
+    from loom.runtime.shutdown import run_main
 
-    asyncio.run(main())
+    # run_main is asyncio.run plus the two things a program needs: SIGINT and
+    # SIGTERM cancel main() so its cleanup runs, and an interrupt becomes an
+    # exit code instead of a traceback.
+    raise SystemExit(run_main(main()))

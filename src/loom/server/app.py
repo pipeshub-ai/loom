@@ -150,6 +150,43 @@ def _view(run: dict[str, Any]) -> RunView:
     return RunView.model_validate(run)
 
 
+def _credential_lifespan(facade: RuntimeFacade) -> Any:
+    """Sweep stored OAuth credentials while the server is up, or ``None``.
+
+    ``None`` — no lifespan at all — whenever this process has no credential
+    store to sweep, which is every ``Runtime()`` that did not configure one.
+    That is deliberate: a server with nothing to refresh should start no
+    background task, so an app built in a test behaves exactly as it did
+    before this existed.
+
+    A long-lived server is the case that needs this most. Renewal on next use
+    covers a CLI command; it does not cover a process that stays up for a week
+    and touches a credential twice, where the second touch is the one that
+    discovers the token expired on Tuesday.
+    """
+    runtime = getattr(facade, "runtime", None)
+    if runtime is None or getattr(runtime, "credentials", None) is None:
+        return None
+
+    import contextlib
+    from collections.abc import AsyncIterator
+
+    from loom.connectors.refresh import service_for
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        service = service_for(runtime)
+        if service is not None:
+            await service.start()
+        try:
+            yield
+        finally:
+            if service is not None:
+                await service.stop()
+
+    return lifespan
+
+
 def create_app(
     runtime: Runtime | RuntimeFacade,
     *,
@@ -187,7 +224,7 @@ def create_app(
     http_auth = build_http_auth(identity)
     principal_dependency = build_principal_dependency(http_auth)
 
-    app = FastAPI(title=title)
+    app = FastAPI(title=title, lifespan=_credential_lifespan(base))
     if http_auth is not None:
         mount_protected_resource_metadata(app, http_auth)
 

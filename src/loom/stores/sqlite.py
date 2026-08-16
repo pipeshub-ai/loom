@@ -11,10 +11,11 @@ import asyncio
 import json
 import sqlite3
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from loom.core.exceptions import ConcurrentUpdateError
 from loom.core.models import (
     Event,
     ExecutionRecord,
@@ -119,6 +120,16 @@ class SQLiteStore:
         async with self._mutex:
             await asyncio.to_thread(run)
 
+    async def _execute_rowcount(self, sql: str, params: tuple[Any, ...] = ()) -> int:
+        def run() -> int:
+            connection = self._connect()
+            cursor = connection.execute(sql, params)
+            connection.commit()
+            return cursor.rowcount
+
+        async with self._mutex:
+            return await asyncio.to_thread(run)
+
     async def _query(self, sql: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
         def run() -> list[sqlite3.Row]:
             return list(self._connect().execute(sql, params).fetchall())
@@ -142,8 +153,30 @@ class SQLiteStore:
             self._row(record),
         )
 
-    async def update_execution(self, record: ExecutionRecord) -> None:
-        await self.create_execution(record)
+    async def update_execution(
+        self, record: ExecutionRecord, *, expected_status: ExecutionStatus | None = None
+    ) -> None:
+        if expected_status is None:
+            await self.create_execution(record)
+            return
+        row = self._row(record)
+        # UPDATE ... WHERE status=? is atomic under SQLite's own file-level
+        # locking, so a concurrent resume from a second process either sees
+        # rowcount==0 (lost the race) or 1 (won it) with no interleaving.
+        rowcount = await self._execute_rowcount(
+            """UPDATE executions
+               SET workflow=?, status=?, parent_run_id=?, idempotency_key=?,
+                   wake_at=?, awaiting_event=?, created_at=?, data=?
+               WHERE run_id=? AND status=?""",
+            (*row[1:], row[0], expected_status.value),
+        )
+        if rowcount == 0:
+            current = await self.get_execution(record.run_id)
+            raise ConcurrentUpdateError(
+                record.run_id,
+                expected=expected_status.value,
+                actual=current.status.value if current is not None else None,
+            )
 
     @staticmethod
     def _row(record: ExecutionRecord) -> tuple[Any, ...]:
@@ -258,6 +291,59 @@ class SQLiteStore:
         )
         return [TriggerRecord.model_validate_json(row["data"]) for row in rows]
 
+    async def claim_due_triggers(
+        self,
+        now: datetime,
+        *,
+        owner: str,
+        lease_seconds: float = 60.0,
+        limit: int = 50,
+    ) -> list[TriggerRecord]:
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=UTC)
+        until = now + timedelta(seconds=lease_seconds)
+
+        def run() -> list[TriggerRecord]:
+            connection = self._connect()
+            # BEGIN IMMEDIATE takes the write lock up front. Without it SQLite
+            # starts a deferred read transaction and two callers can both read
+            # the same due rows before either writes — the exact race, just
+            # harder to see because SQLite serialises the writes afterwards.
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                rows = connection.execute(
+                    """SELECT data FROM triggers
+                       WHERE enabled = 1 AND next_fire_at IS NOT NULL
+                         AND next_fire_at <= ?
+                       ORDER BY next_fire_at LIMIT ?""",
+                    (now.isoformat(), limit),
+                ).fetchall()
+                won: list[TriggerRecord] = []
+                for row in rows:
+                    trigger = TriggerRecord.model_validate_json(row["data"])
+                    held = trigger.claimed_until
+                    if held is not None:
+                        if held.tzinfo is None:
+                            held = held.replace(tzinfo=UTC)
+                        if held > now:
+                            continue
+                    claimed = trigger.model_copy(
+                        update={"claimed_by": owner, "claimed_until": until}
+                    )
+                    connection.execute(
+                        "UPDATE triggers SET data = ? WHERE trigger_id = ?",
+                        (claimed.model_dump_json(), claimed.trigger_id),
+                    )
+                    won.append(claimed)
+                connection.commit()
+                return won
+            except BaseException:
+                connection.rollback()
+                raise
+
+        async with self._mutex:
+            return await asyncio.to_thread(run)
+
     async def update_after_fire(
         self,
         trigger_id: str,
@@ -273,6 +359,10 @@ class SQLiteStore:
                     "last_fire_at": last_fire,
                     "next_fire_at": next_fire,
                     "run_count": current.run_count + 1,
+                    # Release the claim; see MemoryStore for why at advance
+                    # time rather than at expiry.
+                    "claimed_by": "",
+                    "claimed_until": None,
                 }
             )
         )

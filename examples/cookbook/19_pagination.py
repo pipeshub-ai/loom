@@ -20,7 +20,6 @@ whole page sits in memory at once.
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from pathlib import Path
 from typing import Any
@@ -117,31 +116,36 @@ async def drain_everything(ctx: Context, _: Any = None) -> str:
 
 
 async def main() -> None:
-    rt = Runtime(store=MemoryStore())
-    rt.register_all([bounded_report, drain_everything])
+    async with Runtime(store=MemoryStore()) as rt:
+        rt.register_all([bounded_report, drain_everything])
 
-    header("BOUNDED — ONE CALL, HONEST COVERAGE")
-    capped = await rt.run(bounded_report, 100)
-    log("capped", capped.output)
-    log("note", "250 exist; the report says so rather than implying 100 is all")
+        header("BOUNDED — ONE CALL, HONEST COVERAGE")
+        capped = await rt.run(bounded_report, 100)
+        log("capped", capped.output)
+        log("note", "250 exist; the report says so rather than implying 100 is all")
 
-    everything = await rt.run(bounded_report, 250)
-    log("full", everything.output)
+        everything = await rt.run(bounded_report, 250)
+        log("full", everything.output)
 
-    header("UNBOUNDED — ONE PAGE PER STEP")
-    drained = await rt.run(drain_everything)
-    log("result", str(drained.output))
+        header("UNBOUNDED — ONE PAGE PER STEP")
+        drained = await rt.run(drain_everything)
+        log("result", str(drained.output))
 
-    entries = await rt.history(drained.run_id)
-    log("journal", f"{len(entries)} entries — one per page, not one for all 250")
-    for report in rt.stream.since(drained.run_id)[:3]:
-        log("progress", report.message)
+        entries = await rt.history(drained.run_id)
+        log("journal", f"{len(entries)} entries — one per page, not one for all 250")
+        for report in rt.stream.since(drained.run_id)[:3]:
+            log("progress", report.message)
 
-    header("WHY NOT JUST RAISE THE LIMIT")
-    log("note", "One call for 50,000 rows is one journal entry.")
-    log("note", "A crash refetches every row; the whole page is held at once.")
-    log("note", "A page per step resumes where it stopped, and streams progress.")
+        header("WHY NOT JUST RAISE THE LIMIT")
+        log("note", "One call for 50,000 rows is one journal entry.")
+        log("note", "A crash refetches every row; the whole page is held at once.")
+        log("note", "A page per step resumes where it stopped, and streams progress.")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    from loom.runtime.shutdown import run_main
+
+    # run_main is asyncio.run plus the two things a program needs: SIGINT and
+    # SIGTERM cancel main() so its cleanup runs, and an interrupt becomes an
+    # exit code instead of a traceback.
+    raise SystemExit(run_main(main()))

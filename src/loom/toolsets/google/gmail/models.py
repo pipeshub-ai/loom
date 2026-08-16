@@ -14,6 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field
 __all__ = [
     "AttachmentRef",
     "EmailMessage",
+    "EmailThread",
+    "GmailDraft",
     "GmailLabel",
     "GmailProfile",
     "MessageRef",
@@ -106,4 +108,59 @@ class GmailProfile(BaseModel):
     threads_total: int = 0
 
 
+class EmailThread(BaseModel):
+    """A conversation — every message sharing one thread id.
+
+    The unit a human sees in the inbox, and the right unit for triage: a
+    message-level workflow that labels one reply leaves the rest of the
+    conversation unlabelled, which in the Gmail UI looks like nothing happened.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    snippet: str = ""
+    messages: list[EmailMessage] = Field(default_factory=list)
+    """Oldest first, as Gmail returns them. Empty in a *list* response, which
+    carries ids and snippets only — fetch the thread to get its messages."""
+    message_count: int = 0
+    """Set even when ``messages`` is empty, so a list response can still say
+    how long the conversation is."""
+    label_ids: list[str] = Field(default_factory=list)
+    """The union across every message, which is what Gmail shows on the
+    conversation. A thread is unread if any one message in it is."""
+
+    @property
+    def subject(self) -> str:
+        """The first message's subject — the conversation's title."""
+        return self.messages[0].subject if self.messages else ""
+
+    @property
+    def latest(self) -> EmailMessage | None:
+        """The most recent message, which is what a reply responds to."""
+        return self.messages[-1] if self.messages else None
+
+
+class GmailDraft(BaseModel):
+    """An unsent message.
+
+    Kept distinct from :class:`SentMessage` because the difference is the whole
+    point: a draft has an id and has been delivered to nobody. Creating one is
+    the safe half of sending, which is what makes a draft-then-approve workflow
+    possible.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    message_id: str = ""
+    """Id of the message the draft holds. Changes each time the draft is
+    edited; the draft id does not."""
+    thread_id: str = ""
+    subject: str = ""
+    to: list[str] = Field(default_factory=list)
+    snippet: str = ""
+
+
 EmailMessage.model_rebuild()
+EmailThread.model_rebuild()

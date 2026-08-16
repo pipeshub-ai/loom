@@ -206,6 +206,79 @@ assert (first, second) == (True, False)
 `EventDelivery.reason` is `"duplicate"` on the second, so your consumer can ack
 the redelivery instead of retrying it.
 
+## Running things on a schedule
+
+Declare the schedule on the workflow; the host runs a dispatcher. Registration
+is idempotent, so calling it on every boot is the intended usage:
+
+```python
+from loom.runtime.clock import ManualClock
+from loom.runtime.dispatcher import TriggerDispatcher
+from loom.triggers.specs import Schedule
+
+
+@workflow(name="nightly_digest", triggers=[Schedule("0 3 * * *", timezone="Europe/London")])
+async def nightly_digest(ctx: Context, _: object = None) -> str:
+    return "sent"
+
+
+async def schedule_it() -> tuple[int, int]:
+    # A fixed clock so this example is reproducible; production passes none.
+    clock = ManualClock(__import__("datetime").datetime(
+        2026, 3, 2, 2, 0, tzinfo=__import__("datetime").UTC
+    ))
+    runtime = Runtime(store=MemoryStore(), clock=clock)
+    dispatcher = TriggerDispatcher(runtime)
+
+    # Three boots, as a redeploy loop would do.
+    for _ in range(3):
+        await dispatcher.register(nightly_digest)
+
+    triggers = await runtime.store.list_triggers()
+    fired = await dispatcher.tick(__import__("datetime").datetime(
+        2026, 3, 2, 3, 0, tzinfo=__import__("datetime").UTC
+    ))
+    return len(triggers), len(fired)
+
+
+records, fired = asyncio.run(schedule_it())
+assert records == 1   # re-registering does not add a second schedule
+assert fired == 1     # and the 03:00 occurrence runs once
+```
+
+**Cron survives restarts because it lives in the store**, not in the process: a
+`TriggerRecord` holds `next_fire_at`, `last_fire_at`, and `run_count` behind the
+`TriggerStore` protocol that all four backends implement.
+
+In production you run one loop rather than ticking by hand, and cron shares it
+with due timers and orphan recovery:
+
+```python
+from loom.runtime.dispatcher import TriggerDispatcher
+
+runtime = Runtime(store=MemoryStore())
+dispatcher = TriggerDispatcher(runtime)
+# await runtime.start_scheduler(interval=5, dispatcher=dispatcher)
+#     ... and pass elector= to run many processes against one store.
+assert dispatcher is not None
+```
+
+Two properties worth knowing before you run more than one replica:
+
+- **An occurrence is submitted under a deterministic idempotency key**
+  (`trigger_id@scheduled_for`), so two dispatchers racing produce one run. You
+  do not need to elect a leader for *correctness* — only to avoid duplicate
+  work, which `claim_due_triggers` handles: the due set is *taken*, under a
+  lease, so a dispatcher that dies mid-tick delays one occurrence rather than
+  stranding the trigger.
+- **A missed window is a decision.** By default the pending occurrence runs and
+  the rest are skipped and logged. `Schedule(..., catch_up=True)` replays them
+  instead, bounded by `max_catch_up`, keeping the newest.
+
+`Schedule(..., jitter=60)` spreads a fleet that all fire at midnight. It delays
+dispatch only — never the schedule — and the delay is derived from the
+occurrence, so every replica agrees on it.
+
 ## Knowing which code ran
 
 Publish with the source you deployed, and any finished run can be traced back to
@@ -253,6 +326,66 @@ For this to see anything, your toolset manifests must declare each operation's
 `EffectClass` — that declaration is what tells a read from a write at the call
 site.
 
+## Shutting down
+
+Your process will be told to stop, and on a deploy that means SIGTERM. Loom's
+recovery story *is* the cleanup, so this is not housekeeping: `shutdown()` stops
+the schedulers, and the `finally` around each in-flight run settles the lease
+that `reclaim_orphans` later matches on. Killed where it stands, none of it
+runs.
+
+Use the Runtime as a context manager, so the shutdown cannot be skipped by the
+path that skips things — the exceptional one:
+
+```python
+async def serve_one() -> str:
+    async with Runtime(store=MemoryStore()) as runtime:
+        runtime.register(settle)
+        result = await runtime.run(settle, {"invoice_id": "INV-9"})
+        return result.status.value
+
+
+assert asyncio.run(serve_one()) == "completed"
+```
+
+`shutdown(drain=...)` is the grace period. It stops the sources of new runs
+first — supervised dispatchers and queue consumers, then the scheduler — then
+waits for in-flight drives, then cancels. Five seconds by default; pass `0` in
+tests.
+
+Route the signals through `guarded`, which cancels your entry coroutine instead
+of letting the process die mid-step:
+
+```python
+from loom.runtime.shutdown import Interrupted, guarded, run_main
+
+
+async def forever() -> str:
+    async with Runtime(store=MemoryStore()) as runtime:
+        runtime.register(settle)
+        await runtime.start_scheduler(interval=5)
+        return "ready"
+
+
+assert asyncio.run(guarded(forever())) == "ready"
+assert Interrupted(15).exit_code == 143   # SIGTERM, the shell's convention
+assert callable(run_main)                 # asyncio.run for a __main__ block
+```
+
+Nothing is installed by importing that module — a library that seizes your
+process's signal handlers is one you cannot embed. You ask for it, at your
+entry point.
+
+**An interrupted run is not a failed run.** It stays unfinished — `RUNNING`, or
+`PENDING` if it had not started — with an expired lease, and is picked up by the
+next `reclaim_orphans()` on any node, which re-enters the body and serves
+everything already journaled. So a rolling deploy does not need to drain to
+zero; it needs *some* node still scanning. What it must not do is mark those
+runs failed, which is why cancellation is handled separately from exceptions in
+the engine, and why your own shutdown path should not "tidy up" an unfinished
+record on the way out. The expired lease is what makes it findable; without one
+it is invisible to every scan.
+
 ## What to check before you ship
 
 - **Does your host reach past a seam?** If it needs a `_private` attribute, the
@@ -263,3 +396,5 @@ site.
   nothing and a run cannot be traced to the code that produced it.
 - **Have you checked `sandbox.enforces`?** Believing in a bound you do not have
   is worse than knowing you lack it.
+- **Does SIGTERM reach your cleanup?** If the answer is "the container just
+  stops", every run in flight at deploy time is one nobody settled.

@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import defaultdict, deque
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from loom.core.exceptions import ConcurrentUpdateError, ValidationError
 from loom.core.models import (
     Event,
     ExecutionRecord,
@@ -42,17 +43,42 @@ class MemoryStore:
 
     async def create_execution(self, record: ExecutionRecord) -> None:
         async with self._mutex:
-            self._executions[record.run_id] = record.model_copy(deep=True)
             if record.idempotency_key:
-                self._idempotency.setdefault(record.idempotency_key, record.run_id)
+                won = self._idempotency.setdefault(
+                    record.idempotency_key, record.run_id
+                )
+                if won != record.run_id:
+                    # Refuse, the way every persistent store does: the key is
+                    # UNIQUE in SQLite and Postgres and a unique partial index
+                    # in Mongo. Absorbing it here instead — keeping the first
+                    # id in the index while storing the second record anyway —
+                    # left the store holding two runs for one key, so a
+                    # scheduled occurrence that was correctly deduplicated
+                    # everywhere else fired twice on the default store.
+                    raise ValidationError(
+                        f"idempotency key {record.idempotency_key!r} already "
+                        f"belongs to run {won}"
+                    )
+            self._executions[record.run_id] = record.model_copy(deep=True)
 
     async def get_execution(self, run_id: str) -> ExecutionRecord | None:
         async with self._mutex:
             found = self._executions.get(run_id)
             return found.model_copy(deep=True) if found else None
 
-    async def update_execution(self, record: ExecutionRecord) -> None:
+    async def update_execution(
+        self, record: ExecutionRecord, *, expected_status: ExecutionStatus | None = None
+    ) -> None:
         async with self._mutex:
+            if expected_status is not None:
+                current = self._executions.get(record.run_id)
+                actual = current.status if current is not None else None
+                if actual != expected_status:
+                    raise ConcurrentUpdateError(
+                        record.run_id,
+                        expected=expected_status.value,
+                        actual=actual.value if actual is not None else None,
+                    )
             self._executions[record.run_id] = record.model_copy(deep=True)
 
     async def delete_execution(self, run_id: str) -> None:
@@ -257,6 +283,46 @@ class MemoryStore:
             due.sort(key=lambda t: t.next_fire_at or now)
             return due[:limit]
 
+    async def claim_due_triggers(
+        self,
+        now: datetime,
+        *,
+        owner: str,
+        lease_seconds: float = 60.0,
+        limit: int = 50,
+    ) -> list[TriggerRecord]:
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=UTC)
+        until = now + timedelta(seconds=lease_seconds)
+        async with self._mutex:
+            # One critical section for select-and-mark: the whole point is that
+            # no other caller can observe a due trigger between the two.
+            won: list[TriggerRecord] = []
+            for trigger in sorted(
+                self._triggers.values(), key=lambda t: t.next_fire_at or now
+            ):
+                if len(won) >= limit:
+                    break
+                if not trigger.enabled or trigger.next_fire_at is None:
+                    continue
+                fire_at = trigger.next_fire_at
+                if fire_at.tzinfo is None:
+                    fire_at = fire_at.replace(tzinfo=UTC)
+                if fire_at > now:
+                    continue
+                held = trigger.claimed_until
+                if held is not None:
+                    if held.tzinfo is None:
+                        held = held.replace(tzinfo=UTC)
+                    if held > now:
+                        continue
+                claimed = trigger.model_copy(
+                    update={"claimed_by": owner, "claimed_until": until}
+                )
+                self._triggers[trigger.trigger_id] = claimed
+                won.append(claimed.model_copy(deep=True))
+            return won
+
     async def update_after_fire(
         self,
         trigger_id: str,
@@ -270,6 +336,11 @@ class MemoryStore:
                     "last_fire_at": last_fire,
                     "next_fire_at": next_fire,
                     "run_count": t.run_count + 1,
+                    # Release the claim: a lease that outlives the fire blocks
+                    # the next occurrence whenever it is longer than the
+                    # interval.
+                    "claimed_by": "",
+                    "claimed_until": None,
                 })
 
     async def delete_trigger(self, trigger_id: str) -> None:

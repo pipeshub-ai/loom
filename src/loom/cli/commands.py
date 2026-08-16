@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -21,6 +22,7 @@ from loom.core.exceptions import (
     InputMismatch,
     RegistryError,
 )
+from loom.runtime.shutdown import Interrupted
 
 #: How often ``--follow`` and ``watch`` re-read a run, in seconds.
 POLL_INTERVAL = 0.4
@@ -45,9 +47,17 @@ def with_backend(args: argparse.Namespace, target: str | None = None) -> Target:
 
 
 def run_async(coro: Any) -> int:
-    """Drive a command coroutine, turning known errors into exit codes."""
+    """Drive a command coroutine, turning known errors into exit codes.
+
+    ``guarded`` is what makes Ctrl+C and ``docker stop`` behave the same: both
+    cancel the command, its ``finally`` closes the backend, and the Runtime
+    settles the lease on anything it was driving — so an interrupted run is
+    picked up by the next ``reclaim_orphans`` instead of being stranded.
+    """
+    from loom.runtime.shutdown import guarded, report
+
     try:
-        return asyncio.run(coro)
+        return asyncio.run(guarded(coro, notify=report))
     except (ConfigurationError, InputMismatch, RegistryError) as exc:
         # InputMismatch is USAGE rather than FAILED on purpose: the payload was
         # refused at the door, so there is no run to have failed. A script that
@@ -55,9 +65,40 @@ def run_async(coro: Any) -> int:
         # from "the workflow broke".
         print(str(exc), file=sys.stderr)
         return Exit.USAGE
+    except Interrupted as stop:
+        interrupted(stop.exit_code)
+        return stop.exit_code
     except KeyboardInterrupt:
-        print("interrupted", file=sys.stderr)
-        return Exit.USAGE
+        # Reachable where add_signal_handler is not (Windows), and if a signal
+        # lands in the window before guarded() has installed anything.
+        interrupted(Exit.INTERRUPTED)
+        return Exit.INTERRUPTED
+
+
+def interrupted(code: int) -> None:
+    """Say what an interrupt left behind, and how to find it.
+
+    A run that was mid-step is still RUNNING in the store with an expired lease.
+    That is recoverable rather than lost, but only if whoever pressed Ctrl+C
+    knows to go looking — otherwise it reads as a run that vanished.
+    """
+    print(f"interrupted (exit {code})", file=sys.stderr)
+    print(
+        "  Any run that was in flight is recoverable: loom runs --status running",
+        file=sys.stderr,
+    )
+
+
+def close_backend(backend: CliBackend) -> None:
+    """Close a backend from synchronous code, best-effort.
+
+    For the two commands that hand control to a server owning its own event
+    loop. By the time it returns there is no loop left to await on, so this
+    opens one — and swallows what it finds, because a failure to close on the
+    way out must not turn a clean shutdown into a non-zero exit.
+    """
+    with contextlib.suppress(Exception):
+        asyncio.run(backend.close())
 
 
 def parse_input(raw: str | None) -> Any:
@@ -627,6 +668,121 @@ def _answer_from(args: argparse.Namespace) -> dict[str, Any]:
     return answer
 
 
+def cmd_toolsets(args: argparse.Namespace) -> int:
+    """List the integrations a workflow (or an agent) can call.
+
+    The node catalog has had ``loom nodes`` since it existed; toolsets had no
+    CLI surface at all, so the only way to see which integrations a process
+    could reach was to start an MCP server and ask it. That is a strange place
+    to have to go to answer "is Salesforce wired up here?".
+
+    Reads manifests only — Layer 1 — so listing costs no imports of httpx, no
+    vendor SDKs, and no credentials.
+    """
+    out = printer_for(args)
+    from loom.toolsets.registry import get_catalog, register_available_toolsets
+
+    register_available_toolsets()
+    catalog = get_catalog()
+
+    rows = []
+    for toolset_id in sorted(catalog.toolset_ids):
+        manifest = catalog.get(toolset_id)
+        if manifest is None:
+            continue
+        operations = list(manifest.all_operations())
+        if args.query and args.query.lower() not in (
+            f"{manifest.id} {manifest.summary} {manifest.description}".lower()
+        ):
+            continue
+        rows.append(
+            {
+                "id": manifest.id,
+                "version": manifest.version,
+                "operations": len(operations),
+                "groups": sorted(manifest.groups),
+                "summary": manifest.summary,
+                "auth": sorted((manifest.auth or {}).get("fields", [])),
+            }
+        )
+
+    out.json(rows)
+    if not rows:
+        out.line("  no toolsets matched")
+        return Exit.OK
+    out.table(
+        ["toolset", "ops", "groups", "summary"],
+        [
+            [
+                row["id"],
+                str(row["operations"]),
+                ",".join(row["groups"])[:28],
+                (row["summary"] or "")[:52],
+            ]
+            for row in rows
+        ],
+    )
+    return Exit.OK
+
+
+def cmd_toolset(args: argparse.Namespace) -> int:
+    """Show one toolset: its operations, effects, and how to import them."""
+    out = printer_for(args)
+    from loom.toolsets.registry import get_catalog, register_available_toolsets
+
+    register_available_toolsets()
+    manifest = get_catalog().get(args.toolset_id)
+    if manifest is None:
+        known = ", ".join(sorted(get_catalog().toolset_ids)) or "none"
+        out.error(f"unknown toolset '{args.toolset_id}' (known: {known})")
+        return Exit.USAGE
+
+    operations = [
+        {
+            "id": op.id,
+            "function": op.function,
+            "effect": op.effect.value,
+            "paginated": op.pagination,
+            "resolves": op.resolves,
+            "summary": op.summary,
+        }
+        for op in manifest.all_operations()
+    ]
+    out.json(
+        {
+            "id": manifest.id,
+            "version": manifest.version,
+            "summary": manifest.summary,
+            "description": manifest.description,
+            "base_url": manifest.base_url,
+            "auth": manifest.auth,
+            "import_line": manifest.import_line(),
+            "operations": operations,
+        }
+    )
+    out.line(f"{manifest.id} v{manifest.version} — {manifest.summary}")
+    if manifest.auth:
+        fields = ", ".join((manifest.auth or {}).get("fields", []))
+        out.line(f"  auth: {manifest.auth.get('type', '')} ({fields})")
+    # The one line that stops a generated import being invented.
+    if manifest.import_line():
+        out.line(f"  {manifest.import_line()}")
+    out.table(
+        ["operation", "effect", "pages", "resolves", "summary"],
+        [
+            [
+                op["id"],
+                op["effect"],
+                "yes" if op["paginated"] else "",
+                op["resolves"] or "",
+                (op["summary"] or "")[:44],
+            ]
+            for op in operations
+        ],
+    )
+    return Exit.OK
+
+
 def cmd_nodes(args: argparse.Namespace) -> int:
     """List the catalogued nodes a workflow can call."""
 
@@ -798,12 +954,27 @@ def cmd_serve(args: argparse.Namespace) -> int:
             "[[tool.loom]] modules, or pass --module[/yellow]"
         )
 
-    uvicorn.run(
-        create_app(runtime, identity=identity),
-        host=args.host,
-        port=args.port,
-        log_level=args.log_level,
-    )
+    # uvicorn installs its own SIGINT/SIGTERM handlers and unwinds cleanly, so
+    # what is missing on the way out is only ours: the Runtime's schedulers and
+    # the store's connections, neither of which uvicorn knows about.
+    #
+    # It then re-raises the signal it caught, so the process ends the way it
+    # would have unhandled. That is right for a program uvicorn owns and wrong
+    # here: the server was *asked* to stop and did, which is a success, and
+    # reporting it as an interrupt would print a recovery hint for runs nobody
+    # cut short. uvicorn already swallows the KeyboardInterrupt for exactly this
+    # reason; SIGTERM only reaches us because we are the ones who handle it.
+    try:
+        uvicorn.run(
+            create_app(runtime, identity=identity),
+            host=args.host,
+            port=args.port,
+            log_level=args.log_level,
+        )
+    except (Interrupted, KeyboardInterrupt):
+        pass
+    finally:
+        close_backend(target.backend)
     return Exit.OK
 
 
@@ -879,6 +1050,13 @@ def cmd_mcp(args: argparse.Namespace) -> int:
     except ValueError as exc:
         out.error(str(exc))
         return Exit.USAGE
+    except (Interrupted, KeyboardInterrupt):
+        # Same as serve: a server told to stop, which stopped, succeeded.
+        pass
+    finally:
+        # The scheduler lifespan already calls runtime.shutdown(); this is what
+        # closes the store behind it.
+        close_backend(target.backend)
     return Exit.OK
 
 

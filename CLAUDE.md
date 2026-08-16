@@ -33,6 +33,11 @@ loom approve <run> refund [--reject]
 loom send <run> <event> '{"token": "x"}'
 loom cancel / retry / replay <run>
 
+# credentials
+loom connect gmail                     # OAuth a credential a workflow can read
+loom whoami                            # what is stored, and whether it is ok/due/expired
+loom refresh [--all] [--force]         # renew what is near expiry; exit 1 if any failed
+
 # serving
 loom workflows
 loom publish onboard
@@ -48,9 +53,26 @@ nothing else about the command changes, because local and remote go through one
 `RuntimeFacade`.
 
 **Exit codes are the contract:** `0` completed, `1` failed, `2` usage,
-**`3` suspended**, `4` cancelled. The third one matters — a run parked on a human
-has neither succeeded nor failed, and collapsing it into either makes calling
-scripts do the wrong thing. A suspended run prints the command that unparks it.
+**`3` suspended**, `4` cancelled, and `128 + signum` interrupted (`130` Ctrl+C,
+`143` SIGTERM). The third one matters — a run parked on a human has neither
+succeeded nor failed, and collapsing it into either makes calling scripts do the
+wrong thing. A suspended run prints the command that unparks it.
+
+**A signal is not an error.** `loom.runtime.shutdown` routes SIGINT and SIGTERM
+to one place: cancel the work, let it unwind, report it as what it is. That
+matters more than the tidy output, because LOOM's recovery story *is* the
+cleanup — the `finally` that settles the lease `reclaim_orphans` later matches
+on. SIGTERM used to run none of it, so `docker stop` stranded whatever was
+mid-step. An interrupted command says which runs survived and how to find them;
+a second signal restores the default disposition and re-raises, because a
+cleanup path that cannot itself be interrupted is a hang with extra steps.
+
+`guarded()` covers a command's event loop and `terminate_on()` the windows
+outside one — argument parsing, and the commands that never open a loop. The
+servers keep their own handling: uvicorn and FastMCP install their own handlers,
+and `serve`/`mcp` exit `0` on either signal, because a server asked to stop and
+which stopped has succeeded. Nothing is installed by importing the module — a
+library that seizes the process's signal handlers is one you cannot embed.
 
 **`--json` on every command**, so output pipes into `jq`. Human output uses
 `rich` when installed (`[cli]` extra) and strips styling when not a TTY.
@@ -458,30 +480,397 @@ match. An operation id names a capability; only a function name is something
 anyone can write. `tests/test_manifest_imports.py` executes every declared
 import, so the docs cannot promise a symbol that is not there.
 
-### Gmail and Calendar Toolsets
+### GitHub and GitLab Toolsets
 
-`toolsets/google/` — two separately-grantable toolsets (`gmail`,
-`google_calendar`) over one shared OAuth layer, pure httpx, no vendor SDK.
+`toolsets/github/` (15 operations) and `toolsets/gitlab/` (14). Research and
+schema in `docs/design/github-gitlab-toolsets.md`.
+
+**Both signal pagination in response headers**, which no earlier dialect could
+read — by the time `page_through` hands a style the response, headers are gone.
+So these clients return `{"items": rows, "headers": {…}}` and `HeaderPaging`
+reads both halves: GitHub's `Link: …; rel="next"` (absence of `rel="next"` is
+the documented end) and GitLab's `x-next-page` (empty means the same as
+absent). Plain data deliberately — an httpx object in a paging style would make
+the style untestable without a transport.
+
+**GitHub's issue listings contain pull requests.** Its own model: *every pull
+request is an issue, but not every issue is a pull request*, told apart by a
+`pull_request` key. `github_list_issues` filters them out by default, because
+"how many open issues" answered over an unfiltered listing is wrong with
+nothing to notice. `GitHubIssue.is_pull_request` keeps it visible, and the
+filtered `Results` drops its `total` rather than reporting one that counted PRs.
+
+**Three GitHub signals mean "partial", none of them an error**: search caps at
+1,000 results however large `total_count` is, search is limited to 30
+requests/minute, and `incomplete_results` means the query timed out server-side.
+All three surface through `.complete`.
+
+**GitLab's `iid` is not its `id`.** The number in a URL is the per-project
+`iid`; the global `id` is a different number most endpoints reject. Both are
+carried under GitLab's own names. Two more traps encoded: `state="opened"`, not
+`"open"` (an unknown state is ignored and returns everything), and closing takes
+`state_event="close"`, not a state. A `group/project` path is URL-encoded for
+you — an unencoded slash is a different route and 404s.
+
+**Both return 404 for a resource the token cannot see**, so `GitHubNotFound` and
+`GitLabNotFound` say so in the message; otherwise a permissions problem is
+debugged as a typo. GitHub's 403 splits on `x-ratelimit-remaining`: zero is
+"wait", anything else is "never".
+
+### Salesforce and HubSpot Toolsets
+
+`toolsets/salesforce/` (11 operations) and `toolsets/hubspot/` (15) — the two
+CRMs, built from vendor docs read during the work rather than recalled. The
+research, schema, and phasing are in
+`docs/design/salesforce-hubspot-toolsets.md`.
+
+**Salesforce has no constant base URL.** Every org answers on its own host,
+returned by the OAuth exchange as `instance_url`; `login.salesforce.com`
+authenticates and does not serve data. The client therefore refuses to
+construct without either an explicit instance URL or the refresh credentials
+that produce one — a wrong base URL otherwise surfaces as 404s that look like
+missing records. Sandboxes need `SALESFORCE_LOGIN_URL=https://test.salesforce.com`;
+a sandbox token against the production host fails as `invalid_grant`, which
+reads like a bad token rather than a wrong host.
+
+**It also refreshes.** Access tokens expire mid-workflow, so the client owns
+the exchange, under a lock, and retries a 401 exactly once — the same
+arrangement `toolsets/google/auth.py` uses. Twice would turn a revoked grant
+into a loop against the login host.
+
+**A 403 splits.** `REQUEST_LIMIT_EXCEEDED` is org quota and clears if you wait;
+any other 403 is a permission that never will. Same rule the Google toolset
+applies to quota versus scope, and the reason `errorCode` is carried on the
+exception rather than just the status.
+
+**SOQL literals are escaped.** `O'Brien` is the most predictable surname in any
+CRM, and unescaped it terminates the string literal.
+
+**HubSpot's two caps both truncate silently.** Search returns at most 10,000
+results — paging past it is a 400 — so the client stops there and reports
+`complete=False` rather than turning a large query into an error at the end.
+And properties are opt-in: a response carries only what `properties=` asked
+for, so a default field list is declared per object type. Omitting it returns
+a contact with no company, which reads as missing data rather than as an
+under-specified request.
+
+Both APIs are uniform across object types, so both expose **generic CRUD plus
+typed finders** rather than five near-identical copies — a custom `Deal__c` or
+a custom HubSpot object is reachable without a library change. HubSpot's path
+version is a constructor argument, since it has begun publishing dated versions
+(`/crm/objects/2026-03/…`) alongside `v3`.
+
+### Listing toolsets from the CLI
+
+`loom toolsets` lists every integration a process can reach; `loom toolset <id>`
+shows one, with each operation's effect class, whether it pages, what it
+resolves, and the import line generated code needs. Both read manifests only —
+Layer 1 — so listing costs no vendor imports and no credentials. Before this,
+the only way to answer "is Salesforce wired up here?" was to start an MCP
+server and ask it.
+
+### ClickUp and Asana Toolsets
+
+`toolsets/clickup/` and `toolsets/asana/` — 14 operations each, the same three
+files every shipped toolset uses, pure httpx, no vendor SDK.
+
+**Auth differs in a way worth knowing.** Asana is a plain bearer token
+(`ASANA_ACCESS_TOKEN`). ClickUp has two shapes sent *differently*: a personal
+token goes in `Authorization` **raw**, an OAuth token takes the `Bearer` prefix,
+and sending a personal token as `Bearer pk_…` returns 401 with no hint why.
+`CLICKUP_OAUTH_TOKEN` wins over `CLICKUP_API_TOKEN` when both are set.
+
+**Paging.** ClickUp counts *pages* — `page=0,1,…` with a `last_page` flag — which
+is `PageNumberPaging`, a dialect distinct from `OffsetPaging` because sending a
+row offset where a page number belongs returns the wrong window and no error.
+Asana carries an opaque offset inside `next_page.uri`, which `CursorPaging`
+already parses.
+
+**Asana's search neither pages nor ships on every plan.** It returns
+`list[AsanaTask]`, not `Results`, and declares `pagination=False` — Asana states
+results are unstable across identical queries, so there is no page to follow and
+no coverage to report. `AsanaPremiumRequired` is its own error class because a
+workflow can act on it: fall back to `asana_list_tasks` on a known project.
+
+**Writes with no idempotency key are not retried** — creating a task, posting a
+comment. A timeout after the service accepted it is indistinguishable from a
+failure, so a retry files it twice. Updates and deletes retry once, since naming
+the same task twice reaches the same end state.
+
+Both mark their people-lookup as `resolves="user"`: every write in either API
+takes an id (numeric in ClickUp, a `gid` in Asana), and a name passed where an id
+belongs matches nothing and reports **no error**.
+
+### Google Workspace Toolsets
+
+`toolsets/google/` — four separately-grantable toolsets (`gmail`,
+`google_calendar`, `google_drive`, `google_meet`) over one shared OAuth layer,
+pure httpx, no vendor SDK. Four rather than one because a workflow reading a
+calendar has no business holding a mail-send or a Drive-delete scope, and
+`GrantSet(toolsets=["google_calendar"])` should mean exactly that.
+`GOOGLE_MANIFESTS` registers all four in a line.
 
 Credentials resolve from the environment in order: `GOOGLE_ACCESS_TOKEN`, then
 `GOOGLE_CLIENT_ID`+`GOOGLE_CLIENT_SECRET`+`GOOGLE_REFRESH_TOKEN`, then
 `GOOGLE_SERVICE_ACCOUNT_FILE` (the only one needing the `[google]` extra). One
-cached token serves both toolsets, refreshed under a lock.
+cached token serves all four, refreshed under a lock — and a later toolset's
+scopes are *merged into* it rather than dropped. Without that the second
+toolset used gets a token carrying only the first one's scopes, which under a
+service account is a Drive call authenticated for Gmail: a 403 that reads as a
+broken credential rather than a shared cache. `python -m loom.toolsets.google.setup
+--scopes drive` mints a refresh token; `read`/`write` are composed from the
+per-toolset sets, so a scope added to one cannot be missing from the combined one.
 
 **Errors are classified, not blanket-retried.** Google 4xx (bar 429) raises a
 `NonRetryableError` subclass, so a plain `Retry` policy stops on a malformed
 query rather than sleeping through three attempts. A 403 splits on `reason`:
 quota is retryable, missing scope is not.
 
-**`gmail_send_message`/`gmail_reply_to_message` have retries off.** No
-idempotency key exists, so a timeout after delivery is indistinguishable from a
-failure and a retry double-sends. Journaling covers replay; this covers the
-attempt. Calendar writes retry once — a duplicate event is deletable.
+**Anything that a retry would duplicate has retries off.**
+`gmail_send_message`/`gmail_reply_to_message`/`gmail_forward_message`,
+`drive_upload_file`, and `meet_create_space`: none of those APIs offers an
+idempotency key, so a timeout after the effect is indistinguishable from a
+failure. Journaling covers replay; this covers the attempt. Calendar and Drive
+metadata writes retry once — a duplicate event or a re-applied rename is
+recoverable.
 
-**Defaults that avoid surprises:** `send_updates="none"` so bulk event work does
-not email attendees; `singleEvents=True` so recurring series come back as
-instances. Gmail messages arrive flattened out of their MIME tree; attachments
-come back as LOOM `Attachment`s and offload to blobs.
+**Defaults that avoid surprises:** `send_updates="none"` and Drive's
+`notify=False`, so bulk work does not email hundreds of people as a side effect
+of a default; `singleEvents=True` so recurring series come back as instances;
+`trashed = false` on every Drive search, so a workflow processing a folder does
+not re-process the bin.
+
+**Pagination is per-endpoint, because Google is not consistent with itself.**
+Gmail and Calendar read `maxResults`, Drive and Meet read `pageSize`, and each
+*ignores* the other rather than rejecting it — so the wrong name is not an
+error, it is every request silently asking for the server default. Page
+ceilings differ too (Drive files 1000, Drive permissions 100, Meet artifacts
+10). `GoogleSession.paginate(size_param=…, page_size=…)` takes both, every
+paged read returns `Results`, and `tests/test_manifest_imports.py` checks the
+client, the return type, and the manifest agree.
+
+**Every one of the six marks a resolver**, because every one of them accepts an
+id where a person says a name: Gmail a *label* (`gmail_modify_labels` takes
+`Label_7`, and passing "Urgent" applies nothing and reports success), Calendar a
+*calendar* (a secondary calendar's id is an opaque
+`...@group.calendar.google.com`), Drive a *folder*, Slack a *channel* and a
+*user*, Zoom a *user*. Meet is the exception and needs none — its inputs are
+resource names produced by other calls.
+
+A resolver that pages has a **third** answer, and the two that scan a list say
+so: `slack_find_channel` and `calendar_find_calendar` raise when the scan ran
+out before matching, rather than answering `None`. "Not found" is a fact a
+caller acts on — it creates the channel, or reports the gap — and it is only a
+fact if the whole list was searched. `None` from a truncated scan silently loses
+things that plainly exist, in exactly the workspaces big enough for it to
+matter.
+
+**Timeouts are configurable, and split in two.** Every client takes `timeout=`
+(30s, an API call) and the four that move bytes also take `transfer_timeout=`
+(300s). One budget for both would either fail every large Drive export and Zoom
+recording, or leave an ordinary API call hanging for five minutes.
+
+Two seams matter more than the individual tools, because in both cases the
+obvious toolset is the wrong one:
+
+- **Scheduling a meeting is a Calendar operation.** The Meet API cannot
+  schedule anything — `meet_create_space` makes a room with a link and no time,
+  no invitees and no calendar entry, which looks like success until nobody
+  joins. `calendar_create_event(..., add_meet=True)` is the real path; it sends
+  `conferenceDataVersion=1`, without which Google accepts the request, ignores
+  the conference block, and returns an event with no link and no error. The
+  `requestId` is *derived* from the event rather than random, so it is both
+  deterministic and an idempotency key against a re-driven step.
+- **A meeting's recording and transcript live in Drive.** Meet reports the ids;
+  `drive_download_file` fetches a recording and `drive_export_file` reads a
+  transcript — which is a Google Doc and so has no bytes to download.
+  `MeetRecording.is_ready` exists because Meet reports a recording the moment
+  it stops and the Drive file appears later.
+
+**Drive's failure modes are silent, so the client closes them.** A missing
+`fields` mask returns a file with no timestamps; a missing
+`includeItemsFromAllDrives` returns an empty list for a team whose files live
+on a shared drive; downloading a Google Doc is a 403 that reads as a
+permissions problem. All three answer 200-shaped and make a workflow report
+something untrue, so the mask is always sent, both shared-drive flags are
+always on, and a Doc download is refused up front naming the export call.
+`drive_find_folder` is marked `resolves="folder"` and matches exactly — a
+`name contains` query returns "Reports Archive" for "Reports", and writing to
+the wrong folder is worse than finding nothing.
+
+**Gmail permanent delete is deliberately not exposed.** `messages.delete` needs
+`https://mail.google.com/`, a *restricted* scope granting full mailbox access,
+so shipping one unrecoverable operation would widen what every Gmail workflow
+is granted. Trash is recoverable for 30 days and `gmail_untrash_message` undoes
+it. Threads are the better triage unit — Gmail's UI groups by conversation, so
+labelling one message of a thread looks like nothing happened — and
+`gmail_list_threads` is one request per page where `gmail_search_messages` is
+one per hit. `gmail_create_draft` is the safe half of sending: an agent writes,
+`ctx.wait_for_approval()` parks, a human sends.
+
+### Web Search Toolsets
+
+`toolsets/exa/`, `toolsets/tavily/`, `toolsets/duckduckgo/` — three because
+they are not interchangeable, and the manifests carry enough for the coding
+agent to choose.
+
+| Toolset | Credential | Paginates | Distinctive |
+|---|---|---|---|
+| `exa` (4 ops) | `EXA_API_KEY` (`x-api-key`) | no, cap 100 | Embeddings search — a *description*, not keywords. Page text, similar pages, cited answers. |
+| `tavily` (3 ops) | `TAVILY_API_KEY` (bearer) | no, cap 20 | `include_answer` returns a written answer beside the results. News/finance topics, page extract, site map. |
+| `duckduckgo` (3 ops) | none | **yes** | No key. Best-effort — see below. |
+
+**Neither Exa nor Tavily has a cursor of any kind**, so a request above the cap
+cannot be made whole. Both clients **refuse** rather than clamp: a caller that
+asked for 500, received 100, and reported 100 as the total is the failure
+`Results` exists to prevent, one layer earlier. The error is a
+`NonRetryableError` naming the ceiling and the alternative, so `Retry` stops
+instead of failing the same impossible request three times. Their reads return
+plain `list`s with `pagination=False`; `duckduckgo` returns `Results` because
+`ddgs` exposes a page number and the client follows it.
+
+**Partial success is carried.** Exa's `/contents` and Tavily's `/extract`
+answer 200 for a request in which some URLs failed, so the side array reaches
+the caller as `.failed` — a short list with nothing saying it is short is the
+same bug as a silent page cap.
+
+**DuckDuckGo is not an official API.** They publish none; their one documented
+endpoint returns instant answers and no web results. This rides on the
+third-party `ddgs` package, which parses result pages — `pip install
+'loomflow[duckduckgo]'`, optional precisely because it is a different
+reliability contract from the other two. Two things are engineered around it:
+being blocked raises a *retryable* `DuckDuckGoRateLimited` rather than
+returning `[]` (which a workflow reads as "nothing matched" and acts on), and
+the client drives the paging itself so `.complete` distinguishes "that is
+everything" from "it stopped early" — asking `ddgs` for 30 returns whatever it
+managed, silently. A *soft* block, no rows and no error, stays
+indistinguishable from a genuine miss; that one cannot be fixed here. `ddgs` is
+synchronous, so every call goes through `asyncio.to_thread`.
+
+**All ten operations are `READ` and `idempotent`**, which is load-bearing
+rather than bookkeeping: web search is the canonical taint source, so under
+`TaintBroker` a run that has searched needs a human before it writes. Classified
+as writes, no read could taint and the rule would be unreachable.
+
+Tavily's own `timeout` parameter is exposed as `read_timeout`, because
+`ctx.step` claims `timeout` and a tool declaring it is unreachable by keyword.
+
+### OneDrive and SharePoint Toolsets
+
+`docs/design/onedrive-sharepoint-toolsets.md` is the research these were built
+from — Graph API notes, schemas, and the decision each fact forced, with sources.
+
+`toolsets/microsoft/` — two separately-grantable toolsets (`onedrive`,
+`sharepoint`, 17 operations each) over one shared Graph layer, pure httpx, no
+vendor SDK. **A SharePoint document library *is* a `drive` and its files *are*
+`driveItem`s**, so `models.py` is shared and a file moved between the two keeps
+one shape. They stay separate toolsets because the grant boundary is real.
+
+Credentials resolve in order: `MS_TENANT_ID`+`MS_CLIENT_ID`+`MS_CLIENT_SECRET`
++`MS_REFRESH_TOKEN` (delegated — acts as a person), the same three without it
+(client credentials — acts as the app), then `MS_GRAPH_ACCESS_TOKEN`.
+`AZURE_TENANT_ID`/`AZURE_CLIENT_ID`/`AZURE_CLIENT_SECRET` are accepted as
+fallbacks, since that is the trio the Azure SDKs already put in an environment.
+The durable credential outranks the ready-made one for the same reason it does
+in `GoogleAuth`. One cached token serves both toolsets.
+
+**`/me` does not exist under an app-only token.** Client credentials
+authenticate the application, so there is no signed-in person and `/me/drive`
+fails with a 400 that reads as a broken toolset rather than a missing argument.
+The clients refuse **before the request**, naming both fixes: `MS_ONEDRIVE_USER`
+/ `MS_ONEDRIVE_DRIVE_ID`, or authenticate as a person.
+
+**Paging reuses `LinkPaging`**, and the reference is why: `@odata.nextLink` is a
+complete URL and the docs say *"Don't try to extract the `$skiptoken` […] and
+use it in a different request"* — which is what `CursorPaging` does. The
+follow-up therefore sends the URL verbatim with no parameters of its own; note
+that `httpx` clears a URL's query when handed even an empty `params` dict, which
+silently re-fetches page one forever.
+
+**A SharePoint column has two names and the wrong one fails silently.** Item
+values are keyed by the *internal* name ("Due Date" is `DueDate` or
+`Due_x0020_Date`); a write using display names is accepted and sets nothing, so
+the row is created and the value is missing. `sharepoint_list_columns` carries
+`resolves="column"` and returns both. Likewise `$expand=fields` is always sent,
+because Graph hides item values by default and an unexpanded read looks like an
+empty list rather than a missing parameter.
+
+Two smaller traps, both test-pinned: Graph's path escape needs a *second* colon
+when anything follows it (`/root:/Reports:/children`), which is why
+`addressing.py` exists; and an upload session's fragment `PUT`s must carry **no**
+`Authorization` header — the upload URL is pre-authenticated and signing it can
+401 — making them the only deliberately unsigned requests in the codebase.
+`onedrive_upload_file` refuses over 10 MiB and names
+`onedrive_upload_large_file`, whose 5 MiB chunk is a multiple of 320 KiB by
+construction, because a violation of that rule fails only after the last
+fragment. `onedrive_list_changes` wraps `delta` — Graph names polling as a
+leading cause of throttling — and returns the delta link beside the items,
+since a caller that drops it re-enumerates the whole drive next time.
+
+### Slack and Zoom Toolsets
+
+`docs/design/slack-zoom-toolsets.md` is the research these were built from —
+API notes, schemas, and the decisions each fact forced, with sources.
+
+**Slack's failures are HTTP 200s.** `{"ok": false, "error": "channel_not_found"}`
+with a 200 status line. A client written to the shape every other toolset here
+uses — raise above 399, else decode — treats every failure as an *empty
+success*, so a workflow posting to a channel it was never invited to reports the
+message as sent and delivers nothing. `toolsets/slack/errors.py` therefore
+classifies on the `error` string, and every response goes through
+`raise_for_status`. `missing_scope` gets its own type because the fix is a
+different action in kind — a reinstall, by a person — and Slack names the scope
+it wanted.
+
+**Slack's cursor is nested, and that needed no new dialect.** It lives at
+`response_metadata.next_cursor` and signals exhaustion with an empty string.
+Both are already `TokenPaging` behaviours — a tuple `token_field` addresses a
+nested position, as HubSpot's `paging.next.after` does — so Slack uses that. A
+`NestedTokenPaging` class was written and then deleted: it was the same dialect
+twice, which is the second source of truth `pagination.py` exists to prevent.
+
+**Everything in Slack takes an id, never a name.** `#incidents` is what people
+type and `C024BE91L` is what Slack accepts, so `slack_find_channel`
+(`resolves="channel"`) and `slack_find_user_by_email` (`resolves="user"`) are
+the two resolvers, and both match *exactly* — a prefix match would return
+`#eng-alerts` for `#eng` and post to the wrong room. `files.upload` stopped
+working in March 2025, so `slack_upload_file` is three calls to two hosts behind
+one tool, and the bot token is deliberately not sent to the pre-signed storage
+URL.
+
+**Zoom has two identifiers and they are not interchangeable.** `meeting.id` is
+numeric and names the *series*; `meeting.uuid` names one *occurrence*, and every
+past-meeting endpoint takes the second. Worse, a uuid is base64: one beginning
+with `/` or containing `//` must be **double** URL-encoded or Zoom answers
+`3001 Meeting does not exist` for a meeting that plainly does. `encode_uuid`
+applies the rule conditionally — double-encoding one that does not need it
+produces the same 3001 from the other direction.
+
+**`meeting.start_url` is a host credential**, carrying an embedded token that
+lets anyone who opens it run the meeting. That warning is a pydantic `Field`
+description rather than an attribute docstring, deliberately: only the former
+reaches `model_json_schema()`, which is what the manifest publishes and what the
+coding agent reads. A warning that lives only in the source is one the agent
+writing the code never sees.
+
+**A Zoom daily rate limit is non-retryable on purpose.** Both limits arrive as a
+429, and only the message text tells them apart — but a per-second limit clears
+while a step backs off and a daily one does not clear until midnight UTC, so
+retrying against it burns the run to reach the same answer. `ZoomDailyLimitReached`
+is a `NonRetryableError`; `ZoomRateLimited` is not.
+
+**Auth differs between them.** Slack is an ordinary bot token — `loom connect
+slack` (already a provider) or `$SLACK_BOT_TOKEN`. Zoom's default is
+Server-to-Server OAuth, which has **no refresh token**: the client id and secret
+*are* the durable credential and an hourly token is minted from them on demand,
+so the credential-store refresh machinery does not apply and `toolsets/zoom/auth.py`
+caches its own under a lock, as `GoogleAuth` does for a service account.
+`loom connect zoom` (a new provider entry) covers the user-delegated case.
+
+Neither posts nor schedules under a retry: `chat.postMessage` and
+`meetings.create` have no idempotency key, so a retry after a post-delivery
+timeout posts the message twice — visibly, to everyone — or puts a second
+meeting on the calendar with a different join link.
 
 ### Production Layer
 
@@ -634,6 +1023,69 @@ make.
 today's `LOOM_CONN_{ID}_TOKEN` behaviour, unchanged and now named. A host with a
 credential service implements two methods instead of monkey-patching a concrete
 class.
+
+### Keeping OAuth tokens alive
+
+**Two thresholds, and the gap between them is the whole design.**
+`RefreshPolicy.is_due` (default: ten minutes before expiry,
+`$LOOM_OAUTH_REFRESH_SKEW`) is when renewal is *attempted*.
+`StoredCredential.is_expired` is when failing to renew becomes an *error*.
+Waiting for expiry is renewing too late — a token with two seconds left passes
+every check and then 401s on the request it was fetched for — and the window
+absorbs clock drift against the authorization server, which is otherwise
+indistinguishable from a token that died early.
+
+In between, `get()` **fails soft**: no refresher, a network blip, an
+authorization-server outage, and it returns the credential that is still valid
+and tries again next call. Raising there would take a working token away ten
+minutes before it was needed, turning someone else's transient failure into
+ours. Past expiry it raises, because there is nothing left to fall back to.
+
+**The window is clamped to half the token's own lifetime** (`max_fraction`,
+which is why `StoredCredential` carries `issued_at`). A provider issuing
+five-minute tokens under a ten-minute window would otherwise report every token
+as due the moment it was minted: every call refreshes, the server sees a storm,
+and where refresh tokens rotate, each rotation invalidates the last. The clamp
+is also what lets `OAuthClient._peek_if_fresh` judge another process's write by
+the same policy — a freshly minted token has its whole lifetime ahead of it, so
+two processes cannot bounce one credential between them.
+
+**`store.refresh(name)` renews now; `store.get(name)` renews if due.** Same code
+underneath, so they cannot drift on locking, rotation, or write-back — but
+`refresh()` always raises on failure, because the caller asked for the renewal
+and "the old token still works" answers a different question.
+
+**`CredentialRefreshService` (`connectors/refresh.py`) is the background half**,
+and it holds no renewal logic at all — it decides *when* to ask and calls
+`store.refresh()`. `start()` sweeps immediately (that is "on restart"), then on
+a timer, and registers through `Runtime.supervise()` so `shutdown()` stops it.
+`loom serve` and `loom mcp` start one; short-lived commands rely on the skew in
+`get()`, and `loom refresh [--all] [--force]` is the explicit hook for a systemd
+timer or a login profile — exit **1** when any credential could not be renewed,
+so a scheduled run reports a dead refresh token instead of succeeding quietly.
+A failed credential backs off exponentially to an hour: retrying a permanently
+dead refresh token every sweep is a self-inflicted flood that gets the *working*
+credentials rate-limited too.
+
+**Not built on cron, deliberately.** `TriggerDispatcher` fires workflows through
+`Runtime.submit()` — an `ExecutionRecord` and a journal per occurrence, thousands
+of run records a year to keep one token alive, and a hard dependency on a store
+that `loom login` does not require. Cron's exactly-once-per-occurrence guarantee
+exists to stop double-firing side effects; a refresh is idempotent and
+self-healing, so a missed one should be retried, never `catch_up`-backfilled.
+What is reused is the machinery around it: `supervise()`, the `Clock` port, and
+`LockProvider` for cross-process single-flight.
+
+**The CLI's store is now the Runtime's ambient store.** `loom connect gmail`
+previously stored a credential no workflow could read — the CLI could
+authenticate something it then could not use, indistinguishable from the connect
+having failed. `targets.resolve()` attaches it as `Runtime(credentials=…)`,
+which `_credentials_for` treats as *ambient*: a per-run `credentials=` still
+wins, and a name the run declared is never satisfied from here, so this widens
+what an unspecified run can reach without ever swapping a caller's identity. It
+is also built against the Runtime's store as a `LockProvider`, which closes a
+real gap — two `loom` processes could previously refresh the same credential at
+once and, on a rotating server, invalidate each other's refresh token.
 
 ### Sandboxed execution
 
@@ -860,12 +1312,48 @@ covers them, since a crashed run is `RUNNING`, not waiting on a timer. Wired int
 `Runtime(journal_warn_entries=..., journal_max_entries=...)` makes forgetting it
 loud instead of slow — a warning once, then `BudgetExceeded`.
 
+**An interrupt must be no worse than a crash.** `_drive` settles its lease by
+reading the record rather than by being told: every normal exit has already
+moved it off `PENDING`/`RUNNING` (terminal via `_finish_*`, `SUSPENDED` via
+`_park`), so one still unfinished means the drive was cancelled — Ctrl+C, a
+SIGTERM handler, `shutdown()`. That run gets `lease_owner` as a breadcrumb and
+its lease expired *now*, so the next `reclaim_orphans()` takes it immediately.
+
+Clearing it instead is the bug this replaced, and the shape is worth
+remembering: `reclaim_orphans` matches on `lease_expires_at`, so a nulled one is
+unmatchable and the run stays unfinished with no timer covering it and nothing
+able to find it — a Ctrl+C stranded a run that a `kill -9` recovered. The engine
+names `asyncio.CancelledError` for the same reason: it is a `BaseException`, and
+letting it reach the `except Exception` arm would record a healthy run `FAILED`
+on a keystroke and unwind compensations for work about to be resumed.
+
+**`PENDING` is scanned as well as `RUNNING`**, for the drive cancelled in the
+one store round-trip between creating the record and taking the lease. What
+keeps that safe is that the *expired lease* is the signal, never the status: a
+record `submit()` has created and not yet driven carries no lease at all, so it
+is never matched however long it queues. Only a drive that reached its `finally`
+leaves one — exactly the runs somebody has stopped working on.
+
+`shutdown(drain=5.0)` stops the *sources* of new runs first — supervised
+services, then the scheduler — then lets in-flight drives finish, then cancels.
+`TriggerDispatcher` and `QueueConsumer` register themselves via
+`Runtime.supervise()` from their own `start()`, so a host does not have to know
+which it wired up. Whatever the deadline cuts off is exactly the interrupted-run
+case above and recovers the same way, which is what lets the deadline be short.
+
+**`async with Runtime(...) as rt:`** is how a host should say it — a trailing
+`await rt.shutdown()` only runs when nothing goes wrong, which is the case where
+it matters least. `loom.runtime.shutdown.run_main(main())` is the matching
+`__main__` block: `asyncio.run` plus signals and an exit code. Every cookbook
+example uses both, so the pattern a reader copies is the one that cleans up.
+
 ### Store parity
 
 Every store claims `ExecutionStore + CacheStore + LockProvider + TriggerStore`
-(Redis deliberately claims only the last two). `tests/conformance/` runs **one
-behavioural suite against all four backends**, with Mongo and Postgres reached
-through real servers in CI.
+— the last now including `claim_due_triggers` — while Redis deliberately claims
+only `CacheStore + LockProvider`. `tests/conformance/` runs **one behavioural
+suite against all four backends**, with Mongo and Postgres reached through real
+servers in CI.
 
 That harness is not ceremony. Before it, the suite covered `memory` and
 `sqlite` and the other two were covered by `hasattr` — and its first run
@@ -1056,13 +1544,84 @@ This is the realistic path to other languages — workflow authoring stays Pytho
 because durability depends on re-entering a Python function body, but starting
 runs and delivering approvals are ordinary HTTP requests.
 
-### Trigger Dispatcher (new)
+### Scheduling and cron
 
-`TriggerDispatcher` (`runtime/dispatcher.py`) fires cron/interval workflows at the scheduled time:
-- Scans registered workflows for `Schedule`/`Interval` triggers
-- Computes `next_fire_at` via `CronSchedule.next_after()`
-- Fires runs via `Runtime.submit()` on each `tick()`
-- Uses `TriggerStore` protocol for persistence (in-memory by default)
+`CronSchedule` (`triggers/cron.py`) is ~200 lines of stdlib — no croniter, no
+APScheduler. It computes in the declared timezone and returns UTC, so DST is
+handled where it has to be: the lost hour fires nothing and the repeated hour
+fires **once** (`tests/test_cron_dst.py` pins one-per-local-hour-label, 23 on
+the short day and 24 on the long one).
+
+`TriggerDispatcher` (`runtime/dispatcher.py`) scans `Schedule`/`Interval`
+triggers, persists a `TriggerRecord` through `TriggerStore`, and fires due ones
+via `Runtime.submit()`. Cron therefore survives restarts by living in the store,
+not in the process.
+
+**Two identities, and everything here follows from them.**
+
+`Fire.key` is `trigger_id@scheduled_for` — the *occurrence*, not the attempt —
+and is passed as `submit(idempotency_key=…)`. `idempotency_key` is UNIQUE in
+every persistent store, so two dispatchers racing, or one retrying after dying
+between the submit and the advance, resolve to one run. A caller that loses that
+race gets the winner's run back rather than an exception, so a correctly
+deduplicated fire does not surface as a dispatcher error.
+
+`_trigger_id` is a hash of the workflow plus **only the fields that decide when
+it fires** (`kind`, `cron`, `timezone`, `seconds`). Registration runs on every
+boot, so a fresh id per boot added a record per deploy — three deploys, three
+runs per occurrence, from three ids no occurrence key could collapse. The
+allowlist matters twice over: `describe()` also carries `next_fire`, a
+*timestamp*, so hashing the whole description made the id depend on what time
+the process booted. Policy (`catch_up`, `max_catch_up`, `jitter`) is excluded
+deliberately — changing it updates the stored spec in place instead of orphaning
+the trigger's `last_fire_at` and `run_count`.
+
+Registration is therefore idempotent: a known trigger keeps its schedule state
+(recomputing `next_fire_at` on boot would let a pod that restarts more often
+than its schedule fires never fire at all), and triggers the workflow no longer
+declares are retired, so changing a cron does not leave the old one running.
+
+**Missed fires are a policy.** `catch_up=False` (default) fires the pending
+occurrence and skips the rest, now counted and logged rather than silent.
+`catch_up=True` replays each missed occurrence oldest-first under its own key —
+so an interrupted backfill resumes without repeating — bounded by
+`max_catch_up` (default 10), which keeps the newest and reports the drop. The
+walk stops one past the ceiling, so a per-minute cron down for a week is not
+enumerated in full just to discard almost all of it.
+
+**Jitter is applied to dispatch, never to the schedule**, and is *derived* from
+the occurrence key rather than sampled. A random draw would make two dispatchers
+disagree about when an occurrence becomes eligible; deriving it means every
+process computes the same delay with no coordination, and `Fire.key` stays
+exactly the schedule's moment. Jitter reaching the key would silently disable
+the exactly-once guarantee — an option for smoothing load undoing the
+correctness property.
+
+**Claiming is the other half, and it is about work, not correctness.**
+`TriggerStore.claim_due_triggers(now, owner=…, lease_seconds=…)` takes the due
+set rather than reading it, so two dispatchers stop building, submitting, and
+advancing the same occurrence. Every backend implements it with its own
+primitive — a mutex, `BEGIN IMMEDIATE`, `UPDATE … RETURNING … FOR UPDATE SKIP
+LOCKED`, `find_one_and_update` — and `tests/conformance/test_trigger_claim.py`
+is what says the four mean the same thing.
+
+It is a **lease, not a lock**: a dispatcher that dies mid-tick delays one
+occurrence instead of stranding the trigger forever. And `update_after_fire`
+*releases* the claim as it advances — leaving that to expiry would make the
+lease duration a silent lower bound on the schedule, so a per-minute cron under
+a 60-second lease would fire once and then idle. Claim state lives inside
+`TriggerRecord`, which every store already persists whole, so none of this
+needed a migration on a deployed table.
+
+`await rt.start_scheduler(dispatcher=…, elector=…)` puts cron on the same loop
+and the same lease as due timers and orphan recovery. Leaving it outside was a
+trap rather than an omission: a host that passed an elector reasonably believed
+its scheduling was single-leader, and its timers were while its crons were not.
+
+A store that predates `claim_due_triggers` falls back to `due_triggers` with a
+debug line — a host with its own `TriggerStore` is not broken by a capability it
+has not implemented, and without the claim the behaviour is exactly what shipped
+before.
 
 ### Storage Backends
 
@@ -1103,5 +1662,6 @@ pip install loomflow[postgres]    # + PostgreSQL
 pip install loomflow[langchain]   # + LangChain/LangGraph
 pip install loomflow[agno]        # + Agno
 pip install loomflow[pydantic-ai] # + Pydantic AI
+pip install loomflow[duckduckgo]  # + ddgs, for the duckduckgo toolset only
 pip install loomflow[all]         # everything
 ```

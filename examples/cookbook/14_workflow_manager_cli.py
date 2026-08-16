@@ -21,7 +21,6 @@ Requires:
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from pathlib import Path
 
@@ -233,45 +232,49 @@ async def main() -> None:
     # Setup runtime with sample workflows
     log("setup", "Creating runtime with sample workflows...")
     model = AnthropicProvider(model_name="claude-sonnet-4-6")
-    rt = Runtime(store=MemoryStore())
+    async with Runtime(store=MemoryStore()) as rt:
+        # Register sample workflows
+        dispatcher = TriggerDispatcher(rt)
+        await dispatcher.register(hello_workflow)
+        await dispatcher.register(heartbeat_workflow)
+        rt.register(echo_workflow)
 
-    # Register sample workflows
-    dispatcher = TriggerDispatcher(rt)
-    await dispatcher.register(hello_workflow)
-    await dispatcher.register(heartbeat_workflow)
-    rt.register(echo_workflow)
+        log("setup", f"Registered {len(rt._workflows)} workflows")
+        for name in rt._workflows:
+            log("setup", f"  - {name}")
 
-    log("setup", f"Registered {len(rt._workflows)} workflows")
-    for name in rt._workflows:
-        log("setup", f"  - {name}")
-
-    # Build tool registry
-    registry = ToolsetRegistry()
-    registry.register(
-        Toolset.from_callables(
-            "workflow_manager",
-            build_workflow_tools(rt),
-            summary="Manage workflows: list, run, schedule, cancel",
+        # Build tool registry
+        registry = ToolsetRegistry()
+        registry.register(
+            Toolset.from_callables(
+                "workflow_manager",
+                build_workflow_tools(rt),
+                summary="Manage workflows: list, run, schedule, cancel",
+            )
         )
-    )
 
-    # Create the manager agent
-    manager = WorkflowManagerAgent(
-        runtime=rt,
-        model=model,
-        dispatcher=dispatcher,
-        tool_registry=registry,
-    )
+        # Create the manager agent
+        manager = WorkflowManagerAgent(
+            runtime=rt,
+            model=model,
+            dispatcher=dispatcher,
+            tool_registry=registry,
+        )
 
-    log("setup", "Manager agent ready")
+        log("setup", "Manager agent ready")
 
-    if args.command:
-        await single_command(manager, args.command)
-    else:
-        await interactive_loop(manager)
+        if args.command:
+            await single_command(manager, args.command)
+        else:
+            await interactive_loop(manager)
 
-    await dispatcher.stop()
+        await dispatcher.stop()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    from loom.runtime.shutdown import run_main
+
+    # run_main is asyncio.run plus the two things a program needs: SIGINT and
+    # SIGTERM cancel main() so its cleanup runs, and an interrupt becomes an
+    # exit code instead of a traceback.
+    raise SystemExit(run_main(main()))

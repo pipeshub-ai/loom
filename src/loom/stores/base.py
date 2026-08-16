@@ -28,7 +28,20 @@ class ExecutionStore(Protocol):
 
     async def get_execution(self, run_id: str) -> ExecutionRecord | None: ...
 
-    async def update_execution(self, record: ExecutionRecord) -> None: ...
+    async def update_execution(
+        self, record: ExecutionRecord, *, expected_status: ExecutionStatus | None = None
+    ) -> None:
+        """Persist *record*.
+
+        When `expected_status` is given, the write is conditional: it must
+        raise :class:`~loom.core.exceptions.ConcurrentUpdateError` rather
+        than write if the currently-stored record's status is not
+        `expected_status`. This is what lets the engine detect two processes
+        both resuming the same suspended run from the same delivered event
+        — the loser must not overwrite a journal the winner is concurrently
+        appending to.
+        """
+        ...
 
     async def list_executions(
         self,
@@ -158,6 +171,35 @@ class TriggerStore(Protocol):
     async def due_triggers(
         self, now: datetime, *, limit: int = 50
     ) -> list[TriggerRecord]: ...
+
+    async def claim_due_triggers(
+        self,
+        now: datetime,
+        *,
+        owner: str,
+        lease_seconds: float = 60.0,
+        limit: int = 50,
+    ) -> list[TriggerRecord]:
+        """Take ownership of due triggers, returning only the ones won here.
+
+        ``due_triggers`` reads; this one *takes*. The difference matters because
+        the dispatcher's sequence is read, submit, advance — so two dispatchers
+        reading the same due row both act on it. The occurrence key already
+        makes that harmless (one run, not two), which leaves this doing the
+        other half of the job: stopping two processes from doing the same work,
+        and from both advancing one record.
+
+        Three properties every implementation must have:
+
+        - **Exclusive.** Two concurrent callers never both receive one record.
+        - **Leased, not locked.** A claim lapses after *lease_seconds*, so a
+          dispatcher that dies mid-tick delays one occurrence rather than
+          stranding the trigger forever.
+        - **Does not advance.** Claiming is not firing. ``update_after_fire``
+          stays the only thing that moves ``next_fire_at``, so a claim that is
+          never acted on simply expires and the occurrence comes back.
+        """
+        ...
 
     async def update_after_fire(
         self,

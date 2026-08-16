@@ -9,7 +9,7 @@ holding once credentials go through encryption and a file.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from keyring.backend import KeyringBackend
@@ -352,3 +352,235 @@ class TestLayeredCredentialStore:
 
         layered = LayeredCredentialStore(MemoryCredentialStore(), MemoryCredentialStore())
         assert repr(layered) == "<LayeredCredentialStore layers=2>"
+
+
+# ---------------------------------------------------------------------------
+# Early refresh — the window before expiry
+# ---------------------------------------------------------------------------
+
+
+NOON = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
+
+
+def _timed(
+    token: str = "tok", *, minutes_left: float, lifetime_minutes: float = 60.0
+) -> StoredCredential:
+    """A credential expiring *minutes_left* from NOON, with a known lifetime."""
+    expires_at = NOON + timedelta(minutes=minutes_left)
+    return StoredCredential(
+        token=Secret(token),
+        refresh_token=Secret("refresh-me"),
+        expires_at=expires_at,
+        issued_at=expires_at - timedelta(minutes=lifetime_minutes),
+    )
+
+
+class TestEarlyRefresh:
+    """Renewing at the moment of expiry is renewing too late.
+
+    A token with two seconds left passes an ``is_expired`` check and then 401s
+    on the request it was fetched for. The window also absorbs clock drift
+    between this machine and the authorization server, which is otherwise
+    indistinguishable from a token that expired early.
+    """
+
+    def _armed(self, store) -> _CountingRefresher:
+        store.clock = ManualClock(NOON)  # type: ignore[attr-defined]
+        refresher = _CountingRefresher()
+        store._refresher = refresher  # type: ignore[attr-defined]
+        return refresher
+
+    async def test_a_token_inside_the_window_is_renewed_before_it_expires(
+        self, store
+    ) -> None:
+        refresher = self._armed(store)
+        await store.put("jira", _timed("old", minutes_left=5))
+
+        assert (await store.get("jira")).reveal() == "refreshed-1"
+        assert refresher.calls == 1
+
+    async def test_a_token_outside_the_window_is_left_alone(self, store) -> None:
+        refresher = self._armed(store)
+        await store.put("jira", _timed("current", minutes_left=30))
+
+        assert (await store.get("jira")).reveal() == "current"
+        assert refresher.calls == 0
+
+    async def test_the_boundary_is_inclusive(self, store) -> None:
+        """Exactly at the window: renew. Off by a second the other way: do not."""
+        refresher = self._armed(store)
+        await store.put("jira", _timed("edge", minutes_left=10))
+        assert (await store.get("jira")).reveal() == "refreshed-1"
+
+        refresher.calls = 0
+        await store.put("jira", _timed("just-outside", minutes_left=10.02))
+        assert (await store.get("jira")).reveal() == "just-outside"
+        assert refresher.calls == 0
+
+    async def test_a_short_lived_token_does_not_refresh_on_every_call(
+        self, store
+    ) -> None:
+        """The failure a flat window would cause.
+
+        A provider issuing five-minute tokens under a ten-minute window would
+        report every token as due the moment it was minted: every call
+        refreshes, the authorization server sees a storm, and on a server that
+        rotates refresh tokens each rotation invalidates the last.
+        """
+        refresher = self._armed(store)
+        # Four of its five minutes remain — nowhere near due, despite the whole
+        # lifetime being shorter than the configured window.
+        await store.put("jira", _timed("fresh", minutes_left=4, lifetime_minutes=5))
+
+        assert (await store.get("jira")).reveal() == "fresh"
+        assert refresher.calls == 0
+
+    async def test_a_short_lived_token_still_refreshes_past_its_half_life(
+        self, store
+    ) -> None:
+        """Clamped, not disabled."""
+        refresher = self._armed(store)
+        await store.put("jira", _timed("aging", minutes_left=2, lifetime_minutes=5))
+
+        assert (await store.get("jira")).reveal() == "refreshed-1"
+        assert refresher.calls == 1
+
+    async def test_a_credential_with_no_lifetime_recorded_uses_the_full_window(
+        self, store
+    ) -> None:
+        """Written before ``issued_at`` existed. Nothing to clamp against, and
+        inventing a lifetime would manufacture one nobody measured."""
+        refresher = self._armed(store)
+        await store.put(
+            "jira",
+            StoredCredential(
+                token=Secret("legacy"),
+                refresh_token=Secret("r"),
+                expires_at=NOON + timedelta(minutes=5),
+            ),
+        )
+
+        assert (await store.get("jira")).reveal() == "refreshed-1"
+        assert refresher.calls == 1
+
+
+class TestEarlyRefreshFailsSoft:
+    """Inside the window the token still works, so a failed renewal must not
+    take it away. At expiry there is nothing to fall back to and the caller
+    has to hear about it."""
+
+    class _Broken:
+        async def refresh(self, name, stored):
+            raise AuthExpired("the authorization server is having a bad day")
+
+    async def test_a_failed_early_refresh_returns_the_still_valid_token(
+        self, store
+    ) -> None:
+        store.clock = ManualClock(NOON)  # type: ignore[attr-defined]
+        store._refresher = self._Broken()  # type: ignore[attr-defined]
+        await store.put("jira", _timed("still-good", minutes_left=5))
+
+        assert (await store.get("jira")).reveal() == "still-good"
+
+    async def test_a_failed_refresh_after_expiry_raises(self, store) -> None:
+        store.clock = ManualClock(NOON)  # type: ignore[attr-defined]
+        store._refresher = self._Broken()  # type: ignore[attr-defined]
+        await store.put("jira", _timed("dead", minutes_left=-1))
+
+        with pytest.raises(AuthExpired):
+            await store.get("jira")
+
+    async def test_no_refresher_inside_the_window_is_not_an_error(
+        self, store
+    ) -> None:
+        """The regression this guards: making `due` behave like `expired`
+        would break every store with no refresher ten minutes early."""
+        store.clock = ManualClock(NOON)  # type: ignore[attr-defined]
+        await store.put("jira", _timed("usable", minutes_left=5))
+
+        assert (await store.get("jira")).reveal() == "usable"
+
+    async def test_no_refresher_after_expiry_still_raises(self, store) -> None:
+        store.clock = ManualClock(NOON)  # type: ignore[attr-defined]
+        await store.put("jira", _timed("gone", minutes_left=-1))
+
+        with pytest.raises(AuthExpired, match="jira"):
+            await store.get("jira")
+
+    async def test_a_failed_early_refresh_does_not_damage_the_stored_record(
+        self, store
+    ) -> None:
+        store.clock = ManualClock(NOON)  # type: ignore[attr-defined]
+        store._refresher = self._Broken()  # type: ignore[attr-defined]
+        await store.put("jira", _timed("intact", minutes_left=5))
+        await store.get("jira")
+
+        stored = await store.peek("jira")
+        assert stored.token.reveal() == "intact"
+        assert stored.refresh_token is not None
+
+
+class TestExplicitRefresh:
+    """``store.refresh(name)`` renews now, whether or not it is due — what
+    ``loom refresh`` runs. Distinct from ``get()``, and sharing its code."""
+
+    async def test_it_renews_a_credential_that_is_not_due(self, store) -> None:
+        store.clock = ManualClock(NOON)  # type: ignore[attr-defined]
+        refresher = _CountingRefresher()
+        store._refresher = refresher  # type: ignore[attr-defined]
+        await store.put("jira", _timed("current", minutes_left=45))
+
+        assert (await store.refresh("jira")).reveal() == "refreshed-1"
+        assert refresher.calls == 1
+
+    async def test_it_persists_like_get_does(self, store) -> None:
+        store.clock = ManualClock(NOON)  # type: ignore[attr-defined]
+        store._refresher = _CountingRefresher()  # type: ignore[attr-defined]
+        await store.put("jira", _timed("current", minutes_left=45))
+        await store.refresh("jira")
+
+        assert (await store.peek("jira")).token.reveal() == "refreshed-1"
+
+    async def test_it_raises_rather_than_failing_soft(self, store) -> None:
+        """The caller asked for this to happen; reporting success because the
+        old token still works would answer a different question."""
+        store.clock = ManualClock(NOON)  # type: ignore[attr-defined]
+        store._refresher = TestEarlyRefreshFailsSoft._Broken()  # type: ignore[attr-defined]
+        await store.put("jira", _timed("current", minutes_left=45))
+
+        with pytest.raises(AuthExpired):
+            await store.refresh("jira")
+
+    async def test_an_unknown_name_is_not_found(self, store) -> None:
+        with pytest.raises(CredentialNotFound):
+            await store.refresh("nope")
+
+
+class TestPeekAll:
+    """What the background sweep reads. The encrypted stores override it to
+    decrypt once rather than once per credential."""
+
+    async def test_it_returns_every_record(self, store) -> None:
+        await store.put("a", _cred("tok-a"))
+        await store.put("b", _cred("tok-b"))
+
+        found = await store.peek_all()
+
+        assert set(found) == {"a", "b"}
+        assert found["a"].token.reveal() == "tok-a"
+
+    async def test_it_neither_expires_nor_refreshes(self, store) -> None:
+        store.clock = ManualClock(NOON)  # type: ignore[attr-defined]
+
+        class MustNotBeCalled:
+            async def refresh(self, name, stored):
+                raise AssertionError("peek_all must not trigger a refresh")
+
+        store._refresher = MustNotBeCalled()  # type: ignore[attr-defined]
+        await store.put("jira", _timed("stale", minutes_left=-5))
+
+        found = await store.peek_all()
+        assert found["jira"].token.reveal() == "stale"
+
+    async def test_an_empty_store_is_an_empty_mapping(self, store) -> None:
+        assert await store.peek_all() == {}

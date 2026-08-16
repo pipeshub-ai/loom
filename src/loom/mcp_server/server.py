@@ -58,6 +58,12 @@ def _principal_facade(base_facade: RuntimeFacade, auth_enabled: bool) -> Runtime
 def _scheduler_lifespan(facade: RuntimeFacade) -> Any:
     """Run the Runtime's timer loop for the lifetime of the server.
 
+    Also sweeps stored OAuth credentials, which matters more here than
+    anywhere else: an MCP server stays up for days and may not touch a
+    credential for most of that, so "renew on next use" would mean the next
+    use is the one that discovers the token died overnight. The sweep runs
+    once at startup — the "on restart" case — and then on a timer.
+
     Returns ``None`` when the facade has no in-process Runtime to drive — a
     ``RemoteFacade`` talks to a server that schedules its own.
     """
@@ -68,9 +74,16 @@ def _scheduler_lifespan(facade: RuntimeFacade) -> Any:
     import contextlib
     from collections.abc import AsyncIterator
 
+    from loom.connectors.refresh import service_for
+
     @contextlib.asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncIterator[None]:
         await runtime.start_scheduler()
+        credentials = service_for(runtime)
+        if credentials is not None:
+            # Registers itself with runtime.supervise(), so the shutdown below
+            # stops it without this block having to remember to.
+            await credentials.start()
         try:
             yield
         finally:

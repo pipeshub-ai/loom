@@ -45,9 +45,23 @@ class TestResolversAreDeclarative:
         assert JIRA_MANIFEST.resolvers()["user"].function == "jira_resolve_user"
 
     def test_a_toolset_with_none_reports_none(self) -> None:
+        """Meet, because every input it takes is a resource name produced by
+        another call — there is no human-written name to resolve.
+
+        This was Gmail until Gmail gained a *label* resolver: labelling takes
+        ``Label_7`` and a person says "Urgent", so it turned out to have the
+        very problem this marker exists for.
+        """
+        from loom.toolsets.google import GOOGLE_MEET_MANIFEST
+
+        assert GOOGLE_MEET_MANIFEST.resolvers() == {}
+
+    def test_gmail_resolves_a_label(self) -> None:
+        """Passing a label *name* where an id belongs is not an error — Gmail
+        accepts the call and applies nothing."""
         from loom.toolsets.google import GMAIL_MANIFEST
 
-        assert GMAIL_MANIFEST.resolvers() == {}
+        assert GMAIL_MANIFEST.resolvers()["label"].function == "gmail_find_label"
 
     def test_any_toolset_can_declare_one(self) -> None:
         """Nothing here is Jira-specific."""

@@ -13,6 +13,7 @@ import contextlib
 import inspect
 import logging
 import uuid
+import weakref
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -20,6 +21,7 @@ from typing import Any
 from loom.core.exceptions import (
     AdmissionRejected,
     AuthExpired,
+    ConcurrentUpdateError,
     ConfigurationError,
     ContinueAsNew,
     InputMismatch,
@@ -76,6 +78,13 @@ from loom.steps.definition import StepDefinition
 from loom.stores.memory import MemoryStore
 
 logger = logging.getLogger("workflow.engine")
+
+
+#: Statuses meaning "somebody should still be working on this run". A record
+#: left in one of these with an expired lease is nobody's, and only
+#: ``reclaim_orphans`` covers it — no timer is watching, because it is not
+#: waiting for one.
+_UNFINISHED = (ExecutionStatus.PENDING, ExecutionStatus.RUNNING)
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -382,6 +391,7 @@ class Runtime:
         self._driving: set[str] = set()
         self._background: set[asyncio.Task[Any]] = set()
         self._scheduler_task: asyncio.Task[None] | None = None
+        self._services: weakref.WeakSet[Any] = weakref.WeakSet()
 
     @classmethod
     def from_env(cls, **overrides: Any) -> Runtime:
@@ -639,7 +649,7 @@ class Runtime:
         credentials = kwargs.pop("credentials", None)
         env = kwargs.pop("env", None)
         deps = kwargs.pop("deps", None)
-        record = await self._open_execution(
+        record = await self._open_execution_idempotently(
             definition,
             input,
             trigger=kwargs.pop("trigger", TriggerKind.MANUAL),
@@ -654,6 +664,44 @@ class Runtime:
         )
         self._spawn(self._drive(record.run_id, deps=deps))
         return record.run_id
+
+    async def _open_execution_idempotently(
+        self, definition: Any, input: Any, **kwargs: Any
+    ) -> ExecutionRecord:
+        """Create the record, or hand back the one that beat us to the key.
+
+        The check in :meth:`submit` narrows the race; the store's own UNIQUE
+        constraint closes it. So the loser of that race finds out by having its
+        insert refused — and what it should do is return the winner's run,
+        because the caller asked for "a run for this key" and there is one.
+
+        Raising instead would turn a correctly deduplicated scheduled fire into
+        an error in the dispatcher, which then declines to advance the trigger
+        and tries the same occurrence again on the next tick. The deduplication
+        would be working and the schedule would still be stuck.
+
+        Deliberately catching broadly: each backend signals a duplicate in its
+        driver's own vocabulary — ``IntegrityError``, ``DuplicateKeyError``,
+        ``ValidationError``. Narrowing to a list of those would silently stop
+        covering the next backend someone adds. The re-read is what makes it
+        safe: nothing is swallowed unless the key really does resolve now, and
+        anything else is re-raised untouched.
+        """
+        key = kwargs.get("idempotency_key")
+        try:
+            return await self._open_execution(definition, input, **kwargs)
+        except Exception:
+            if not key:
+                raise
+            winner = await self.store.find_by_idempotency_key(key)
+            if winner is None:
+                raise
+            logger.info(
+                "lost the idempotency race for %s, using run %s",
+                key,
+                winner.run_id,
+            )
+            return winner
 
     async def resume(self, run_id: str, *, deps: Any = None) -> ExecutionResult:
         """Continue a parked run. Safe to call redundantly."""
@@ -849,12 +897,23 @@ class Runtime:
         elector: LeaderElector | None = None,
         group: str = "scheduler",
         lease: Duration = 30.0,
+        dispatcher: Any | None = None,
     ) -> None:
-        """Run the timer scanner in the background until :meth:`shutdown`.
+        """Run the scheduler in the background until :meth:`shutdown`.
+
+        Three things, on one loop: due timers (``ctx.sleep``), orphan recovery,
+        and — when a *dispatcher* is passed — cron and interval triggers.
 
         Pass an *elector* to run many processes against one store: each tick
-        first tries to take the lease for *group*, and only the holder scans for
-        due runs. Without it every process would resume the same timers.
+        first tries to take the lease for *group*, and only the holder scans.
+        Without it every process would resume the same timers.
+
+        The *dispatcher* argument exists because leaving cron outside this loop
+        was a trap: a host that called ``start_scheduler(elector=…)``
+        reasonably believed its scheduling was single-leader, and its timers
+        were while its crons were not. Cron is still correct without an elector
+        — the occurrence key sees to that — but it was doing the work N times
+        and quietly saying nothing about it.
         """
         if self._scheduler_task is not None:
             return
@@ -867,6 +926,11 @@ class Runtime:
                     if elector is None or await elector.acquire_leadership(
                         group, lease_seconds
                     ):
+                        if dispatcher is not None:
+                            # Before the timer scan: firing a trigger creates a
+                            # run, and creating it first means it is picked up
+                            # this tick rather than one interval later.
+                            await dispatcher.tick()
                         await self.tick()
                         await self.reclaim_orphans()
                 except Exception:
@@ -875,20 +939,87 @@ class Runtime:
 
         self._scheduler_task = asyncio.create_task(loop())
 
-    async def shutdown(self) -> None:
-        """Stop the scheduler and let in-flight background drives settle."""
+    async def __aenter__(self) -> Runtime:
+        """Use a Runtime as a context manager, so shutdown cannot be forgotten.
+
+            async with Runtime(store=MemoryStore()) as rt:
+                await rt.run(my_flow, payload)
+
+        Equivalent to a ``try/finally`` around :meth:`shutdown`, which is what
+        every host needs and what a trailing ``await rt.shutdown()`` only does
+        when nothing goes wrong — the case where it matters least. On the way
+        out of an interrupted program that trailing call is the first thing
+        skipped.
+        """
+        return self
+
+    async def __aexit__(self, *_exc: Any) -> None:
+        await self.shutdown()
+
+    def supervise(self, service: Any) -> None:
+        """Have :meth:`shutdown` stop this background service too.
+
+        A service is anything with an async ``stop()`` that polls on its own
+        task — :class:`TriggerDispatcher` and :class:`QueueConsumer` today. Both
+        register themselves from ``start()``, so a host that shuts the Runtime
+        down does not have to know which of them it happens to have wired up.
+
+        Held weakly: a service the caller has dropped is one nobody can stop by
+        name either, and keeping it alive here would leak every dispatcher a
+        long-lived process ever started.
+        """
+        self._services.add(service)
+
+    def unsupervise(self, service: Any) -> None:
+        """Forget a service, because it has stopped itself."""
+        self._services.discard(service)
+
+    async def shutdown(self, *, drain: Duration = 5.0) -> None:
+        """Stop background work and settle what is in flight.
+
+        In order, because the order is the point: stop the *sources* of new runs
+        (supervised dispatchers and consumers, then the scheduler), then let the
+        drives already running finish, then cancel whatever is left.
+
+        *drain* is how long in-flight drives get. A drive cancelled at the
+        deadline is not lost — it leaves the run RUNNING with an expired lease,
+        which the next :meth:`reclaim_orphans` on any node resumes from the
+        journal. ``drain=0`` cancels immediately, which is what a test wants and
+        what this did before it took an argument.
+        """
+        for service in list(self._services):
+            stop = getattr(service, "stop", None)
+            if stop is None:
+                continue
+            with contextlib.suppress(Exception):
+                result = stop()
+                if hasattr(result, "__await__"):
+                    await result
+        self._services.clear()
+
         if self._scheduler_task is not None:
             self._scheduler_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._scheduler_task
             self._scheduler_task = None
+
         pending = [task for task in self._background if not task.done()]
+        seconds = to_seconds(drain)
+        if pending and seconds > 0:
+            # Deliberately the real clock. A drain is a grace period against the
+            # process actually exiting, and a ManualClock — which no one is
+            # advancing during shutdown — would wait forever.
+            with contextlib.suppress(Exception):
+                await asyncio.wait(pending, timeout=seconds)
+            pending = [task for task in pending if not task.done()]
+
         for task in pending:
             task.cancel()
         for task in pending:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
         self._background.clear()
+
         backend = getattr(self.blobs, "backend", None)
         close = getattr(backend, "close", None)
         if close is not None:
@@ -1039,7 +1170,7 @@ class Runtime:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await heartbeat
             self._driving.discard(run_id)
-            await self._release_lease(run_id)
+            await self._settle_lease(run_id)
 
     async def _drive_inner(self, run_id: str, *, deps: Any) -> ExecutionResult:
         record = await self._require(run_id)
@@ -1061,6 +1192,13 @@ class Runtime:
                 # before it still served from the journal.
                 resume_exhausted=record.trigger is not TriggerKind.REPLAY,
             )
+            # Two processes can both load this SUSPENDED record after the same
+            # delivered event (e.g. a Kafka approval consumed twice) and both
+            # reach here. Only one may win the SUSPENDED -> RUNNING transition
+            # and start replaying the journal; the other must back off rather
+            # than interleave writes into a journal it is not driving.
+            previous_status = record.status
+            resuming_from_suspend = previous_status == ExecutionStatus.SUSPENDED
             record.status = ExecutionStatus.RUNNING
             record.attempt += 1
             record.started_at = record.started_at or self.clock.now()
@@ -1068,7 +1206,21 @@ class Runtime:
             record.awaiting_event = None
             record.lease_owner = self.node_id
             record.lease_expires_at = self.clock.now() + timedelta(seconds=self.lease_ttl)
-            await self.store.update_execution(record)
+            try:
+                await self.store.update_execution(
+                    record,
+                    expected_status=previous_status if resuming_from_suspend else None,
+                )
+            except ConcurrentUpdateError:
+                logger.warning(
+                    "run %s: lost the race to resume from SUSPENDED (another "
+                    "process already advanced it) — backing off as a no-op",
+                    run_id,
+                )
+                current = await self.store.get_execution(run_id)
+                if current is None:
+                    return await self._result_for(record)
+                return await self._result_for(current)
 
             # Before the body re-enters, not after: a broker whose decision
             # depends on what the run has already done has to know that first,
@@ -1136,6 +1288,27 @@ class Runtime:
                 unwound = await ctx.run_compensations()
                 await self.persist_journal(record, journal)
                 return await self._finish_cancelled(record, journal, unwound)
+            except asyncio.CancelledError:
+                # Not a workflow outcome — the *process* is going away: Ctrl+C, a
+                # SIGTERM handler, or shutdown() cancelling this drive. The run
+                # has neither failed nor been cancelled by anyone with an opinion
+                # about it, so nothing is written to its status; it stays RUNNING
+                # and _settle_lease hands it to the next reclaim_orphans.
+                #
+                # CancelledError is a BaseException, so it reached here only
+                # because it is named. Falling into the `except Exception` arm
+                # below would be worse than missing it: the run would be recorded
+                # FAILED on a keystroke, and the compensation stack would unwind
+                # work that is about to be resumed and completed.
+                span.set_status("abandoned")
+                span.end()
+                # Best-effort, and only load-bearing above the default
+                # flush_every=1 — under it every durable op is already on disk
+                # and the sole casualty is the step that was in flight, which
+                # produced nothing to keep.
+                with contextlib.suppress(Exception):
+                    await self.persist_journal(record, journal)
+                raise
             except Exception as error:
                 span.record_exception(error)
                 span.end()
@@ -1479,33 +1652,82 @@ class Runtime:
             record.lease_expires_at = self.clock.now() + timedelta(seconds=self.lease_ttl)
             await self.store.update_execution(record)
 
-    async def _release_lease(self, run_id: str) -> None:
-        """Drop our claim so the run is not mistaken for an orphan we abandoned."""
+    async def _settle_lease(self, run_id: str) -> None:
+        """Close out our claim on a run the drive has stopped working on.
+
+        Two outcomes, and which one applies is read from the record rather than
+        passed in, because every normal exit from ``_drive_inner`` has already
+        moved the record off RUNNING — terminal via ``_finish_*``, SUSPENDED via
+        ``_park``. So a record still RUNNING when the drive ends means the drive
+        did not end normally: cancelled by Ctrl+C, by a SIGTERM handler, or by
+        :meth:`shutdown`.
+
+        *Settled* — drop the claim, so the run is not mistaken for an orphan we
+        abandoned. *Abandoned* — record ``lease_owner`` as the breadcrumb naming
+        who dropped it and expire the lease **now**, so the next
+        :meth:`reclaim_orphans` on any node picks the run up immediately.
+
+        Clearing the lease in the abandoned case is what made Ctrl+C worse than
+        ``kill -9``: ``reclaim_orphans`` matches on ``lease_expires_at``, so a
+        nulled one is unmatchable and the run stays RUNNING forever, with no
+        timer covering it and nothing to resume it. A killed process leaves the
+        lease intact and recovers; an interrupted one has to as well. Expiring
+        immediately rather than leaving the heartbeat's future timestamp is the
+        one improvement over the crash path: we *know* we are not coming back,
+        so there is nothing to wait out.
+        """
         record = await self.store.get_execution(run_id)
-        if record is None or record.lease_owner != self.node_id:
+        if record is None:
             return
-        record.lease_owner = None
-        record.lease_expires_at = None
+        # Someone else has taken it over, so it is no longer ours to settle.
+        if record.lease_owner is not None and record.lease_owner != self.node_id:
+            return
+
+        if record.status not in _UNFINISHED:
+            if record.lease_owner is None:
+                return
+            record.lease_owner = None
+            record.lease_expires_at = None
+        else:
+            # PENDING as well as RUNNING, and the owner is *claimed* here rather
+            # than assumed: a drive cancelled before its first store write
+            # leaves a record nobody ever leased, which — like the nulled lease
+            # above — no scan can match. Narrow, since only a store round-trip
+            # sits between creating the record and taking the lease, but it is
+            # the same defect and it deserves the same answer.
+            record.lease_owner = self.node_id
+            record.lease_expires_at = self.clock.now()
         await self.store.update_execution(record)
 
     async def reclaim_orphans(
         self, now: datetime | None = None, *, limit: int = 100
     ) -> list[str]:
-        """Resume runs left ``RUNNING`` by a node that died.
+        """Resume unfinished runs abandoned by a node that died or was stopped.
 
         A crashed worker leaves its run marked RUNNING forever — no timer covers
         it, because it is not waiting for one. This finds records whose lease has
         expired and re-drives them; the journal makes that safe, since everything
         already completed is served from it rather than repeated.
 
+        ``PENDING`` is scanned as well as ``RUNNING``, for the run whose drive
+        was cancelled before it could take the lease. What keeps that safe is
+        that the expired lease — not the status — is the signal: a record freshly
+        created by ``submit()`` and still queued has no lease at all, so it is
+        never matched, however long it sits there. Only a drive that reached its
+        ``finally`` leaves one behind (see :meth:`_settle_lease`), which is
+        exactly the set of runs somebody has stopped working on.
+
         Call from a scheduler loop. Returns the run ids picked up.
         """
         moment = now or self.clock.now()
+        candidates = [
+            record
+            for status in _UNFINISHED
+            for record in await self.store.list_executions(status=status, limit=limit)
+        ]
         stale = [
             record
-            for record in await self.store.list_executions(
-                status=ExecutionStatus.RUNNING, limit=limit
-            )
+            for record in candidates
             if record.run_id not in self._driving
             and record.lease_expires_at is not None
             and _as_utc(record.lease_expires_at) <= moment
