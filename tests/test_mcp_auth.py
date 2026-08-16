@@ -526,12 +526,17 @@ class TestPrincipalFacadeHelper:
 
     async def test_wraps_with_the_contextvars_principal_when_enabled(self) -> None:
         from mcp.server.auth.middleware.auth_context import AuthenticatedUser, auth_context_var
-        from mcp.server.auth.provider import AccessToken
 
         from loom.identity.facade import AuthorizedFacade
+        from loom.identity.verifier import VerifiedToken
         from loom.mcp_server.server import _principal_facade
 
-        access = AccessToken(
+        # VerifiedToken, not the SDK's AccessToken: FastMCP is built with our
+        # own token_verifier, so this is the object that actually lands in the
+        # context var. The SDK's type models a token issued to a *client* and
+        # has no subject field at all — constructing one here would be testing
+        # a shape production never produces.
+        access = VerifiedToken(
             token="tok", client_id="loom-cli", scopes=["runs:write"], subject="alice"
         )
         reset = auth_context_var.set(AuthenticatedUser(access))
@@ -651,14 +656,14 @@ class TestBuildServerHonoursTransport:
         self, static_identity: IdentitySettings
     ) -> None:
         from mcp.server.auth.middleware.auth_context import AuthenticatedUser, auth_context_var
-        from mcp.server.auth.provider import AccessToken
 
+        from loom.identity.verifier import VerifiedToken
         from loom.mcp_server import build_server
 
         server = build_server(
             self._facade(), identity=static_identity, transport="streamable-http"
         )
-        access = AccessToken(
+        access = VerifiedToken(
             token="tok-alice", client_id="", scopes=["workflows:read"], subject="alice"
         )
         reset = auth_context_var.set(AuthenticatedUser(access))
@@ -674,8 +679,8 @@ class TestBuildServerHonoursTransport:
     ) -> None:
         """The idempotent-start corner case, now through the real protocol."""
         from mcp.server.auth.middleware.auth_context import AuthenticatedUser, auth_context_var
-        from mcp.server.auth.provider import AccessToken
 
+        from loom.identity.verifier import VerifiedToken
         from loom.mcp_server import build_server
 
         server = build_server(
@@ -684,7 +689,7 @@ class TestBuildServerHonoursTransport:
 
         as_alice = auth_context_var.set(
             AuthenticatedUser(
-                AccessToken(
+                VerifiedToken(
                     token="tok-alice",
                     client_id="",
                     scopes=["runs:write", "runs:read", "workflows:read"],
@@ -710,7 +715,7 @@ class TestBuildServerHonoursTransport:
 
         as_bob = auth_context_var.set(
             AuthenticatedUser(
-                AccessToken(
+                VerifiedToken(
                     token="tok-bob-runs",
                     client_id="",
                     scopes=["runs:write", "runs:read", "workflows:read"],

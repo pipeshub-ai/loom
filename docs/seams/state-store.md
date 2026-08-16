@@ -29,7 +29,6 @@ Store *value*, replacing whatever was there.
 
 ## Implementations
 
-- `runtime.context.WorkflowState`
 - `runtime.state.StoreBackedState`
 
 ## Consumers

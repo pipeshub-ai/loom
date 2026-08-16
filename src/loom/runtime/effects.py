@@ -51,6 +51,7 @@ __all__ = [
     "EffectDenied",
     "EffectResult",
     "GuardedBroker",
+    "RunObserver",
 ]
 
 
@@ -154,6 +155,31 @@ class EffectBroker(Protocol):
 
     async def dispatch(self, call: EffectCall, authority: Authority) -> EffectResult:
         """Carry out *call* under *authority*, or refuse it."""
+        ...
+
+
+@runtime_checkable
+class RunObserver(Protocol):
+    """A broker that keeps per-run state, and needs the run's history to do it.
+
+    Optional, and checked structurally: most brokers decide on one call at a
+    time and implement nothing here. It exists for the ones whose decision
+    depends on what the run has *already* done — taint being the example — and
+    those cannot be correct without it. The engine serves a journaled call from
+    the journal without dispatching it, so a broker that accumulated its state
+    from dispatches alone would see an empty history after any re-entry and,
+    having seen nothing, permit everything.
+
+    A broker that wraps another must forward both calls, or the wrapped one goes
+    back to being re-entry-blind.
+    """
+
+    def observe_run(self, run_id: str, journal: Any) -> None:
+        """Rebuild per-run state from the journal, before the body re-enters."""
+        ...
+
+    def forget_run(self, run_id: str) -> None:
+        """Drop a terminal run's state."""
         ...
 
 

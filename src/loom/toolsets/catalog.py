@@ -72,14 +72,42 @@ class ToolsetCatalog:
 
     def __init__(self) -> None:
         self._manifests: dict[str, ToolsetManifest] = {}
+        self._by_function: dict[str, EffectClass] | None = None
+        """Lazy ``@step`` function name → declared effect class. ``None`` means
+        not built yet; invalidated on every registration."""
 
     def register(self, manifest: ToolsetManifest, /) -> None:
         """Register a toolset manifest."""
         self._manifests[manifest.id] = manifest
+        self._by_function = None
 
     def unregister(self, toolset_id: str) -> None:
         """Remove a toolset from the catalog."""
         self._manifests.pop(toolset_id, None)
+        self._by_function = None
+
+    def effect_of(self, function: str) -> EffectClass | None:
+        """Whether a ``@step`` function reads, writes, or destroys.
+
+        The reverse of ``import_line()``: given the name a workflow body calls,
+        report what its manifest declared it to be. The effect class lives on
+        the manifest's :class:`OperationSpec` and nothing carried it to the call
+        site, so ``await ctx.step(gmail_search_messages, ...)`` reached the
+        broker classified as a *write* — the default for an operation nobody
+        classified. Anything deciding on reads versus writes was therefore
+        deciding on that default, and a read could never be recognised as one.
+
+        Manifest metadata only, and no toolset is imported to answer — the same
+        rule grant validation follows, and what keeps Layer 1 Layer 1.
+        """
+        if self._by_function is None:
+            self._by_function = {
+                operation.function: operation.effect
+                for manifest in self._manifests.values()
+                for operation in manifest.all_operations()
+                if operation.function
+            }
+        return self._by_function.get(function)
 
     def get(self, toolset_id: str) -> ToolsetManifest | None:
         """Retrieve a manifest by id."""

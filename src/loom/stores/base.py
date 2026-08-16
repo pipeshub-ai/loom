@@ -77,6 +77,27 @@ class ExecutionStore(Protocol):
 
     async def runs_awaiting_event(self, name: str) -> list[str]: ...
 
+    async def claim_event_delivery(self, key: str, *, ttl_seconds: float = 604800.0) -> bool:
+        """Claim *key* for the first caller. ``False`` for every caller after.
+
+        Kafka, Redis Streams, SQS — every event bus worth using is at-least-once,
+        so a redelivered message must not resume a run a second time.
+        ``submit()`` has had an idempotency key since the beginning and events
+        did not, so the *trigger* path was protected and the *event* path was
+        not.
+
+        **Atomic, or it is nothing.** A read-then-write in the engine lets two
+        consumers both observe the key as unclaimed, which is the exact race
+        this prevents — so the claim belongs in the store, where a unique index
+        or an INSERT can enforce it, and the conformance suite runs it
+        concurrently on every backend.
+
+        *ttl_seconds* bounds how long the memory lasts. A week by default:
+        long enough that no realistic redelivery slips past, short enough that
+        the table does not grow without limit.
+        """
+        ...
+
     # -- timers -----------------------------------------------------------------------
 
     async def due_runs(self, now: datetime, *, limit: int = 100) -> list[str]:

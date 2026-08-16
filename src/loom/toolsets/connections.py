@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
@@ -50,14 +50,48 @@ class Credential(BaseModel):
         return now >= expires_at
 
 
+@runtime_checkable
+class CredentialResolver(Protocol):
+    """Where credentials actually come from.
+
+    Extracted so a host with a credential service, a secrets manager, or a
+    connector platform plugs in rather than monkey-patching. The default
+    adapter reads the environment and an explicit config dict, which is the
+    right answer for a developer and the wrong one for a deployment.
+
+    Two methods, because a token that can expire is the normal case and a
+    resolver that could only ever hand back a stale one would push refresh
+    logic into every caller.
+    """
+
+    async def resolve(
+        self, connection_id: str, scopes: list[str] | None = None
+    ) -> Credential:
+        """The credential for *connection_id*, or raise ``CredentialNotFound``."""
+        ...
+
+    async def refresh(self, connection_id: str) -> Credential:
+        """A freshly-minted credential, ignoring any cached one."""
+        ...
+
+    def has_connection(self, connection_id: str) -> bool:
+        """Whether one is available, without minting it."""
+        ...
+
+
 class ConnectionBroker:
     """Exchanges a connection ID for scoped credentials.
 
-    In embedded mode, credentials are resolved from environment variables
-    or an explicit config dict.  The env var naming convention is::
+    Delegates to a :class:`CredentialResolver`. The default is
+    :class:`EnvCredentialResolver`, so the behaviour with no arguments is
+    exactly what it has always been::
 
         LOOM_CONN_{CONNECTION_ID}_TOKEN
         LOOM_CONN_{CONNECTION_ID}_KEY
+
+    A host supplies its own::
+
+        ConnectionBroker(resolver=PlatformCredentials(config_service))
     """
 
     def __init__(
@@ -65,8 +99,10 @@ class ConnectionBroker:
         *,
         config: dict[str, dict[str, Any]] | None = None,
         clock: Clock | None = None,
+        resolver: CredentialResolver | None = None,
     ) -> None:
         self._config = config or {}
+        self._resolver = resolver or EnvCredentialResolver(config=self._config)
         self.clock = clock or SystemClock()
         """Passed through to :meth:`Credential.expired` by callers that check
         expiry against this broker's resolutions, so a test using
@@ -88,6 +124,36 @@ class ConnectionBroker:
         in the SDK raises, so a caller can catch one exception type rather
         than knowing this broker alone raises ``KeyError``.
         """
+        return await self._resolver.resolve(connection_id, scopes)
+
+    async def refresh(self, connection_id: str) -> Credential:
+        """Mint a fresh credential, bypassing anything cached."""
+        return await self._resolver.refresh(connection_id)
+
+    def has_connection(self, connection_id: str) -> bool:
+        """Check if a credential is available (without resolving)."""
+        return self._resolver.has_connection(connection_id)
+
+
+class EnvCredentialResolver:
+    """The default resolver: an explicit config dict, then the environment.
+
+    Unchanged behaviour, now with a name — which is what makes it replaceable.
+    """
+
+    def __init__(self, *, config: dict[str, dict[str, Any]] | None = None) -> None:
+        self._config = config or {}
+
+    async def refresh(self, connection_id: str) -> Credential:
+        """Environment variables do not refresh; re-reading them is the best
+        this resolver can honestly do."""
+        return await self.resolve(connection_id)
+
+    async def resolve(
+        self,
+        connection_id: str,
+        scopes: list[str] | None = None,
+    ) -> Credential:
         # Check explicit config
         if connection_id in self._config:
             entry = self._config[connection_id]

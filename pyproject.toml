@@ -77,7 +77,12 @@ pydantic-ai = ["pydantic-ai>=2.0"]
 
 # API server
 api = [
-    "fastapi>=0.115",
+    # Floor at 0.135, not 0.115: earlier releases cap starlette below 1.0, and
+    # anything else in the environment that pulls a newer starlette then breaks
+    # *FastAPI itself* — `FastAPI()` raises on `Router(on_startup=…)` before any
+    # of our code runs. That reads as "the HTTP surface is broken" rather than
+    # as a dependency conflict, and it takes the whole HTTP test suite with it.
+    "fastapi>=0.135",
     "uvicorn[standard]>=0.30",
 ]
 
@@ -99,8 +104,9 @@ dev = [
     "mypy>=1.0",
     "httpx>=0.27",
     # The HTTP surface ships in-tree, so its tests should run by default rather
-    # than silently skipping on a machine without the api extra.
-    "fastapi>=0.115",
+    # than silently skipping on a machine without the api extra. Same floor as
+    # the api extra, and for the same reason.
+    "fastapi>=0.135",
     # Same reasoning: the credential-store conformance suite covers the
     # encrypted-file and keyring-backed implementations, not only Memory.
     "keyring>=25",

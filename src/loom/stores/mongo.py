@@ -101,7 +101,14 @@ class MongoStore:
         await ex.create_index([("status", 1), ("wake_at", 1)])
         await ex.create_index([("status", 1), ("awaiting_event", 1)])
         await ex.create_index(
-            "idempotency_key", unique=True, sparse=True
+            "idempotency_key",
+            unique=True,
+            # partialFilterExpression, not sparse. `sparse` skips documents that
+            # *lack* the field; a document carrying `idempotency_key: null`
+            # still indexes, so the second keyless run collided with the first
+            # and MongoStore could hold exactly one. Found by the conformance
+            # matrix the first time Mongo was actually driven through it.
+            partialFilterExpression={"idempotency_key": {"$type": "string"}},
         )
 
         jn = self._db.journal
@@ -251,6 +258,23 @@ class MongoStore:
         }
         await self._db.events.insert_one(doc)
 
+    async def claim_event_delivery(
+        self, key: str, *, ttl_seconds: float = 604800.0
+    ) -> bool:
+        from pymongo.errors import DuplicateKeyError
+
+        now = time.time()
+        await self._db.event_deliveries.delete_many({"expires_at": {"$lte": now}})
+        try:
+            # insert_one against _id: the unique index *is* the claim. An upsert
+            # would succeed for both callers and defeat the whole point.
+            await self._db.event_deliveries.insert_one(
+                {"_id": key, "expires_at": now + ttl_seconds}
+            )
+        except DuplicateKeyError:
+            return False
+        return True
+
     async def take_event(
         self, run_id: str, name: str
     ) -> Event | None:
@@ -305,7 +329,8 @@ class MongoStore:
         doc = await self._db.cache.find_one({"_id": key})
         if doc is None:
             return None
-        if doc.get("expires_at", 0) < time.time():
+        expires_at = doc.get("expires_at")
+        if expires_at is not None and expires_at < time.time():
             await self._db.cache.delete_one({"_id": key})
             return None
         return doc.get("value")
@@ -313,13 +338,13 @@ class MongoStore:
     async def set(
         self, key: str, value: Any, ttl_seconds: float
     ) -> None:
+        # A ttl of zero or less means "no expiry", the rule every other store
+        # follows. Reading it as "expires immediately" makes set(key, value, 0)
+        # a silent no-op, which is never what a caller means.
+        expires_at = time.time() + ttl_seconds if ttl_seconds > 0 else None
         await self._db.cache.replace_one(
             {"_id": key},
-            {
-                "_id": key,
-                "expires_at": time.time() + ttl_seconds,
-                "value": value,
-            },
+            {"_id": key, "expires_at": expires_at, "value": value},
             upsert=True,
         )
 
@@ -333,24 +358,27 @@ class MongoStore:
     async def acquire(
         self, key: str, owner: str, ttl_seconds: float
     ) -> bool:
+        from pymongo.errors import DuplicateKeyError
+
         now = time.time()
-        result = await self._db.locks.find_one_and_update(
-            {
-                "_id": key,
-                "$or": [
-                    {"owner": owner},
-                    {"expires_at": {"$lt": now}},
-                ],
-            },
-            {
-                "$set": {
-                    "owner": owner,
-                    "expires_at": now + ttl_seconds,
-                }
-            },
-            upsert=True,
-            return_document=True,
-        )
+        held = {"owner": owner, "expires_at": now + ttl_seconds}
+        try:
+            result = await self._db.locks.find_one_and_update(
+                {
+                    "_id": key,
+                    "$or": [{"owner": owner}, {"expires_at": {"$lt": now}}],
+                },
+                {"$set": held},
+                upsert=True,
+                return_document=True,
+            )
+        except DuplicateKeyError:
+            # Somebody else holds it and it has not expired. The upsert races
+            # the _id index and Mongo reports the collision — which is the
+            # correct outcome expressed as an exception. Losing a contended
+            # lock is `False`, not a crash: a caller that has to catch a driver
+            # error to find out it did not get the lock will not.
+            return False
         return result is not None and result.get("owner") == owner
 
     async def renew(

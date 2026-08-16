@@ -29,10 +29,17 @@ class _VerifiedToken(Protocol):
     ``mcp`` package; only ``mcp_server/server.py`` does.
     """
 
-    subject: str | None
     scopes: list[str]
     client_id: str
-    claims: dict[str, Any] | None
+
+    # `subject` and `claims` are deliberately *not* required. The MCP SDK's own
+    # `AccessToken` has neither — it models a token issued to a client rather
+    # than to a person — and a host may configure FastMCP with an SDK-native
+    # verifier instead of one of ours. Requiring them here would make this
+    # protocol describe only the tokens we happen to mint, which is the one
+    # thing a structural type covering a foreign object must not do.
+    # `from_access_token` reads both with `getattr` and says what it does when
+    # they are absent.
 
 
 @dataclass(frozen=True)
@@ -111,19 +118,34 @@ class Principal:
         :class:`ServicePrincipal` directly when the caller side already
         knows a token is a service token.
         """
-        subject = token.subject or ""
+        # `getattr`, not `token.subject`: the MCP SDK's own `AccessToken` has
+        # no `subject` field at all — it models a token issued to a *client*,
+        # not to a person. A host that configures FastMCP with an SDK-native
+        # verifier instead of one of ours therefore hands us an object that
+        # satisfies everything here except this attribute, and reading it
+        # directly raises `AttributeError` from inside a request handler.
+        subject = getattr(token, "subject", None) or ""
+        client_id = getattr(token, "client_id", "") or ""
         if not subject:
-            # Every reference `TokenVerifier` in `identity/verifier.py`
-            # already refuses a token with no subject (returns `None`, a
-            # 401), so this is a defensive fallback for a custom verifier
-            # that did not — never construct a Principal nothing can be
-            # held accountable to.
+            # Fall back to the client id, which is what the SDK itself does:
+            # `AuthenticatedUser` passes `auth_info.client_id` to `SimpleUser`
+            # as the username. Matching that is the least surprising reading of
+            # a token that names no person.
+            #
+            # Worth knowing where this lands: `subject` is what ownership
+            # checks compare, so under an SDK-native verifier two people
+            # sharing one OAuth client share one identity. The verifiers in
+            # `identity/verifier.py` all carry a real `sub` and refuse a token
+            # without one, which is why that is the configuration to prefer.
+            subject = client_id
+        if not subject:
+            # Nothing to hold accountable — neither a person nor a client.
             return ANONYMOUS
         return cls(
             subject=subject,
             scopes=frozenset(token.scopes),
-            client_id=token.client_id,
-            claims=dict(token.claims or {}),
+            client_id=client_id,
+            claims=dict(getattr(token, "claims", None) or {}),
         )
 
 

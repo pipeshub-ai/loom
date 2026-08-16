@@ -127,10 +127,14 @@ class AuthorizedFacade:
         await self._require_owned(run_id)
         return await self.inner.reports(run_id, offset)
 
-    async def send_event(self, run_id: str, name: str, payload: Any) -> None:
+    async def send_event(
+        self, run_id: str, name: str, payload: Any, *, dedupe_key: str | None = None
+    ) -> dict[str, Any]:
         self.principal.requires(Scope.RUNS_WRITE.value)
         await self._require_owned(run_id)
-        await self.inner.send_event(run_id, name, payload)
+        return await self.inner.send_event(
+            run_id, name, payload, dedupe_key=dedupe_key
+        )
 
     async def cancel(self, run_id: str) -> dict[str, Any]:
         self.principal.requires(Scope.RUNS_CANCEL.value)

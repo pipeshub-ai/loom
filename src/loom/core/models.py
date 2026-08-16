@@ -274,6 +274,24 @@ class ExecutionResult(BaseModel):
         return None
 
 
+class EventDelivery(BaseModel):
+    """What ``Runtime.send_event`` did with an event.
+
+    A return value rather than ``None`` because an at-least-once consumer needs
+    to tell "delivered" from "already delivered" in order to ack correctly: a
+    duplicate that raised would be retried forever, and one that looked like a
+    fresh delivery would hide the redelivery entirely.
+    """
+
+    delivered: bool = True
+    reason: str = ""
+    """Why not, when ``delivered`` is False. ``"duplicate"`` today."""
+    run_ids: list[str] = Field(default_factory=list)
+    """Runs this delivery resumed. Empty is normal — an event can arrive before
+    anything waits for it, and it stays buffered."""
+    dedupe_key: str = ""
+
+
 class Event(BaseModel):
     """An external signal delivered to a suspended (or future) execution."""
 

@@ -160,10 +160,25 @@ class TestExampleRunner:
         assert outcome == "failed"
         assert "bad keyword" in detail
 
-    def test_a_missing_import_is_skipped_not_failed(self, tmp_path: Path) -> None:
+    def test_a_missing_import_is_skipped_not_failed(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """An example needing a dependency this machine lacks is not wrong.
+
+        The absent module is injected rather than named from the real list: the
+        list holds *optional extras*, and the store-parity job installs
+        ``[mongo,postgres]`` on purpose — so an assertion built on ``motor``
+        being missing passes until somebody installs the thing CI needs.
+        """
+        import docs_examples
         from docs_examples import Example, run
 
-        example = Example(tmp_path / "x.md", 1, "import motor\n")
+        monkeypatch.setattr(
+            docs_examples,
+            "ENVIRONMENTAL",
+            (*docs_examples.ENVIRONMENTAL, "no module named 'definitely_absent_pkg'"),
+        )
+        example = Example(tmp_path / "x.md", 1, "import definitely_absent_pkg\n")
         assert run(example, timeout=30)[0] == "skipped"
 
     def test_a_hanging_example_is_a_failure(self, tmp_path: Path) -> None:

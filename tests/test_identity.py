@@ -18,6 +18,54 @@ from loom.identity.scopes import Scope, scopes_to_grant
 from loom.security.grants import GrantSet
 
 
+class TestFromAccessToken:
+    """What a `Principal` is derived from, including tokens we did not shape.
+
+    A host may configure FastMCP with an SDK-native verifier rather than one of
+    ours, and the MCP SDK's own ``AccessToken`` has **no subject field**: it
+    models a token issued to a *client*, not to a person. Reading the attribute
+    directly raised ``AttributeError`` from inside a request handler, which is
+    the worst place to discover a shape mismatch.
+    """
+
+    def test_a_token_with_a_subject_uses_it(self) -> None:
+        from loom.identity.verifier import VerifiedToken
+
+        principal = Principal.from_access_token(
+            VerifiedToken(token="t", client_id="loom-cli", scopes=["runs:read"],
+                          subject="alice")
+        )
+
+        assert principal.subject == "alice"
+        assert principal.client_id == "loom-cli"
+        assert principal.has("runs:read")
+
+    def test_a_token_with_no_subject_falls_back_to_the_client(self) -> None:
+        """What the SDK itself does — ``AuthenticatedUser`` passes
+        ``client_id`` to ``SimpleUser`` as the username."""
+        from mcp.server.auth.provider import AccessToken
+
+        principal = Principal.from_access_token(
+            AccessToken(token="t", client_id="loom-cli", scopes=["runs:read"])
+        )
+
+        assert principal.subject == "loom-cli"
+        assert principal.has("runs:read")
+
+    def test_a_token_naming_neither_a_person_nor_a_client_is_anonymous(
+        self,
+    ) -> None:
+        """Nothing to hold accountable, so nothing is authorized."""
+        from mcp.server.auth.provider import AccessToken
+
+        principal = Principal.from_access_token(
+            AccessToken(token="t", client_id="", scopes=["runs:read"])
+        )
+
+        assert principal is ANONYMOUS
+        assert not principal.has("runs:read")
+
+
 class TestPrincipal:
     def test_a_held_scope_is_held(self) -> None:
         principal = Principal(subject="alice", scopes=frozenset({"runs:write"}))

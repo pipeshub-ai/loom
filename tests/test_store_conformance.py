@@ -1,13 +1,18 @@
-"""One conformance suite, run against every in-memory-capable store.
+"""One conformance suite, run against **every** store that claims the protocol.
 
-``MemoryStore`` and ``SQLiteStore(":memory:")`` are both fully in-process, so
-the same behavioural contract can be asserted against both with no
-infrastructure. Divergence between stores is the bug class this catches — a
-feature wired against dict semantics that quietly behaves differently once
-rows go through SQL.
+Divergence between stores is the bug class this catches — a feature wired
+against dict semantics that quietly behaves differently once rows go through SQL
+or documents through BSON.
 
-Mongo and Postgres implement the same protocol but need a server, so they are
-covered by the protocol-shape test at the bottom rather than executed here.
+Until the matrix in ``tests/conformance/backends.py`` existed, this ran against
+``memory`` and ``sqlite`` only, and Mongo and Postgres were covered by a
+``hasattr`` check at the bottom. Having the methods is not implementing the
+protocol: nothing asserted that Postgres orders ``list_executions`` the way
+SQLite does, that Mongo's idempotency lookup is unique, or that ``acquire()`` is
+atomic anywhere.
+
+Backends needing a server are skipped **by name, with the reason**, so an absent
+Postgres reads differently from a passing one. See ``backends.py``.
 """
 
 from __future__ import annotations
@@ -16,27 +21,17 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from conformance.backends import ALL_BACKENDS, open_store
 from loom import Context, ExecutionStatus, Runtime, step, workflow
 from loom.core.models import Event, ExecutionRecord, TriggerRecord
 from loom.runtime.journal import EntryKind, EntryStatus, JournalEntry
-from loom.stores.memory import MemoryStore
-from loom.stores.sqlite import SQLiteStore
 
 
-@pytest.fixture(params=["memory", "sqlite"])
+@pytest.fixture(params=[backend.name for backend in ALL_BACKENDS])
 async def store(request):
-    """Each test runs once per in-memory store implementation."""
-    if request.param == "memory":
-        yield MemoryStore()
-        return
-
-    made = SQLiteStore(":memory:")
-    try:
+    """Each test runs once per store in the matrix."""
+    async with open_store(request.param) as made:
         yield made
-    finally:
-        close = getattr(made, "close", None)
-        if close is not None:
-            await close()
 
 
 def _record(run_id: str = "run-1", **overrides) -> ExecutionRecord:
@@ -439,7 +434,14 @@ class TestProtocolCoverage:
         ("loom.stores.postgres", "PostgresStore"),
     ])
     def test_remote_stores_implement_the_full_surface(self, module, name) -> None:
-        """These need a server to run, so at least assert nothing is missing."""
+        """A shape pre-flight, not coverage.
+
+        The behavioural coverage is the matrix above, which now runs these two
+        for real. This stays because it fails in milliseconds without a server
+        and names the missing method — but a store passing *this* proved almost
+        nothing: every store passed it while Mongo could hold one run and
+        Postgres could not advance a trigger at all.
+        """
         import importlib
 
         cls = getattr(importlib.import_module(module), name)

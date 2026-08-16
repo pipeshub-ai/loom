@@ -140,6 +140,11 @@ class Toolset:
                 summary=t.description.split(".")[0] if t.description else op_id,
                 description=t.description,
                 effect=effect,
+                # The name a workflow body will actually write. Left empty, this
+                # manifest can neither say how to import itself nor answer what
+                # `ctx.step(op, ...)` is — the operation id names a capability,
+                # and only a function name is something anyone can call.
+                function=op_id,
                 input_schema=t.parameters,
                 output_schema=_output_schema(step_fn),
                 idempotent=(effect == EffectClass.READ),
@@ -198,6 +203,7 @@ class Toolset:
             effect = declared.get(name) or _guess_effect(name)
             ops.append(OperationSpec(
                 id=name,
+                function=name,
                 summary=desc_oneline[:100],
                 description=desc,
                 input_schema=schema,
@@ -308,6 +314,18 @@ class ToolsetRegistry(ToolsetCatalog):
         found = super().get(toolset_id)
         if found is None and self._parent is not None:
             return self._parent.get(toolset_id)
+        return found
+
+    def effect_of(self, function: str) -> EffectClass | None:
+        """As :meth:`ToolsetCatalog.effect_of`, continuing into the parent.
+
+        Without the chain a step from an entry-point toolset — the ordinary way
+        a first-party integration arrives — would resolve to nothing here, and
+        its reads would go on reaching the broker classified as writes.
+        """
+        found = super().effect_of(function)
+        if found is None and self._parent is not None:
+            return self._parent.effect_of(function)
         return found
 
     def get_toolset(self, toolset_id: str) -> Toolset | None:

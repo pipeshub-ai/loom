@@ -71,6 +71,11 @@ CREATE TABLE IF NOT EXISTS cache (
     value      TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS event_deliveries (
+    key        TEXT PRIMARY KEY,
+    expires_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS locks (
     key        TEXT PRIMARY KEY,
     owner      TEXT NOT NULL,
@@ -317,6 +322,32 @@ class SQLiteStore:
             "INSERT INTO events (run_id, name, data) VALUES (?,?,?)",
             (event.run_id or "", event.name, event.model_dump_json()),
         )
+
+    async def claim_event_delivery(
+        self, key: str, *, ttl_seconds: float = 604800.0
+    ) -> bool:
+        def run() -> bool:
+            connection = self._connect()
+            now = time.time()
+            with connection:
+                connection.execute(
+                    "DELETE FROM event_deliveries WHERE expires_at <= ?", (now,)
+                )
+                # INSERT OR IGNORE against a PRIMARY KEY: the claim is the
+                # insert, so two concurrent callers cannot both see it free.
+                cursor = connection.execute(
+                    "INSERT OR IGNORE INTO event_deliveries (key, expires_at) "
+                    "VALUES (?,?)",
+                    (key, now + ttl_seconds),
+                )
+            return cursor.rowcount == 1
+
+        # Under self._mutex, like every other write here. One connection is
+        # shared across the thread pool, so reading `cursor.rowcount` from one
+        # thread while another executes on the same connection interleaves —
+        # 13 of 16 concurrent claimers "won" without it.
+        async with self._mutex:
+            return await asyncio.to_thread(run)
 
     async def take_event(self, run_id: str, name: str) -> Event | None:
         def run() -> Event | None:

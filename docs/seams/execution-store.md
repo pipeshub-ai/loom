@@ -10,6 +10,10 @@ Durable home for execution headers, journals, buffered events, and timers.
 
 ## Contract
 
+### `claim_event_delivery(self, key: 'str', *, ttl_seconds: 'float' = 604800.0) -> 'bool'`
+
+Claim *key* for the first caller. ``False`` for every caller after.
+
 ### `create_execution(self, record: 'ExecutionRecord') -> 'None'`
 
 ### `delete_execution(self, run_id: 'str') -> 'None'`

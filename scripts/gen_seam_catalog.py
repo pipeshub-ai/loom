@@ -49,6 +49,7 @@ SEAMS: dict[str, tuple[str, str]] = {
     "QueueBackend": ("triggers/queue.py", "Where at-least-once messages come from"),
     "SpillStore": ("agents/bounds.py", "Where an oversized tool result is kept"),
     "EffectBroker": ("runtime/effects.py", "What every durable operation is weighed against"),
+    "ExecutionSandbox": ("runtime/sandbox.py", "Where a workflow body is invoked"),
 }
 
 MARKER_BEGIN = "<!-- BEGIN GENERATED — do not edit below this line -->"
@@ -105,13 +106,17 @@ def collect(name: str, module: str, purpose: str) -> Seam:
         raise SystemExit(f"{module} does not define {name}")
 
     methods: list[tuple[str, str]] = []
+    required: dict[str, frozenset[str]] = {}
     for attribute, value in vars(protocol).items():
         if attribute.startswith("_") or not callable(value):
             continue
         try:
+            parameters = inspect.signature(value).parameters
             signature = f"{attribute}{inspect.signature(value)}"
         except (TypeError, ValueError):
+            parameters = {}
             signature = attribute
+        required[attribute] = frozenset(parameters) - {"self"}
         methods.append((signature, inspect.getdoc(value) or ""))
 
     return Seam(
@@ -120,7 +125,7 @@ def collect(name: str, module: str, purpose: str) -> Seam:
         purpose=purpose,
         doc=inspect.getdoc(protocol) or "",
         methods=sorted(methods),
-        implementations=_implementations(name, {m.split("(")[0] for m, _ in methods}),
+        implementations=_implementations(name, required),
         consumers=_consumers(name, module),
     )
 
@@ -132,15 +137,21 @@ def _import(module: str) -> Any:
     return importlib.import_module(dotted)
 
 
-def _implementations(name: str, required: set[str]) -> list[str]:
+def _implementations(name: str, required: dict[str, frozenset[str]]) -> list[str]:
     """Classes satisfying this protocol, declared or structural.
 
     Both, because a Protocol is usually satisfied structurally and naming it as
     a base is optional — a page listing only the declared ones would report
     "none found" for exactly the seams whose implementations are cleanest.
-    A structural match is every method the protocol requires, defined on the
-    class. Read from the AST, so generating the catalog imports no optional
-    vendor SDK.
+    Read from the AST, so generating the catalog imports no optional vendor SDK.
+
+    A structural match needs the method *names* and the **parameter names** of
+    each. Names alone are not identifying: ``ExecutionSandbox`` declares one
+    method called ``run``, and matching on that reported every check, stage,
+    node, and agent backend in the tree as an implementation of it — a page
+    that wrong is worse than no page, because it is read as a fact. Parameters
+    are what distinguish ``run(body, run_id, input, channel, policy)`` from the
+    dozen unrelated ``run(self)`` methods a codebase accumulates.
     """
     found: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
@@ -152,14 +163,40 @@ def _implementations(name: str, required: set[str]) -> list[str]:
             if not isinstance(node, ast.ClassDef) or node.name == name:
                 continue
             declared = name in {_base_name(base) for base in node.bases}
-            defined = {
-                item.name
-                for item in node.body
-                if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef)
-            }
-            if declared or (required and required <= defined):
+            if declared or (required and _matches_structurally(node, required)):
                 found.append(f"{_module_of(path)}.{node.name}")
     return found
+
+
+def _matches_structurally(
+    node: ast.ClassDef, required: dict[str, frozenset[str]]
+) -> bool:
+    """Every required method present, each accepting the parameters it declares.
+
+    A superset is allowed — an implementation may take extra optional arguments
+    — but every parameter the protocol names must be one the class would accept,
+    since a caller holding the protocol will pass them all.
+    """
+    defined = {
+        item.name: item
+        for item in node.body
+        if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+    for method, parameters in required.items():
+        implementation = defined.get(method)
+        if implementation is None:
+            return False
+        args = implementation.args
+        accepted = {
+            argument.arg
+            for argument in [*args.posonlyargs, *args.args, *args.kwonlyargs]
+        }
+        if args.kwarg is not None:
+            # **kwargs accepts any name the protocol declares.
+            continue
+        if not parameters <= accepted:
+            return False
+    return True
 
 
 def _consumers(name: str, module: str) -> list[str]:

@@ -83,7 +83,9 @@
       "Bash(awk -F'|' '{print $2}')",
       "Bash(awk -F: '{print $1}')",
       "Bash(perl -pi -e 's/from loom import state\\\\b/from loom import stores/g; s/`from loom import state` is valid even though `state` is/`from loom import stores` is valid even though `stores` is/; s/^\\(\\\\s+assert not any\\\\\\(\\)\"state\"/$1\"stores\"/' tests/test_p2_hardening.py)",
-      "Bash(perl -pi -e \"s/is valid even though \\\\`state\\\\` is/is valid even though \\\\`stores\\\\` is/\" tests/test_p2_hardening.py)"
+      "Bash(perl -pi -e \"s/is valid even though \\\\`state\\\\` is/is valid even though \\\\`stores\\\\` is/\" tests/test_p2_hardening.py)",
+      "Bash(LOOM_TEST_STORES=memory,sqlite python3 -m pytest tests/test_store_conformance.py -q -p no:warnings -rs)",
+      "Bash(xargs -I{} echo \"ruff clean: {}\")"
     ]
   }
 }

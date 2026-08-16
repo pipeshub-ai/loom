@@ -577,6 +577,108 @@ gateway. Nothing is promoted on the way to terminal — an earlier draft did, an
 it put a journal write after the compensation stack had already unwound while
 making the distinction unobservable, since every failed run erased it.
 
+### Embedding Loom in a host
+
+`docs/guides/embedding.md` is the end-to-end walkthrough for putting Loom inside
+a product with its own users, database, and notification transport — store,
+sandbox, human channel, broker, versions, credentials, and event idempotency,
+composed by the host. Every snippet on that page executes in CI.
+
+`tests/test_host_integration.py` is the same host as a test, and it is the
+phase's acid test rather than a demo: one run goes start → **sandboxed** →
+parked on a human → answered over the host's own channel → resumed → traced back
+to the version of the code that ran. A final test greps the file for
+`runtime._…` and fails on a match, because a host that has to reach past a seam
+has found a seam that is not finished — and that creeps back one underscore at a
+time.
+
+### Read-to-write taint
+
+`Runtime(broker=TaintBroker(GuardedBroker()))`. One rule: **once a run has read
+data it did not bring with it, a write or a destructive call needs a human.** A
+workflow that searches the web and then deletes tickets has taken instructions
+from something nobody reviewed — the property you want when a model wrote the
+body. Off unless composed in; taint sits *outside* whatever performs the effect,
+because it decides whether to dispatch at all.
+
+`block_writes` and `block_destructive` are separate dials: nearly every useful
+workflow writes after reading, and very few need to delete. `ctx.wait_for_approval`
+clears the taint, and a read after that approval taints again.
+
+**Taint is derived from the journal, never accumulated in memory** — and the
+reason is that memory fails *open*. The engine re-enters a body from the top and
+serves every already-answered call from the journal without dispatching it, so a
+broker counting dispatches sees an empty history after any park, retry, or
+restart and permits everything. `RunObserver` (`runtime/effects.py`) is the hook:
+`observe_run(run_id, journal)` at re-entry and again when an event lands
+mid-body, `forget_run` at terminal. Any broker wrapping another must forward
+both.
+
+That mid-body call is not belt-and-braces. An approval is journaled by
+`wait_for_event` and **never dispatched**, so a broker only learns of one by
+reading the journal — and at re-entry that entry is still `SUSPENDED`, becoming
+the human's "yes" only while the body runs.
+
+**A step's effect class comes from its manifest.** `ToolsetCatalog.effect_of()`
+maps a `@step` function name to the `EffectClass` its `OperationSpec` declared,
+and `ctx.step` attaches it. Without that every call reached the broker as a
+*write* — the default for anything unclassified — so no read could taint and the
+rule was unreachable in practice. A plain local `@step` stays unclassified;
+inventing a class for it would guess at the declaration a manifest exists to
+make.
+
+### Credential resolution
+
+`ConnectionBroker(resolver=...)` takes a `CredentialResolver`
+(`toolsets/connections.py`); `EnvCredentialResolver` is the default and is
+today's `LOOM_CONN_{ID}_TOKEN` behaviour, unchanged and now named. A host with a
+credential service implements two methods instead of monkey-patching a concrete
+class.
+
+### Sandboxed execution
+
+`Runtime(sandbox=...)` decides **where the workflow body is invoked**. The
+default `InlineSandbox` runs it in this process — what every Runtime already
+did, and what a developer wants. A host executing code a model wrote, against
+credentials the host holds, passes `SubprocessSandbox`:
+
+```python
+from loom.runtime.sandbox import SandboxPolicy
+from loom.runtime.sandboxes import SubprocessSandbox
+
+rt = Runtime(store=…, sandbox=SubprocessSandbox(),
+             sandbox_policy=SandboxPolicy(allowed_env=frozenset({"TZ"}),
+                                          max_wall_seconds=60))
+```
+
+**Not a `DurabilityBackend`.** That port answers where durability *lives*
+(embedded, Temporal, DBOS); isolation is orthogonal — you want a sandbox on the
+embedded backend, and Temporal has its own workers. Conflating them means a host
+cannot have both.
+
+The child holds **no store, no journal, and no credentials**. Every `ctx.*` call
+is a line of JSON back to the parent, which turns it into the ordinary
+`ctx.step(...)` it would have been — so a sandboxed run and an inline one
+produce an *identical journal* and pass the same broker chain, grants, budgets,
+dry-run, and taint. Untrusted orchestration over trusted effects: the body
+decides what to call, the parent decides whether, performs it, and records it.
+`tests/test_sandbox.py` asserts the journals match entry for entry.
+
+Three things worth knowing:
+
+- **The steps map is the allowlist.** A sandboxed body can only reach `@step`s
+  defined in its own workflow's module. A process-wide registry would hand every
+  sandboxed workflow every step any import had ever defined.
+- **A limit that cannot be applied is refused, not ignored.** `enforces` reports
+  what this platform actually honours — macOS has `RLIMIT_AS` and rejects every
+  finite value, including a lower one — and `run` refuses a policy asking for
+  anything outside it. A host told "not here" is better off than one that
+  believes untrusted code is bounded when nothing bounds it.
+- **Parking is not an outcome.** `Suspend` and `WorkflowCancelled` propagate out
+  of a sandbox untouched. A subprocess body that parks dies with its child and
+  re-executes from the top on re-entry, with every earlier call served from the
+  parent's journal — the deterministic re-entry the engine already relies on.
+
 ### Version Gates
 
 `ctx.patched("use-new-pricing")` lets a branch ship without changing what runs
@@ -757,6 +859,57 @@ covers them, since a crashed run is `RUNNING`, not waiting on a timer. Wired int
 `ctx.continue_as_new(seed)` is what keeps a forever-flow's journal bounded, and
 `Runtime(journal_warn_entries=..., journal_max_entries=...)` makes forgetting it
 loud instead of slow — a warning once, then `BudgetExceeded`.
+
+### Store parity
+
+Every store claims `ExecutionStore + CacheStore + LockProvider + TriggerStore`
+(Redis deliberately claims only the last two). `tests/conformance/` runs **one
+behavioural suite against all four backends**, with Mongo and Postgres reached
+through real servers in CI.
+
+That harness is not ceremony. Before it, the suite covered `memory` and
+`sqlite` and the other two were covered by `hasattr` — and its first run
+against real servers found five divergences, including a `sparse=True` unique
+index that let `MongoStore` hold exactly **one** run without an idempotency
+key, and a `update_after_fire` statement Postgres refused to prepare at all.
+
+```bash
+pytest tests/conformance tests/test_store_conformance.py -rs   # -rs prints skip reasons
+LOOM_TEST_STORES=memory,sqlite pytest ...                      # fast local loop
+```
+
+**A backend that cannot be reached is SKIPPED and named, never dropped.** A
+suite that quietly shrinks when a service is down reports green for coverage it
+did not have. `tests/conformance/test_harness.py` drives deliberately-broken
+stores through the suite to prove it still catches each defect class.
+
+### Workflow versions
+
+`WorkflowRecord` says a workflow exists; `WorkflowVersion` says what its code
+*was*. Opt-in and off by default:
+
+```python
+await rt.publish(flow, source=src, pins=Pins(toolsets={"jira": "1.2"}))
+version = await rt.version_of(run_id)      # the code that ran, not the latest
+source = await rt.versions.source_of(version)
+```
+
+`VersionStore` is a port — `StoreBackedVersionStore` is the default, and a host
+storing versions in its own database implements six methods and passes
+`Runtime(versions=…)`.
+
+Three properties worth knowing. **Content goes to blobs**, not into the record,
+so a 200KB workflow is not a document-store problem and the same code works on
+every store. **Identical source returns the existing version** rather than
+appending, so a retried publish does not inflate the chain. And a version
+carries *two* hashes: `content_hash` identifies the source a human committed,
+`code_hash` is what a finished run records — recording only one leaves either
+"show me this version's source" or "which version produced this run"
+unanswerable.
+
+Commits are serialised per workflow through `LockProvider`, which every store
+implements, rather than a store-specific atomic — eight concurrent commits lost
+seven of each other before that, on every backend including Memory.
 
 ### Workflow Catalog
 

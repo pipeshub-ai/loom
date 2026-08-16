@@ -80,8 +80,13 @@ CREATE INDEX IF NOT EXISTS ix_triggers_due
 
 CREATE TABLE IF NOT EXISTS cache (
     key        TEXT PRIMARY KEY,
-    expires_at DOUBLE PRECISION NOT NULL,
+    expires_at DOUBLE PRECISION,
     value      JSONB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS event_deliveries (
+    key        TEXT PRIMARY KEY,
+    expires_at DOUBLE PRECISION NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS locks (
@@ -311,6 +316,24 @@ class PostgresStore:
                 event.model_dump_json(),
             )
 
+    async def claim_event_delivery(
+        self, key: str, *, ttl_seconds: float = 604800.0
+    ) -> bool:
+        now = time.time()
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM event_deliveries WHERE expires_at <= $1", now
+            )
+            # ON CONFLICT DO NOTHING with RETURNING: a row comes back only for
+            # the caller whose insert actually landed.
+            row = await conn.fetchrow(
+                """INSERT INTO event_deliveries (key, expires_at) VALUES ($1, $2)
+                   ON CONFLICT (key) DO NOTHING RETURNING key""",
+                key,
+                now + ttl_seconds,
+            )
+        return row is not None
+
     async def take_event(
         self, run_id: str, name: str
     ) -> Event | None:
@@ -373,7 +396,8 @@ class PostgresStore:
             )
         if row is None:
             return None
-        if row["expires_at"] < time.time():
+        expires_at = row["expires_at"]
+        if expires_at is not None and expires_at < time.time():
             await self.delete(key)
             return None
         return json.loads(row["value"])
@@ -388,7 +412,10 @@ class PostgresStore:
                    ON CONFLICT (key) DO UPDATE
                    SET expires_at=$2, value=$3""",
                 key,
-                time.time() + ttl_seconds,
+                # NULL means never expires — the rule the other stores follow.
+                # Reading a ttl of zero as "expires immediately" makes
+                # set(key, value, 0) a silent no-op.
+                time.time() + ttl_seconds if ttl_seconds > 0 else None,
                 json.dumps(value),
             )
 
@@ -523,14 +550,19 @@ class PostgresStore:
                            jsonb_set(data, '{last_fire_at}',
                                to_jsonb($3::text)),
                            '{next_fire_at}',
-                           CASE WHEN $2 IS NULL THEN 'null'::jsonb
-                                ELSE to_jsonb($2::text) END),
+                           CASE WHEN $4::text IS NULL THEN 'null'::jsonb
+                                ELSE to_jsonb($4::text) END),
                        '{run_count}',
-                       to_jsonb((data->>'run_count')::int + 1))
+                       to_jsonb(COALESCE((data->>'run_count')::int, 0) + 1))
                    WHERE trigger_id = $1""",
                 trigger_id,
                 next_fire,
                 last_fire.isoformat(),
+                # The same value again, as text. Reusing $2 in both a
+                # timestamptz column and a ::text cast made asyncpg deduce
+                # "text versus timestamp with time zone" for one parameter and
+                # refuse to prepare the statement at all.
+                next_fire.isoformat() if next_fire else None,
             )
 
     async def delete_trigger(self, trigger_id: str) -> None:

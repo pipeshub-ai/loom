@@ -95,8 +95,16 @@ class RuntimeFacade(Protocol):
         """
         ...
 
-    async def send_event(self, run_id: str, name: str, payload: Any) -> None:
-        """Deliver an event, resuming the run if it was parked on it."""
+    async def send_event(
+        self, run_id: str, name: str, payload: Any, *, dedupe_key: str | None = None
+    ) -> dict[str, Any]:
+        """Deliver an event, resuming the run if it was parked on it.
+
+        *dedupe_key* protects an at-least-once sender: a repeated key is
+        recorded and dropped. Returns the delivery so a consumer can tell
+        "delivered" from "already delivered" and ack correctly rather than
+        retrying forever.
+        """
         ...
 
     async def cancel(self, run_id: str) -> dict[str, Any]: ...
@@ -417,11 +425,17 @@ class LocalFacade:
             return []
         return [report.describe() for report in since(run_id, offset)]
 
-    async def send_event(self, run_id: str, name: str, payload: Any) -> None:
-        await self.runtime.send_event(run_id, name, payload)
-        # Deliver it: in process, an event only advances the run if something
-        # re-enters the body, and nothing else is driving it here.
-        await self.runtime.resume(run_id)
+    async def send_event(
+        self, run_id: str, name: str, payload: Any, *, dedupe_key: str | None = None
+    ) -> dict[str, Any]:
+        delivery = await self.runtime.send_event(
+            run_id, name, payload, dedupe_key=dedupe_key
+        )
+        if delivery.delivered:
+            # Deliver it: in process, an event only advances the run if
+            # something re-enters the body, and nothing else is driving it here.
+            await self.runtime.resume(run_id)
+        return delivery.model_dump(mode="json")
 
     async def cancel(self, run_id: str) -> dict[str, Any]:
         await self.runtime.cancel(run_id)
@@ -756,6 +770,12 @@ _NO_REMOTE_NODES = (
     "the node catalog is not exposed over HTTP yet, and a remote server's "
     "catalog is the one that matters. Drop --server to browse this process's."
 )
+_NO_REMOTE_DEDUPE = (
+    "dedupe_key is not carried over HTTP yet, and dropping it would let a "
+    "redelivered event resume a run twice while the caller saw success. Run "
+    "the consumer against the process that owns the store — drop --server — or "
+    "add the parameter to the route."
+)
 _NO_REMOTE_CREDENTIALS = (
     "credentials= cannot be sent over HTTP — a live token would leave the "
     "process. Run 'loom connect <name>' on the server, or start the run "
@@ -823,8 +843,17 @@ class RemoteFacade:
     async def reports(self, run_id: str, offset: int = 0) -> list[dict[str, Any]]:
         return await self.client.reports(run_id, offset=offset)
 
-    async def send_event(self, run_id: str, name: str, payload: Any) -> None:
+    async def send_event(
+        self, run_id: str, name: str, payload: Any, *, dedupe_key: str | None = None
+    ) -> dict[str, Any]:
+        if dedupe_key is not None:
+            # Refuse rather than silently drop the key: a caller passing one
+            # believes redeliveries are being suppressed, and a server that
+            # ignores it would resume the run twice while the client saw
+            # success. The route can carry it once the HTTP surface does.
+            raise ConfigurationError(_NO_REMOTE_DEDUPE)
         await self.client.send_event(run_id, name, payload)
+        return {"delivered": True, "reason": "", "run_ids": [], "dedupe_key": ""}
 
     async def cancel(self, run_id: str) -> dict[str, Any]:
         return await self.client.cancel(run_id)

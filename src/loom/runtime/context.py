@@ -748,8 +748,31 @@ class Context(Generic[DepsT]):
             timeout=definition.timeout if timeout is None else timeout,
             on_error=on_error or definition.on_error,
             fallback=definition.fallback if fallback is None else fallback,
-            metadata={"concurrency_key": definition.concurrency_key},
+            metadata={
+                "concurrency_key": definition.concurrency_key,
+                **self._declared_effect(step_name),
+            },
         )
+
+    def _declared_effect(self, step_name: str) -> dict[str, Any]:
+        """What this step's manifest says it is, when a manifest knows it.
+
+        A toolset operation's :class:`EffectClass` lives on its ``OperationSpec``
+        and nothing carried it to the call site, so ``ctx.step(gmail_search…)``
+        reached the broker as an unnamed *write*. Anything deciding on reads
+        versus writes — taint most of all — was therefore deciding on a default
+        rather than on the declaration, and a read could never taint.
+
+        A plain local ``@step`` stays unclassified and keeps the write default:
+        it is not a declaration a manifest ever made, and inventing one here
+        would guess at the very thing the manifest exists to state.
+        """
+        registry = getattr(self._runtime, "toolsets", None)
+        resolve = getattr(registry, "effect_of", None)
+        if resolve is None:
+            return {}
+        declared = resolve(step_name)
+        return {"effect_class": declared} if declared is not None else {}
 
     def call(
         self,
@@ -914,6 +937,11 @@ class Context(Generic[DepsT]):
                 )
             )
             await self._maybe_flush()
+            # The journal just gained an answer a broker's decision may turn on
+            # — an approval clearing taint, most of all. Events are journaled
+            # here and never dispatched, so without this the only broker that
+            # would ever see one is a broker that reads the journal.
+            self._runtime.observe_run(self.run_id, self._journal)
             return decode(payload, output_type)
 
         if deadline is not None and deadline <= self._clock.now():

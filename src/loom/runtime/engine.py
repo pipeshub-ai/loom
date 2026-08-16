@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import uuid
 from collections.abc import Sequence
@@ -25,10 +26,12 @@ from loom.core.exceptions import (
     RegistryError,
     Suspend,
     WorkflowCancelled,
+    WorkflowError,
 )
 from loom.core.models import (
     ErrorInfo,
     Event,
+    EventDelivery,
     ExecutionRecord,
     ExecutionResult,
     ExecutionStatus,
@@ -42,7 +45,7 @@ from loom.observability.tracing import NoopTracer, Tracer
 from loom.runtime.backend import DurabilityBackend, EmbeddedBackend
 from loom.runtime.clock import Clock, SystemClock
 from loom.runtime.context import Context
-from loom.runtime.effects import DirectBroker, EffectBroker
+from loom.runtime.effects import DirectBroker, EffectBroker, RunObserver
 from loom.runtime.flowcontrol import AdmissionController, AdmissionDecision
 from loom.runtime.journal import (
     CompatibilityMode,
@@ -52,6 +55,14 @@ from loom.runtime.journal import (
 )
 from loom.runtime.leader import LeaderElector
 from loom.runtime.registry import WorkflowRecord
+from loom.runtime.sandbox import (
+    ExecutionSandbox,
+    InlineSandbox,
+    RuntimeChannel,
+    SandboxBody,
+    SandboxPolicy,
+    SandboxViolation,
+)
 from loom.runtime.state import (
     InMemoryRunStream,
     RunStream,
@@ -61,6 +72,7 @@ from loom.runtime.state import (
 from loom.runtime.workflow import WorkflowDefinition
 from loom.security.authority import Authority
 from loom.security.rbac import Permission, Role, require
+from loom.steps.definition import StepDefinition
 from loom.stores.memory import MemoryStore
 
 logger = logging.getLogger("workflow.engine")
@@ -111,6 +123,7 @@ class Runtime:
         signed_urls: Any | None = None,
         staging: Any | None = None,
         catalog: Any | None = None,
+        versions: Any | None = None,
         node_id: str | None = None,
         lease_ttl: Duration = 60.0,
         journal_warn_entries: int = 5_000,
@@ -123,6 +136,8 @@ class Runtime:
         validate_input: bool = True,
         spill: Any | None = None,
         strict_determinism: bool = False,
+        sandbox: ExecutionSandbox | None = None,
+        sandbox_policy: SandboxPolicy | None = None,
     ) -> None:
         if backend is not None:
             self.backend = backend
@@ -228,6 +243,20 @@ class Runtime:
         :class:`GuardedBroker` to enforce an authority's grant, a call ceiling,
         or a dry run."""
 
+        self.sandbox: ExecutionSandbox = sandbox or InlineSandbox()
+        """Where a workflow body is invoked. The default runs it in this
+        process, which is what a developer wants and what every existing
+        Runtime already did; a host executing code a model wrote against
+        credentials the host holds passes ``SubprocessSandbox``.
+
+        Deliberately not a :class:`DurabilityBackend`: that port answers where
+        durability *lives*, and isolation is orthogonal to it — you want a
+        sandbox on the embedded backend, and Temporal has its own workers."""
+
+        self.sandbox_policy: SandboxPolicy = sandbox_policy or SandboxPolicy()
+        """What a sandboxed body may reach. Ignored by ``InlineSandbox``, which
+        enforces nothing and says so through ``enforces``."""
+
         self.state: StateStore = state or StoreBackedState(self.store)
         """Backs ``ctx.state`` — workflow-scoped key-value state that outlives a
         run. Defaults to the execution store, so it needs nothing new."""
@@ -275,6 +304,17 @@ class Runtime:
             self.catalog = StoreBackedWorkflowRegistry(self.store)
         """Published workflow catalog. Nothing is written until :meth:`publish`
         is called — importing a module never touches storage."""
+
+        if versions is not None:
+            self.versions = versions
+        else:
+            from loom.runtime.versions import StoreBackedVersionStore
+
+            self.versions = StoreBackedVersionStore(self.store, self.blobs)
+        """Immutable workflow versions. Nothing is written unless :meth:`publish`
+        is given ``source=``, so a Runtime that never versions anything pays
+        nothing. A host with its own version storage — graph database, object
+        store, anything — passes ``versions=`` and implements the protocol."""
 
         self.node_id = node_id or f"node-{uuid.uuid4().hex[:12]}"
         """Identifies this process in run leases, so an orphaned run can be told
@@ -432,7 +472,32 @@ class Runtime:
 
         definition = self.resolve_workflow(target)
         record = record_for(definition, published_by=self.node_id)
+        source = metadata.pop("source", None)
+        pins = metadata.pop("pins", None)
         record.metadata.update(metadata)
+
+        if source is not None:
+            # Committing the source alongside the catalog entry is what lets a
+            # run be replayed against the code it actually ran, rather than
+            # whatever is on disk now. Optional: the file stays the source of
+            # truth for a host that does not want a second copy.
+            from loom.runtime.versions import Pins, WorkflowVersion
+
+            committed = await self.versions.commit(
+                WorkflowVersion(
+                    workflow=record.name,
+                    source=source,
+                    # The fingerprint a finished run carries, so version_of()
+                    # can tie one to the other. Without it the two hash spaces
+                    # never meet and every run resolves to no version.
+                    code_hash=record.code_hash,
+                    pins=pins or Pins(),
+                    created_by=self.node_id,
+                )
+            )
+            record.metadata["version_number"] = committed.version
+            record.metadata["content_hash"] = committed.content_hash
+
         await self.catalog.put(record)
         logger.info("published %s (code_hash=%s)", record.key, record.code_hash[:12])
         return record
@@ -442,6 +507,19 @@ class Runtime:
         imported it. Compare ``record.name in self.workflows`` to tell what this
         Runtime can actually execute."""
         return await self.catalog.list()
+
+    async def version_of(self, run_id: str) -> Any:
+        """The :class:`WorkflowVersion` whose source produced *run_id*.
+
+        Matches on ``code_hash``, the same tie ``provenance`` uses — so a run
+        made by code that has since changed resolves to the version it actually
+        ran, which is the whole point of recording the hash. ``None`` when the
+        workflow was published without source.
+        """
+        record = await self.store.get_execution(run_id)
+        if record is None or not record.code_hash:
+            return None
+        return await self.versions.resolve(record.workflow, record.code_hash)
 
     async def provenance(self, run_id: str) -> WorkflowRecord | None:
         """The catalog entry whose code produced *run_id*, if one was published.
@@ -661,8 +739,34 @@ class Runtime:
 
     # -- events -----------------------------------------------------------------------
 
-    async def send_event(self, run_id: str | None, name: str, payload: Any = None) -> None:
-        """Deliver an event. Resumes the target run if it is parked waiting for it."""
+    async def send_event(
+        self,
+        run_id: str | None,
+        name: str,
+        payload: Any = None,
+        *,
+        dedupe_key: str | None = None,
+    ) -> EventDelivery:
+        """Deliver an event. Resumes the target run if it is parked waiting for it.
+
+        Pass *dedupe_key* — a broker message id, typically — when the sender is
+        at-least-once. Kafka, Redis Streams, and SQS all are, and without a key
+        a redelivered message resumes the run a second time. ``submit()`` has
+        taken an ``idempotency_key`` since the beginning; this is the same
+        protection for the event path.
+
+        Returns what happened rather than ``None`` because "already delivered"
+        is a normal outcome an at-least-once consumer must be able to see: it
+        is how the consumer knows to ack a redelivery rather than retry it.
+        """
+        if dedupe_key is not None and not await self.store.claim_event_delivery(
+            dedupe_key
+        ):
+            logger.info("event %s dropped: %s already delivered", name, dedupe_key)
+            return EventDelivery(
+                delivered=False, reason="duplicate", dedupe_key=dedupe_key
+            )
+
         await self.store.enqueue_event(Event(name=name, payload=encode(payload), run_id=run_id))
 
         waiter = self._event_waiters.get((run_id or "", name))
@@ -670,6 +774,7 @@ class Runtime:
             waiter.set()
 
         targets = [run_id] if run_id else await self.store.runs_awaiting_event(name)
+        resumed: list[str] = []
         for target in targets:
             if target is None:
                 continue
@@ -680,7 +785,9 @@ class Runtime:
                 and record.awaiting_event == name
                 and target not in self._driving
             ):
+                resumed.append(target)
                 self._spawn(self._drive(target))
+        return EventDelivery(delivered=True, run_ids=resumed, dedupe_key=dedupe_key or "")
 
     async def take_event(self, run_id: str, name: str) -> Event | None:
         event = await self.store.take_event(run_id, name)
@@ -963,6 +1070,11 @@ class Runtime:
             record.lease_expires_at = self.clock.now() + timedelta(seconds=self.lease_ttl)
             await self.store.update_execution(record)
 
+            # Before the body re-enters, not after: a broker whose decision
+            # depends on what the run has already done has to know that first,
+            # and everything the journal can answer never reaches it.
+            self.observe_run(run_id, journal)
+
             ctx = Context(
                 runtime=self,
                 record=record,
@@ -979,7 +1091,7 @@ class Runtime:
             )
             try:
                 payload = decode(record.input, definition.input_type)
-                coro = definition.invoke(ctx, payload)
+                coro = self._invoke_body(definition, ctx, record, payload)
                 if definition.timeout is not None:
                     output = await asyncio.wait_for(coro, to_seconds(definition.timeout))
                 else:
@@ -1037,6 +1149,120 @@ class Runtime:
                 span.end()
                 await self.persist_journal(record, journal)
                 return await self._finish_completed(record, journal, output)
+
+    def observe_run(self, run_id: str, journal: Journal) -> None:
+        """Let a stateful broker re-derive this run's state from the journal.
+
+        Called at re-entry and again whenever the journal gains an answer that
+        can change a decision — an event arriving mid-body is the case that
+        matters, because an approval is journaled by ``wait_for_event`` and
+        never dispatched. At re-entry that entry is still ``SUSPENDED``: it
+        becomes the human's "yes" only while the body is running, which is after
+        the last chance a re-entry hook would have had to see it.
+
+        Re-deriving rather than notifying keeps one source of truth. A broker
+        told "an approval happened" would be maintaining a second history beside
+        the journal, and the two would disagree the first time a run was
+        replayed.
+        """
+        if isinstance(self.broker, RunObserver):
+            self.broker.observe_run(run_id, journal)
+
+    async def _invoke_body(
+        self,
+        definition: WorkflowDefinition[Any, Any, Any],
+        ctx: Context[Any],
+        record: ExecutionRecord,
+        payload: Any,
+    ) -> Any:
+        """Invoke the workflow body through the sandbox seam.
+
+        The default path is the one every existing Runtime already took —
+        ``InlineSandbox`` awaits ``definition.invoke`` and hands the value
+        back — so having the seam costs an attribute lookup and a dataclass.
+        Exceptions are *not* caught here: parking, cancellation, and failure are
+        three different things to the caller, and this method is on the path of
+        every run in every deployment.
+        """
+        if isinstance(self.sandbox, InlineSandbox):
+            # Skip recovering source entirely. It is only meaningful to an
+            # adapter that runs the body elsewhere, and reading a module off
+            # disk on every re-entry would be a cost paid by everyone for a
+            # feature almost nobody has switched on.
+            body = SandboxBody(invoke=lambda: definition.invoke(ctx, payload))
+        else:
+            body = SandboxBody(
+                invoke=lambda: definition.invoke(ctx, payload),
+                source=await self._sandbox_source(definition, record),
+                entrypoint=definition.name,
+            )
+
+        outcome = await self.sandbox.run(
+            body=body,
+            run_id=record.run_id,
+            input=payload,
+            # The parent's live Context, so a proxied call journals at the same
+            # path and reaches the broker by the same route as an inline one.
+            channel=RuntimeChannel(ctx=ctx, steps=self._sandbox_steps(definition)),
+            policy=self.sandbox_policy,
+        )
+        if outcome.ok:
+            return outcome.value
+        if outcome.violation:
+            raise SandboxViolation(
+                f"{definition.name} was stopped by its sandbox "
+                f"({outcome.violation}): {outcome.error}"
+            )
+        raise WorkflowError(outcome.error or f"{definition.name} failed in its sandbox")
+
+    async def _sandbox_source(
+        self, definition: WorkflowDefinition[Any, Any, Any], record: ExecutionRecord
+    ) -> str:
+        """The body's source text: what was published, else what is on disk.
+
+        Published first, deliberately. That is the code a host reviewed and
+        pinned, and for a run resumed on another node it may be the only copy
+        that exists there. The module on disk is the fallback for the ordinary
+        case of a workflow that was never published.
+        """
+        if record.code_hash:
+            with contextlib.suppress(Exception):
+                version = await self.versions.resolve(record.workflow, record.code_hash)
+                if version is not None:
+                    published = await self.versions.source_of(version)
+                    if published:
+                        return str(published)
+
+        module = inspect.getmodule(definition.fn)
+        if module is None:
+            return ""
+        try:
+            return inspect.getsource(module)
+        except (OSError, TypeError):
+            # A body defined in a REPL or exec'd string has no readable source.
+            # Returning "" lets the sandbox refuse by name rather than run
+            # something else.
+            return ""
+
+    @staticmethod
+    def _sandbox_steps(
+        definition: WorkflowDefinition[Any, Any, Any],
+    ) -> dict[str, Any]:
+        """The steps a sandboxed body is allowed to reach.
+
+        Taken from the workflow's own module rather than from a global registry:
+        the map is also the allowlist — a body can only invoke what is in it —
+        and a process-wide registry would hand every sandboxed workflow every
+        step any import had ever defined.
+        """
+        module = inspect.getmodule(definition.fn)
+        if module is None:
+            return {}
+        return {
+            value.name: value
+            for value in vars(module).values()
+            if isinstance(value, StepDefinition)
+        }
 
     async def _park(self, record: ExecutionRecord, suspension: Suspend, journal: Journal) -> bool:
         """Persist a suspension. Returns True if we should immediately re-enter the body."""
@@ -1297,12 +1523,19 @@ class Runtime:
         return reclaimed
 
     def _release_admission(self, record: ExecutionRecord) -> None:
-        """Free the in-flight slot a concurrency or singleton policy reserved.
+        """Free the in-flight slot a concurrency or singleton policy reserved,
+        and drop any per-run state a broker was keeping.
 
         Called only from terminal transitions — a suspended run still occupies
         its slot, which is what makes ``singleton`` mean "one live run" rather
-        than "one running instruction".
+        than "one running instruction". A broker's per-run state follows the
+        same rule for the same reason, and releasing it here rather than in
+        four separate ``_finish_*`` methods is what keeps the two from drifting
+        apart; a map keyed by run id and never cleared is a leak the size of the
+        process's lifetime.
         """
+        if isinstance(self.broker, RunObserver):
+            self.broker.forget_run(record.run_id)
         if self.admission is None:
             return
         definition = self._workflows.get(record.workflow)

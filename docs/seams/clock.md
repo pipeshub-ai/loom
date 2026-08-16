@@ -20,10 +20,8 @@ Wait for *seconds*, however this clock understands waiting.
 
 ## Implementations
 
-- `nodes.base.NodeContext`
 - `runtime.clock.SystemClock`
 - `runtime.clock.ManualClock`
-- `runtime.context.Context`
 
 ## Consumers
 

@@ -160,6 +160,16 @@ class StoreBackedWorkflowRegistry:
         for key in doomed:
             await self._store.delete(self._key(key))
         if doomed:
+            # Prune the index too. Leaving the keys costs a store round-trip per
+            # dead entry on every list() — forever, because nothing else ever
+            # removes them — and leaves the index claiming entries that are
+            # gone. Invisible through the protocol, which is exactly why it
+            # would never have been noticed.
+            gone = set(doomed)
+            await self._store.set(
+                self._index_key, [k for k in index if k not in gone], 0
+            )
+        if doomed:
             await self._store.set(
                 self._index_key, [k for k in index if k not in doomed], 0
             )

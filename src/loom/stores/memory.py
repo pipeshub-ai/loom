@@ -29,6 +29,9 @@ class MemoryStore:
         self._executions: dict[str, ExecutionRecord] = {}
         self._journals: dict[str, dict[str, JournalEntry]] = defaultdict(dict)
         self._events: dict[tuple[str, str], deque[Event]] = defaultdict(deque)
+        self._delivered: dict[str, float] = {}
+        """Claimed event-delivery keys, to their expiry. Bounded by a sweep on
+        write rather than a timer: the map only grows on delivery."""
         self._cache: dict[str, tuple[float | None, Any]] = {}
         self._locks: dict[str, tuple[str, float]] = {}
         self._idempotency: dict[str, str] = {}
@@ -122,6 +125,23 @@ class MemoryStore:
             event = event.model_copy(deep=True)
             event.received_at = event.received_at or datetime.now(UTC)
             self._events[(event.run_id or "", event.name)].append(event)
+
+    async def claim_event_delivery(
+        self, key: str, *, ttl_seconds: float = 604800.0
+    ) -> bool:
+        async with self._mutex:
+            now = time.time()
+            # Sweep here rather than on a timer: the map only grows on delivery,
+            # so the cheapest place to bound it is the same call.
+            self._delivered = {
+                claimed: expiry
+                for claimed, expiry in self._delivered.items()
+                if expiry > now
+            }
+            if key in self._delivered:
+                return False
+            self._delivered[key] = now + ttl_seconds
+            return True
 
     async def take_event(self, run_id: str, name: str) -> Event | None:
         async with self._mutex:
