@@ -49,6 +49,35 @@ def _await_reply():
         raise RuntimeError("the host closed the channel")
     return json.loads(line)
 
+class _AgentResult(dict):
+    """JSON shape of ``ctx.agent()``, plus the methods inline ``AgentResult`` has.
+
+    The wire cannot carry a Pydantic model into this process (importing the
+    parent's types is the thing a sandbox exists to avoid), so the parent
+    sends a dict. Generated bodies call ``result.text()`` because that is
+    what the coding-agent prompt teaches; a plain dict raises
+    ``AttributeError: 'dict' object has no attribute 'text'``. A dict
+    subclass stays JSON-serializable if the workflow returns the object
+    itself.
+    """
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(name)
+
+    def text(self):
+        output = self.get("output")
+        if isinstance(output, str):
+            return output
+        messages = self.get("messages") or []
+        if messages:
+            last = messages[-1]
+            if isinstance(last, dict) and last.get("content"):
+                return last["content"]
+        return "" if output is None else str(output)
+
 class Ctx:
     """Every durable call becomes a line on stdout.
 
@@ -73,12 +102,30 @@ class Ctx:
         ) or str(target)
 
     async def _call(self, kind, target, arguments, effect, *, name=None):
+        runnable = not isinstance(target, str) and (
+            callable(target) or hasattr(target, "fn")
+        )
         message = {"t": "call", "kind": kind, "target": self._named(target),
-                   "arguments": arguments, "effect": effect}
+                   "arguments": arguments, "effect": effect, "local": bool(runnable)}
         if name is not None:
             message["name"] = name
         _emit(message)
         reply = _await_reply()
+        if reply.get("delegate"):
+            if not runnable:
+                raise RuntimeError("parent asked to run a step this child cannot")
+            try:
+                if hasattr(target, "invoke"):
+                    result = target.invoke(None, **arguments)
+                else:
+                    result = target(**arguments)
+                if hasattr(result, "__await__"):
+                    result = await result
+                _emit({"t": "delegated_result", "ok": True, "value": result})
+            except BaseException as exc:
+                _emit({"t": "delegated_result", "ok": False,
+                       "error": "%s: %s" % (type(exc).__name__, exc)})
+            reply = _await_reply()
         if not reply.get("ok", False):
             raise RuntimeError(reply.get("error") or "refused")
         return reply.get("value")
@@ -100,7 +147,10 @@ class Ctx:
         return await self._call("tool", target, arguments, "read")
 
     async def agent(self, prompt, **arguments):
-        return await self._call("agent", prompt, arguments, "write")
+        value = await self._call("agent", prompt, arguments, "write")
+        if isinstance(value, dict):
+            return _AgentResult(value)
+        return _AgentResult({"output": value})
 
     async def node(self, node_id, payload=None, **arguments):
         """Call a catalogued node. The payload crosses as plain JSON.

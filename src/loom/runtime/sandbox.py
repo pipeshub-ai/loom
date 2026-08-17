@@ -274,22 +274,34 @@ class RuntimeChannel:
     reason it is built by the engine from the workflow's own module rather than
     from anything the body says."""
     seen: list[EffectCall] = field(default_factory=list)
+    child_local: Callable[[EffectCall], Awaitable[Any]] | None = field(
+        default=None, repr=False, compare=False
+    )
+    """How to run a ``local=True`` step the parent has no implementation for.
+
+    Set by the conversation loop: it writes ``{"delegate": true}`` to the
+    child, the child runs the ``@step`` body it already ``exec()``'d, and
+    this callback returns that result so ``ctx.step`` can journal it. ``None``
+    (the default, and every unit test that constructs a channel by hand)
+    keeps the original refusal for an unknown name."""
 
     async def dispatch(self, call: EffectCall) -> EffectResult:
         self.seen.append(call)
 
         if call.kind in ("step", "tool"):
             target = self.steps.get(call.target)
-            if target is None:
+            if target is not None:
                 return EffectResult(
-                    ok=False,
-                    error=(
-                        f"no step named '{call.target}' is available to this "
-                        f"sandbox. Available: {', '.join(sorted(self.steps)) or 'none'}"
-                    ),
+                    value=await self.ctx.step(target, name=call.name, **call.arguments)
                 )
+            if call.local and self.child_local is not None:
+                return await self._dispatch_child_local(call)
             return EffectResult(
-                value=await self.ctx.step(target, name=call.name, **call.arguments)
+                ok=False,
+                error=(
+                    f"no step named '{call.target}' is available to this "
+                    f"sandbox. Available: {', '.join(sorted(self.steps)) or 'none'}"
+                ),
             )
 
         if call.kind == "agent":
@@ -350,4 +362,28 @@ class RuntimeChannel:
                 f"a sandboxed body cannot perform '{call.kind}' operations "
                 f"(asked for '{call.target}')"
             ),
+        )
+
+    async def _dispatch_child_local(self, call: EffectCall) -> EffectResult:
+        """Journal a step whose body runs in the child, not here.
+
+        The dummy callable is only invoked on a journal miss — replay of
+        ``generate_random_integer`` (the case this exists for) is served
+        from the journal and never asks the child to roll the dice again.
+        ``retry=1``: a retry would write a second ``delegate`` while the
+        child is still waiting for the first attempt's ack.
+        """
+        runner = self.child_local
+        assert runner is not None
+
+        async def run_in_child(**_kwargs: Any) -> Any:
+            return await runner(call)
+
+        return EffectResult(
+            value=await self.ctx.step(
+                run_in_child,
+                name=call.name or call.target,
+                retry=1,
+                **call.arguments,
+            )
         )

@@ -791,6 +791,7 @@ class TestTheSandboxWireShapeIsUnchanged:
             "run_id",
             "path",
             "name",
+            "local",
         }
 
     def test_the_field_does_not_affect_equality(self) -> None:

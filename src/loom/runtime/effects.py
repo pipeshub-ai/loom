@@ -100,6 +100,12 @@ class EffectCall:
     so a sandboxed body's proxied call journals and grant-checks under the
     same name an inline one would, rather than under the generic step's own
     name (e.g. ``pipeshub_tool`` for every bridged operation alike)."""
+    local: bool = False
+    """True when the child holds the implementation — a ``@step`` defined in
+    the sandboxed source itself, which the parent must not ``exec()``. The
+    parent still journals and grant-checks; the child runs the body. A name
+    the parent does not recognise is still refused unless this is set, so a
+    typo cannot become a silent delegation."""
     perform: Callable[[], Awaitable[Any]] | None = field(
         default=None, compare=False, repr=False
     )
@@ -139,6 +145,7 @@ class EffectCall:
             "run_id": self.run_id,
             "path": self.path,
             "name": self.name,
+            "local": self.local,
         }
 
 

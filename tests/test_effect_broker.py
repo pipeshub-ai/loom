@@ -512,6 +512,7 @@ def test_a_call_describes_itself_without_its_closure() -> None:
         "run_id": "run_1",
         "path": "3",
         "name": None,
+        "local": False,
     }
     assert call.toolset == "jira"
     assert call.operation == "issues.search"

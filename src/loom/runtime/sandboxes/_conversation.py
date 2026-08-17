@@ -19,7 +19,7 @@ from typing import Any, Protocol
 
 from loom.core.serde import encode
 from loom.runtime.effects import EffectCall
-from loom.runtime.sandbox import ContextChannel, SandboxOutcome
+from loom.runtime.sandbox import ContextChannel, RuntimeChannel, SandboxOutcome
 from loom.toolsets.manifest import EffectClass
 
 __all__ = ["converse"]
@@ -69,6 +69,35 @@ async def converse(
     )
     await process.stdin.drain()
 
+    async def run_child_local(call: EffectCall) -> Any:
+        """Ask the child to run a ``@step`` it already exec'd.
+
+        Written while ``channel.dispatch`` is blocked inside ``ctx.step``,
+        so this is the only reader of stdout until the child sends
+        ``delegated_result``. The child's first ``_await_reply`` is waiting
+        on this ``delegate`` line — not a deadlock, the same pipe in the
+        other direction.
+        """
+        process.stdin.write(
+            (json.dumps({"ok": True, "delegate": True}) + "\n").encode()
+        )
+        await process.stdin.drain()
+        line = await process.stdout.readline()
+        if not line:
+            raise RuntimeError("the child exited while running a local step")
+        message = json.loads(line)
+        if message.get("t") != "delegated_result":
+            raise RuntimeError(
+                "expected delegated_result from the child, got "
+                f"{message.get('t')!r}: {message.get('error') or message}"
+            )
+        if not message.get("ok", True):
+            raise RuntimeError(message.get("error") or "local step failed")
+        return message.get("value")
+
+    if isinstance(channel, RuntimeChannel):
+        channel.child_local = run_child_local
+
     calls = 0
     while True:
         line = await process.stdout.readline()
@@ -108,6 +137,7 @@ async def converse(
                 effect=EffectClass(message.get("effect", "write")),
                 run_id=run_id,
                 name=message.get("name"),
+                local=bool(message.get("local")),
             )
         )
         process.stdin.write(
@@ -121,7 +151,11 @@ async def converse(
                         # rather than the reconstructed object — rebuilding
                         # one there would mean importing the parent's types
                         # into the untrusted process, which is the thing this
-                        # sandbox exists to avoid.
+                        # sandbox exists to avoid. ``ctx.agent`` is the
+                        # exception that lives in the child harness: it wraps
+                        # the dict in a tiny duck type so ``result.text()``
+                        # matches the inline ``AgentResult`` the prompt
+                        # teaches, without importing loom.agents.
                         "value": encode(outcome.value),
                         "error": outcome.error,
                     }

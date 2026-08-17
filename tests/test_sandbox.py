@@ -649,6 +649,71 @@ class TestHostInjectedSteps:
         assert "local_helper" in reachable
 
 
+class TestChildOwnedLocalSteps:
+    """A host that never ``exec()``s generated source (PipesHub's Docker
+    path) registers a stub whose globals contain no ``@step`` helpers. Those
+    helpers still exist in the published source the child exec's, and must
+    run *there* — running them on the parent would undo the sandbox — while
+    still journaling so a non-deterministic helper is memoized on replay."""
+
+    _SOURCE = (
+        "from loom import workflow, step\n"
+        "\n"
+        "@step\n"
+        "async def generate_random_integer(low: int, high: int) -> int:\n"
+        "    return low + (high - low) // 2\n"
+        "\n"
+        "@workflow(name='rng_flow')\n"
+        "async def flow(ctx, payload):\n"
+        "    return await ctx.step("
+        "generate_random_integer, low=payload['low'], high=payload['high'])\n"
+    )
+
+    async def test_a_local_step_absent_from_the_parent_runs_in_the_child(
+        self, sandbox: ExecutionSandbox,
+    ) -> None:
+        if sandbox.name == "inline":
+            pytest.skip("inline invokes the stub; there is no child to run the helper")
+
+        from loom.runtime.workflow import WorkflowDefinition
+
+        async def stub(ctx: Context, payload: dict) -> int:
+            raise AssertionError("the parent stub must not run")
+
+        definition = WorkflowDefinition(fn=stub, name="rng_flow")
+        rt = Runtime(store=MemoryStore(), sandbox=sandbox)
+        rt.register(definition)
+        await rt.publish(definition, source=self._SOURCE)
+
+        result = await rt.run(definition, {"low": 1, "high": 9})
+
+        assert result.output == 5, result.error
+        entries = await rt.store.load_journal(result.run_id)
+        assert [e.name for e in entries] == ["generate_random_integer"]
+
+    async def test_a_child_local_step_is_served_from_the_journal_on_replay(
+        self, sandbox: ExecutionSandbox,
+    ) -> None:
+        if sandbox.name == "inline":
+            pytest.skip("inline invokes the stub; there is no child to run the helper")
+
+        from loom.runtime.workflow import WorkflowDefinition
+
+        async def stub(ctx: Context, payload: dict) -> int:
+            raise AssertionError("the parent stub must not run")
+
+        definition = WorkflowDefinition(fn=stub, name="rng_flow_replay")
+        source = self._SOURCE.replace("rng_flow", "rng_flow_replay")
+        rt = Runtime(store=MemoryStore(), sandbox=sandbox)
+        rt.register(definition)
+        await rt.publish(definition, source=source)
+
+        first = await rt.run(definition, {"low": 1, "high": 9})
+        replayed = await rt.replay(first.run_id)
+
+        assert first.output == replayed.output == 5
+
+
 @workflow(name="sleeps_durably")
 async def sleeps_durably(ctx: Context, payload: dict) -> str:
     await ctx.sleep(300)
@@ -714,6 +779,41 @@ class TestProtocolRobustness:
 
         assert outcome.ok, outcome.error
         assert outcome.value == "ok"
+
+    async def test_agent_result_text_survives_the_wire(self) -> None:
+        """Generated bodies call ``result.text()``; the wire carries a dict.
+
+        Importing ``AgentResult`` into the child would put parent types on
+        the untrusted side. The harness wraps the encoded dict so the call
+        the coding-agent prompt teaches still works.
+        """
+        from loom.agents.result import AgentResult
+
+        class _AgentChannel:
+            async def dispatch(self, call: EffectCall) -> EffectResult:
+                assert call.kind == "agent"
+                return EffectResult(
+                    value=AgentResult(output="knock knock", agent="jester")
+                )
+
+        outcome = await SubprocessSandbox().run(
+            body=SandboxBody(
+                invoke=_unused,
+                source=(
+                    "async def flow(ctx, payload):\n"
+                    "    joke = await ctx.agent('tell a joke')\n"
+                    "    return {'text': joke.text(), 'output': joke.output}\n"
+                ),
+                entrypoint="flow",
+            ),
+            run_id="r1",
+            input={},
+            channel=_AgentChannel(),
+            policy=SandboxPolicy(),
+        )
+
+        assert outcome.ok, outcome.error
+        assert outcome.value == {"text": "knock knock", "output": "knock knock"}
 
     async def test_namespace_is_visible_to_the_source(self) -> None:
         outcome = await SubprocessSandbox().run(
