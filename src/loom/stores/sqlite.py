@@ -11,6 +11,7 @@ import asyncio
 import json
 import sqlite3
 import time
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from loom.core.models import (
     TriggerRecord,
 )
 from loom.runtime.journal import JournalEntry
+from loom.stores.base import utc_iso
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS executions (
@@ -108,8 +110,40 @@ class SQLiteStore:
             connection.execute("PRAGMA busy_timeout=5000")
             connection.executescript(SCHEMA)
             connection.commit()
+            self._migrate(connection)
             self._connection = connection
         return self._connection
+
+    @staticmethod
+    def _migrate(connection: sqlite3.Connection) -> None:
+        """Apply pending migrations under SQLite's own write lock.
+
+        Synchronous because it runs inside ``_connect``, which is already on a
+        worker thread. ``BEGIN IMMEDIATE`` is what keeps two processes opening
+        the same file at once from both running DDL — the file lock is the only
+        cross-process primitive available before the store is usable.
+        """
+        from loom.stores import migrations
+
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            current = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if current >= migrations.LATEST:
+                connection.execute("ROLLBACK")
+                return
+            for migration in migrations.pending(current, "sqlite"):
+                for statement in migration.sqlite:
+                    try:
+                        connection.execute(statement)
+                    except sqlite3.OperationalError as exc:
+                        if not migrations._is_duplicate_column(exc):
+                            raise
+                connection.execute(f"PRAGMA user_version = {migration.version}")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+        else:
+            connection.commit()
 
     async def _execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
         def run() -> None:
@@ -148,8 +182,8 @@ class SQLiteStore:
         await self._execute(
             """INSERT OR REPLACE INTO executions
                (run_id, workflow, status, parent_run_id, idempotency_key, wake_at,
-                awaiting_event, created_at, data)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
+                awaiting_event, created_at, lease_expires_at, finished_at, data)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             self._row(record),
         )
 
@@ -166,7 +200,8 @@ class SQLiteStore:
         rowcount = await self._execute_rowcount(
             """UPDATE executions
                SET workflow=?, status=?, parent_run_id=?, idempotency_key=?,
-                   wake_at=?, awaiting_event=?, created_at=?, data=?
+                   wake_at=?, awaiting_event=?, created_at=?, lease_expires_at=?,
+                   finished_at=?, data=?
                WHERE run_id=? AND status=?""",
             (*row[1:], row[0], expected_status.value),
         )
@@ -186,9 +221,19 @@ class SQLiteStore:
             record.status.value,
             record.parent_run_id,
             record.idempotency_key,
-            record.wake_at.isoformat() if record.wake_at else None,
+            # utc_iso, not isoformat: this column is compared as TEXT by
+            # due_runs, so a non-UTC offset would sort as a later string than
+            # the instant it names. See loom.stores.base.utc_iso.
+            utc_iso(record.wake_at),
             record.awaiting_event,
-            (record.created_at or datetime.now(UTC)).isoformat(),
+            utc_iso(record.created_at or datetime.now(UTC)),
+            # Lifted out of the JSON payload by migration 1. They live in
+            # columns because `reclaim_orphans` and retention filter on them,
+            # and a predicate inside `data` cannot be a WHERE clause — which is
+            # what forced both to scan a newest-first page and silently miss the
+            # oldest records, the exact ones they exist to find.
+            utc_iso(record.lease_expires_at),
+            utc_iso(record.finished_at),
             record.model_dump_json(),
         )
 
@@ -254,7 +299,7 @@ class SQLiteStore:
             (
                 trigger.trigger_id,
                 trigger.workflow,
-                trigger.next_fire_at.isoformat() if trigger.next_fire_at else None,
+                utc_iso(trigger.next_fire_at),
                 1 if trigger.enabled else 0,
                 trigger.model_dump_json(),
             ),
@@ -287,7 +332,7 @@ class SQLiteStore:
                WHERE enabled = 1 AND next_fire_at IS NOT NULL
                  AND next_fire_at <= ?
                ORDER BY next_fire_at LIMIT ?""",
-            (now.isoformat(), limit),
+            (utc_iso(now), limit),
         )
         return [TriggerRecord.model_validate_json(row["data"]) for row in rows]
 
@@ -316,7 +361,7 @@ class SQLiteStore:
                        WHERE enabled = 1 AND next_fire_at IS NOT NULL
                          AND next_fire_at <= ?
                        ORDER BY next_fire_at LIMIT ?""",
-                    (now.isoformat(), limit),
+                    (utc_iso(now), limit),
                 ).fetchall()
                 won: list[TriggerRecord] = []
                 for row in rows:
@@ -471,9 +516,47 @@ class SQLiteStore:
             """SELECT run_id FROM executions
                WHERE status = ? AND wake_at IS NOT NULL AND wake_at <= ?
                ORDER BY wake_at LIMIT ?""",
-            (ExecutionStatus.SUSPENDED.value, now.isoformat(), limit),
+            (ExecutionStatus.SUSPENDED.value, utc_iso(now), limit),
         )
         return [row["run_id"] for row in rows]
+
+    async def due_leases(
+        self,
+        before: datetime,
+        statuses: Sequence[ExecutionStatus],
+        *,
+        limit: int = 100,
+    ) -> list[ExecutionRecord]:
+        if not statuses:
+            return []
+        marks = ",".join("?" for _ in statuses)
+        rows = await self._query(
+            f"""SELECT data FROM executions
+                WHERE status IN ({marks})
+                  AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?
+                ORDER BY lease_expires_at LIMIT ?""",
+            (*[s.value for s in statuses], utc_iso(before), limit),
+        )
+        return [ExecutionRecord.model_validate_json(row["data"]) for row in rows]
+
+    async def terminal_before(
+        self,
+        cutoff: datetime,
+        statuses: Sequence[ExecutionStatus],
+        *,
+        limit: int = 100,
+    ) -> list[ExecutionRecord]:
+        if not statuses:
+            return []
+        marks = ",".join("?" for _ in statuses)
+        rows = await self._query(
+            f"""SELECT data FROM executions
+                WHERE status IN ({marks})
+                  AND finished_at IS NOT NULL AND finished_at < ?
+                ORDER BY finished_at LIMIT ?""",
+            (*[s.value for s in statuses], utc_iso(cutoff), limit),
+        )
+        return [ExecutionRecord.model_validate_json(row["data"]) for row in rows]
 
     # -- cache ------------------------------------------------------------------------
 

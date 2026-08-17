@@ -29,12 +29,21 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from loom.core.exceptions import AdmissionRejected, ConfigurationError, RegistryError
+from loom.core.exceptions import (
+    AdmissionRejected,
+    ConfigurationError,
+    RegistryError,
+    ValidationError,
+)
+from loom.core.models import TriggerKind
+from loom.core.serde import validate_as
 from loom.events.models import EventRecord, StoredEvent
 from loom.events.subscription import StartAt, Subscription
+from loom.triggers.filter import FilterError
 
 if TYPE_CHECKING:
     from loom.events.log import Checkpoints, EventLog
+    from loom.runtime.clock import Clock
     from loom.runtime.engine import Runtime
 
 __all__ = ["CHAIN_DEPTH_CAP", "DEAD_LETTER_SUFFIX", "DispatchReport", "EventDispatcher"]
@@ -102,6 +111,7 @@ class EventDispatcher:
         batch_size: int = _DEFAULT_BATCH,
         idle_wait: float = _DEFAULT_IDLE_WAIT,
         deliver_to_waiting: bool = True,
+        clock: Clock | None = None,
     ) -> None:
         resolved_log = log if log is not None else getattr(runtime, "events", None)
         if resolved_log is None:
@@ -110,6 +120,17 @@ class EventDispatcher:
                 "the Runtime with events=StoreBackedEventLog(store) — which "
                 "needs no infrastructure beyond the store you already have."
             )
+        # The Runtime's clock, defaulted the way `WatchRenewer` in this package
+        # already defaults it. Taking no clock was drift rather than a decision:
+        # a dispatcher polling on wall time inside a Runtime on virtual time is
+        # the one component a time-travel test cannot reach, and its idle wait
+        # then costs real seconds in every test that starts it.
+        from loom.runtime.clock import SystemClock
+
+        resolved_clock: Clock = (
+            clock or getattr(runtime, "clock", None) or SystemClock()
+        )
+
         resolved_marks = (
             checkpoints
             if checkpoints is not None
@@ -118,9 +139,10 @@ class EventDispatcher:
         if resolved_marks is None:
             from loom.events.log import StoreBackedCheckpoints
 
-            resolved_marks = StoreBackedCheckpoints(runtime.store)
+            resolved_marks = StoreBackedCheckpoints(runtime.store, clock=resolved_clock)
 
         self._runtime = runtime
+        self._clock = resolved_clock
         self._log = resolved_log
         self._marks = resolved_marks
         self._batch_size = batch_size
@@ -252,7 +274,7 @@ class EventDispatcher:
         process stops. It presents as a hang, not as a hot CPU.
         """
         if not self._subscriptions:
-            await asyncio.sleep(self._idle_wait)
+            await self._clock.sleep(self._idle_wait)
             return
         first = self._subscriptions[0]
         after = await self._marks.load(first.subscriber, first.topic)
@@ -267,9 +289,29 @@ class EventDispatcher:
                 first.topic,
                 exc_info=True,
             )
-            await asyncio.sleep(self._idle_wait)
+            await self._clock.sleep(self._idle_wait)
 
     # -- the pass ------------------------------------------------------------
+
+    async def tick(self) -> list[str]:
+        """One pass, reporting the run ids it started.
+
+        The same name and the same return shape as ``TriggerDispatcher.tick``
+        and ``Runtime.tick``, which is what lets
+        :func:`loom.testing.advance` drive this dispatcher too. Without it,
+        ``advance(rt, dispatcher=EventDispatcher(...))`` raised
+        ``AttributeError`` — so the one helper a test reaches for to move time
+        covered cron and timers and silently not the event backbone.
+
+        :meth:`poll_once` is still the richer answer: it returns a
+        :class:`DispatchReport` per subscription, including what was filtered,
+        deferred, or dead-lettered. This is the one for a caller that only
+        wants to know what ran.
+        """
+        started: list[str] = []
+        for report in await self.poll_once():
+            started.extend(report.started)
+        return started
 
     async def poll_once(self) -> list[DispatchReport]:
         """One pass over every subscription.
@@ -352,7 +394,25 @@ class EventDispatcher:
             )
             return None
 
-        if not subscription.accepts(dict(event.payload)):
+        try:
+            wanted = subscription.accepts(dict(event.payload))
+        except FilterError as exc:
+            # A filter that cannot be evaluated has decided nothing about this
+            # event. Before this, the raise escaped to `poll_once`, which leaves
+            # the checkpoint unmoved so the subscriber retries the same event
+            # forever — a permanent stall, logged as "dispatch failed" and
+            # bypassing `max_attempts` entirely, because the raise happened
+            # outside the try that feeds the dead letter.
+            #
+            # Dead-lettering instead is loud (`loom events dead`, and `loom
+            # events status` exits non-zero) and, crucially, advances. The
+            # declaration-time check in `validate_declarable` is what keeps a
+            # workflow file from ever reaching here; this covers a filter edited
+            # into the registry at runtime.
+            await self._dead_letter(subscription, event, exc, report)
+            return None
+
+        if not wanted:
             report.filtered += 1
             return None
 
@@ -360,18 +420,30 @@ class EventDispatcher:
         attempts_key = (subscription.subscriber, event.position)
 
         try:
+            definition = self._runtime.resolve_workflow(subscription.workflow)
+            if definition.input_type is not None:
+                # `serde.decode` is deliberately lenient on a type mismatch — it
+                # hands back the raw payload rather than raising, which is right
+                # when replaying a run already in flight (see its own
+                # docstring) and wrong here: an event shaped for a different
+                # contract should never reach `submit()`, let alone be retried
+                # `max_attempts` times as though the failure might clear on its
+                # own. `validate_as` is the strict half of the same serializer.
+                validate_as(definition.input_type, dict(event.payload))
             run_id = await self._runtime.submit(
                 subscription.workflow,
                 dict(event.payload),
+                trigger=TriggerKind.EVENT,
                 idempotency_key=f"{event.event_id}#{subscription.subscriber}",
                 metadata={
                     "loom.event_id": event.event_id,
                     "loom.event_type": event.record.type,
                     "loom.topic": subscription.topic,
                     "loom.subscriber": subscription.subscriber,
+                    "loom.chain_depth": event.record.chain_depth,
                 },
             )
-        except (RegistryError, ValueError, TypeError) as exc:
+        except (RegistryError, ValueError, TypeError, ValidationError) as exc:
             # Permanent: this event will fail identically forever, and leaving
             # it in place stalls the subscriber. Step over it, loudly.
             await self._dead_letter(subscription, event, exc, report)

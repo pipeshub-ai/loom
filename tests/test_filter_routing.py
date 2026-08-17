@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from loom.triggers.filter import FilterSpec
+from loom.triggers.filter import FilterError, FilterSpec
 from loom.triggers.routing import EventRouter, RoutingEvent
 
 # ---------------------------------------------------------------------------
@@ -124,8 +124,105 @@ class TestFilterOperators:
 
     def test_unknown_operator(self) -> None:
         f = FilterSpec(conditions={"x": {"$unknown": 1}})
-        with pytest.raises(ValueError, match="Unknown filter operator"):
+        with pytest.raises(ValueError, match="unknown filter operator"):
             f.matches({"x": 1})
+
+    def test_unknown_operator_names_the_field_and_the_alternatives(self) -> None:
+        """The message is read by whoever wrote the filter, not by the engine."""
+        f = FilterSpec(conditions={"priority": {"$unknown": 1}})
+
+        with pytest.raises(FilterError) as caught:
+            f.matches({"priority": 1})
+
+        assert "'priority'" in str(caught.value)
+        assert "$in" in str(caught.value)
+
+    def test_a_near_miss_is_suggested(self) -> None:
+        f = FilterSpec(conditions={"x": {"$eqq": 1}})
+
+        with pytest.raises(FilterError, match=r"Did you mean '\$eq'\?"):
+            f.matches({"x": 1})
+
+    def test_check_finds_a_bad_operator_without_an_event(self) -> None:
+        """Declaration time, where the author is still present.
+
+        `matches()` only runs once an event arrives, which in practice is after
+        deployment and against a subscriber that then cannot progress.
+        """
+        with pytest.raises(FilterError, match="unknown filter operator"):
+            FilterSpec(conditions={"x": {"$unknown": 1}}).check()
+
+    def test_check_passes_a_well_formed_filter(self) -> None:
+        FilterSpec(
+            conditions={
+                "a": "literal",
+                "b": {"$in": [1, 2]},
+                "c": {"$gte": 3, "$lte": 4},
+                "d": {"$exists": True},
+            }
+        ).check()
+
+    def test_a_filter_can_be_loaded_even_when_it_is_wrong(self) -> None:
+        """Construction stays permissive on purpose.
+
+        Subscriptions are rehydrated from the registry in bulk; refusing to
+        build one malformed filter there would fail the load of every other
+        subscription alongside it.
+        """
+        FilterSpec(conditions={"x": {"$unknown": 1}})
+
+
+class TestUnorderableComparisons:
+    """A comparison between types that do not order is a filter bug, not a miss."""
+
+    def test_string_against_number_is_reported(self) -> None:
+        f = FilterSpec(conditions={"priority": {"$gt": 50}})
+
+        with pytest.raises(FilterError) as caught:
+            f.matches({"priority": "high"})
+
+        assert "do not order" in str(caught.value)
+        assert "'priority'" in str(caught.value)
+
+    def test_a_comparable_pair_still_works(self) -> None:
+        f = FilterSpec(conditions={"priority": {"$gt": 50}})
+        assert f.matches({"priority": 60}) is True
+        assert f.matches({"priority": 40}) is False
+
+
+class TestContainsVersusIn:
+    """The two read alike and mean opposite things — the likeliest silent miss."""
+
+    def test_in_asks_whether_the_value_is_one_of_several(self) -> None:
+        f = FilterSpec(conditions={"status": {"$in": ["open", "reopened"]}})
+        assert f.matches({"status": "open"}) is True
+        assert f.matches({"status": "closed"}) is False
+
+    def test_contains_asks_whether_the_payload_list_holds_an_item(self) -> None:
+        f = FilterSpec(conditions={"labels": {"$contains": "bug"}})
+        assert f.matches({"labels": ["bug", "p1"]}) is True
+        assert f.matches({"labels": ["p1"]}) is False
+
+    def test_in_against_a_list_valued_field_does_not_pretend_to_work(self) -> None:
+        """`{"labels": {"$in": ["bug"]}}` against `["bug"]` is False, not True.
+
+        Kept as an explicit assertion because it looks like it should match, and
+        because the fix is to reach for `$contains` rather than to change `$in`.
+        """
+        f = FilterSpec(conditions={"labels": {"$in": ["bug"]}})
+        assert f.matches({"labels": ["bug"]}) is False
+
+    def test_in_with_a_non_list_operand_is_reported(self) -> None:
+        f = FilterSpec(conditions={"labels": {"$in": "bug"}})
+
+        with pytest.raises(FilterError, match=r"needs a list"):
+            f.matches({"labels": "bug"})
+
+    def test_eq_exists(self) -> None:
+        """Its absence beside `$ne` sent people to an operator that raises."""
+        f = FilterSpec(conditions={"status": {"$eq": "open"}})
+        assert f.matches({"status": "open"}) is True
+        assert f.matches({"status": "closed"}) is False
 
     def test_null_with_gt(self) -> None:
         f = FilterSpec(conditions={"score": {"$gt": 50}})

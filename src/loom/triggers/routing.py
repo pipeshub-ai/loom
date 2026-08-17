@@ -35,6 +35,13 @@ class RoutingEvent:
     timestamp: datetime = field(
         default_factory=lambda: datetime.now(UTC)
     )
+    """When the event arrived.
+
+    A ``default_factory`` cannot reach a ``Clock``, so a caller inside a
+    Runtime on virtual time must pass ``timestamp=rt.clock.now()`` — otherwise
+    this one field lands on the wall clock while every other timestamp on the
+    run it triggers lands on the test's timeline, and comparing them reads as
+    an event that arrived before the system existed."""
 
 
 @dataclass

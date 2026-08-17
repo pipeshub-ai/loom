@@ -90,6 +90,12 @@ class Subscription:
                 "bounds — `loom events replay --subscriber "
                 f"{self.subscriber} --since 7d --max-events 1000`."
             )
+        if self.filter is not None:
+            # The check `accepts()` below has always claimed happened here. It
+            # did not, so a mistyped operator reached evaluation instead — where
+            # it raises, outside the dead-letter path, and stalls the subscriber
+            # on its first event forever.
+            self.filter.check()
 
     def accepts(self, payload: object) -> bool:
         """Whether this subscription wants an event with *payload*.

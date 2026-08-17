@@ -43,7 +43,10 @@ class TestTheMatrixIsComplete:
         shipped = {
             path.stem
             for path in _Path(stores.__file__).parent.glob("*.py")
-            if path.stem not in {"__init__", "base", "factory"}
+            # Infrastructure shared by the backends rather than a backend:
+            # `migrations` is the numbered DDL the SQL stores apply on connect,
+            # exercised through them and through test_schema_migrations.py.
+            if path.stem not in {"__init__", "base", "factory", "migrations"}
         }
         missing = shipped - {b.name for b in ALL_BACKENDS} - exempt
         assert not missing, f"stores with no conformance row: {sorted(missing)}"

@@ -321,30 +321,78 @@ class TestPaginationIsDeclaredWhereItHappens:
         "duckduckgo": "loom.toolsets.duckduckgo.client",
     }
 
+    #: Every way a client in this repo drives a paging loop.
+    #:
+    #: `page_through(` was missing, and it is the idiom every non-Google client
+    #: uses — so this returned an empty set for jira, confluence, clickup,
+    #: asana, salesforce, hubspot, github and gitlab, and the check below
+    #: `continue`d past every one of their operations. Eight toolsets whose
+    #: coverage-drift guard silently checked nothing, including two that were
+    #: drifting at the time.
+    PAGING_CALLS = ("collect(", "paginate(", "page_through(", ".mapped(", ".filtered(")
+
     def _client_pages(self, module_name: str) -> set[str]:
         """Client methods that run a paging loop.
 
         Source inspection, and deliberately so: the client is the only place
         that knows the truth, and asking it by *calling* it would need
-        credentials. Fails closed — a loop written some way this does not
-        recognise reports a missing declaration rather than passing quietly.
+        credentials.
         """
         import importlib
         import inspect
 
         module = importlib.import_module(module_name)
-        found: set[str] = set()
+        sources: dict[str, str] = {}
         for _, klass in inspect.getmembers(module, inspect.isclass):
             if not klass.__module__.startswith(module_name):
                 continue
             for name, method in inspect.getmembers(klass, inspect.isfunction):
                 try:
-                    source = inspect.getsource(method)
+                    sources[name] = inspect.getsource(method)
                 except OSError:
                     continue
-                if "collect(" in source or "paginate(" in source or ".mapped(" in source:
+
+        found = {
+            name
+            for name, source in sources.items()
+            if any(call in source for call in self.PAGING_CALLS)
+        }
+        # Transitively: a method that calls a paging method pages too. Without
+        # this the detector stops at the first hop, and Salesforce's
+        # `find_accounts` -> `_query_rows` -> `query` reads as not paging — one
+        # level of indirection was enough to hide coverage being computed and
+        # then discarded by a comprehension.
+        changed = True
+        while changed:
+            changed = False
+            for name, source in sources.items():
+                if name in found:
+                    continue
+                if any(f"self.{callee}(" in source for callee in found):
                     found.add(name)
+                    changed = True
         return found
+
+    def test_the_paging_detector_recognises_every_client_idiom(self) -> None:
+        """The detector is the guard's eyesight, so its blind spots are silent.
+
+        Asserted per client rather than in aggregate: one toolset going dark is
+        invisible in a total, and going dark is exactly the failure — the check
+        below skips an operation whose client method it did not recognise, so a
+        detector that sees nothing passes everything.
+        """
+        # Exa and Tavily genuinely do not page — neither API has a cursor of
+        # any kind, which is why their reads return plain lists and declare
+        # `pagination=False`. Their emptiness here is a fact about the vendors,
+        # not a blind spot.
+        no_cursor_upstream = {"exa", "tavily"}
+        blind = [
+            toolset
+            for toolset, module in self.CLIENTS.items()
+            if toolset not in no_cursor_upstream and not self._client_pages(module)
+        ]
+
+        assert not blind, f"paging detector sees nothing for: {blind}"
 
     def test_a_client_that_pages_says_so_all_the_way_out(self) -> None:
         """The check the two-way version could not make.
@@ -367,6 +415,23 @@ class TestPaginationIsDeclaredWhereItHappens:
                 # The tool wraps a client method of a related name.
                 stem = op.function.split("_", 1)[-1]
                 if stem not in paging and op.id.split(".")[-1] not in paging:
+                    continue
+                # Only a read that hands back *rows* owes a coverage answer. A
+                # resolver returns one thing or nothing — `calendar_find_calendar`,
+                # `jira_resolve_user`, `salesforce_whoami` — and "did I see
+                # everything?" is not a question about a single object, however
+                # much paging went into finding it.
+                # Read through the @step wrapper the way `paginates` does — its
+                # own __annotations__ describe the decorator, not the tool — and
+                # as text, because these modules use postponed annotations.
+                import inspect as _inspect
+
+                target = getattr(fn, "fn", fn)
+                try:
+                    returns = str(_inspect.signature(target).return_annotation)
+                except (TypeError, ValueError):
+                    continue
+                if not returns.startswith("list["):
                     continue
                 if not paginates(fn):
                     wrong.append(

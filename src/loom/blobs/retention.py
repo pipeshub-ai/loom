@@ -13,6 +13,9 @@ from pydantic import BaseModel
 
 from loom.core.models import ExecutionStatus
 
+#: Rows per store round trip while scanning for old runs.
+_COMPACT_PAGE = 500
+
 #: Only these can be compacted — a suspended run is still going to resume.
 TERMINAL_STATUSES: tuple[ExecutionStatus, ...] = (
     ExecutionStatus.COMPLETED,
@@ -34,6 +37,41 @@ def _blob_ref(payload: Any) -> str | None:
         ref = payload[BLOB_KEY]
         return ref if isinstance(ref, str) else None
     return None
+
+
+#: How far down a chain of replay clones to look. `Runtime.replay` names a
+#: clone `<run_id>:replay`, and replaying a clone appends again, so the chain is
+#: discoverable by name without a store query for descendants.
+_CLONE_DEPTH = 8
+
+
+async def _refs_held_by_clones(store: Any, run_id: str) -> set[str]:
+    """Blob refs a surviving replay clone of *run_id* still needs.
+
+    `Runtime.replay` copies the source journal verbatim, so the clone's entries
+    name the same blobs. Deleting them while compacting the source leaves the
+    clone with a journal it cannot read — the one way this failure reaches a
+    correctly configured deployment, since the sharing is created by LOOM rather
+    than by chance.
+
+    Costs one journal read per surviving clone, and clones are rare.
+    """
+    held: set[str] = set()
+    name = run_id
+    for _ in range(_CLONE_DEPTH):
+        name = f"{name}:replay"
+        try:
+            entries = await store.load_journal(name)
+        except Exception:
+            # A missing clone is the common case, not a fault.
+            break
+        if not entries:
+            break
+        for entry in entries:
+            ref = _blob_ref(entry.output)
+            if ref is not None:
+                held.add(ref)
+    return held
 
 
 class RetentionPolicy(BaseModel):
@@ -62,6 +100,15 @@ class CompactionResult(BaseModel):
     payloads_deleted: int = 0
     runs_archived: int = 0
     kv_expired: int = 0
+
+    scan_truncated: bool = False
+    """The pass stopped at ``scan_limit`` with rows left unexamined.
+
+    Deliberately visible on the result rather than logged and forgotten: every
+    other field here can read ``0`` both because there was nothing to do and
+    because the scan never reached it, and those call for opposite responses.
+    Not counted in :attr:`total` — it is a caveat about the count, not an item.
+    """
 
     @property
     def total(self) -> int:
@@ -111,6 +158,7 @@ class RetentionManager:
         *,
         blobs: Any | None = None,
         batch_size: int = 500,
+        scan_limit: int = 50_000,
         dry_run: bool = False,
     ) -> CompactionResult:
         """Run one compaction pass against *store*.
@@ -128,8 +176,23 @@ class RetentionManager:
             — otherwise blob storage grows forever while the runs that explain
             it are compacted away.
         batch_size:
-            How many runs to examine per status. Compaction is meant to be run
-            repeatedly from a scheduler, not to drain everything at once.
+            How many runs to *compact* per status, not how many to look at.
+            Compaction is meant to be run repeatedly from a scheduler, not to
+            drain everything at once.
+
+            The distinction is the correctness of this method. ``finished_at``
+            lives inside the record's JSON payload, so the cutoff cannot be a
+            ``WHERE`` clause and is applied here — and it used to be applied to
+            a single ``list_executions(limit=batch_size)``, which orders
+            newest-first because ``run_id`` is a ULID. Old runs are exactly the
+            ones being compacted, so they sat behind every recent run and never
+            entered the window: a store with more than ``batch_size`` terminal
+            runs reported ``runs_archived=0`` forever while growing without
+            bound, and the documented reclamation path looked like it was
+            working.
+        scan_limit:
+            Rows examined per status before the pass gives up and says so. A
+            pass that quietly stops early is the same defect one page larger.
         dry_run:
             Count what would be affected without deleting anything.
         """
@@ -138,16 +201,17 @@ class RetentionManager:
         result = CompactionResult()
 
         for status in TERMINAL_STATUSES:
-            records = await store.list_executions(status=status, limit=batch_size)
-            for record in records:
-                finished = record.finished_at or record.created_at
-                if finished is None:
-                    continue
-                finished = _as_utc(finished)
-
+            for record in await self._stale_records(
+                store,
+                status,
+                journal_cutoff=journal_cutoff,
+                record_cutoff=record_cutoff,
+                batch_size=batch_size,
+                scan_limit=scan_limit,
+                result=result,
+            ):
+                finished = _as_utc(record.finished_at or record.created_at)
                 expiring = finished < record_cutoff
-                if not expiring and finished >= journal_cutoff:
-                    continue
 
                 # Collect blob refs before the journal that names them is gone.
                 if blobs is not None:
@@ -172,20 +236,87 @@ class RetentionManager:
         return result
 
     @staticmethod
+    async def _stale_records(
+        store: Any,
+        status: ExecutionStatus,
+        *,
+        journal_cutoff: datetime,
+        record_cutoff: datetime,
+        batch_size: int,
+        scan_limit: int,
+        result: CompactionResult,
+    ) -> list[Any]:
+        """Runs of *status* old enough to compact, found by paging the store.
+
+        Stops at ``batch_size`` matches so one pass stays bounded, and at
+        ``scan_limit`` rows examined so a very large store cannot make a pass
+        unbounded either. The second ceiling is recorded on the result rather
+        than swallowed — a caller that sees ``runs_archived=0`` needs to know
+        whether that means "nothing was old enough" or "we did not get that far".
+        """
+        # `finished_at` became an indexed column in migration 1, so the stores
+        # that ship with LOOM answer this without a scan. A host's own store
+        # need not implement it; the paging loop below is correct, just linear.
+        indexed = getattr(store, "terminal_before", None)
+        if indexed is not None:
+            cutoff = max(journal_cutoff, record_cutoff)
+            return list(await indexed(cutoff, [status], limit=batch_size))
+
+        found: list[Any] = []
+        scanned = 0
+        offset = 0
+        while len(found) < batch_size:
+            if scanned >= scan_limit:
+                if await store.list_executions(status=status, limit=1, offset=offset):
+                    result.scan_truncated = True
+                break
+            page = await store.list_executions(
+                status=status,
+                limit=min(_COMPACT_PAGE, scan_limit - scanned),
+                offset=offset,
+            )
+            if not page:
+                break
+            scanned += len(page)
+            offset += len(page)
+            for record in page:
+                finished = record.finished_at or record.created_at
+                if finished is None:
+                    continue
+                finished = _as_utc(finished)
+                # Old enough to lose its journal, or old enough to lose the
+                # record entirely. Anything newer than both is left alone.
+                if finished < record_cutoff or finished < journal_cutoff:
+                    found.append(record)
+                    if len(found) >= batch_size:
+                        break
+        return found
+
+    @staticmethod
     async def _drop_blobs(
         store: Any, blobs: Any, run_id: str, *, dry_run: bool
     ) -> int:
         """Delete blobs referenced by one run's journal. Returns the count.
 
-        Deletion is best-effort: a blob shared with a run that is still live has
-        already been removed by whichever run got here first, and the second
-        delete is a harmless no-op. Content addressing means re-publishing the
-        same bytes simply recreates it.
+        Deletion used to be justified as best-effort — "a blob shared with a
+        live run has already been removed by whichever run got here first, and
+        the second delete is a harmless no-op". That reasons about deleting
+        twice, not about deleting something still needed. Blobs are
+        content-addressed, so sharing is the *normal* case for a deterministic
+        step, and `Runtime.replay` guarantees it: the clone's journal is a copy
+        of the original's, sharing every ref. Compacting the original left the
+        clone unable to replay at all.
+
+        A general fix is a refcount, which needs a table this store does not
+        have. What is closed here is the sharing LOOM itself creates, which is
+        both the common case and the only one that is certain: refs still named
+        by a surviving replay clone are kept.
         """
+        held = await _refs_held_by_clones(store, run_id)
         deleted = 0
         for entry in await store.load_journal(run_id):
             ref = _blob_ref(entry.output)
-            if ref is None:
+            if ref is None or ref in held:
                 continue
             deleted += 1
             if not dry_run:

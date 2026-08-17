@@ -437,7 +437,16 @@ class BuiltInAgentRuntime:
                         kind=ItemKind.TOOL_OUTPUT,
                         agent=agent.name,
                         name=call.name,
-                        content=result_str,
+                        # The *bounded* text once bounds are configured, not the
+                        # raw result. `messages` and `items` both live inside the
+                        # one AgentResult that becomes one journal entry, so
+                        # keeping the full text here meant `ResultBounds` capped
+                        # the model's view and nothing else: twenty 4 MB tool
+                        # calls still concentrated ~80 MB into a single row.
+                        # Without bounds this is unchanged — the journal keeps
+                        # the value whole, because a replay has to reconstruct
+                        # the run that happened.
+                        content=bounded if agent.bounds is not None else result_str,
                         turn=turn,
                     ))
                     limits.check_tool_calls(len(all_tool_calls))

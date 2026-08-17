@@ -6,11 +6,12 @@ policy and decides: admit, delay, skip, debounce, or batch.
 
 from __future__ import annotations
 
-import time
 from collections import defaultdict
 from enum import StrEnum
 
 from pydantic import BaseModel
+
+from loom.runtime.clock import Clock, SystemClock
 
 # ---------------------------------------------------------------------------
 # Decision enum
@@ -130,9 +131,25 @@ class AdmissionController:
     All state is held in-memory, making the controller easy to test and
     suitable for single-process deployments.  Distributed deployments should
     back these counters with a shared store (Redis, database row locks, etc.).
+
+    Every window this evaluates — throttle, rate limit, debounce, batch — is
+    measured against the :class:`~loom.runtime.clock.Clock`, so pass the
+    Runtime's own when there is one::
+
+        rt = Runtime(store=store, clock=clock,
+                     admission=AdmissionController(clock=clock))
+
+    It reads ``clock.now()`` rather than ``time.monotonic()``, and the trade is
+    deliberate. Monotonic time is immune to an NTP step; it is also unreachable
+    from a test, which is why nothing anywhere proved that a debounce window
+    ever *expires* — only that entering one debounces. A clock step widens or
+    narrows one window once and self-corrects; an untestable expiry is a
+    permanent hole, since a debounce that never releases looks exactly like a
+    trigger that never fired.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Clock | None = None) -> None:
+        self._clock: Clock = clock or SystemClock()
         self._in_flight: dict[str, int] = defaultdict(int)
 
         # Throttle: track the timestamp of the last admitted run per key.
@@ -172,14 +189,21 @@ class AdmissionController:
         policy: FlowControlPolicy,
         *,
         partition_key: str = "",
+        now: float | None = None,
     ) -> AdmissionResult:
         """Run all configured checks in priority order.
 
         Order: concurrency -> singleton -> throttle -> rate limit -> debounce
         -> batch.  The first check that does *not* admit short-circuits.
+
+        *now* overrides the clock reading for this one call, in seconds on the
+        same scale the windows are expressed in. For a caller that already has
+        a moment in hand and must not re-read the clock between two decisions —
+        two policies evaluated for one trigger have to agree about when they
+        were evaluated, or one window closes a microsecond after the other.
         """
         key = _flow_key(flow_id, partition_key)
-        now = time.monotonic()
+        moment = self._clock.now().timestamp() if now is None else now
 
         # 1. Concurrency ---------------------------------------------------
         if policy.concurrency is not None:
@@ -212,7 +236,7 @@ class AdmissionController:
             min_interval = 1.0 / policy.throttle.max_per_second
             last = self._last_admitted.get(key)
             if last is not None:
-                elapsed = now - last
+                elapsed = moment - last
                 if elapsed < min_interval:
                     wait = min_interval - elapsed
                     return AdmissionResult(
@@ -224,12 +248,12 @@ class AdmissionController:
         # 4. Rate limit -----------------------------------------------------
         if policy.rate_limit is not None:
             log = self._rate_log[key]
-            cutoff = now - policy.rate_limit.period_seconds
+            cutoff = moment - policy.rate_limit.period_seconds
             # Prune expired entries.
             log[:] = [ts for ts in log if ts > cutoff]
             if len(log) >= policy.rate_limit.requests:
                 oldest = log[0]
-                wait = oldest + policy.rate_limit.period_seconds - now
+                wait = oldest + policy.rate_limit.period_seconds - moment
                 return AdmissionResult(
                     decision=AdmissionDecision.DELAY,
                     reason="rate limit exceeded",
@@ -240,9 +264,9 @@ class AdmissionController:
         if policy.debounce is not None:
             dk = _flow_key(flow_id, policy.debounce.key or partition_key)
             last_trigger = self._debounce_last.get(dk)
-            self._debounce_last[dk] = now
+            self._debounce_last[dk] = moment
             if last_trigger is not None:
-                elapsed = now - last_trigger
+                elapsed = moment - last_trigger
                 if elapsed < policy.debounce.period_seconds:
                     return AdmissionResult(
                         decision=AdmissionDecision.DEBOUNCE,
@@ -254,10 +278,10 @@ class AdmissionController:
         if policy.batch is not None:
             self._batch_counts[key] += 1
             if key not in self._batch_first_ts:
-                self._batch_first_ts[key] = now
+                self._batch_first_ts[key] = moment
 
             count = self._batch_counts[key]
-            elapsed = now - self._batch_first_ts[key]
+            elapsed = moment - self._batch_first_ts[key]
 
             if count < policy.batch.max_size and elapsed < policy.batch.window_seconds:
                 return AdmissionResult(
@@ -270,6 +294,6 @@ class AdmissionController:
             self._batch_first_ts.pop(key, None)
 
         # All checks passed — record and admit.
-        self._last_admitted[key] = now
-        self._rate_log[key].append(now)
+        self._last_admitted[key] = moment
+        self._rate_log[key].append(moment)
         return AdmissionResult(decision=AdmissionDecision.ADMIT)

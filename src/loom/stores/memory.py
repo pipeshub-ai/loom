@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import defaultdict, deque
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -16,6 +17,12 @@ from loom.core.models import (
     TriggerRecord,
 )
 from loom.runtime.journal import JournalEntry, path_order
+from loom.stores.base import as_utc
+
+
+def _by_time(item: tuple[datetime, str, Any]) -> tuple[datetime, str]:
+    """Order by timestamp, then run id — so ties are stable rather than arbitrary."""
+    return item[0], item[1]
 
 
 class MemoryStore:
@@ -190,15 +197,62 @@ class MemoryStore:
     # -- timers -----------------------------------------------------------------------
 
     async def due_runs(self, now: datetime, *, limit: int = 100) -> list[str]:
+        # Both sides normalised, as due_triggers already does: a naive wake_at
+        # against an aware `now` raises TypeError, which turns a caller passing
+        # `datetime(2026, 8, 17, 9, 30)` into a crashed scheduler tick rather
+        # than a woken run. See loom.stores.base.as_utc.
+        now = as_utc(now)
         async with self._mutex:
             due = [
-                record.run_id
+                (as_utc(record.wake_at), record.run_id)
                 for record in self._executions.values()
                 if record.status is ExecutionStatus.SUSPENDED
                 and record.wake_at is not None
-                and record.wake_at <= now
+                and as_utc(record.wake_at) <= now
             ]
-        return sorted(due)[:limit]
+        # Ordered by wake time, not by run_id: callers take the head of this
+        # list, so the run that has been waiting longest has to come first.
+        return [run_id for _wake, run_id in sorted(due)][:limit]
+
+    async def due_leases(
+        self,
+        before: datetime,
+        statuses: Sequence[ExecutionStatus],
+        *,
+        limit: int = 100,
+    ) -> list[ExecutionRecord]:
+        before = as_utc(before)
+        wanted = set(statuses)
+        async with self._mutex:
+            found = [
+                (as_utc(r.lease_expires_at), r.run_id, r)
+                for r in self._executions.values()
+                if r.status in wanted
+                and r.lease_expires_at is not None
+                and as_utc(r.lease_expires_at) <= before
+            ]
+        return [r.model_copy(deep=True) for _at, _id, r in sorted(found, key=_by_time)][:limit]
+
+    async def terminal_before(
+        self,
+        cutoff: datetime,
+        statuses: Sequence[ExecutionStatus],
+        *,
+        limit: int = 100,
+    ) -> list[ExecutionRecord]:
+        cutoff = as_utc(cutoff)
+        wanted = set(statuses)
+        found = []
+        async with self._mutex:
+            for r in self._executions.values():
+                if r.status not in wanted:
+                    continue
+                # created_at stands in for a record that never recorded a
+                # finish — the same fallback the caller used to apply itself.
+                finished = r.finished_at or r.created_at
+                if finished is not None and as_utc(finished) < cutoff:
+                    found.append((as_utc(finished), r.run_id, r))
+        return [r.model_copy(deep=True) for _at, _id, r in sorted(found, key=_by_time)][:limit]
 
     # -- cache ------------------------------------------------------------------------
 

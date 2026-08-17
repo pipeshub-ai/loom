@@ -97,6 +97,7 @@ HUBSPOT_MANIFEST = ToolsetManifest(
             OperationSpec(
                 id="contacts.find",
                 function="hubspot_find_contacts",
+                pagination=True,
                 summary="Find contacts by name, email, or company.",
                 description="The join between a person and the id every write needs.",
                 resolves="contact",
@@ -125,6 +126,7 @@ HUBSPOT_MANIFEST = ToolsetManifest(
             OperationSpec(
                 id="companies.find",
                 function="hubspot_find_companies",
+                pagination=True,
                 summary="Find companies by name or domain.",
                 resolves="company",
                 effect=EffectClass.READ,
@@ -136,6 +138,7 @@ HUBSPOT_MANIFEST = ToolsetManifest(
             OperationSpec(
                 id="deals.find",
                 function="hubspot_find_deals",
+                pagination=True,
                 summary="Find deals by free text.",
                 effect=EffectClass.READ,
                 idempotent=True,

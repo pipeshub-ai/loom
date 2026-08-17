@@ -21,10 +21,12 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
+from loom.core.compat import UNKNOWN as _UNKNOWN
+from loom.core.compat import tolerant_enum
 from loom.core.exceptions import NondeterminismError
 from loom.core.models import ErrorInfo, StepRecord, StepStatus, Usage
 
@@ -33,6 +35,15 @@ logger = logging.getLogger(__name__)
 
 class EntryKind(StrEnum):
     """What kind of durable operation an entry represents."""
+
+    UNKNOWN = _UNKNOWN
+    """A kind written by a newer version of LOOM.
+
+    On the replay path, so its absence was the worst of the evolution hazards:
+    one new member in a later version made every journal containing it
+    unloadable by an earlier one — an outage, not a degradation. See
+    :mod:`loom.core.compat`.
+    """
 
     STEP = "step"
     SIDE_EFFECT = "side_effect"
@@ -67,6 +78,21 @@ class EntryStatus(StrEnum):
     goes terminal and no outer driver claimed it.
     """
     SUSPENDED = "suspended"
+
+    UNKNOWN = _UNKNOWN
+    """A status written by a newer version. See :mod:`loom.core.compat`.
+
+    Deliberately not settled (see :attr:`JournalEntry.is_settled`): an entry
+    whose outcome cannot be read must not be served back to a replay as though
+    it were an answer.
+    """
+
+
+#: Persisted journal enum fields, tolerant of members this version predates.
+Kind = Annotated[EntryKind, BeforeValidator(tolerant_enum(EntryKind, EntryKind.UNKNOWN))]
+EntryState = Annotated[
+    EntryStatus, BeforeValidator(tolerant_enum(EntryStatus, EntryStatus.UNKNOWN))
+]
 
 
 def path_order(path: str) -> tuple[int, ...]:
@@ -108,12 +134,19 @@ class Scope:
 class JournalEntry(BaseModel):
     """One recorded durable operation."""
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    # See ExecutionRecord for why "allow" rather than the "ignore" default.
+    # It matters less here — `drain_dirty()` flushes only touched entries, so an
+    # untouched entry is not rewritten and cannot be stripped — but a *retried*
+    # entry is rewritten, and that is the one a mixed-version deploy touches.
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
+
+    schema_version: int = 1
+    """Shape of this entry. See :attr:`ExecutionRecord.schema_version`."""
 
     path: str
-    kind: EntryKind
+    kind: Kind
     name: str
-    status: EntryStatus = EntryStatus.PENDING
+    status: EntryState = EntryStatus.PENDING
     fingerprint: str = ""
     contract_hash: str = ""
     """Hash of the step's input/output type annotations — detects contract changes."""
@@ -155,12 +188,18 @@ class JournalEntry(BaseModel):
             # the journal keeps the distinction that decides what replay does.
             EntryStatus.EXHAUSTED: StepStatus.FAILED,
             EntryStatus.SUSPENDED: StepStatus.RUNNING,
+            # An entry written by a newer version. Rendered as PENDING because
+            # it names no outcome — and looked up with .get() besides, so a
+            # member added later cannot turn "show me this run" into a KeyError.
+            EntryStatus.UNKNOWN: StepStatus.PENDING,
         }
         return StepRecord(
             seq=seq,
             name=self.name,
             kind=self.kind.value,
-            status=StepStatus.CACHED if self.metadata.get("cache_hit") else status_map[self.status],
+            status=StepStatus.CACHED
+            if self.metadata.get("cache_hit")
+            else status_map.get(self.status, StepStatus.PENDING),
             fingerprint=self.fingerprint,
             input=self.input,
             output=self.output,

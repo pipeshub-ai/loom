@@ -30,6 +30,7 @@ MAX_RESPONSE_CHARS = 8_000
 
 __all__ = [
     "MAX_RESPONSE_CHARS",
+    "STATIC_STAGE_NAMES",
     "call_read_operation",
     "get_tool_contract",
     "get_tool_docs",
@@ -156,65 +157,170 @@ async def call_read_operation(
     return result[:MAX_RESPONSE_CHARS]
 
 
+#: The non-executing half of ``agents/stages.py::default_stages()``. Every
+#: stage here reads the source and nothing else — no subprocess that runs the
+#: workflow, no second model, no API key — which is what makes the whole set
+#: safe to run inside one MCP tool call. The executing stages (smoke, replay)
+#: live behind :func:`smoke_test_workflow`, and ``critique`` needs a model this
+#: server deliberately does not have.
+STATIC_STAGE_NAMES = (
+    "compile", "static", "grants", "coverage", "resolution", "lint", "types",
+)
+
+#: Stages that judge the code against the *request* rather than against the
+#: language. With no spec they have nothing to compare and find nothing, which
+#: is not the same as finding nothing wrong — see :func:`_stage_rows`.
+_SPEC_STAGES = frozenset({"coverage", "resolution"})
+
+
+def _static_pipeline() -> Any:
+    """The pipeline :func:`validate_workflow_code` runs.
+
+    Built from ``agents/stages.py`` rather than re-implemented, so a stage
+    added for the coding agent reaches an MCP client too. Before this, the
+    tool ran a hand-rolled ``CodeValidator`` call and a client got two of the
+    seven — including neither of the two written from observed failures that
+    compile and validate perfectly cleanly.
+    """
+    from loom.agents.checks import CheckPipeline
+    from loom.agents.stages import (
+        CompileStage,
+        CoverageStage,
+        GrantStage,
+        LintStage,
+        ResolutionStage,
+        StaticStage,
+        TypeStage,
+    )
+
+    return CheckPipeline(
+        [
+            CompileStage(),
+            StaticStage(),
+            GrantStage(_catalog()),
+            CoverageStage(),
+            ResolutionStage(),
+            LintStage(),
+            TypeStage(),
+        ]
+    )
+
+
 async def validate_workflow_code(
     code: str,
     allowed_packages: str | None = None,
+    spec: str = "",
 ) -> str:
-    """Validate workflow code against LOOM's static rules. Does not run it.
+    """Validate workflow code against LOOM's rules. Does not run it.
 
-    Runs, in order: a compile check (catches what ``ast.parse`` lets through,
-    like a bare ``return`` outside a function), then AST structure checks
-    (missing ``@workflow``/``@step``, bare I/O in a workflow body,
-    nondeterministic calls, unresolvable ``loom`` symbols, and
-    imports of toolsets this server does not have registered).
+    Runs the same seven non-executing stages the coding agent's own pipeline
+    runs, cheapest first, stopping at the first blocking failure: ``compile``,
+    ``static`` (structure, determinism, imports, store choice, toolset
+    availability), ``grants``, ``coverage``, ``resolution``, ``lint`` (ruff),
+    ``types`` (mypy).
 
     Args:
         code: Complete Python source.
         allowed_packages: Comma-separated third-party package names the
             target environment has installed, e.g. ``"httpx,pandas"``. Omit
             to skip the allowlist check entirely.
+        spec: The user's own words for what the workflow should do. Without
+            it ``coverage`` and ``resolution`` are skipped — they compare the
+            code against the request, and there is nothing to compare against.
+            Both catch defects that pass every other stage: a fetch capped at
+            100 answering a spec that said "all", and a query built by
+            fuzzy-matching a word the spec supplied instead of resolving it.
 
     Returns JSON: ``{"valid": bool, "issues": [{"category", "severity",
-    "message"}, ...]}``. ``valid`` is false only when an issue's severity is
-    ``"error"`` — warnings do not block.
+    "message"}, ...], "stages": [{"name", "status", "reason"}, ...]}``.
+    ``valid`` is false only when an issue's severity is ``"error"`` — warnings
+    do not block. A stage's ``status`` is one of ``ok``, ``failed``,
+    ``skipped`` (its tool is absent, or it had nothing to judge against), or
+    ``not_run`` (an earlier blocking stage failed).
     """
-    from loom.agents.smoke import compile_check
-    from loom.agents.validator import CodeValidator
-
-    compiled = compile_check(code)
-    if not compiled.ok:
-        return _json(
-            {
-                "valid": False,
-                "issues": [
-                    {
-                        "category": "syntax",
-                        "severity": "error",
-                        "message": compiled.error,
-                    }
-                ],
-            }
-        )
+    from loom.agents.checks import CheckContext
 
     packages = (
         {p.strip() for p in allowed_packages.split(",") if p.strip()}
         if allowed_packages
         else None
     )
-    validator = CodeValidator(
+    # An empty registry checks nothing — the same rule grant validation
+    # follows. Toolsets load lazily and through entry points, so "none
+    # registered" says nothing about what the target environment has, and
+    # passing an empty set would make the validator reject every
+    # ``loom.toolsets.*`` import in the file.
+    available = set(_catalog().list_toolsets()) or None
+
+    context = CheckContext(
         allowed_packages=packages,
+        available_toolsets=available,
         toolset_modules=_toolset_modules(),
+        spec=spec,
     )
-    issues = validator.validate(code)
-    return _json(
-        {
-            "valid": not any(i.severity == "error" for i in issues),
-            "issues": [
-                {"category": i.category, "severity": i.severity, "message": i.message}
-                for i in issues
-            ],
-        }
-    )
+    report = await _static_pipeline().run(code, context)
+
+    payload: dict[str, Any] = {
+        "valid": report.ok,
+        "issues": [
+            {"category": i.category, "severity": i.severity, "message": i.message}
+            for i in report.issues
+        ],
+        "stages": _stage_rows(report, spec),
+    }
+    if not spec.strip():
+        payload["note"] = (
+            "coverage and resolution were skipped. Pass spec= (the user's own "
+            "words for what this workflow should do) so they can check the "
+            "code against the request, not just against the language."
+        )
+    return _json(payload)
+
+
+def _stage_rows(report: Any, spec: str) -> list[dict[str, Any]]:
+    """One row per stage, saying what it actually did.
+
+    A stage that could not run has found nothing, and reporting that as a pass
+    is how a client concludes its code cleared seven checks when it cleared
+    five. ``not_run`` is the same honesty applied to the pipeline's own
+    short-circuit: everything after a blocking failure would report only that
+    failure's consequences, so it was never asked.
+    """
+    rows: list[dict[str, Any]] = []
+    for name in STATIC_STAGE_NAMES:
+        result = report.result(name)
+        if result is None:
+            rows.append(
+                {
+                    "name": name,
+                    "status": "not_run",
+                    "reason": "an earlier blocking stage failed; this would "
+                    "only report its consequences",
+                }
+            )
+        elif result.skipped:
+            # ``GrantStage`` states its reason in ``skipped=`` rather than
+            # ``reason=``; read whichever carried it, because a skip with no
+            # stated reason is indistinguishable from a pass to anyone
+            # skimming.
+            reason = result.reason or (
+                result.skipped if isinstance(result.skipped, str) else ""
+            )
+            rows.append({"name": name, "status": "skipped", "reason": reason})
+        elif name in _SPEC_STAGES and not spec.strip():
+            rows.append(
+                {
+                    "name": name,
+                    "status": "skipped",
+                    "reason": "no spec was passed, so there was nothing to "
+                    "judge the code's intent against",
+                }
+            )
+        else:
+            rows.append(
+                {"name": name, "status": "failed" if result.errors else "ok"}
+            )
+    return rows
 
 
 async def smoke_test_workflow(
@@ -241,9 +347,17 @@ async def smoke_test_workflow(
         timeout: Seconds before the subprocess is killed and the run reported
             as failed (not a hang in this tool — a bounded wait).
 
+    On a run that completes, it then runs the code *twice more* and compares
+    the two outputs — the ``replay`` key. Nondeterminism is the one defect
+    class a single run cannot see: a body reading ``datetime.now()`` or
+    iterating a set passes once and diverges on the replay the engine performs
+    after every crash, park, or retry. Reported separately from ``ok`` because
+    it is a different question, and skipped when the first run did not
+    complete, since there is then nothing to compare.
+
     Returns JSON: ``ok``, ``phase`` (``compile``/``import``/``run``/``done``),
     ``error``, ``traceback``, ``steps_executed``, ``output_preview``,
-    ``workflows_found``, ``status``, ``environmental``.
+    ``workflows_found``, ``status``, ``environmental``, ``replay``.
     """
     import asyncio
 
@@ -272,8 +386,53 @@ async def smoke_test_workflow(
             "workflows_found": result.workflows_found,
             "status": result.status,
             "environmental": result.environmental,
+            "replay": await _replay_report(
+                code, workflow_input, fakes, timeout, result
+            ),
         }
     )
+
+
+async def _replay_report(
+    code: str,
+    workflow_input: Any,
+    fakes: list[tuple[str, str]],
+    timeout: float,
+    smoked: Any,
+) -> dict[str, Any]:
+    """Did two runs of the same code produce the same output?
+
+    Reuses ``ReplayStage`` rather than comparing two ``smoke_run`` calls here,
+    so the determinism message a client repairs against is written in exactly
+    one place. Best-effort throughout: a run that never completed is reported
+    as ``skipped``, never as ``ok``, because claiming a determinism check that
+    did not happen is the failure this whole payload shape exists to avoid.
+    """
+    if not smoked.ok:
+        return {
+            "status": "skipped",
+            "reason": "the run did not complete, so there was no output for a "
+            "second run to be compared against",
+        }
+
+    from loom.agents.checks import CheckContext
+    from loom.agents.stages import ReplayStage
+
+    result = await ReplayStage().run(
+        code,
+        CheckContext(workflow_input=workflow_input, fakes=fakes, timeout=timeout),
+    )
+    if result.skipped:
+        return {"status": "skipped", "reason": result.reason}
+    if result.errors:
+        return {
+            "status": "failed",
+            "issues": [
+                {"category": i.category, "severity": i.severity, "message": i.message}
+                for i in result.issues
+            ],
+        }
+    return {"status": "ok"}
 
 
 async def save_workflow(code: str, path: str) -> str:

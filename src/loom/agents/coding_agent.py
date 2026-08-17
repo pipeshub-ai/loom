@@ -143,9 +143,16 @@ DEFAULT_SYSTEM_PROMPT = textwrap.dedent("""\
 
     Spec says **all / every / the full list** → raise the limit and report the
     coverage. A count over a capped fetch looks complete and is not. For a set
-    with no natural bound — a mailbox, a log — take one page per step with
-    `cursor=`, as the toolset docs show; one call for 50,000 rows is a single
-    journal entry that a crash refetches whole.
+    with no natural bound — a mailbox, a log — bound the *window*, not the row
+    count: a date range or status, watermark in `ctx.state`, run repeatedly. No
+    read takes `cursor=`, and one call for 50,000 rows is one journal entry a
+    crash refetches whole.
+
+    **Filter in the query, not after it** — JQL, `q=`, `$filter`, SOQL all take
+    one. Fetching everything and keeping six rows pages an unbounded amount of
+    someone else's data, and a comprehension over a paged result is a plain
+    list, so `.complete` is gone and a truncated fetch reads as complete. Use
+    `.filtered(...)`/`.mapped(...)` when a predicate cannot go server-side.
 
     ## What the workflow returns
 

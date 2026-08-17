@@ -16,7 +16,7 @@ The cases below are the ones that actually go wrong:
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -499,3 +499,68 @@ async def test_a_scheduled_workflow_that_sleeps_still_resumes(scheduled) -> None
 
     await advance(rt, minutes=31, dispatcher=dispatcher)
     assert (await rt.get(started[0])).output == "finished"
+
+
+# ---------------------------------------------------------------------------
+# Driving something other than cron
+# ---------------------------------------------------------------------------
+
+
+async def test_advance_drives_anything_that_runs_what_is_due() -> None:
+    """`dispatcher=` used to mean `TriggerDispatcher` and nothing else.
+
+    Every background component in the tree answers "run whatever is due" under
+    a different name — a `TriggerDispatcher` ticks, an `EventDispatcher` polls,
+    a `WatchRenewer` sweeps — so a helper that knew only `tick()` raised
+    `AttributeError` on two thirds of the family. Which meant the one helper a
+    test reaches for to move time silently did not cover the event backbone or
+    the things keeping provider subscriptions alive.
+    """
+    swept: list[str] = []
+
+    class Renewer:
+        async def sweep(self) -> list[str]:
+            swept.append("team@example.com")
+            return list(swept)
+
+    rt = _runtime()
+    fired = await advance(rt, minutes=5, dispatcher=Renewer())
+
+    assert swept == ["team@example.com"]
+    assert fired == [], (
+        "a sweep returns the resources it renewed, not run ids — folding those "
+        "into the list a test asserts on reports a mailbox as a run"
+    )
+
+
+async def test_advance_reads_run_ids_out_of_a_report() -> None:
+    """A `poll_once` returns reports rather than ids, and the ids inside them
+    are what a caller asserts on."""
+
+    class Report:
+        started: ClassVar[list[str]] = ["run_a", "run_b"]
+
+    class Poller:
+        async def poll_once(self) -> list[Any]:
+            return [Report()]
+
+    rt = _runtime()
+
+    assert await advance(rt, minutes=1, dispatcher=Poller()) == ["run_a", "run_b"]
+
+
+async def test_advance_says_what_it_cannot_drive() -> None:
+    rt = _runtime()
+
+    with pytest.raises(ConfigurationError, match="cannot be driven"):
+        await advance(rt, minutes=1, dispatcher=object())
+
+
+async def test_a_bare_clock_can_be_advanced() -> None:
+    """For a test whose subject is a loop rather than a run: a renewer or a
+    credential sweep has no Runtime to tick."""
+    clock = ManualClock(NINE_AM)
+
+    await advance(clock, hours=2)
+
+    assert clock.now() == NINE_AM + timedelta(hours=2)

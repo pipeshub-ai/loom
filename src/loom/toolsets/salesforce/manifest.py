@@ -107,6 +107,7 @@ SALESFORCE_MANIFEST = ToolsetManifest(
             OperationSpec(
                 id="crm.find_accounts",
                 function="salesforce_find_accounts",
+                pagination=True,
                 summary="Find accounts by name.",
                 description=(
                     "The join between a company's name and the id every write "
@@ -120,6 +121,7 @@ SALESFORCE_MANIFEST = ToolsetManifest(
             OperationSpec(
                 id="crm.find_contacts",
                 function="salesforce_find_contacts",
+                pagination=True,
                 summary="Find contacts by name or email, optionally in one account.",
                 resolves="contact",
                 effect=EffectClass.READ,
@@ -129,6 +131,7 @@ SALESFORCE_MANIFEST = ToolsetManifest(
             OperationSpec(
                 id="crm.find_opportunities",
                 function="salesforce_find_opportunities",
+                pagination=True,
                 summary="Find opportunities by name, account, stage, or openness.",
                 effect=EffectClass.READ,
                 idempotent=True,
@@ -139,6 +142,7 @@ SALESFORCE_MANIFEST = ToolsetManifest(
             OperationSpec(
                 id="people.find_users",
                 function="salesforce_find_users",
+                pagination=True,
                 summary="Find Salesforce users by name or email.",
                 description="Resolve before assigning an OwnerId.",
                 resolves="user",

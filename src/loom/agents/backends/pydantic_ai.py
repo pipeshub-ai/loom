@@ -111,14 +111,19 @@ def _loom_tool_to_pai(tool: Any) -> Any:
     # Use get_type_hints-compatible annotation
     if asyncio.iscoroutinefunction(fn):
         async def wrapper(ctx, **kwargs: Any) -> str:
-            result = await fn(**kwargs)
-            return str(result)
+            # tool.render_result, not str(): `str(Results([1,2,3],
+            # complete=False, total=312))` is "[1, 2, 3]" — page one rendered
+            # exactly like a complete answer, with the coverage the paging layer
+            # computed thrown away on the last line before the model reads it.
+            rendered: str = tool.render_result(await fn(**kwargs))
+            return rendered
     else:
         async def wrapper(ctx, **kwargs: Any) -> str:
             result = fn(**kwargs)
             if inspect.isawaitable(result):
-                return str(await result)
-            return str(result)
+                result = await result
+            rendered: str = tool.render_result(result)
+            return rendered
 
     # Annotate ctx with RunContext for Pydantic AI schema generation
     wrapper.__annotations__["ctx"] = RunContext[Any]

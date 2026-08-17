@@ -78,11 +78,20 @@ def _wire(args: argparse.Namespace) -> tuple[Any, Any, Any]:
             "store directly, and a --server proxy has no way to expose it yet"
         )
 
-    log = getattr(runtime, "events", None) or StoreBackedEventLog(runtime.store)
-    marks = getattr(runtime, "checkpoints", None) or StoreBackedCheckpoints(
-        runtime.store
+    # The Runtime's clock reaches all three, because they disagree otherwise:
+    # the checkpoints stamp `updated_at` and the manager reads it back to
+    # report idle time, so a writer and a reader on two clocks would make
+    # `loom events status` report an idle age that no subscriber ever had.
+    clock = getattr(runtime, "clock", None)
+    log = getattr(runtime, "events", None) or StoreBackedEventLog(
+        runtime.store, clock=clock
     )
-    manager = SubscriptionManager(runtime.store, log=log, checkpoints=marks)
+    marks = getattr(runtime, "checkpoints", None) or StoreBackedCheckpoints(
+        runtime.store, clock=clock
+    )
+    manager = SubscriptionManager(
+        runtime.store, log=log, checkpoints=marks, clock=clock
+    )
     return runtime, log, manager
 
 

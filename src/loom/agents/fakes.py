@@ -252,7 +252,29 @@ def _coerce(payload: Any, output_type: Any) -> Any:
     try:
         return TypeAdapter(output_type).validate_python(payload)
     except Exception:
-        return payload
+        # Failing open here has a specific, nasty consequence for a paged
+        # operation. The declared type is `Results[T]`; the raw payload is a
+        # plain list. So generated code that correctly writes
+        # `threads.summary()` dies with an AttributeError inside the *blocking*
+        # smoke stage — and AttributeError is explicitly classified as a code
+        # fault rather than an environment one, so the repair loop is handed a
+        # real failure whose cheapest fix is to delete the coverage check. The
+        # pipeline ends up teaching the model to remove the safety property.
+        #
+        # Recovering the coverage wrapper costs one branch and is always
+        # correct: an empty page is a complete one.
+        return _empty_page_of(output_type, payload)
+
+
+def _empty_page_of(output_type: Any, payload: Any) -> Any:
+    """*payload* wrapped as a ``Results`` when the step declares one."""
+    from loom.toolsets.pagination import Results
+
+    origin = getattr(output_type, "__origin__", output_type)
+    if isinstance(origin, type) and issubclass(origin, Results):
+        rows = payload if isinstance(payload, list) else []
+        return Results(rows, complete=True, total=len(rows))
+    return payload
 
 
 def _stub(original: Any, op: Any) -> Any:

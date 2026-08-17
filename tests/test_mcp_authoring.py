@@ -37,6 +37,50 @@ async def doubler(ctx: Context, n: int) -> int:
     return await ctx.step(double, n)
 '''
 
+#: A cap on a fetch, and nothing anywhere asking whether it was enough. Passes
+#: compile, static, lint and mypy; only ``coverage`` — given the spec — has
+#: anything to say about it.
+CAPPED_WORKFLOW = '''\
+from loom import Context, step, workflow
+
+
+@step
+async def fetch(query: str) -> list:
+    """Fetch matching rows."""
+    return await search_rows(query, max_results=100)
+
+
+async def search_rows(query: str, max_results: int = 50) -> list:
+    """Stand-in for a paged toolset read."""
+    return []
+
+
+@workflow(name="reporter", description="Report the rows")
+async def reporter(ctx: Context, query: str) -> str:
+    """Report them."""
+    rows = await ctx.step(fetch, query)
+    return f"{len(rows)} found"
+'''
+
+#: A word lifted straight from the spec into a fuzzy match operator. Nothing
+#: resolved it to an id, so this returns whatever happens to contain the
+#: substring — and reports no error when that is nothing.
+FUZZY_WORKFLOW = '''\
+from loom import Context, step, workflow
+
+
+@step
+async def search(jql: str) -> list:
+    """Search issues."""
+    return []
+
+
+@workflow(name="owned_stories", description="Stories owned by someone")
+async def owned_stories(ctx: Context, unused: str) -> list:
+    """Find them."""
+    return await ctx.step(search, 'assignee ~ "vishwjeet"')
+'''
+
 
 def parsed(raw: str) -> dict:
     """Every authoring tool returns JSON text; this asserts that and decodes it."""
@@ -250,6 +294,170 @@ class TestValidateWorkflowCode:
         assert any(i["category"] == "toolset" for i in result["issues"])
 
 
+class TestValidateRunsTheRealPipeline:
+    """The stages a client gets, and what it is told about the ones it didn't.
+
+    Before this the tool ran ``compile`` and a hand-rolled ``CodeValidator``
+    call — two of the seven non-executing stages — so the five that a coding
+    agent gets, including both stages written from observed failures, were
+    unreachable over MCP by construction.
+    """
+
+    def _rows(self, result: dict) -> dict[str, dict]:
+        return {row["name"]: row for row in result["stages"]}
+
+    async def test_every_static_stage_is_reported(self) -> None:
+        from loom.mcp_server import authoring
+
+        result = parsed(
+            await authoring.validate_workflow_code(CLEAN_WORKFLOW, spec="double a number")
+        )
+        assert [row["name"] for row in result["stages"]] == list(
+            authoring.STATIC_STAGE_NAMES
+        )
+        assert all(row["status"] == "ok" for row in result["stages"]), result["stages"]
+
+    async def test_coverage_flags_a_cap_when_the_spec_asked_for_all(self) -> None:
+        from loom.mcp_server import authoring
+
+        result = parsed(
+            await authoring.validate_workflow_code(
+                CAPPED_WORKFLOW, spec="report all the rows matching the query"
+            )
+        )
+        assert any(i["category"] == "coverage" for i in result["issues"]), result
+        assert self._rows(result)["coverage"]["status"] == "ok"
+        # A warning, not a refusal: capping is a legitimate call, and making it
+        # without noticing is the defect.
+        assert result["valid"] is True
+
+    async def test_the_same_cap_is_silent_without_a_completeness_word(self) -> None:
+        from loom.mcp_server import authoring
+
+        result = parsed(
+            await authoring.validate_workflow_code(
+                CAPPED_WORKFLOW, spec="report the first page of rows"
+            )
+        )
+        assert not any(i["category"] == "coverage" for i in result["issues"])
+
+    async def test_resolution_flags_a_fuzzy_match_on_a_spec_word(self) -> None:
+        from loom.mcp_server import authoring
+
+        result = parsed(
+            await authoring.validate_workflow_code(
+                FUZZY_WORKFLOW, spec="show the stories owned by Vishwjeet"
+            )
+        )
+        found = [i for i in result["issues"] if i["category"] == "resolution"]
+        assert found, result
+        assert "vishwjeet" in found[0]["message"].lower()
+        assert result["valid"] is True
+
+    async def test_no_spec_still_validates_and_finds_no_intent_issues(self) -> None:
+        """Backwards compatible: the parameter is optional, and its absence
+        must not turn a clean file into an error."""
+        from loom.mcp_server import authoring
+
+        result = parsed(await authoring.validate_workflow_code(FUZZY_WORKFLOW))
+
+        assert result["valid"] is True
+        assert not any(
+            i["category"] in ("coverage", "resolution") for i in result["issues"]
+        )
+
+    async def test_without_a_spec_the_intent_stages_report_skipped_not_ok(self) -> None:
+        """The rule the whole payload shape exists for: a check that could not
+        run has found nothing, and calling that a pass is how a client
+        concludes its code cleared seven stages when it cleared five."""
+        from loom.mcp_server import authoring
+
+        rows = self._rows(parsed(await authoring.validate_workflow_code(CAPPED_WORKFLOW)))
+
+        assert rows["coverage"]["status"] == "skipped"
+        assert rows["resolution"]["status"] == "skipped"
+        assert "spec" in rows["coverage"]["reason"]
+        assert rows["static"]["status"] == "ok"
+
+    async def test_a_missing_spec_is_called_out_in_a_note(self) -> None:
+        from loom.mcp_server import authoring
+
+        without = parsed(await authoring.validate_workflow_code(CLEAN_WORKFLOW))
+        with_spec = parsed(
+            await authoring.validate_workflow_code(CLEAN_WORKFLOW, spec="double it")
+        )
+
+        assert "spec" in without["note"]
+        assert "note" not in with_spec
+
+    async def test_a_skipped_stage_is_never_reported_as_passing(self) -> None:
+        """Directly, because ruff and mypy are both installed here — the real
+        skip path (``reason='ruff is not installed'``) cannot be reached in
+        this environment, and mocking the subprocess would test the mock."""
+        from loom.agents.checks import CheckResult, PipelineReport
+        from loom.mcp_server import authoring
+
+        report = PipelineReport(
+            results=[
+                CheckResult("compile"),
+                CheckResult("static"),
+                CheckResult("grants"),
+                CheckResult("coverage"),
+                CheckResult("resolution"),
+                CheckResult("lint", skipped=True, reason="ruff is not installed"),
+                CheckResult("types", skipped=True, reason="mypy is not installed"),
+            ]
+        )
+        rows = {r["name"]: r for r in authoring._stage_rows(report, "some spec")}
+
+        assert rows["lint"] == {
+            "name": "lint",
+            "status": "skipped",
+            "reason": "ruff is not installed",
+        }
+        assert rows["types"]["status"] == "skipped"
+        assert rows["compile"]["status"] == "ok"
+
+    async def test_a_grant_stage_skip_still_carries_its_reason(self) -> None:
+        """``GrantStage`` states its reason in ``skipped=`` rather than
+        ``reason=``; a skip with no stated reason reads as a pass to anyone
+        skimming the rows."""
+        from loom.agents.checks import CheckResult, PipelineReport
+        from loom.mcp_server import authoring
+
+        report = PipelineReport(
+            results=[CheckResult("grants", skipped="no toolset registry to check against")]
+        )
+        rows = {r["name"]: r for r in authoring._stage_rows(report, "")}
+
+        assert rows["grants"]["status"] == "skipped"
+        assert rows["grants"]["reason"] == "no toolset registry to check against"
+
+    async def test_stages_after_a_blocking_failure_are_not_run_not_ok(self) -> None:
+        from loom.mcp_server import authoring
+
+        result = parsed(await authoring.validate_workflow_code("def (", spec="anything"))
+        rows = self._rows(result)
+
+        assert result["valid"] is False
+        assert rows["compile"]["status"] == "failed"
+        assert rows["lint"]["status"] == "not_run"
+        assert rows["types"]["status"] == "not_run"
+
+    async def test_the_grant_stage_flags_a_toolset_that_does_not_exist(self) -> None:
+        from loom.mcp_server import authoring
+
+        code = (
+            "from loom import Context, workflow\n"
+            "from loom.security.grants import GrantSet\n\n"
+            '@workflow(name="granted", grants=GrantSet(toolsets=["not_a_toolset"]))\n'
+            "async def granted(ctx: Context, x: str) -> str:\n"
+            "    return x\n"
+        )
+        result = parsed(await authoring.validate_workflow_code(code, spec="do a thing"))
+        assert any(i["category"] == "grants" for i in result["issues"]), result
+
+
 class TestSmokeTestWorkflow:
     async def test_passes_a_clean_workflow(self) -> None:
         from loom.mcp_server import authoring
@@ -299,6 +507,63 @@ class TestSmokeTestWorkflow:
         # A real call with no credentials would fail on a 401; a faked one
         # succeeds against schema-generated stand-ins.
         assert result["ok"] is True, result
+
+
+class TestSmokeReportsReplaySeparately:
+    """Running once cannot see nondeterminism, and that is the defect the
+    engine's own re-entry turns into a wrong answer rather than a crash. It is
+    reported beside ``ok`` rather than folded into it, because "it ran" and
+    "it ran the same way twice" are different questions."""
+
+    async def test_a_deterministic_workflow_replays_ok(self) -> None:
+        from loom.mcp_server import authoring
+
+        result = parsed(await authoring.smoke_test_workflow(CLEAN_WORKFLOW, "5"))
+
+        assert result["ok"] is True
+        assert result["replay"]["status"] == "ok"
+
+    async def test_replay_is_skipped_when_the_run_did_not_complete(self) -> None:
+        """Not reported ``ok``: two runs that both failed have compared
+        nothing, and a determinism claim nobody checked is worse than none."""
+        from loom.mcp_server import authoring
+
+        code = (
+            "from loom import Context, step, workflow\n\n"
+            "@step\n"
+            "async def boom() -> str:\n"
+            "    raise RuntimeError('nope')\n\n"
+            '@workflow(name="breaker2")\n'
+            "async def breaker2(ctx: Context, x: str) -> str:\n"
+            "    return await ctx.step(boom)\n"
+        )
+        result = parsed(await authoring.smoke_test_workflow(code, '"x"'))
+
+        assert result["ok"] is False
+        assert result["replay"]["status"] == "skipped"
+        assert result["replay"]["reason"]
+
+    async def test_a_nondeterministic_body_is_caught(self) -> None:
+        """``random`` is imported inside the step, so the AST determinism rule
+        — which only reads the workflow body — has nothing to say. Only
+        running it twice shows this."""
+        from loom.mcp_server import authoring
+
+        code = (
+            "import random\n\n"
+            "from loom import Context, step, workflow\n\n"
+            "@step\n"
+            "async def roll() -> int:\n"
+            "    return random.randint(1, 10_000_000)\n\n"
+            '@workflow(name="roller")\n'
+            "async def roller(ctx: Context, x: str) -> int:\n"
+            "    return await ctx.step(roll)\n"
+        )
+        result = parsed(await authoring.smoke_test_workflow(code, '"x"'))
+
+        assert result["ok"] is True, result
+        assert result["replay"]["status"] == "failed", result["replay"]
+        assert result["replay"]["issues"][0]["category"] == "determinism"
 
 
 class TestSaveWorkflow:
@@ -378,7 +643,7 @@ def authoring_server(authoring_facade):
 
 
 class TestServerRegistration:
-    async def test_all_22_tools_are_registered_when_enabled(self, authoring_server) -> None:
+    async def test_all_24_tools_are_registered_when_enabled(self, authoring_server) -> None:
         names = {t.name for t in await authoring_server.list_tools()}
         authoring_names = {
             "get_tool_contract",
@@ -389,9 +654,9 @@ class TestServerRegistration:
             "save_workflow",
         }
         assert authoring_names <= names
-        assert len(names) == 22
+        assert len(names) == 24
 
-    async def test_disabled_via_config_drops_to_16(self, authoring_facade) -> None:
+    async def test_disabled_via_config_drops_to_18(self, authoring_facade) -> None:
         from loom.mcp_server import build_server
         from loom.mcp_server.authoring_config import AuthoringConfig
 
@@ -399,7 +664,7 @@ class TestServerRegistration:
             authoring_facade, name="off", authoring=AuthoringConfig(enabled=False)
         )
         names = {t.name for t in await server.list_tools()}
-        assert len(names) == 16
+        assert len(names) == 18
         assert "get_tool_contract" not in names
         assert "save_workflow" not in names
 
@@ -411,7 +676,7 @@ class TestServerRegistration:
         monkeypatch.setenv("LOOM_MCP_AUTHORING", "0")
         server = build_server(authoring_facade, name="off-env")
         names = {t.name for t in await server.list_tools()}
-        assert len(names) == 16
+        assert len(names) == 18
 
     async def test_every_authoring_tool_has_annotations(self, authoring_server) -> None:
         authoring_names = {
@@ -449,7 +714,7 @@ class TestServerRegistration:
             len(t.name) + len(t.description or "") + len(json.dumps(t.inputSchema))
             for t in registered
         )
-        assert total <= 18_000, f"22 tools' schemas total {total} chars"
+        assert total <= 18_000, f"24 tools' schemas total {total} chars"
 
     async def test_instructions_mention_authoring_when_enabled(self, authoring_server) -> None:
         assert "save_workflow" in (authoring_server.instructions or "")
@@ -473,6 +738,147 @@ class TestServerRegistration:
         assert "validate_workflow_code" in text
         assert "smoke_test_workflow" in text
         assert "sync CRM leads" in text
+
+    async def test_the_prompt_tells_the_model_to_pass_the_spec(
+        self, authoring_server
+    ) -> None:
+        """The two stages that judge intent are unreachable without it, so a
+        client that never passes spec gets five checks and is told it got
+        seven."""
+        result = await authoring_server.get_prompt(
+            "create_workflow", {"description": "sync CRM leads"}
+        )
+        text = str(result.messages[0].content)
+        assert "spec=" in text
+        assert "coverage" in text and "resolution" in text
+
+    async def test_the_instructions_say_why_the_spec_matters(
+        self, authoring_server
+    ) -> None:
+        instructions = authoring_server.instructions or ""
+        assert "spec=" in instructions
+        assert "skipped" in instructions
+
+    async def test_the_validate_tool_advertises_a_spec_parameter(
+        self, authoring_server
+    ) -> None:
+        by_name = {t.name: t for t in await authoring_server.list_tools()}
+        schema = by_name["validate_workflow_code"].inputSchema
+        assert "spec" in schema["properties"]
+        assert schema["required"] == ["code"]
+
+
+class TestNoDriftBetweenTheTwoToolSets:
+    """``agents/workflow_tools.py`` and ``mcp_server/tools.py`` expose the same
+    capabilities over the same facade to two different callers. They are
+    allowed to overlap; they are not allowed to differ.
+
+    They did. ``run_workflow`` deduplicated over MCP and did not in-process, so
+    an agent retrying a call it thought had failed started a second run — the
+    one failure an idempotency key exists to prevent. And two management tools
+    existed only in-process.
+    """
+
+    async def test_both_run_workflow_tools_take_an_idempotency_key(self) -> None:
+        import inspect
+
+        from loom.agents.workflow_tools import build_workflow_tools
+        from loom.mcp_server import tools as mcp_tools
+
+        rt = _bare_runtime()
+        by_name = {fn.__name__: fn for fn in build_workflow_tools(rt)}
+        agent_side = inspect.signature(by_name["run_workflow"]).parameters
+        mcp_side = inspect.signature(mcp_tools.run_workflow).parameters
+
+        assert "idempotency_key" in agent_side
+        assert "idempotency_key" in mcp_side
+
+    async def test_the_key_actually_deduplicates_in_process(self) -> None:
+        from loom.agents.workflow_tools import build_workflow_tools
+
+        rt = _bare_runtime()
+        run = {fn.__name__: fn for fn in build_workflow_tools(rt)}["run_workflow"]
+
+        first = parsed(await run("doubler", "3", "same-key"))
+        second = parsed(await run("doubler", "3", "same-key"))
+
+        assert first["run_id"] == second["run_id"]
+
+    async def test_mcp_gained_the_two_tools_that_only_existed_in_process(
+        self, authoring_server
+    ) -> None:
+        names = {t.name for t in await authoring_server.list_tools()}
+        assert {"get_workflow_info", "schedule_workflow"} <= names
+
+    async def test_get_workflow_info_answers_for_one_by_name(self) -> None:
+        from loom.facade import LocalFacade
+        from loom.mcp_server import tools as mcp_tools
+
+        facade = LocalFacade(_bare_runtime())
+        found = parsed(await mcp_tools.get_workflow_info(facade, "doubler"))
+        assert found["name"] == "doubler"
+        assert "input_schema" in found
+
+    async def test_get_workflow_info_names_the_others_when_there_is_no_match(
+        self,
+    ) -> None:
+        from loom.facade import LocalFacade
+        from loom.mcp_server import tools as mcp_tools
+
+        facade = LocalFacade(_bare_runtime())
+        result = parsed(await mcp_tools.get_workflow_info(facade, "nope"))
+        assert "error" in result
+        assert "doubler" in result["available"]
+
+    async def test_schedule_workflow_registers_a_durable_trigger(self) -> None:
+        from loom.facade import LocalFacade
+        from loom.mcp_server import tools as mcp_tools
+
+        facade = LocalFacade(_bare_runtime())
+        made = parsed(await mcp_tools.schedule_workflow(facade, "doubler", "0 9 * * *"))
+        assert made["workflow"] == "doubler"
+        assert made["trigger_id"]
+
+    async def test_scheduling_an_unknown_workflow_is_a_payload_not_a_raise(self) -> None:
+        from loom.facade import LocalFacade
+        from loom.mcp_server import tools as mcp_tools
+
+        facade = LocalFacade(_bare_runtime())
+        assert "error" in parsed(
+            await mcp_tools.schedule_workflow(facade, "nope", "0 9 * * *")
+        )
+
+    async def test_a_malformed_cron_is_a_payload_not_a_raise(self) -> None:
+        """A raise here would end the calling model's turn; an error payload
+        is something it can correct and call again with."""
+        from loom.facade import LocalFacade
+        from loom.mcp_server import tools as mcp_tools
+
+        facade = LocalFacade(_bare_runtime())
+        assert "error" in parsed(
+            await mcp_tools.schedule_workflow(facade, "doubler", "not a cron")
+        )
+
+
+def _bare_runtime():
+    """A Runtime with the doubler from ``CLEAN_WORKFLOW`` registered."""
+    from loom import Context, step, workflow
+    from loom.runtime.engine import Runtime
+    from loom.stores.memory import MemoryStore
+
+    @step
+    async def double(n: int) -> int:
+        """Double a number."""
+        return n * 2
+
+    @workflow(name="doubler", description="Double the input")
+    async def doubler(ctx: Context, n: int) -> int:
+        """Double it."""
+        return await ctx.step(double, n)
+
+    rt = Runtime(store=MemoryStore())
+    rt.register(doubler)
+    return rt
 
 
 class TestValidateThenSmokeChain:

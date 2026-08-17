@@ -183,7 +183,7 @@ async def hubspot_archive_object(object_type: str, object_id: str) -> bool:
 
 
 @step(retry=_READ)
-async def hubspot_find_contacts(query: str = "", limit: int = 20) -> list[HubSpotContact]:
+async def hubspot_find_contacts(query: str = "", limit: int = 20) -> Results[HubSpotContact]:
     """Find contacts by free text — name, email, or company.
 
     Resolve a person here before filtering or associating: HubSpot writes take
@@ -240,7 +240,7 @@ async def hubspot_create_contact(properties: dict[str, Any]) -> HubSpotContact:
 @step(retry=_READ)
 async def hubspot_find_companies(
     query: str = "", limit: int = 20
-) -> list[HubSpotCompany]:
+) -> Results[HubSpotCompany]:
     """Find companies by free text — name or domain.
 
     Args:
@@ -256,7 +256,7 @@ async def hubspot_find_companies(
 
 
 @step(retry=_READ)
-async def hubspot_find_deals(query: str = "", limit: int = 20) -> list[HubSpotDeal]:
+async def hubspot_find_deals(query: str = "", limit: int = 20) -> Results[HubSpotDeal]:
     """Find deals by free text.
 
     Args:

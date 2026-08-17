@@ -29,8 +29,12 @@ Wait for *seconds*, however this clock understands waiting.
 - `connectors.credentials`
 - `connectors.oauth_client`
 - `connectors.refresh`
+- `events.dispatcher`
+- `events.log`
+- `events.manager`
 - `events.watch`
 - `runtime.engine`
+- `runtime.flowcontrol`
 - `toolsets.connections`
 
 <!-- END GENERATED -->

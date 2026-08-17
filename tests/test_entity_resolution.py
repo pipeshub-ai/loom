@@ -524,12 +524,24 @@ class TestMarkdownByDefault:
         all. The correction states the rule and the three things a direct call
         skips.
 
+        It moved a fourth time, from 9000 to 9400, to pay for two more. The
+        paging advice told the model to "take one page per step with
+        ``cursor=``" — and an introspection sweep of every shipped toolset
+        found 82 paged reads and 82 without a ``cursor`` parameter, so code
+        following the instruction raised ``TypeError``. That is replaced with
+        advice that can be carried out: bound the window, not the row count.
+        The second is the placement rule — filter in the query rather than
+        after it. Nothing anywhere said so, and ``PlacementStage`` exists
+        because a workflow that pages an entire project and keeps six rows in
+        a comprehension passed all ten stages while reporting a truncated
+        fetch as a complete answer.
+
         The margin above the current length is about one sentence wide on
         purpose, so the next addition has to run this search too.
         """
         from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
 
-        assert len(DEFAULT_SYSTEM_PROMPT) < 9000, "the prompt is drifting long"
+        assert len(DEFAULT_SYSTEM_PROMPT) < 9400, "the prompt is drifting long"
 
 
 class TestRepeatedLookupsAreStopped:
@@ -727,6 +739,64 @@ class TestInventedModulePaths:
 
         assert agent._validator.toolset_modules == self.MODULES
         assert agent._check_context("spec").toolset_modules == self.MODULES
+
+
+class TestToolsetModulesOutsideLoom:
+    """A custom toolset's ``tools_module`` need not live under ``loom`` at
+    all -- a host application bridging its own tool-execution layer in (the
+    shape ``docs/guides/embedding.md`` describes) necessarily declares a
+    module at its own root. ``_check_toolsets`` already special-cases
+    ``loom.toolsets.*`` imports against ``toolset_modules``; this pins that
+    ``_check_allowed_packages`` -- the *other* check a strict
+    ``allowed_packages`` activates -- honours the same allowlist instead of
+    rejecting the declared import outright because its root package was
+    never named in ``allowed_packages``.
+    """
+
+    MODULES = {"host_bridge": "myapp.integrations.bridge"}  # noqa: RUF012
+
+    def test_the_declared_module_is_importable_under_a_strict_allowlist(self) -> None:
+        from loom.agents.validator import CodeValidator
+
+        issues = CodeValidator(
+            allowed_packages=frozenset(), toolset_modules=self.MODULES,
+        ).validate("import loom\nfrom myapp.integrations.bridge import call_tool\n")
+
+        assert not [i for i in issues if i.category == "imports"]
+
+    def test_a_submodule_of_the_declared_module_is_also_importable(self) -> None:
+        from loom.agents.validator import CodeValidator
+
+        issues = CodeValidator(
+            allowed_packages=frozenset(), toolset_modules=self.MODULES,
+        ).validate("import loom\nfrom myapp.integrations.bridge.extra import call_tool\n")
+
+        assert not [i for i in issues if i.category == "imports"]
+
+    def test_a_different_module_under_the_same_root_is_still_rejected(self) -> None:
+        """The allowance is for the exact declared path, never the bare
+        root -- otherwise naming one toolset's module would quietly widen
+        every other import from the same host package."""
+        from loom.agents.validator import CodeValidator
+
+        issues = CodeValidator(
+            allowed_packages=frozenset(), toolset_modules=self.MODULES,
+        ).validate("import loom\nfrom myapp.secrets import credentials\n")
+
+        errors = [i for i in issues if i.category == "imports" and "myapp" in i.message]
+        assert errors
+
+    def test_with_no_toolset_modules_declared_the_same_import_is_still_rejected(self) -> None:
+        """Behaviour is unchanged for callers that pass no `toolset_modules`
+        at all -- this is additive, not a general relaxation of
+        `allowed_packages`."""
+        from loom.agents.validator import CodeValidator
+
+        issues = CodeValidator(allowed_packages=frozenset()).validate(
+            "import loom\nfrom myapp.integrations.bridge import call_tool\n"
+        )
+
+        assert [i for i in issues if i.category == "imports" and "myapp" in i.message]
 
 
 class TestCodeOrJudgement:
@@ -952,3 +1022,68 @@ class TestResolutionStage:
         flat = " ".join(DEFAULT_SYSTEM_PROMPT.split())
         assert "Nor may you quietly fix a spelling" in flat
         assert '"sas" becoming "saas" is a guess' in flat
+
+
+class TestGeneratedCodeIsScannedForDangerousCalls:
+    """`CodeValidator` was a determinism-and-structure linter, nothing more.
+
+    The premise of the whole coding-agent design is that generated code is
+    untrusted. The sandbox contains *execution*; refusing at authoring time is
+    the cheaper layer, and it produces something a person can act on rather than
+    a runtime failure discovered later against real credentials.
+    """
+
+    def _security(self, code: str):
+        from loom.agents.validator import CodeValidator
+
+        return [i for i in CodeValidator().validate(code) if i.category == "security"]
+
+    WORKFLOW = (
+        "from loom import Context, step, workflow\n"
+        "@step\n"
+        "async def s(n: int) -> int:\n"
+        "    {body}\n"
+        "@workflow(name='x')\n"
+        "async def x(ctx: Context, n: int) -> str:\n"
+        "    return str(await ctx.step(s, n))\n"
+    )
+
+    def test_eval_is_an_error(self) -> None:
+        issues = self._security(self.WORKFLOW.format(body="return eval('1+1')"))
+        assert issues and issues[0].severity == "error"
+
+    def test_exec_is_an_error(self) -> None:
+        assert self._security(self.WORKFLOW.format(body="exec('x=1')\n    return n"))
+
+    def test_shelling_out_is_an_error(self) -> None:
+        code = "import os\n" + self.WORKFLOW.format(body="os.system('ls')\n    return n")
+        errors = [i for i in self._security(code) if i.severity == "error"]
+        assert errors
+
+    def test_a_step_body_is_scanned_too(self) -> None:
+        """Whole-module, not workflow-body-only.
+
+        The determinism checks look only at the orchestration body, because
+        determinism is a property of that body. This is a different question —
+        the artefact is about to run somewhere — and `subprocess.run` inside a
+        `@step` is exactly as much of a decision as one in the body.
+        """
+        code = "import subprocess\n" + self.WORKFLOW.format(
+            body="subprocess.run(['ls'])\n    return n"
+        )
+        assert [i for i in self._security(code) if i.severity == "error"]
+
+    def test_a_risky_import_is_a_warning_not_a_refusal(self) -> None:
+        """`socket` inside a step can be the job — flag it, do not fail it."""
+        code = "import socket\n" + self.WORKFLOW.format(body="return n")
+        issues = self._security(code)
+        assert issues
+        assert all(i.severity == "warning" for i in issues)
+
+    def test_a_risky_import_is_reported_once(self) -> None:
+        code = "import socket\nimport socket\n" + self.WORKFLOW.format(body="return n")
+        assert len(self._security(code)) == 1
+
+    def test_ordinary_generated_code_is_clean(self) -> None:
+        """The negative control — a scanner that fires on normal work is noise."""
+        assert not self._security(self.WORKFLOW.format(body="return n * 2"))

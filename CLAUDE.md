@@ -141,9 +141,25 @@ pytest tests/test_runtime.py::test_basic_workflow
 # Lint
 ruff check src tests
 
-# Type checking
+# Type checking — in a `[dev]` environment, deliberately not `[all]`
 mypy
 ```
+
+**mypy runs against `[dev]`, not `[all]`, and that is a decision rather than an
+accident.** `python_version = "3.11"` is the floor `requires-python` and the
+classifiers promise, and checking against the oldest supported version is what
+catches a 3.12-only stdlib call. The optional integration SDKs pull numpy
+transitively, and numpy's stubs use PEP 695 `type` statements — a *syntax* error
+below 3.12 — so mypy could not parse them and stopped with "errors prevented
+further checking", never type-checking LOOM at all. No per-module setting avoids
+that: `follow_imports` and `ignore_errors` are both ignored for stub files, and
+the failure happens while parsing regardless.
+
+None of those SDKs is needed to check LOOM — every one is imported lazily inside
+a function and declared `ignore_missing_imports` in `pyproject.toml` — so `[dev]`
+is the environment this check is *for*. The full suite still needs `[all]`; that
+is a separate environment. If you type-check in a `[all]` venv you will get one
+numpy syntax error and nothing else, which means the gate is not running.
 
 ## Architecture
 
@@ -1481,9 +1497,14 @@ the escape hatch for a codebase whose annotations were never meant as contracts.
 
 Two properties worth knowing: republishing identical bytes resolves to the
 existing version rather than creating a duplicate, so retries and replays do not
-inflate the version chain. And `get_artifact` journals the version it resolved,
-so a replay reads what the original run read — a replay rehearses what happened,
-not what would happen now.
+inflate the version chain. And a replay of `get_artifact` reads what the
+original run read — a replay rehearses what happened, not what would happen now.
+It buys that by journaling the **content**, not the version: with
+`Runtime(blobs=...)` the payload goes back out over the offload threshold and
+dedupes against the artifact's own bytes, so the cost is a reference; without
+one it is inline, and `journal_max_payload_bytes` is what stops a 500 MB read
+from becoming a 667 MB journal row. Prefer `artifact_url` for large artifacts —
+it is deliberately not journaled.
 
 `RetentionManager.compact(store, blobs=...)` deletes orphaned blobs and drops
 per-run staging entries; without the `blobs=` argument it reclaims rows and leaks

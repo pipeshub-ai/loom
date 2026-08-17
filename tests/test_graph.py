@@ -33,6 +33,8 @@ from loom.graph.extractor import (
     extract_from_source,
     merge_passes,
 )
+from loom.graph.layout import compute_layout
+from loom.graph.reactflow import to_react_flow
 from loom.graph.timetravel import TimeTraveler
 from loom.graph.trace import RunTrace, overlay_journal
 from loom.graph.wgir import (
@@ -260,6 +262,70 @@ async def my_workflow(ctx, ticket):
         ext = extract_from_source(source, flow_id="test")
         agent_nodes = [n for n in ext.nodes if n.kind is NodeKind.AGENT]
         assert len(agent_nodes) == 1
+
+    def test_agent_with_a_literal_prompt_gets_a_short_label_and_the_full_text_as_description(
+        self,
+    ) -> None:
+        """A long inline prompt used to become the node's *label* verbatim --
+        an unreadable card title and (via `_alloc_id`) an unreadable node id.
+        The label should read as a short title; the full prompt should still
+        reach the graph, just as `description` instead."""
+        prompt = (
+            "Write exactly one short, family-friendly joke for Abhishek. "
+            "Return only the joke: no greeting, explanation, quotation marks, "
+            "follow-up question, or extra lines."
+        )
+        source = f'''
+async def my_workflow(ctx, input):
+    result = await ctx.agent(
+        {prompt!r}
+    )
+    return result.text().strip()
+'''
+        ext = extract_from_source(source, flow_id="test")
+        agent_node = next(n for n in ext.nodes if n.kind is NodeKind.AGENT)
+
+        assert len(agent_node.label) < len(prompt)
+        assert agent_node.label.startswith("Write exactly one short")
+        assert agent_node.description == prompt
+        # The id is derived from the (already short) label, not the raw
+        # prompt, and stays free of spaces/punctuation.
+        assert len(agent_node.id) <= 48
+        assert " " not in agent_node.id
+
+    def test_a_short_agent_prompt_is_not_truncated(self) -> None:
+        source = '''
+async def my_workflow(ctx, input):
+    result = await ctx.agent("Say hi")
+'''
+        ext = extract_from_source(source, flow_id="test")
+        agent_node = next(n for n in ext.nodes if n.kind is NodeKind.AGENT)
+        assert agent_node.label == "Say hi"
+        assert agent_node.description == "Say hi"
+
+    def test_return_description_names_the_returned_expression(self) -> None:
+        source = '''
+async def my_workflow(ctx, input):
+    result = await ctx.step(fetch_data, input)
+    return result.text().strip()
+'''
+        ext = extract_from_source(source, flow_id="test")
+        return_node = next(n for n in ext.nodes if n.kind is NodeKind.RETURN)
+        assert "result.text().strip()" in return_node.description
+
+    def test_switch_and_loop_descriptions_name_their_condition(self) -> None:
+        source = '''
+async def my_workflow(ctx, items):
+    if len(items) > 10:
+        await ctx.step(big_handler, items)
+    for item in items:
+        await ctx.step(process, item)
+'''
+        ext = extract_from_source(source, flow_id="test")
+        switch_node = next(n for n in ext.nodes if n.kind is NodeKind.SWITCH)
+        loop_node = next(n for n in ext.nodes if n.kind is NodeKind.LOOP)
+        assert "len(items) > 10" in switch_node.description
+        assert "item" in loop_node.description and "items" in loop_node.description
 
     def test_extract_emit(self) -> None:
         source = '''
@@ -748,3 +814,309 @@ class TestTimeTravel:
         tt = TimeTraveler(graph, journal)
         snap = tt.snapshot_at(1)
         assert snap.find_node("b").metadata["status"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# Edge condition labels (if/else, loops)
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeConditionLabels:
+    def test_if_else_labels_true_and_false(self) -> None:
+        source = '''
+async def my_workflow(ctx, input):
+    if input > 10:
+        await ctx.step(big_handler, input)
+    else:
+        await ctx.step(small_handler, input)
+'''
+        ext = extract_from_source(source, flow_id="test")
+        switch_id = next(n.id for n in ext.nodes if n.kind is NodeKind.SWITCH)
+        by_target = {e.target: e for e in ext.edges if e.source == switch_id}
+        assert by_target["big_handler"].label == "True"
+        assert by_target["small_handler"].label == "False"
+        assert by_target["big_handler"].condition == "input > 10"
+        assert by_target["small_handler"].condition == "not (input > 10)"
+
+    def test_if_else_branches_reconverge_after_the_block(self) -> None:
+        """A statement after `if/else` is reachable from *either* branch --
+        both must show up as a predecessor, not just whichever branch the
+        AST visitor happened to finish last."""
+        source = '''
+async def my_workflow(ctx, input):
+    if input > 10:
+        await ctx.step(big_handler, input)
+    else:
+        await ctx.step(small_handler, input)
+    await ctx.step(finish, input)
+'''
+        ext = extract_from_source(source, flow_id="test")
+        finish_id = next(n.id for n in ext.nodes if n.label == "finish")
+        preds = {e.source for e in ext.edges if e.target == finish_id}
+        assert preds == {"big_handler", "small_handler"}
+
+    def test_if_without_else_reconnects_from_switch(self) -> None:
+        """No `else` means the false outcome skips straight from the switch
+        to whatever comes next, not through the true branch."""
+        source = '''
+async def my_workflow(ctx, input):
+    if input > 10:
+        await ctx.step(big_handler, input)
+    await ctx.step(finish, input)
+'''
+        ext = extract_from_source(source, flow_id="test")
+        switch_id = next(n.id for n in ext.nodes if n.kind is NodeKind.SWITCH)
+        finish_id = next(n.id for n in ext.nodes if n.label == "finish")
+        preds = {e.source for e in ext.edges if e.target == finish_id}
+        assert preds == {"big_handler", switch_id}
+
+    def test_for_loop_back_edge_and_done_label(self) -> None:
+        source = '''
+async def my_workflow(ctx, items):
+    for item in items:
+        await ctx.step(process, item)
+    await ctx.step(finish, items)
+'''
+        ext = extract_from_source(source, flow_id="test")
+        loop_id = next(n.id for n in ext.nodes if n.kind is NodeKind.LOOP)
+        back_edge = next(e for e in ext.edges if e.target == loop_id)
+        assert back_edge.source == "process"
+        assert back_edge.label == "loop"
+
+        exit_edge = next(e for e in ext.edges if e.source == loop_id and e.target != "process")
+        assert exit_edge.target == "finish"
+        assert exit_edge.label == "done"
+
+
+# ---------------------------------------------------------------------------
+# Layout engine
+# ---------------------------------------------------------------------------
+
+
+class TestLayoutEngine:
+    def test_empty_graph(self) -> None:
+        graph = WGIRGraph(flow_id="test", nodes=[], edges=[])
+        assert compute_layout(graph) == {}
+
+    def test_single_node_at_origin(self) -> None:
+        graph = WGIRGraph(
+            flow_id="test", nodes=[WGIRNode(id="a", kind=NodeKind.EFFECT, label="a")]
+        )
+        positions = compute_layout(graph)
+        assert positions == {"a": (0.0, 0.0)}
+
+    def test_linear_chain_advances_one_column_per_node(self) -> None:
+        graph = WGIRGraph(
+            flow_id="test",
+            nodes=[
+                WGIRNode(id=n, kind=NodeKind.EFFECT, label=n)
+                for n in ("a", "b", "c", "d", "e")
+            ],
+            edges=[
+                WGIREdge(source=s, target=t, kind=EdgeKind.CONTROL)
+                for s, t in [("a", "b"), ("b", "c"), ("c", "d"), ("d", "e")]
+            ],
+        )
+        positions = compute_layout(graph)
+        xs = [positions[n][0] for n in ("a", "b", "c", "d", "e")]
+        assert xs == sorted(xs)
+        assert len(set(xs)) == 5
+        # A linear chain has no siblings, so every node stays on one row.
+        assert len({positions[n][1] for n in ("a", "b", "c", "d", "e")}) == 1
+
+    def test_branching_produces_two_rows_in_the_same_column(self) -> None:
+        graph = WGIRGraph(
+            flow_id="test",
+            nodes=[
+                WGIRNode(id="switch", kind=NodeKind.SWITCH, label="if"),
+                WGIRNode(id="big", kind=NodeKind.EFFECT, label="big"),
+                WGIRNode(id="small", kind=NodeKind.EFFECT, label="small"),
+            ],
+            edges=[
+                WGIREdge(source="switch", target="big", kind=EdgeKind.CONTROL, label="True"),
+                WGIREdge(source="switch", target="small", kind=EdgeKind.CONTROL, label="False"),
+            ],
+        )
+        positions = compute_layout(graph)
+        assert positions["big"][0] == positions["small"][0]
+        assert positions["big"][0] > positions["switch"][0]
+        assert positions["big"][1] != positions["small"][1]
+
+    def test_parallel_gather_places_branches_side_by_side(self) -> None:
+        graph = WGIRGraph(
+            flow_id="test",
+            nodes=[
+                WGIRNode(id="start", kind=NodeKind.EFFECT, label="start"),
+                WGIRNode(id="fetch_a", kind=NodeKind.EFFECT, label="fetch_a"),
+                WGIRNode(id="fetch_b", kind=NodeKind.EFFECT, label="fetch_b"),
+                WGIRNode(id="join", kind=NodeKind.PARALLEL, label="gather"),
+            ],
+            edges=[
+                WGIREdge(source="start", target="fetch_a", kind=EdgeKind.CONTROL),
+                WGIREdge(source="start", target="fetch_b", kind=EdgeKind.CONTROL),
+                WGIREdge(source="fetch_a", target="join", kind=EdgeKind.CONTROL),
+                WGIREdge(source="fetch_b", target="join", kind=EdgeKind.CONTROL),
+            ],
+        )
+        positions = compute_layout(graph)
+        # Both parallel branches land in the same column, distinct rows,
+        # and converge into a later column.
+        assert positions["fetch_a"][0] == positions["fetch_b"][0]
+        assert positions["fetch_a"][1] != positions["fetch_b"][1]
+        assert positions["join"][0] > positions["fetch_a"][0]
+
+    def test_cyclic_loop_terminates_and_lays_out_forward(self) -> None:
+        graph = WGIRGraph(
+            flow_id="test",
+            nodes=[
+                WGIRNode(id="loop", kind=NodeKind.LOOP, label="for"),
+                WGIRNode(id="process", kind=NodeKind.EFFECT, label="process"),
+                WGIRNode(id="finish", kind=NodeKind.EFFECT, label="finish"),
+            ],
+            edges=[
+                WGIREdge(source="loop", target="process", kind=EdgeKind.CONTROL),
+                WGIREdge(source="process", target="loop", kind=EdgeKind.CONTROL, label="loop"),
+                WGIREdge(source="loop", target="finish", kind=EdgeKind.CONTROL, label="done"),
+            ],
+        )
+        positions = compute_layout(graph)  # must not hang
+        assert positions["process"][0] > positions["loop"][0]
+        assert positions["finish"][0] > positions["loop"][0]
+
+    def test_self_loop_does_not_hang(self) -> None:
+        graph = WGIRGraph(
+            flow_id="test",
+            nodes=[WGIRNode(id="a", kind=NodeKind.LOOP, label="a")],
+            edges=[WGIREdge(source="a", target="a", kind=EdgeKind.CONTROL)],
+        )
+        positions = compute_layout(graph)
+        assert positions == {"a": (0.0, 0.0)}
+
+    def test_tb_direction_swaps_axes(self) -> None:
+        graph = WGIRGraph(
+            flow_id="test",
+            nodes=[
+                WGIRNode(id="a", kind=NodeKind.EFFECT, label="a"),
+                WGIRNode(id="b", kind=NodeKind.EFFECT, label="b"),
+            ],
+            edges=[WGIREdge(source="a", target="b", kind=EdgeKind.CONTROL)],
+        )
+        lr = compute_layout(graph, direction="LR")
+        tb = compute_layout(graph, direction="TB")
+        assert lr["b"][0] > lr["a"][0]
+        assert tb["b"][1] > tb["a"][1]
+
+    def test_disconnected_nodes_do_not_crash(self) -> None:
+        graph = WGIRGraph(
+            flow_id="test",
+            nodes=[
+                WGIRNode(id="a", kind=NodeKind.EFFECT, label="a"),
+                WGIRNode(id="orphan", kind=NodeKind.EFFECT, label="orphan"),
+            ],
+            edges=[],
+        )
+        positions = compute_layout(graph)
+        assert set(positions) == {"a", "orphan"}
+
+
+# ---------------------------------------------------------------------------
+# Enhanced React Flow export
+# ---------------------------------------------------------------------------
+
+
+class TestEnhancedReactFlowExport:
+    def test_display_name_conversion(self) -> None:
+        graph = WGIRGraph(
+            flow_id="test",
+            nodes=[WGIRNode(id="prepare_joke", kind=NodeKind.EFFECT, label="prepare_joke")],
+        )
+        payload = to_react_flow(graph)
+        assert payload["nodes"][0]["data"]["displayName"] == "Prepare Joke"
+
+    def test_display_name_leaves_dotted_tool_ids_alone(self) -> None:
+        graph = WGIRGraph(
+            flow_id="test",
+            nodes=[WGIRNode(id="n", kind=NodeKind.TOOL, label="jira.search_issues")],
+        )
+        payload = to_react_flow(graph)
+        assert payload["nodes"][0]["data"]["displayName"] == "jira.search_issues"
+
+    def test_new_node_fields_present(self) -> None:
+        graph = WGIRGraph(
+            flow_id="test",
+            nodes=[
+                WGIRNode(
+                    id="fetch",
+                    kind=NodeKind.EFFECT,
+                    label="fetch",
+                    description="Fetches data",
+                    retry_policy={"max_attempts": 3},
+                    timeout="30s",
+                    tools=["jira.search_issues"],
+                    children=["child_a"],
+                ),
+            ],
+        )
+        data = to_react_flow(graph)["nodes"][0]["data"]
+        assert data["retryPolicy"] == {"max_attempts": 3}
+        assert data["timeout"] == "30s"
+        assert data["tools"] == ["jira.search_issues"]
+        assert data["children"] == ["child_a"]
+        assert data["hasDescription"] is True
+
+    def test_edge_condition_and_label_in_export(self) -> None:
+        graph = WGIRGraph(
+            flow_id="test",
+            nodes=[
+                WGIRNode(id="switch", kind=NodeKind.SWITCH, label="if"),
+                WGIRNode(id="big", kind=NodeKind.EFFECT, label="big"),
+            ],
+            edges=[
+                WGIREdge(
+                    source="switch",
+                    target="big",
+                    kind=EdgeKind.CONTROL,
+                    label="True",
+                    condition="input > 10",
+                ),
+            ],
+        )
+        edge = to_react_flow(graph)["edges"][0]
+        assert edge["label"] == "True"
+        assert edge["data"]["condition"] == "input > 10"
+
+    def test_layout_metadata_present(self) -> None:
+        graph = WGIRGraph(
+            flow_id="test",
+            nodes=[WGIRNode(id="a", kind=NodeKind.EFFECT, label="a")],
+        )
+        payload = to_react_flow(graph)
+        assert payload["layout"] == {"direction": "LR", "computed": True}
+
+    def test_layout_metadata_reports_supplied_positions(self) -> None:
+        graph = WGIRGraph(
+            flow_id="test",
+            nodes=[WGIRNode(id="a", kind=NodeKind.EFFECT, label="a")],
+        )
+        payload = to_react_flow(graph, positions={"a": (5.0, 5.0)})
+        assert payload["layout"]["computed"] is False
+
+    def test_positions_use_layout_engine_not_naive_fallback(self) -> None:
+        """A branch should land on two distinct rows -- the old
+        `_fallback_position` stacked every sibling `row * 110px` in arrival
+        order regardless of shape, so this only holds with real layering."""
+        graph = WGIRGraph(
+            flow_id="test",
+            nodes=[
+                WGIRNode(id="switch", kind=NodeKind.SWITCH, label="if"),
+                WGIRNode(id="big", kind=NodeKind.EFFECT, label="big"),
+                WGIRNode(id="small", kind=NodeKind.EFFECT, label="small"),
+            ],
+            edges=[
+                WGIREdge(source="switch", target="big", kind=EdgeKind.CONTROL),
+                WGIREdge(source="switch", target="small", kind=EdgeKind.CONTROL),
+            ],
+        )
+        nodes = {n["id"]: n["position"] for n in to_react_flow(graph)["nodes"]}
+        assert nodes["big"]["x"] == nodes["small"]["x"]
+        assert nodes["big"]["y"] != nodes["small"]["y"]

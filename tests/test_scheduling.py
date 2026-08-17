@@ -266,21 +266,47 @@ class TestTheTriggerIdIsAContract:
     def test_the_id_does_not_depend_on_when_it_was_computed(self) -> None:
         """The bug this catches is subtle and total.
 
-        `Schedule.describe()` includes `next_fire`, a timestamp evaluated when
-        it is called. Hashing the whole description therefore made a trigger's
-        id depend on what time the process booted — so two deployments minutes
-        apart produced two ids for one declared schedule, which is exactly the
-        duplication the id was introduced to prevent.
+        `Schedule.describe()` used to include `next_fire`, a timestamp
+        evaluated when it was called. Hashing the whole description therefore
+        made a trigger's id depend on what time the process booted — so two
+        deployments minutes apart produced two ids for one declared schedule,
+        which is exactly the duplication the id was introduced to prevent.
+
+        The allowlist in `_trigger_id` fixed the id. `describe()` itself is now
+        stable too, which is the second half of the same bug — see below.
         """
         spec = Schedule("0 9 * * *")
         first = _trigger_id("billing", spec)
         later = _trigger_id("billing", Schedule("0 9 * * *"))
 
         assert first == later
-        assert "next_fire" in spec.describe(), (
-            "describe() no longer carries a timestamp; if the allowlist in "
-            "_trigger_id was relaxed on that basis, re-check this property"
-        )
+
+    def test_describe_carries_no_wall_clock_reading(self) -> None:
+        """`describe()` twice must give the same answer twice.
+
+        The dispatcher decides whether a registered trigger has changed by
+        comparing `existing.spec != spec.describe()`, so a field derived from
+        the wall clock made that comparison true on every call — a trigger
+        store write per boot per trigger, to persist a value nothing reads. It
+        also meant a run under a `ManualClock` persisted a record stamped with
+        the real date, so the one artefact a time-travel test could inspect was
+        the one still on wall time.
+        """
+        spec = Schedule("0 9 * * *")
+        assert spec.describe() == spec.describe()
+        assert "next_fire" not in spec.describe()
+
+    def test_next_fire_comes_back_when_a_moment_is_supplied(self) -> None:
+        """Dropped from the identity, not from the API.
+
+        A caller answering "when does this next run?" for a person or an API
+        passes the moment it wants the answer relative to — which is what makes
+        the answer reproducible instead of a function of when it was asked.
+        """
+        spec = Schedule("0 9 * * *")
+        described = spec.describe(now=datetime(2026, 3, 1, 10, 0, tzinfo=UTC))
+
+        assert described["next_fire"] == "2026-03-02T09:00:00+00:00"
 
     def test_policy_is_not_part_of_the_identity(self) -> None:
         """Changing catch-up or jitter must not orphan the trigger.

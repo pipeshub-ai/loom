@@ -148,8 +148,19 @@ class CredentialRefreshService:
         # never.
         self._policy = policy or getattr(store, "refresh_policy", None) or RefreshPolicy()
         self._interval = interval
-        self._clock = clock or getattr(store, "clock", None) or SystemClock()
         self._runtime = runtime
+        # The Runtime's clock ahead of the store's, which is the order
+        # `WatchRenewer` already uses. The store's clock is a fallback for the
+        # `loom login` case where there is no Runtime at all; preferring it
+        # meant a host that put its Runtime on a `ManualClock` got a sweeper
+        # still sleeping on wall time, so the one background service a
+        # time-travel test most wants to drive was the one it could not.
+        self._clock = (
+            clock
+            or getattr(runtime, "clock", None)
+            or getattr(store, "clock", None)
+            or SystemClock()
+        )
         self._task: asyncio.Task[None] | None = None
         self._backoff: dict[str, _Backoff] = {}
 

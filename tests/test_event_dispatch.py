@@ -15,9 +15,11 @@ import asyncio
 from typing import Any
 
 import pytest
+from pydantic import BaseModel, ConfigDict
 
 from loom import Context, Runtime, workflow
 from loom.core.exceptions import ConfigurationError
+from loom.core.models import TriggerKind
 from loom.events import (
     CHAIN_DEPTH_CAP,
     EventDispatcher,
@@ -68,8 +70,12 @@ def message(event_id: str, *, channel: str = "C_TECH", text: str = "hi", **kw: A
 @pytest.fixture
 def wired() -> tuple[Runtime, StoreBackedEventLog, EventDispatcher]:
     store = MemoryStore()
-    runtime = Runtime(store=store)
     log = StoreBackedEventLog(store)
+    # `events=log` so `ctx.publish` (which only knows `Runtime.events`) and the
+    # dispatcher (given `log=` explicitly, since a host may keep them decoupled)
+    # read and write the same log -- the realistic wiring, and the one
+    # `TestPublishFeedsTheEventLog` needs to observe a workflow's own publish.
+    runtime = Runtime(store=store, events=log)
     dispatcher = EventDispatcher(
         runtime, log=log, checkpoints=StoreBackedCheckpoints(store)
     )
@@ -407,6 +413,101 @@ class TestPoisonAndLoops:
         assert len(dead) == 1, "the bad event must be inspectable, not vanished"
         assert dead[0].payload["error"].startswith("OSError")
 
+    async def test_a_filter_that_cannot_be_evaluated_does_not_stall_the_subscriber(
+        self, wired
+    ) -> None:
+        """A malformed filter used to wedge a subscription permanently.
+
+        `FilterSpec.matches` raises on an unknown operator, and it was called
+        *outside* the try that feeds the dead letter — so `max_attempts` never
+        applied, the checkpoint never moved, and the subscriber re-read the same
+        event forever while the log said "dispatch failed". The filter is the
+        thing that is broken, but the run that never happens is what anyone
+        notices, a day late.
+
+        A filter arrives here already stored, so it is validated at declaration
+        (see `validate_declarable`) and dead-lettered at dispatch.
+        """
+        runtime, log, dispatcher = wired
+        marks = StoreBackedCheckpoints(runtime.store)
+        runtime.register(archive)
+        await dispatcher.subscribe(
+            Subscription(
+                "s",
+                TOPIC,
+                "archive",
+                filter=FilterSpec(conditions={"channel": {"$unknown": "C_TECH"}}),
+            )
+        )
+        await log.append(TOPIC, [message("bad"), message("next", text="after")])
+
+        await dispatcher.poll_once()
+        await settle()
+
+        assert await marks.load("s", TOPIC) == "2", (
+            "the checkpoint must advance past an unevaluable filter, or the "
+            "subscriber re-reads the same event forever"
+        )
+        dead = await log.read(f"{TOPIC}.dead", after=None, limit=10)
+        assert len(dead) == 2, "both events are undeliverable while the filter is broken"
+        assert "unknown filter operator" in dead[0].payload["error"]
+
+    async def test_an_unorderable_comparison_is_dead_lettered_not_raised(
+        self, wired
+    ) -> None:
+        """`"high" > 50` — the other way a filter stops being evaluable.
+
+        Same stall, reached by a filter that is spelled correctly and meets a
+        payload it cannot be applied to.
+        """
+        runtime, log, dispatcher = wired
+        marks = StoreBackedCheckpoints(runtime.store)
+        runtime.register(archive)
+        await dispatcher.subscribe(
+            Subscription(
+                "s",
+                TOPIC,
+                "archive",
+                filter=FilterSpec(conditions={"channel": {"$gt": 50}}),
+            )
+        )
+        await log.append(TOPIC, [message("e1")])
+
+        await dispatcher.poll_once()
+        await settle()
+
+        assert await marks.load("s", TOPIC) == "1"
+        dead = await log.read(f"{TOPIC}.dead", after=None, limit=10)
+        assert len(dead) == 1
+        assert "do not order" in dead[0].payload["error"]
+
+    async def test_a_well_formed_filter_still_filters_silently(self, wired) -> None:
+        """The negative control: a non-match is not a dead letter.
+
+        The two outcomes are handled oppositely, so a fix that routed ordinary
+        non-matches to the dead letter would pass both tests above and bury the
+        stream in noise.
+        """
+        runtime, log, dispatcher = wired
+        marks = StoreBackedCheckpoints(runtime.store)
+        runtime.register(archive)
+        await dispatcher.subscribe(
+            Subscription(
+                "s",
+                TOPIC,
+                "archive",
+                filter=FilterSpec(conditions={"channel": "C_OTHER"}),
+            )
+        )
+        await log.append(TOPIC, [message("e1", channel="C_TECH")])
+
+        await dispatcher.poll_once()
+        await settle()
+
+        assert await marks.load("s", TOPIC) == "1"
+        assert RAN == []
+        assert await log.read(f"{TOPIC}.dead", after=None, limit=10) == []
+
     async def test_a_missing_workflow_is_permanent_not_retried(
         self, wired
     ) -> None:
@@ -614,6 +715,207 @@ class TestLifecycle:
         await dispatcher.start()
         await dispatcher.stop()
         await dispatcher.stop()
+
+
+# ---------------------------------------------------------------------------
+# Trigger kind and typed input validation
+#
+# Module scope, not nested in a test method: `from __future__ import
+# annotations` makes every annotation a string, and Loom resolves a
+# workflow's declared input type via `typing.get_type_hints` against the
+# function's own `__globals__` -- which cannot see a class defined inside a
+# test method's local scope. Nesting them silently produces an untyped `dict`
+# input instead of the `input_type` this suite exists to exercise.
+# ---------------------------------------------------------------------------
+
+TYPED_TOPIC = "app.typed.message"
+TYPED_RAN: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def _clear_typed() -> None:
+    TYPED_RAN.clear()
+
+
+class TypedMessage(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    channel: str
+    text: str
+
+
+@workflow(name="typed_consumer", triggers=[OnAppEvent(TYPED_TOPIC)])
+async def typed_consumer(ctx: Context, message: TypedMessage) -> str:
+    TYPED_RAN.append(message.text)
+    return "ok"
+
+
+class TestTriggerKind:
+    async def test_a_dispatched_run_is_recorded_as_an_event_trigger(
+        self, wired
+    ) -> None:
+        """Distinct from ``TriggerKind.MANUAL`` -- a run started by the
+        dispatcher was not started by a person calling ``runtime.run()``, and
+        a host filtering runs by trigger kind must be able to tell them apart."""
+        runtime, log, dispatcher = wired
+        await dispatcher.register(archive)
+
+        await log.append(TOPIC, [message("e1", text="dispatched")])
+        report = (await dispatcher.poll_once())[0]
+        await settle()
+
+        assert report.started
+        record = await runtime.store.get_execution(report.started[0])
+        assert record is not None
+        assert record.trigger is TriggerKind.EVENT
+
+
+class TestTypedInput:
+    async def test_a_well_shaped_event_decodes_into_the_declared_input(
+        self, wired
+    ) -> None:
+        runtime, log, dispatcher = wired
+        await dispatcher.register(typed_consumer)
+
+        await log.append(
+            TYPED_TOPIC, [EventRecord(event_id="e1", type="typed.message",
+                                       payload={"channel": "C1", "text": "hello"})]
+        )
+        report = (await dispatcher.poll_once())[0]
+        await settle()
+
+        assert report.started
+        record = await runtime.store.get_execution(report.started[0])
+        assert record is not None and record.status.value == "completed"
+        assert TYPED_RAN == ["hello"]
+
+    async def test_a_malformed_event_is_dead_lettered_on_the_first_attempt(
+        self, wired
+    ) -> None:
+        """A payload that will never fit the declared input is a permanent
+        failure, not a transient one -- it must not wait out `max_attempts`
+        retries before the checkpoint is allowed to move past it."""
+        runtime, log, dispatcher = wired
+        marks = StoreBackedCheckpoints(runtime.store)
+        await dispatcher.register(typed_consumer)
+
+        # Missing the required `text` field.
+        await log.append(
+            TYPED_TOPIC,
+            [EventRecord(event_id="e1", type="typed.message", payload={"channel": "C1"})],
+        )
+        report = (await dispatcher.poll_once())[0]
+        await settle()
+
+        assert report.started == [], "a malformed event must not start a run"
+        assert report.dead_lettered == 1
+        assert await marks.load("typed_consumer", TYPED_TOPIC) == "1", (
+            "the checkpoint must advance past it on the very first pass"
+        )
+        assert TYPED_RAN == []
+
+        dead = await log.read(f"{TYPED_TOPIC}.dead", after=None, limit=10)
+        assert len(dead) == 1
+        assert "ValidationError" in dead[0].payload["error"]
+
+
+# ---------------------------------------------------------------------------
+# ctx.publish feeding the event backbone
+# ---------------------------------------------------------------------------
+
+ORDERS_TOPIC = "app.orders.created"
+ENRICHED_TOPIC = "app.orders.enriched"
+LOOP_TOPIC = "app.loop.tick"
+PUBLISH_RAN: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def _clear_publish() -> None:
+    PUBLISH_RAN.clear()
+
+
+@workflow(name="enricher", triggers=[OnAppEvent(ORDERS_TOPIC)])
+async def enricher(ctx: Context, order: dict) -> str:
+    PUBLISH_RAN.append(f"enricher:{order.get('id', '')}")
+    await ctx.publish(ENRICHED_TOPIC, {"id": order.get("id", ""), "enriched": True})
+    return "enriched"
+
+
+@workflow(name="notifier", triggers=[OnAppEvent(ENRICHED_TOPIC)])
+async def notifier(ctx: Context, order: dict) -> str:
+    PUBLISH_RAN.append(f"notifier:{order.get('id', '')}")
+    return "notified"
+
+
+@workflow(name="looper", triggers=[OnAppEvent(LOOP_TOPIC)])
+async def looper(ctx: Context, tick: dict) -> str:
+    PUBLISH_RAN.append("tick")
+    await ctx.publish(LOOP_TOPIC, {})
+    return "ticked"
+
+
+class TestPublishFeedsTheEventLog:
+    async def test_a_workflows_own_publish_starts_another_workflows_subscription(
+        self, wired
+    ) -> None:
+        """`ctx.publish` used to only wake `wait_for_event` waiters -- it never
+        reached the `EventLog`, so an `OnAppEvent` subscription on a topic a
+        workflow publishes (rather than an external source) could never fire."""
+        runtime, log, dispatcher = wired
+        await dispatcher.register(enricher)
+        await dispatcher.register(notifier)
+
+        await log.append(
+            ORDERS_TOPIC,
+            [EventRecord(event_id="o1", type="order.created", payload={"id": "o1"})],
+        )
+        await dispatcher.poll_once()
+        await settle()
+
+        # `enricher`'s publish is now durable; a second pass picks it up.
+        await dispatcher.poll_once()
+        await settle()
+
+        assert PUBLISH_RAN == ["enricher:o1", "notifier:o1"]
+
+    async def test_a_published_events_chain_depth_is_one_more_than_its_run(
+        self, wired
+    ) -> None:
+        """The published event's depth must be derived from the run that
+        published it, or the cap this exists to enforce never engages."""
+        runtime, log, dispatcher = wired
+        await dispatcher.register(enricher)
+
+        await log.append(
+            ORDERS_TOPIC,
+            [EventRecord(event_id="o1", type="order.created", payload={"id": "o1"})],
+        )
+        await dispatcher.poll_once()
+        await settle()
+
+        stored = await log.read(ENRICHED_TOPIC, after=None, limit=10)
+        assert len(stored) == 1
+        assert stored[0].record.chain_depth == 1, (
+            "the triggering event was depth 0 (external), so one workflow-to-"
+            "workflow hop must record depth 1"
+        )
+
+    async def test_a_publish_loop_is_stopped_by_the_chain_depth_cap(
+        self, wired
+    ) -> None:
+        """A workflow that publishes the event it is itself subscribed to."""
+        _, log, dispatcher = wired
+        await dispatcher.register(looper)
+
+        await log.append(LOOP_TOPIC, [EventRecord(event_id="tick0", type="tick", payload={})])
+        for _ in range(CHAIN_DEPTH_CAP + 3):
+            await dispatcher.poll_once()
+            await settle()
+
+        # One tick per hop up to and including the cap boundary, then no more.
+        assert 0 < len(PUBLISH_RAN) <= CHAIN_DEPTH_CAP + 1, (
+            f"the loop must stop at the chain-depth cap, ran {len(PUBLISH_RAN)} times"
+        )
 
 
 class TestWaitingRuns:

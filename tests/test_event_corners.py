@@ -50,6 +50,7 @@ from loom.events.source_registry import (
     builtin_source,
     discover_source_entry_points,
 )
+from loom.runtime.clock import ManualClock, SystemClock
 from loom.stores.memory import MemoryStore
 from loom.toolsets.google.auth import GoogleAuth, GoogleCredentials
 from loom.toolsets.google.errors import GmailHistoryExpired
@@ -780,6 +781,26 @@ def dispatching():
     return runtime, runtime.events, marks, dispatcher
 
 
+@pytest.fixture
+def parked_dispatching():
+    """The same wiring, on a clock that parks rather than one that runs.
+
+    The idle path is the one place in this package where "did it wait?" is the
+    property under test, and against the wall clock the only way to ask was to
+    measure elapsed real seconds — which makes the test both slow and a
+    coin-toss on a loaded machine. ``ManualClock(park=True)`` turns the same
+    question into two exact observations: the loop is parked, and it asked for
+    the interval it declared.
+    """
+    clock = ManualClock(datetime(2026, 1, 1, 9, 0, tzinfo=UTC), park=True)
+    store = MemoryStore()
+    log = StoreBackedEventLog(store, clock=clock)
+    runtime = Runtime(store=store, clock=clock, events=log)
+    marks = StoreBackedCheckpoints(store, clock=clock)
+    dispatcher = EventDispatcher(runtime, log=log, checkpoints=marks)
+    return clock, runtime, log, marks, dispatcher
+
+
 class TestBackpressure:
     async def test_a_retryable_admission_rejection_defers(
         self, dispatching
@@ -787,6 +808,7 @@ class TestBackpressure:
         """Backpressure is already built: a rejected dispatch leaves no run
         behind and the checkpoint simply does not advance, so it retries."""
         runtime, log, marks, dispatcher = dispatching
+        _register_plain(runtime, "w")
         await dispatcher.subscribe(Subscription("s", TOPIC, "w"))
         await log.append(TOPIC, [event(1)])
 
@@ -806,6 +828,7 @@ class TestBackpressure:
         """"This will never be admitted" retried forever stalls the subscriber
         behind an event that cannot run."""
         runtime, log, marks, dispatcher = dispatching
+        _register_plain(runtime, "w")
         await dispatcher.subscribe(Subscription("s", TOPIC, "w"))
         await log.append(TOPIC, [event(1), event(2)])
 
@@ -865,6 +888,23 @@ def _registered(runtime: Runtime) -> Any:
     return thing_worker
 
 
+def _register_plain(runtime: Runtime, name: str) -> None:
+    """Register a triggerless workflow under *name*.
+
+    For tests that build their own :class:`Subscription` by hand (a custom
+    subscriber name, no ``OnAppEvent``) rather than through
+    ``dispatcher.register`` — they still need the name to resolve, since the
+    dispatcher now reads the target's ``input_type`` before every submit.
+    """
+    from loom import workflow
+
+    @workflow(name=name)
+    async def _wf(ctx: Any, payload: dict | None = None) -> str:
+        return "ok"
+
+    runtime.register(_wf)
+
+
 class TestDispatcherIdle:
     async def test_the_loop_waits_rather_than_spinning(self, dispatching) -> None:
         """A quiet system must not cost thousands of reads a second."""
@@ -891,6 +931,52 @@ class TestDispatcherIdle:
 
         assert waited, "an idle pass must wait on the log, not re-poll immediately"
 
+    async def test_the_idle_loop_stops_dead_on_a_parked_clock(
+        self, parked_dispatching
+    ) -> None:
+        """The same property as above, stated exactly rather than measured.
+
+        "It waited" used to be inferred from elapsed real seconds, which is
+        both slow and load-dependent. Here the loop reaches its wait, parks,
+        and then provably does *not* run again across a hundred event-loop
+        turns — which is what "does not spin" actually means, and what a
+        wall-clock test can only approximate.
+        """
+        clock, _, _, _, dispatcher = parked_dispatching
+        await dispatcher.subscribe(Subscription("s", TOPIC, "w"))
+        passes = 0
+        original = dispatcher.poll_once
+
+        async def counting() -> Any:
+            nonlocal passes
+            passes += 1
+            return await original()
+
+        dispatcher.poll_once = counting  # type: ignore[method-assign]
+        await dispatcher.start()
+        try:
+            for _ in range(100):
+                await asyncio.sleep(0)
+                if clock.parked:
+                    break
+            assert clock.parked, "the loop never reached a wait"
+            settled = passes
+
+            for _ in range(100):
+                await asyncio.sleep(0)
+            assert passes == settled, (
+                f"the idle loop made {passes - settled} further passes without "
+                "any time passing — that is the spin, and on a store whose "
+                "async methods never await it starves the whole event loop"
+            )
+
+            clock.advance(seconds=1)
+            for _ in range(10):
+                await asyncio.sleep(0)
+            assert passes > settled, "advancing the clock did not release the wait"
+        finally:
+            await dispatcher.stop()
+
     async def test_it_idles_safely_with_no_subscriptions(
         self, dispatching
     ) -> None:
@@ -900,6 +986,27 @@ class TestDispatcherIdle:
         await dispatcher.start()
         await asyncio.sleep(0.03)
         await dispatcher.stop()
+
+    async def test_with_no_subscriptions_it_waits_on_the_clock(
+        self, parked_dispatching
+    ) -> None:
+        """The no-subscription branch takes a different path — a bare sleep
+        rather than a wait on the log — and it used to be the one that reached
+        `asyncio.sleep` directly, so a Runtime on virtual time still paid real
+        seconds for a dispatcher that had nothing to do."""
+        clock, _, _, _, dispatcher = parked_dispatching
+        dispatcher._idle_wait = 7.0
+        await dispatcher.start()
+        try:
+            for _ in range(20):
+                await asyncio.sleep(0)
+                if clock.parked:
+                    break
+            assert clock.slept == [7.0], (
+                "the empty-subscription idle did not go through the clock"
+            )
+        finally:
+            await dispatcher.stop()
 
     async def test_a_broken_wait_still_waits(self, dispatching) -> None:
         """An adapter whose `wait_for` raises — unsupported, or a broker
@@ -911,13 +1018,20 @@ class TestDispatcherIdle:
         **starves every other coroutine in the process**: it presents as a
         hang, not as a hot CPU.
 
-        Timed directly rather than driven through ``start()``, and that is
+        Checked directly rather than driven through ``start()``, and that is
         forced rather than stylistic — under the bug the loop never yields, so
         ``asyncio.wait_for`` around it never fires either. There is no in-loop
         timeout that can catch this; only not entering the loop can.
+
+        The fallback used to be *timed* — ``elapsed >= 0.04`` — which measured
+        the right thing on a quiet machine and something else on a loaded one.
+        The clock records what was asked for, so the same property is now an
+        equality rather than a threshold.
         """
         runtime, log, marks, dispatcher = dispatching
         await dispatcher.register(_registered(runtime))
+        clock = ManualClock(datetime(2026, 1, 1, 9, 0, tzinfo=UTC))
+        dispatcher._clock = clock
 
         async def broken(topic: str, **kw: Any) -> bool:
             raise OSError("wait is not supported here")
@@ -925,18 +1039,17 @@ class TestDispatcherIdle:
         log.wait_for = broken  # type: ignore[method-assign]
         dispatcher._idle_wait = 0.05
 
-        started = asyncio.get_running_loop().time()
         await dispatcher._idle()
-        elapsed = asyncio.get_running_loop().time() - started
 
-        assert elapsed >= 0.04, (
-            f"an idle pass returned in {elapsed:.4f}s when the wait failed; it "
-            "must fall back to a timed sleep or the loop spins without yielding"
+        assert clock.slept == [0.05], (
+            "an idle pass whose wait failed did not fall back to a timed "
+            "sleep; without one the loop spins without ever yielding"
         )
 
         # Only now start the loop. The order is the safeguard: driving it while
         # `_idle` returns instantly would hang this test rather than fail it,
         # and there is no timeout that escapes a task which never yields.
+        dispatcher._clock = SystemClock()
         dispatcher._idle_wait = 0.01
         await dispatcher.start()
         try:

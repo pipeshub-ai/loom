@@ -423,6 +423,90 @@ class TestOrphanRecovery:
 
         assert await Runtime(store=store).reclaim_orphans() == []
 
+    async def test_an_orphan_is_found_behind_a_page_of_healthy_runs(self) -> None:
+        """The starvation case, and the reason `limit` bounds results not reads.
+
+        The lease lives inside the record's JSON, so it is filtered in Python
+        after the store query — and that query orders newest-first, `run_id`
+        being a ULID. An orphan is a run that stopped advancing, so it carries
+        one of the *oldest* ids. Behind a page of healthy runs it was never in
+        the window that got filtered, and `reclaim_orphans` returned `[]`: the
+        precise set it exists to rescue, invisible to it, reported as "nothing
+        to do".
+
+        150 healthy runs here against the old single page of 100.
+        """
+        from loom.core.models import ExecutionRecord
+        from loom.core.serde import encode
+
+        store = MemoryStore()
+        # Oldest id, so every healthy run sorts ahead of it.
+        await store.create_execution(
+            ExecutionRecord(
+                run_id="00000000-orphan",
+                workflow="orphan_flow",
+                status=ExecutionStatus.RUNNING,
+                input=encode(7),
+                lease_owner="dead-node",
+                lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+            )
+        )
+        for i in range(150):
+            await store.create_execution(
+                ExecutionRecord(
+                    run_id=f"zz{i:04d}-healthy",
+                    workflow="orphan_flow",
+                    status=ExecutionStatus.RUNNING,
+                    lease_owner="live-node",
+                    lease_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+                )
+            )
+
+        rt = Runtime(store=store)
+        rt.register(orphan_flow)
+        try:
+            assert await rt.reclaim_orphans() == ["00000000-orphan"]
+        finally:
+            await rt.shutdown()
+
+    async def test_the_scan_ceiling_is_reported_not_silent(self, caplog) -> None:
+        """A bounded scan that gives up must say so.
+
+        Stopping quietly at a ceiling is the same defect as the single page,
+        one page bigger — it reads as "no orphans" either way.
+
+        Exercises the *fallback* path deliberately. The shipped stores answer
+        this from an indexed column and never scan, so the ceiling only governs
+        a host's own `ExecutionStore` that does not implement `due_leases` —
+        which is exactly the store that would otherwise regress unnoticed.
+        """
+        import logging
+
+        from loom.core.models import ExecutionRecord
+
+        class NoIndexedScan(MemoryStore):
+            """A store predating `due_leases`, as a host's own might be."""
+
+            due_leases = None
+
+        store = NoIndexedScan()
+        for i in range(60):
+            await store.create_execution(
+                ExecutionRecord(
+                    run_id=f"r{i:04d}",
+                    workflow="orphan_flow",
+                    status=ExecutionStatus.RUNNING,
+                    lease_owner="live-node",
+                    lease_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+                )
+            )
+
+        rt = Runtime(store=store)
+        with caplog.at_level(logging.WARNING):
+            assert await rt.reclaim_orphans(scan_limit=10) == []
+
+        assert any("scan_limit" in r.message for r in caplog.records)
+
     async def test_a_run_this_node_is_driving_is_not_reclaimed(self) -> None:
         rt = Runtime(store=MemoryStore())
         rt._driving.add("mine")

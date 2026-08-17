@@ -283,9 +283,13 @@ class HubSpotClient:
 
     async def find_contacts(
         self, query: str = "", *, limit: int = 20
-    ) -> list[HubSpotContact]:
+    ) -> Results[HubSpotContact]:
         rows = await self.search_objects("contacts", query=query, limit=limit)
-        return [HubSpotContact.from_api(_raw(r)) for r in rows]
+        # `.mapped`, not a comprehension: `search_objects` pages and
+        # reports whether HubSpot's 10,000-result search cap truncated
+        # the answer, and a comprehension over a `Results` throws that
+        # away — silently turning a partial list into an apparent total.
+        return rows.mapped(lambda r: HubSpotContact.from_api(_raw(r)))
 
     async def get_contact_by_email(self, email: str) -> HubSpotContact:
         """Fetch a contact by email rather than by record id.
@@ -303,15 +307,23 @@ class HubSpotClient:
 
     async def find_companies(
         self, query: str = "", *, limit: int = 20
-    ) -> list[HubSpotCompany]:
+    ) -> Results[HubSpotCompany]:
         rows = await self.search_objects("companies", query=query, limit=limit)
-        return [HubSpotCompany.from_api(_raw(r)) for r in rows]
+        # `.mapped`, not a comprehension: `search_objects` pages and
+        # reports whether HubSpot's 10,000-result search cap truncated
+        # the answer, and a comprehension over a `Results` throws that
+        # away — silently turning a partial list into an apparent total.
+        return rows.mapped(lambda r: HubSpotCompany.from_api(_raw(r)))
 
     async def find_deals(
         self, query: str = "", *, limit: int = 20
-    ) -> list[HubSpotDeal]:
+    ) -> Results[HubSpotDeal]:
         rows = await self.search_objects("deals", query=query, limit=limit)
-        return [HubSpotDeal.from_api(_raw(r)) for r in rows]
+        # `.mapped`, not a comprehension: `search_objects` pages and
+        # reports whether HubSpot's 10,000-result search cap truncated
+        # the answer, and a comprehension over a `Results` throws that
+        # away — silently turning a partial list into an apparent total.
+        return rows.mapped(lambda r: HubSpotDeal.from_api(_raw(r)))
 
     async def create_deal(self, properties: dict[str, Any]) -> HubSpotDeal:
         made = await self.create_object("deals", properties)

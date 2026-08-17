@@ -150,6 +150,33 @@ class Results(list[T], Generic[T]):
             cursor=self.cursor,
         )
 
+    def filtered(self, keep: Callable[[Any], bool]) -> Results[Any]:
+        """Rows satisfying *keep*, coverage carried over and ``total`` dropped.
+
+        The counterpart to :meth:`mapped`, and **not** expressible in terms of
+        it. ``mapped`` is one-to-one, so it keeps ``total``; a filter is
+        many-to-fewer, so keeping ``total`` would report a count larger than
+        what is being returned — which is the same "a number that does not
+        describe these rows" failure ``Results`` exists to prevent, arriving
+        from the other direction.
+
+        Its absence is why the one place in the codebase that filters a paged
+        read had to hand-roll it, with a comment explaining both halves
+        (``toolsets/github/client.py``, dropping pull requests out of an issue
+        listing). Every other site that needed it reached for a comprehension
+        instead and silently produced a plain ``list``, losing ``complete``.
+
+        ``complete`` survives because it describes the *fetch*, not the rows: if
+        the source had more than was asked for, that is still true after
+        discarding some of what arrived.
+        """
+        return type(self)(
+            [item for item in self if keep(item)],
+            complete=self.complete,
+            total=None,
+            cursor=self.cursor,
+        )
+
     def __wire__(self) -> dict[str, Any]:
         """Everything, including whether this was everything.
 
@@ -283,6 +310,7 @@ async def collect(
     limit: int,
     page_size: int,
     max_pages: int = MAX_PAGES,
+    start: str | None = None,
 ) -> Results:
     """Page through *fetch* until *limit* items, or the source runs out.
 
@@ -293,12 +321,18 @@ async def collect(
     Returns a :class:`Results` whose ``complete`` is ``True`` only when the
     source was genuinely exhausted — not when the limit or the page ceiling
     stopped it.
+
+    *start* resumes from a cursor a previous call returned, which is what makes
+    the pattern :attr:`Results.cursor` describes actually reachable: one step
+    per page, each journaled, the cursor kept in ``ctx.state`` between runs.
+    Without it that docstring described something no caller could do, because
+    paging always began at the beginning.
     """
     if limit <= 0:
         return Results([], complete=True)
 
     collected: list[Any] = []
-    cursor: str | None = None
+    cursor: str | None = start
     total: int | None = None
     complete = False
 
@@ -649,6 +683,7 @@ async def page_through(
     limit: int,
     page_size: int,
     row: Callable[[Any], Any] | None = None,
+    start: str | None = None,
 ) -> Results[Any]:
     """Page an endpoint, given one function that performs a request.
 
@@ -673,5 +708,5 @@ async def page_through(
             total=page.total,
         )
 
-    return await collect(fetch, limit=limit, page_size=page_size)
+    return await collect(fetch, limit=limit, page_size=page_size, start=start)
 

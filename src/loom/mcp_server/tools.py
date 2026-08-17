@@ -25,6 +25,7 @@ __all__ = [
     "get_artifact_url",
     "get_run_journal",
     "get_run_status",
+    "get_workflow_info",
     "list_artifacts",
     "list_runs",
     "list_workflows",
@@ -32,6 +33,7 @@ __all__ = [
     "replay_run",
     "retry_run",
     "run_workflow",
+    "schedule_workflow",
     "search_toolsets",
     "send_event",
     "show_toolset",
@@ -145,6 +147,44 @@ async def list_workflows(facade: RuntimeFacade) -> str:
             }
         )
     return _json(_cap_list({"workflows": workflows}, "workflows", 0))
+
+
+async def get_workflow_info(facade: RuntimeFacade, workflow: str) -> str:
+    """One workflow's description, version, triggers, and input schema.
+
+    ``list_workflows`` is capped and pages, so on an install with many
+    workflows the one being asked about may not be in the answer at all —
+    and a model reading a truncated list has no way to tell "not here" from
+    "does not exist". This answers for one by name, and names the others
+    when there is no such workflow.
+    """
+    catalog = {entry["name"]: entry for entry in await facade.workflows()}
+    found = catalog.get(workflow)
+    if found is None:
+        return _json(
+            {"error": f"No workflow named '{workflow}'.", "available": sorted(catalog)}
+        )
+    return _json(_cap_text(found))
+
+
+async def schedule_workflow(
+    facade: RuntimeFacade, workflow: str, cron: str, timezone: str = "UTC"
+) -> str:
+    """Fire a workflow on a cron expression, durably.
+
+    The trigger lives in the store, not in this process, so it survives the
+    server restarting — which is the difference between a schedule and a
+    reminder to start something.
+    """
+    if not any(entry["name"] == workflow for entry in await facade.workflows()):
+        return _json({"error": f"No workflow named '{workflow}'."})
+    try:
+        return _json(await facade.schedule(workflow, cron, timezone=timezone))
+    except Exception as exc:
+        # A malformed cron expression and an unknown timezone both land here,
+        # and both are things the caller fixes by calling again — a raise
+        # would end the turn instead.
+        return _json({"error": str(exc)})
 
 
 async def run_workflow(

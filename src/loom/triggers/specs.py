@@ -123,8 +123,24 @@ class Schedule(TriggerSpec):
     def next_fire(self, after: datetime | None = None) -> datetime:
         return self.schedule.next_after(after)
 
-    def describe(self) -> JSONDict:
-        return {
+    def describe(self, *, now: datetime | None = None) -> JSONDict:
+        """What this trigger is. **Stable across calls**, unless *now* is given.
+
+        ``next_fire`` used to be in here unconditionally, computed from the
+        wall clock at the moment of the call, and that made the description a
+        moving value. Two consequences, both silent. The dispatcher decides
+        whether a registered trigger has changed by comparing
+        ``existing.spec != spec.describe()``, so *every* registration wrote to
+        the trigger store — a store round trip per boot per trigger, to persist
+        a field nothing reads. And a run under a ``ManualClock`` persisted a
+        trigger record stamped with the real date, so the one artefact a
+        time-travel test could inspect was the one still on wall time.
+
+        Pass *now* — the Runtime's ``clock.now()`` — when the answer is for a
+        human or an API: then ``next_fire`` comes back, derived from a moment
+        the caller chose rather than from whenever this happened to be called.
+        """
+        described: JSONDict = {
             "kind": self.kind.value,
             "name": self.name,
             "cron": self.cron,
@@ -135,8 +151,10 @@ class Schedule(TriggerSpec):
             # cannot read is a field that does nothing, however clearly it is
             # declared on the spec.
             "jitter": to_seconds(self.jitter),
-            "next_fire": self.next_fire().isoformat(),
         }
+        if now is not None:
+            described["next_fire"] = self.next_fire(now).isoformat()
+        return described
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +169,14 @@ class Interval(TriggerSpec):
         return f"interval:{to_seconds(self.every)}s"
 
     def next_fire(self, after: datetime | None = None) -> datetime:
+        """*after* plus the interval.
+
+        Pass one. The wall-clock fallback exists for a caller holding nothing
+        else, and it is the reason every scheduler path in LOOM supplies
+        ``clock.now()`` explicitly: an interval computed from the wall clock
+        inside a run on virtual time lands a year away from the schedule the
+        test is driving, and looks like a trigger that simply never fires.
+        """
         from datetime import timedelta
 
         base = after or datetime.now(UTC)
@@ -446,12 +472,20 @@ class EmailInbox(TriggerSpec):
 PollFunction = Callable[[Any], Any]
 
 
-def build_manual_event(payload: Any = None) -> TriggerEvent:
+def build_manual_event(payload: Any = None, *, now: datetime | None = None) -> TriggerEvent:
+    """A manual trigger event, stamped *now* — the Runtime's ``clock.now()``.
+
+    The fallback is the wall clock, which is what makes the argument worth
+    passing: a manual run inside a virtual-clock test otherwise carries a
+    ``received_at`` from a different timeline than every other timestamp on
+    the same run, and comparing the two reads as a run that arrived months
+    before it started.
+    """
     return TriggerEvent(
         kind=TriggerKind.MANUAL,
         payload=payload,
         trigger_name="manual",
-        received_at=datetime.now(UTC),
+        received_at=now or datetime.now(UTC),
     )
 
 

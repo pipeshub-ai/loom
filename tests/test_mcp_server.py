@@ -541,7 +541,7 @@ class TestServerRegistration:
 
         server = build_server(facade, authoring=AuthoringConfig(enabled=False))
         names = {tool.name for tool in await server.list_tools()}
-        assert len(names) == 16
+        assert len(names) == 18
         assert "save_workflow" not in names
 
     async def test_read_only_tools_marked_correctly(self, server) -> None:
@@ -565,6 +565,8 @@ class TestServerRegistration:
         assert names == {
             "list_workflows",
             "run_workflow",
+            "get_workflow_info",
+            "schedule_workflow",
             "get_run_status",
             "list_runs",
             "get_run_journal",
@@ -802,7 +804,7 @@ class TestStdioEndToEnd:
             names = {t.name for t in (await session.list_tools()).tools}
             assert "run_workflow" in names
             assert "save_workflow" in names  # authoring tools on by default
-            assert len(names) == 22
+            assert len(names) == 24
 
     async def test_workflows_from_the_module_are_visible(self, project: Path) -> None:
         """The gap that made the original server useless: an empty registry."""

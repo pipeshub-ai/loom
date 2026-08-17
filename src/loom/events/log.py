@@ -26,8 +26,8 @@ import json
 import logging
 import secrets
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import UTC, datetime
-from typing import Any, Protocol, runtime_checkable
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from loom.core.exceptions import ConfigurationError
 from loom.events.models import (
@@ -37,6 +37,9 @@ from loom.events.models import (
     RetentionPolicy,
     StoredEvent,
 )
+
+if TYPE_CHECKING:
+    from loom.runtime.clock import Clock
 
 __all__ = [
     "Checkpoints",
@@ -203,7 +206,9 @@ class StoreBackedEventLog:
     day it moves to a partitioned backend.
     """
 
-    def __init__(self, store: Any, *, owner: str = "") -> None:
+    def __init__(
+        self, store: Any, *, owner: str = "", clock: Clock | None = None
+    ) -> None:
         for capability in ("get", "set", "delete"):
             if not hasattr(store, capability):
                 raise ConfigurationError(
@@ -211,11 +216,20 @@ class StoreBackedEventLog:
                     f"has no '{capability}'. Pass a LOOM store, or supply your own "
                     "EventLog — see loom.testing.conformance to prove it correct."
                 )
+        from loom.runtime.clock import SystemClock
+
         self._store = store
         self._lock = store if hasattr(store, "acquire") else None
         self._owner = owner or f"eventlog-{secrets.token_hex(4)}"
         self._poll_interval = 0.05
         self._guards: dict[str, tuple[Any, Any]] = {}
+        #: The same ``Clock`` port the engine reads, so that "this record is
+        #: three days old" and "this subscriber has not committed in a week"
+        #: are testable at all. Retention was the one place in the backbone
+        #: that could only be exercised by waiting: an age cutoff read from
+        #: ``datetime.now(UTC)`` means a test for a seven-day policy takes
+        #: seven days, so nothing tested it.
+        self._clock: Clock = clock or SystemClock()
 
     # -- writing -------------------------------------------------------------
 
@@ -245,7 +259,9 @@ class StoreBackedEventLog:
 
                 seq = head + written + 1
                 await self._store.set(
-                    f"{_REC}:{topic}:{seq}", _encode(record, seq), _NO_TTL
+                    f"{_REC}:{topic}:{seq}",
+                    _encode(record, seq, self._clock.now()),
+                    _NO_TTL,
                 )
                 await self._store.set(index_key, seq, _NO_TTL)
                 positions.append(str(seq))
@@ -325,18 +341,23 @@ class StoreBackedEventLog:
         Deliberately naive: its job is to make every adapter valid without
         implementing this, not to be efficient. Efficiency here is
         backend-specific and belongs in the backend.
-        """
-        import asyncio
 
-        deadline = asyncio.get_running_loop().time() + timeout
+        Both the deadline and the poll go through the ``Clock``, not the event
+        loop's timer. On a ``ManualClock`` the loop's timer runs at wall speed
+        while everything else in the test runs at virtual speed, so a wait
+        measured against it is the one place where an idle dispatcher would
+        still cost real seconds — and a `timeout` a test believed it had
+        skipped past.
+        """
+        deadline = self._clock.now().timestamp() + timeout
         target = int(after) if after is not None else 0
         while True:
             head = int(await self._store.get(f"{_HEAD}:{topic}") or 0)
             if head > target:
                 return True
-            if asyncio.get_running_loop().time() >= deadline:
+            if self._clock.now().timestamp() >= deadline:
                 return False
-            await asyncio.sleep(self._poll_interval)
+            await self._clock.sleep(self._poll_interval)
 
     # -- retention -----------------------------------------------------------
 
@@ -354,15 +375,18 @@ class StoreBackedEventLog:
         if not head:
             return 0
 
+        now = self._clock.now()
         floor = head
         if self._checkpoints is not None:
-            now = datetime.now(UTC)
             for mark in (await self._checkpoints.active(topic)).values():
                 if mark.is_stale(now=now, ttl_seconds=policy.subscriber_ttl_seconds):
                     continue
                 floor = min(floor, int(mark.position))
 
-        cutoff = datetime.now(UTC).timestamp() - policy.max_age_seconds
+        # One reading for both the staleness test and the age cutoff. Two calls
+        # to `now()` could straddle a subscriber's TTL, so a checkpoint could be
+        # counted live for the floor and stale for the cutoff in one pass.
+        cutoff = now.timestamp() - policy.max_age_seconds
 
         # A count ceiling is a *second*, independent reason to discard, and it
         # deliberately ignores the age floor — that is what makes it a ceiling
@@ -433,8 +457,17 @@ class StoreBackedCheckpoints:
     PREFIX = "eventlog:ckpt"
     ROSTER = "eventlog:subs"
 
-    def __init__(self, store: Any) -> None:
+    def __init__(self, store: Any, *, clock: Clock | None = None) -> None:
+        from loom.runtime.clock import SystemClock
+
         self._store = store
+        #: ``updated_at`` is stamped here and read by ``Checkpoint.is_stale``,
+        #: by ``StoreBackedEventLog.retain``, and by
+        #: ``SubscriptionManager.health``. All four have to be on one timeline:
+        #: a writer on the wall clock and a reader on a virtual one makes every
+        #: checkpoint look either brand new or a decade stale, depending on
+        #: which way the test set its clock.
+        self._clock: Clock = clock or SystemClock()
 
     def _key(self, subscriber: str, topic: str) -> str:
         return f"{self.PREFIX}:{topic}:{subscriber}"
@@ -442,7 +475,10 @@ class StoreBackedCheckpoints:
     async def commit(self, subscriber: str, topic: str, position: Position) -> None:
         await self._store.set(
             self._key(subscriber, topic),
-            {"position": str(position), "updated_at": datetime.now(UTC).isoformat()},
+            {
+                "position": str(position),
+                "updated_at": self._clock.now().isoformat(),
+            },
             _NO_TTL,
         )
         await self._enrol(subscriber, topic)
@@ -535,6 +571,11 @@ class _AppendLock:
 
         await self._guard.acquire()
         if self._lock is not None:
+            # Deliberately the event loop's clock rather than the log's, and
+            # for the reason the engine's lease heartbeat gives: this is a wait
+            # on *another process*, which is on wall time whatever this one
+            # believes. A virtual deadline here would let a test declare the
+            # other writer wedged without a millisecond having passed.
             deadline = asyncio.get_running_loop().time() + self._ttl
             while not await self._lock.acquire(self._key, self._owner, self._ttl):
                 if asyncio.get_running_loop().time() >= deadline:
@@ -554,7 +595,7 @@ class _AppendLock:
             self._guard.release()
 
 
-def _encode(record: EventRecord, seq: int) -> Any:
+def _encode(record: EventRecord, seq: int, appended_at: datetime) -> Any:
     return {
         "seq": seq,
         "event_id": record.event_id,
@@ -564,7 +605,7 @@ def _encode(record: EventRecord, seq: int) -> Any:
         "source": record.source,
         "occurred_at": record.occurred_at.isoformat() if record.occurred_at else None,
         "chain_depth": record.chain_depth,
-        "appended_at": datetime.now(UTC).isoformat(),
+        "appended_at": appended_at.isoformat(),
     }
 
 

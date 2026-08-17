@@ -36,6 +36,57 @@ BARE_IO_CALLS: set[str] = {
     "aiohttp.request",
 }
 
+#: Calls that execute text as code, reach the host, or manipulate the process.
+#:
+#: This validator was a determinism-and-structure linter, and the premise of the
+#: whole coding-agent design is that the generated code is untrusted. The sandbox
+#: contains *execution*; refusing at authoring time is the cheaper layer and the
+#: one that produces a message somebody can act on — a workflow that shells out
+#: is a review finding, not a runtime error to be discovered on a Tuesday.
+#:
+#: Named calls only. This is a tripwire against the obvious, not a proof: an
+#: attacker with `getattr` and string building is not stopped by a name list,
+#: and pretending otherwise is worse than being explicit that the sandbox is
+#: what actually holds.
+DANGEROUS_CALLS: set[str] = {
+    "eval",
+    "exec",
+    "compile",
+    "__import__",
+    "importlib.import_module",
+    "os.system",
+    "os.popen",
+    "os.execv",
+    "os.execve",
+    "os.fork",
+    "os.kill",
+    "os.remove",
+    "os.unlink",
+    "os.rmdir",
+    "shutil.rmtree",
+    "subprocess.run",
+    "subprocess.call",
+    "subprocess.check_output",
+    "subprocess.Popen",
+    "socket.socket",
+    "socket.create_connection",
+    "ctypes.CDLL",
+    "pickle.loads",
+    "marshal.loads",
+    "setattr",
+}
+
+#: Modules whose mere import in generated workflow code is worth a look.
+#: Warned, not refused: `subprocess` inside a `@step` may be exactly the job.
+DANGEROUS_IMPORTS: set[str] = {
+    "ctypes",
+    "marshal",
+    "multiprocessing",
+    "pty",
+    "socket",
+    "subprocess",
+}
+
 NONDETERMINISTIC_CALLS: set[str] = {
     "datetime.now",
     "uuid.uuid4",
@@ -178,7 +229,95 @@ class CodeValidator:
         self._check_allowed_packages(tree, issues)
         self._check_symbols(tree, issues)
         self._check_no_store_choice(tree, issues)
+        self._check_dangerous(tree, issues)
         return issues
+
+    def _check_dangerous(self, tree: ast.Module, issues: list[CodeIssue]) -> None:
+        """Flag code execution, process control, and host access.
+
+        Scoped to ``@workflow`` and ``@step`` bodies — the code that will run
+        durably against real credentials — rather than the whole module. A
+        generated file also carries a ``if __name__ == "__main__"`` demo block,
+        and the surrounding cookbook and host scripts legitimately shell out to
+        *run* a generated workflow and clean up a temp file afterwards. Judging
+        those by the same rule flags the harness for doing its job, which is the
+        same precedent ``_check_no_store_choice`` already follows: constructing
+        a store is wrong in the library and fine in the script.
+
+        Both bodies, not just the orchestration one: unlike determinism, which
+        is a property of the workflow body alone, this is about what runs — and
+        a ``subprocess.run`` inside a ``@step`` is exactly as much of a decision.
+
+        Errors for executing text as code or shelling out, because there is no
+        version of those a spec asks for. Warnings for the imports, because
+        ``socket`` or ``subprocess`` in a step can be the job.
+
+        A name list is a tripwire, not a proof. Someone composing ``getattr``
+        and a string gets past it, and the sandbox is what actually holds — this
+        is the cheap layer that turns the obvious cases into a review finding
+        instead of a runtime surprise.
+        """
+        flagged_imports: set[str] = set()
+        for node in self._durable_nodes(tree):
+            if isinstance(node, ast.Call):
+                name = self._call_name(node)
+                if name and name in DANGEROUS_CALLS:
+                    issues.append(
+                        CodeIssue(
+                            "security",
+                            f"'{name}' executes code or reaches the host directly. "
+                            "A generated workflow should express what it needs "
+                            "through a toolset operation or a @step, not by "
+                            "running arbitrary code.",
+                            "error",
+                        )
+                    )
+                continue
+            root = ""
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    root = alias.name.split(".")[0]
+                    if root in DANGEROUS_IMPORTS and root not in flagged_imports:
+                        flagged_imports.add(root)
+                        issues.append(self._risky_import(root))
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                root = node.module.split(".")[0]
+                if root in DANGEROUS_IMPORTS and root not in flagged_imports:
+                    flagged_imports.add(root)
+                    issues.append(self._risky_import(root))
+
+    def _durable_nodes(self, tree: ast.Module) -> list[ast.AST]:
+        """Every node inside a ``@workflow`` or ``@step`` body, plus its imports.
+
+        Module-level imports are included because that is where a step's
+        ``import subprocess`` actually sits — the call is in the body and the
+        import is at the top, and reporting one without the other names half the
+        decision.
+        """
+        found: list[ast.AST] = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.Import | ast.ImportFrom)
+        ]
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            names = {self._decorator_name(d) for d in node.decorator_list}
+            if not names & {"workflow", "flow", "step", "pure", "effect", "node"}:
+                continue
+            for child in node.body:
+                found.extend(ast.walk(child))
+        return found
+
+    @staticmethod
+    def _risky_import(root: str) -> CodeIssue:
+        return CodeIssue(
+            "security",
+            f"imports '{root}', which reaches outside the workflow. Legitimate "
+            "inside a @step for some jobs — worth a second look before this "
+            "runs against real credentials.",
+            "warning",
+        )
 
     # ------------------------------------------------------------------
     # Structure checks
@@ -356,14 +495,37 @@ class CodeValidator:
         tree: ast.Module,
         issues: list[CodeIssue],
     ) -> None:
-        """Flag imports of packages the target environment does not have."""
+        """Flag imports of packages the target environment does not have.
+
+        A toolset's own ``tools_module`` is permitted here even when its root
+        package is outside ``allowed_packages`` — a custom (non-``loom``)
+        toolset that follows "Manifests must say how to import themselves"
+        (``ToolsetManifest.import_line()``) necessarily lives at some other
+        root, e.g. a host application's own package. Without this, the
+        narrowest and therefore most common ``allowed_packages`` setting for
+        generated code — "nothing beyond ``loom``" — would make every such
+        toolset's declared import unusable: the model writes exactly the
+        import the manifest told it to, and this check fails it anyway. The
+        match is against the toolset's *exact* declared module path, or a
+        submodule of it, never its bare root, so declaring one toolset's
+        import path does not accidentally widen what else that root package
+        exposes.
+        """
         if self.allowed_packages is None:
             return
 
-        permitted = self.allowed_packages | ALWAYS_ALLOWED | sys.stdlib_module_names
-        for root in sorted(_imported_roots(tree)):
-            if root in permitted or root.startswith("_"):
+        permitted_roots = self.allowed_packages | ALWAYS_ALLOWED | sys.stdlib_module_names
+        permitted_modules = set(self.toolset_modules.values())
+        flagged_roots: set[str] = set()
+        for module, root in sorted(_imported_modules(tree)):
+            if root in permitted_roots or root.startswith("_") or root in flagged_roots:
                 continue
+            if any(
+                module == known or module.startswith(known + ".")
+                for known in permitted_modules
+            ):
+                continue
+            flagged_roots.add(root)
             issues.append(
                 CodeIssue(
                     "imports",
@@ -481,14 +643,25 @@ def _imported_roots(tree: ast.Module) -> set[str]:
     Walks the whole module, so an import tucked inside a step body counts too —
     that is the usual place a model puts one.
     """
-    roots: set[str] = set()
+    return {root for _module, root in _imported_modules(tree)}
+
+
+def _imported_modules(tree: ast.Module) -> set[tuple[str, str]]:
+    """Every ``(module_path, root_package)`` pair imported anywhere in *tree*.
+
+    The root alone is what ``allowed_packages`` is checked against; the full
+    path is what an exact ``toolset_modules`` entry is checked against — a
+    toolset's declared module is a specific path, not merely "some import
+    under this root package".
+    """
+    modules: set[tuple[str, str]] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            roots.update(alias.name.split(".")[0] for alias in node.names)
+            modules.update((alias.name, alias.name.split(".")[0]) for alias in node.names)
         # `from . import x` is relative, so there is no package to attribute it to.
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            roots.add(node.module.split(".")[0])
-    return roots
+            modules.add((node.module, node.module.split(".")[0]))
+    return modules
 
 
 def _is_resolvable(module: str) -> bool:

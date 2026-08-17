@@ -121,6 +121,178 @@ class TestRetention:
         assert await store.get_execution("ancient") is None
         assert await store.load_journal("ancient") == []
 
+    async def test_old_runs_are_found_behind_a_batch_of_recent_ones(self) -> None:
+        """The no-op case, and the reason `batch_size` bounds work not reads.
+
+        `finished_at` is inside the record's JSON, so the cutoff is applied in
+        Python after the store query — and that query orders newest-first,
+        `run_id` being a ULID. Old runs are precisely what compaction is for, so
+        they sat behind every recent run and never entered the examined window.
+        A store with more terminal runs than `batch_size` reported
+        `runs_archived=0` on every pass, forever, while growing without bound —
+        and a scheduled compaction that reports success is one nobody revisits.
+        """
+        store = MemoryStore()
+        await _seed_run(
+            store,
+            status=ExecutionStatus.FAILED,
+            finished_days_ago=800,
+            # Oldest id, so every recent run sorts ahead of it.
+            run_id="00000000-ancient",
+        )
+        for i in range(120):
+            await _seed_run(
+                store,
+                status=ExecutionStatus.COMPLETED,
+                finished_days_ago=1,
+                run_id=f"zz{i:04d}-fresh",
+            )
+
+        result = await RetentionManager(RetentionPolicy()).compact(
+            store, batch_size=50
+        )
+
+        assert result.runs_archived == 1
+        assert await store.get_execution("00000000-ancient") is None
+        assert not result.scan_truncated
+
+    async def test_a_truncated_scan_says_so(self) -> None:
+        """Zero archived has two meanings, and they need opposite responses.
+
+        Without this flag, "nothing was old enough" and "we never got that far"
+        are the same output.
+
+        Exercises the *fallback* path: the shipped stores answer from an indexed
+        `finished_at` and never scan, so the ceiling governs only a host store
+        that does not implement `terminal_before`.
+        """
+
+        class NoIndexedScan(MemoryStore):
+            terminal_before = None
+
+        store = NoIndexedScan()
+        for i in range(60):
+            await _seed_run(
+                store,
+                status=ExecutionStatus.COMPLETED,
+                finished_days_ago=1,
+                run_id=f"r{i:04d}",
+            )
+
+        result = await RetentionManager(RetentionPolicy()).compact(
+            store, scan_limit=10
+        )
+
+        assert result.scan_truncated
+        # A caveat about the count, not an item in it.
+        assert result.total == 0
+
+    async def test_an_exhausted_scan_is_not_reported_as_truncated(self) -> None:
+        """The negative control: no false alarm when the data simply ended."""
+
+        class NoIndexedScan(MemoryStore):
+            terminal_before = None
+
+        store = NoIndexedScan()
+        for i in range(10):
+            await _seed_run(
+                store,
+                status=ExecutionStatus.COMPLETED,
+                finished_days_ago=1,
+                run_id=f"r{i:04d}",
+            )
+
+        result = await RetentionManager(RetentionPolicy()).compact(
+            store, scan_limit=10
+        )
+
+        assert not result.scan_truncated
+
+    async def test_a_blob_a_replay_clone_still_needs_is_kept(self, tmp_path) -> None:
+        """Compacting a run must not strip the journal of its replay clone.
+
+        `Runtime.replay` copies the source journal verbatim, and blobs are
+        content-addressed, so the clone names the same refs. Deleting them while
+        compacting the source left the clone with a journal it could not read —
+        the one variant of this that reaches a correctly configured deployment,
+        because the sharing is created by LOOM rather than by coincidence.
+        """
+        from loom.blobs.blob import BlobService, blob_backend_from_url
+        from loom.core.models import ExecutionRecord
+        from loom.runtime.journal import EntryKind, EntryStatus, JournalEntry
+
+        blobs = BlobService(blob_backend_from_url(f"file://{tmp_path}"))
+        ref = await blobs.store(b'"shared payload"', "application/json")
+        store = MemoryStore()
+
+        when = datetime.now(UTC) - timedelta(days=120)
+        for run_id, finished in (("source", when), ("source:replay", datetime.now(UTC))):
+            await store.create_execution(
+                ExecutionRecord(
+                    run_id=run_id,
+                    workflow="p2_simple",
+                    status=ExecutionStatus.COMPLETED,
+                    created_at=finished,
+                    finished_at=finished,
+                )
+            )
+            await store.save_journal(
+                run_id,
+                [
+                    JournalEntry(
+                        path="0000",
+                        kind=EntryKind.STEP,
+                        name="big",
+                        status=EntryStatus.COMPLETED,
+                        output={"__blob__": ref},
+                    )
+                ],
+            )
+
+        result = await RetentionManager(RetentionPolicy()).compact(store, blobs=blobs)
+
+        assert result.payloads_deleted == 0, "the clone still names this blob"
+        assert await blobs.load(ref) == b'"shared payload"'
+
+    async def test_a_blob_no_clone_needs_is_still_deleted(self, tmp_path) -> None:
+        """The negative control — otherwise the fix is just "never delete"."""
+        from loom.blobs.blob import BlobNotFoundError, BlobService, blob_backend_from_url
+        from loom.core.models import ExecutionRecord
+        from loom.runtime.journal import EntryKind, EntryStatus, JournalEntry
+
+        blobs = BlobService(blob_backend_from_url(f"file://{tmp_path}"))
+        ref = await blobs.store(b'"lonely payload"', "application/json")
+        store = MemoryStore()
+
+        when = datetime.now(UTC) - timedelta(days=120)
+        await store.create_execution(
+            ExecutionRecord(
+                run_id="source",
+                workflow="p2_simple",
+                status=ExecutionStatus.COMPLETED,
+                created_at=when,
+                finished_at=when,
+            )
+        )
+        await store.save_journal(
+            "source",
+            [
+                JournalEntry(
+                    path="0000",
+                    kind=EntryKind.STEP,
+                    name="big",
+                    status=EntryStatus.COMPLETED,
+                    output={"__blob__": ref},
+                )
+            ],
+        )
+
+        result = await RetentionManager(RetentionPolicy()).compact(store, blobs=blobs)
+
+        assert result.payloads_deleted == 1
+        with pytest.raises(BlobNotFoundError):
+            await blobs.load(ref)
+
     async def test_recent_runs_are_untouched(self) -> None:
         store = MemoryStore()
         await _seed_run(

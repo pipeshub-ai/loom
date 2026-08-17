@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -26,6 +27,7 @@ from loom.core.models import (
     TriggerRecord,
 )
 from loom.runtime.journal import JournalEntry, path_order
+from loom.stores.base import as_utc
 
 _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS executions (
@@ -128,6 +130,14 @@ class PostgresStore:
         )
         async with self._pool.acquire() as conn:
             await conn.execute(_SCHEMA)
+            # `CREATE TABLE IF NOT EXISTS` above covers a new table and nothing
+            # else — a new *column* on an existing one is a silent no-op that
+            # then fails every INSERT naming it. Migrations close that, under a
+            # transaction so two pods starting together cannot both apply them.
+            from loom.stores.migrations import apply_postgres
+
+            async with conn.transaction():
+                await apply_postgres(conn)
 
     async def close(self) -> None:
         """Close the connection pool."""
@@ -145,19 +155,24 @@ class PostgresStore:
                 """INSERT INTO executions
                    (run_id, workflow, status, parent_run_id,
                     idempotency_key, wake_at, awaiting_event,
-                    created_at, data)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                    created_at, lease_expires_at, finished_at, data)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
                    ON CONFLICT (run_id) DO UPDATE
-                   SET data=$9, status=$3, wake_at=$6,
-                       awaiting_event=$7""",
+                   SET data=$11, status=$3, wake_at=$6,
+                       awaiting_event=$7, lease_expires_at=$9,
+                       finished_at=$10""",
                 record.run_id,
                 record.workflow,
                 record.status.value,
                 record.parent_run_id,
                 record.idempotency_key,
-                record.wake_at,
+                as_utc(record.wake_at) if record.wake_at else None,
                 record.awaiting_event,
-                record.created_at or datetime.now(UTC),
+                as_utc(record.created_at) if record.created_at else datetime.now(UTC),
+                # Lifted out of `data` by migration 1 so retention and orphan
+                # reclamation can index them instead of scanning.
+                as_utc(record.lease_expires_at) if record.lease_expires_at else None,
+                as_utc(record.finished_at) if record.finished_at else None,
                 data,
             )
 
@@ -184,15 +199,18 @@ class PostgresStore:
             tag = await conn.execute(
                 """UPDATE executions
                    SET workflow=$2, status=$3, parent_run_id=$4,
-                       idempotency_key=$5, wake_at=$6, awaiting_event=$7, data=$8
-                   WHERE run_id=$1 AND status=$9""",
+                       idempotency_key=$5, wake_at=$6, awaiting_event=$7,
+                       lease_expires_at=$8, finished_at=$9, data=$10
+                   WHERE run_id=$1 AND status=$11""",
                 record.run_id,
                 record.workflow,
                 record.status.value,
                 record.parent_run_id,
                 record.idempotency_key,
-                record.wake_at,
+                as_utc(record.wake_at) if record.wake_at else None,
                 record.awaiting_event,
+                as_utc(record.lease_expires_at) if record.lease_expires_at else None,
+                as_utc(record.finished_at) if record.finished_at else None,
                 data,
                 expected_status.value,
             )
@@ -409,10 +427,52 @@ class PostgresStore:
                    WHERE status=$1 AND wake_at <= $2
                    ORDER BY wake_at LIMIT $3""",
                 ExecutionStatus.SUSPENDED.value,
-                now,
+                as_utc(now),
                 limit,
             )
         return [r["run_id"] for r in rows]
+
+    async def due_leases(
+        self,
+        before: datetime,
+        statuses: Sequence[ExecutionStatus],
+        *,
+        limit: int = 100,
+    ) -> list[ExecutionRecord]:
+        if not statuses:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT data FROM executions
+                   WHERE status = ANY($1::text[])
+                     AND lease_expires_at IS NOT NULL AND lease_expires_at <= $2
+                   ORDER BY lease_expires_at LIMIT $3""",
+                [s.value for s in statuses],
+                as_utc(before),
+                limit,
+            )
+        return [ExecutionRecord.model_validate_json(r["data"]) for r in rows]
+
+    async def terminal_before(
+        self,
+        cutoff: datetime,
+        statuses: Sequence[ExecutionStatus],
+        *,
+        limit: int = 100,
+    ) -> list[ExecutionRecord]:
+        if not statuses:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT data FROM executions
+                   WHERE status = ANY($1::text[])
+                     AND finished_at IS NOT NULL AND finished_at < $2
+                   ORDER BY finished_at LIMIT $3""",
+                [s.value for s in statuses],
+                as_utc(cutoff),
+                limit,
+            )
+        return [ExecutionRecord.model_validate_json(r["data"]) for r in rows]
 
     # ------------------------------------------------------------------
     # CacheStore
@@ -515,7 +575,7 @@ class PostgresStore:
                 trigger.trigger_id,
                 trigger.workflow,
                 trigger.kind.value,
-                trigger.next_fire_at,
+                as_utc(trigger.next_fire_at) if trigger.next_fire_at else None,
                 trigger.enabled,
                 trigger.model_dump_json(),
             )
@@ -556,7 +616,7 @@ class PostgresStore:
                    WHERE enabled AND next_fire_at <= $1
                    ORDER BY next_fire_at
                    LIMIT $2""",
-                now,
+                as_utc(now),
                 limit,
             )
         return [
@@ -598,7 +658,7 @@ class PostgresStore:
                    RETURNING data""",
                 owner,
                 until.isoformat(),
-                now,
+                as_utc(now),
                 limit,
             )
         return [TriggerRecord.model_validate_json(r["data"]) for r in rows]

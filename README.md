@@ -752,9 +752,10 @@ SQLiteStore
 
 ```python
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from loom import Context, Runtime, workflow
+from loom.runtime.clock import ManualClock
 from loom.runtime.dispatcher import TriggerDispatcher
 from loom.stores.memory import MemoryStore
 from loom.triggers.specs import Schedule
@@ -766,12 +767,15 @@ async def daily_report(ctx: Context, _: None = None) -> str:
 
 
 async def main():
-    rt = Runtime(store=MemoryStore())
+    # A ManualClock, so this reads the same on any day at any hour. register()
+    # computes the next fire from the runtime's clock, so on the real clock this
+    # example printed nothing whenever you happened to run it after 09:00.
+    monday_9am = datetime(2026, 8, 17, 9, 0, tzinfo=UTC)
+    rt = Runtime(store=MemoryStore(), clock=ManualClock(monday_9am - timedelta(hours=1)))
     dispatcher = TriggerDispatcher(rt)
     await dispatcher.register(daily_report)
     # tick() submits whatever is due. Pass a time to see it fire without
     # waiting until Monday; in production start_scheduler() ticks for you.
-    monday_9am = datetime(2026, 8, 17, 9, 0, tzinfo=UTC)
     for run_id in await dispatcher.tick(now=monday_9am):
         result = await rt.resume(run_id)
         print(result.status.value, "|", result.output)

@@ -272,10 +272,20 @@ class ToolsetRegistry(ToolsetCatalog):
     Runtimes leaking registrations into each other.
     """
 
-    def __init__(self, parent: ToolsetCatalog | None = None) -> None:
+    def __init__(
+        self,
+        parent: ToolsetCatalog | None = None,
+        *,
+        allow_builtin_fallback: bool = True,
+    ) -> None:
         super().__init__()
         self._toolsets: dict[str, Toolset] = {}
         self._parent = parent
+        # Default True: a bare ``Runtime()`` / generated ``python flow.py``
+        # still resolves ``toolsets=["jira"]`` to Loom's shipped toolsets.
+        # Hosts that must never touch process-env credentials (multi-tenant
+        # Query) pass ``False`` so an unknown id stays unknown.
+        self._allow_builtin_fallback = allow_builtin_fallback
 
     # -- registration ---------------------------------------------------------
 
@@ -331,9 +341,10 @@ class ToolsetRegistry(ToolsetCatalog):
     def get_toolset(self, toolset_id: str) -> Toolset | None:
         """The executable toolset for *toolset_id*, or ``None``.
 
-        Checked in order: registered here, registered on the parent, then the
-        toolsets LOOM ships. That last step is what lets a generated workflow
-        run standalone — ``python generated_workflow.py`` registers nothing,
+        Checked in order: registered here, registered on the parent, then
+        (when :attr:`_allow_builtin_fallback` is true) the toolsets LOOM
+        ships. That last step is what lets a generated workflow run
+        standalone — ``python generated_workflow.py`` registers nothing,
         and ``toolsets=["jira"]`` used to fail with "no executable toolset
         'jira' is registered (known: none)".
 
@@ -341,6 +352,9 @@ class ToolsetRegistry(ToolsetCatalog):
         ``list_toolsets`` and so out of :meth:`resolve_tools`'s no-ids sweep.
         Asking for one by name gets it; asking for "everything" does not
         quietly acquire four integrations and their destructive operations.
+        Hosts that pass ``allow_builtin_fallback=False`` skip the last step
+        so an unregistered id cannot resolve to a process-env credentialed
+        builtin.
         """
         found = self._toolsets.get(toolset_id)
         if found is not None:
@@ -349,6 +363,8 @@ class ToolsetRegistry(ToolsetCatalog):
             inherited = self._parent.get_toolset(toolset_id)
             if inherited is not None:
                 return inherited
+        if not self._allow_builtin_fallback:
+            return None
 
         from loom.toolsets.registry import builtin_toolset
 
@@ -600,11 +616,19 @@ PAGING_HOWTO = [
     "  Bounded set — one call, then say what it covers:",
     "      found = await ctx.step(<paged read>, ..., max_results=200)",
     '      header = f"showing {found.summary()}"   # "200 of 312"',
-    "  Unbounded set (a mailbox, a log) — one page per step, resumable.",
-    "  Raising max_results is wrong there: one call for 50,000 rows is one",
-    "  journal entry, so a crash refetches all of them.",
-    "      page = await ctx.step(<paged read>, ..., cursor=cursor)",
-    '      await ctx.state.set("cursor", page.cursor)',
+    "  Unbounded set (a mailbox, a log): raising max_results is wrong — one",
+    "  call for 50,000 rows is one journal entry, so a crash refetches all of",
+    "  them. No shipped read takes a cursor argument, so bound the window",
+    "  instead of the row count — a date range, a label, a status — and run",
+    "  the workflow on a schedule over successive windows:",
+    "      since = await ctx.state.get('since') or default_start",
+    "      found = await ctx.step(<paged read>, query_for(since), max_results=500)",
+    "      await ctx.state.set('since', new_watermark)",
+    "  Filter at the service, never after: pass the predicate to the query",
+    "  (JQL, q=, $filter, SOQL) rather than fetching everything and keeping",
+    "  the rows you wanted. A comprehension over a paged result is also a",
+    "  plain list, so it silently drops .complete — use .filtered(...) when",
+    "  the predicate genuinely cannot be expressed server-side.",
     "",
 ]
 

@@ -11,6 +11,13 @@ and set ``runtime._dispatcher`` to do their work. A facade is data in and data
 out, so an assistant that manages workflows can be handed one without being
 handed the ability to run arbitrary code in the host process.
 
+These overlap with ``mcp_server/tools.py`` on purpose — one set is reached by
+an in-process agent, the other by an MCP client — but they must not *differ*.
+They did: this ``run_workflow`` had no ``idempotency_key``, so an agent that
+retried a call it thought had failed started a second run, while the identical
+MCP tool deduplicated. ``get_workflow_info`` and ``schedule_workflow`` were the
+mirror gap and now exist on both sides.
+
 Usage::
 
     from loom.agents.workflow_tools import build_workflow_tools
@@ -78,16 +85,22 @@ def build_workflow_tools(facade: Any) -> list[Any]:
             "input_schema": found.get("input_schema"),
         }, indent=2, default=str)
 
-    async def run_workflow(name: str, input_json: str = "null") -> str:
+    async def run_workflow(
+        name: str, input_json: str = "null", idempotency_key: str | None = None
+    ) -> str:
         """Run a workflow immediately.
 
         Args:
             name: Workflow name.
             input_json: JSON-encoded input data (default: null).
+            idempotency_key: Reuse to make a repeated call return the original
+                run instead of starting a second one.
         """
         input_data = json.loads(input_json)
         try:
-            result = await facade.start(name, input_data)
+            result = await facade.start(
+                name, input_data, idempotency_key=idempotency_key
+            )
             return json.dumps({
                 "run_id": result["run_id"],
                 "status": result["status"],

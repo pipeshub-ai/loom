@@ -101,14 +101,19 @@ def _loom_tool_to_agno(tool: Any) -> Any:
     if asyncio.iscoroutinefunction(fn):
         @agno_tool(name=tool.name, description=tool.description or tool.name)
         async def wrapper(**kwargs: Any) -> str:
-            result = await fn(**kwargs)
-            return str(result)
+            # tool.render_result, not str(): `str(Results([1,2,3],
+            # complete=False, total=312))` is "[1, 2, 3]" — page one rendered
+            # exactly like a complete answer, with the coverage the paging layer
+            # computed thrown away on the last line before the model reads it.
+            rendered: str = tool.render_result(await fn(**kwargs))
+            return rendered
     else:
         @agno_tool(name=tool.name, description=tool.description or tool.name)
         def wrapper(**kwargs: Any) -> str:
             result = fn(**kwargs)
             if inspect.isawaitable(result):
-                return str(asyncio.get_event_loop().run_until_complete(result))
-            return str(result)
+                result = asyncio.get_event_loop().run_until_complete(result)
+            rendered: str = tool.render_result(result)
+            return rendered
 
     return wrapper

@@ -525,6 +525,16 @@ class TestBuiltInToolsetsReachEveryProcess:
 
         assert registry.get_toolset("jira") is mine
 
+    def test_builtin_fallback_can_be_disabled(self) -> None:
+        """Multi-tenant hosts must not resolve unknown ids to env-credentialed builtins."""
+        from loom.agents.tool_registry import ToolsetRegistry
+
+        open_registry = ToolsetRegistry()
+        assert open_registry.get_toolset("jira") is not None
+
+        closed = ToolsetRegistry(allow_builtin_fallback=False)
+        assert closed.get_toolset("jira") is None
+
     def test_an_unknown_toolset_is_still_unknown(self) -> None:
         from loom.toolsets.registry import builtin_toolset
 

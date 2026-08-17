@@ -115,12 +115,22 @@ discover integrations and their typed schemas
    - call_read_operation to resolve entity names to ids (a project, a user) \
 before generating code that depends on them
    - validate_workflow_code to check generated code against LOOM's rules \
-(compile, structure, determinism, imports) without running it
+without running it — compile, structure, determinism, imports, grants, \
+coverage, entity resolution, lint, types
    - smoke_test_workflow to execute generated code once in a sandbox with \
-mocked integrations — no real API calls
+mocked integrations — no real API calls — and then twice more to check it is \
+deterministic
    - save_workflow to write the finished code to a file
    The loop: discover, write code, validate, fix, smoke, fix, save, then \
 run_workflow. The create_workflow prompt walks through it in full.
+
+5. Pass the user's own words as `spec=` to validate_workflow_code, every time. \
+Two of its stages compare the code against the request rather than against the \
+language, and they report themselves skipped without it. They catch the two \
+defects that pass every other check: a fetch capped at 100 answering a spec \
+that said "all", and a query that fuzzy-matches a word from the spec instead \
+of resolving it to the id the system uses. A stage reported `skipped` has \
+found nothing — that is not the same as passing.
 """
 
 
@@ -225,6 +235,44 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
     async def list_workflows() -> str:
         """List every workflow this server can run, with input schemas."""
         return await tools.list_workflows(_principal_facade(base_facade, auth_enabled))
+
+    @server.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
+    async def get_workflow_info(workflow: str) -> str:
+        """One workflow's description, triggers, and full input schema.
+
+        Use this before run_workflow when the input shape matters —
+        list_workflows is capped and may not carry the one you want.
+
+        Args:
+            workflow: Name of the workflow.
+        """
+        return await tools.get_workflow_info(
+            _principal_facade(base_facade, auth_enabled), workflow
+        )
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=False, idempotentHint=False,
+            openWorldHint=False,
+        )
+    )
+    async def schedule_workflow(
+        workflow: str, cron: str, timezone: str = "UTC"
+    ) -> str:
+        """Fire a workflow on a cron expression, durably.
+
+        The trigger is stored, so it survives this server restarting.
+
+        Args:
+            workflow: Name of the workflow.
+            cron: Cron expression, e.g. "0 9 * * 1-5".
+            timezone: IANA timezone the expression is read in.
+        """
+        return await tools.schedule_workflow(
+            _principal_facade(base_facade, auth_enabled), workflow, cron, timezone
+        )
 
     @server.tool(
         annotations=ToolAnnotations(
@@ -546,20 +594,26 @@ def _register_authoring_tools(server: FastMCP, config: AuthoringConfig) -> None:
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
     )
     async def validate_workflow_code(
-        code: str, allowed_packages: str | None = None
+        code: str, allowed_packages: str | None = None, spec: str = ""
     ) -> str:
-        """Check generated workflow code against LOOM's static rules —
-        compile, structure, determinism, imports. Does not execute it.
+        """Check generated workflow code against LOOM's rules — compile,
+        structure, determinism, imports, grants, coverage, entity resolution,
+        lint, types. Does not execute it.
 
         Args:
             code: Complete Python source.
             allowed_packages: Comma-separated third-party packages the target
                 environment has, e.g. "httpx,pandas". Omit to skip that check.
+            spec: The user's own words for what this workflow should do.
+                Always pass it: without it the coverage and resolution stages
+                are skipped, and those are the two that catch code which
+                compiles and validates cleanly while answering a different
+                question than the one asked.
         """
         error = _too_large(code)
         if error is not None:
             return error
-        return await authoring.validate_workflow_code(code, allowed_packages)
+        return await authoring.validate_workflow_code(code, allowed_packages, spec)
 
     @server.tool(
         annotations=ToolAnnotations(

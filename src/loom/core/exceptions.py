@@ -155,6 +155,17 @@ class ResourceUnavailable(WorkflowError):  # noqa: N818
     """A required resource (connection pool, external service, lock) is unavailable."""
 
 
+class DataUnavailable(NonRetryableError):  # noqa: N818
+    """A journaled payload cannot be read back, so the run cannot replay.
+
+    Non-retryable by inheritance, and that is the point of the class existing.
+    An offloaded payload whose blob has been deleted surfaced as a bare
+    ``BlobNotFoundError`` carrying a 64-character hash and nothing else — which
+    the engine classified as retryable, so a run whose data is permanently gone
+    was retried against it forever.
+    """
+
+
 class ConcurrentUpdateError(WorkflowError):
     """A conditional ``update_execution(..., expected_status=...)`` lost a race.
 

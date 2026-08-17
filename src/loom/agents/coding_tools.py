@@ -443,7 +443,49 @@ async def _call_read_operation(
             }
         )
 
-    return json.dumps({"result": _plain(result)}, indent=2, default=str)[:8000]
+    payload: dict[str, Any] = {"result": _plain(result)}
+    # Coverage hoisted *beside* the rows rather than left inside them, because
+    # the truncation two lines down cuts the tail off — and on a `Results` the
+    # tail is exactly where `complete` and `total` live. This is the entity
+    # resolution loop the prompt mandates, so an agent picking "the" account out
+    # of a silently-capped, silently-truncated list bakes the wrong id into
+    # generated code that then runs unchanged forever.
+    coverage = _coverage(result)
+    if coverage is not None:
+        payload["coverage"] = coverage
+
+    rendered = json.dumps(payload, indent=2, default=str)
+    if len(rendered) <= _READ_RESULT_LIMIT:
+        return rendered
+    return json.dumps(
+        {
+            "result": rendered[:_READ_RESULT_LIMIT],
+            "truncated": True,
+            "note": (
+                "This rendering was cut at "
+                f"{_READ_RESULT_LIMIT} characters — it is not the whole result. "
+                "Narrow the query rather than reading past the cut."
+            ),
+            **({"coverage": coverage} if coverage is not None else {}),
+        },
+        indent=2,
+        default=str,
+    )
+
+
+#: How much of a read a resolution turn may put in front of the model.
+_READ_RESULT_LIMIT = 8000
+
+
+def _coverage(value: Any) -> dict[str, Any] | None:
+    """Whether *value* is a page, said where a cut cannot remove it."""
+    if not hasattr(value, "complete"):
+        return None
+    return {
+        "complete": bool(value.complete),
+        "total": getattr(value, "total", None),
+        "returned": len(value) if hasattr(value, "__len__") else None,
+    }
 
 
 def _plain(value: Any) -> Any:

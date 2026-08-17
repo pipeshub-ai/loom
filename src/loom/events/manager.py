@@ -171,14 +171,24 @@ class SubscriptionManager:
         subscriber_ttl: float = DEFAULT_SUBSCRIBER_TTL,
         clock: Any = None,
     ) -> None:
+        from loom.runtime.clock import Clock, SystemClock
+
         self._store = store
         self._log = log
         self._marks = checkpoints
         self._ttl = subscriber_ttl
-        self._clock = clock
+        #: Defaulted rather than left optional. This reads `updated_at`, which
+        #: `StoreBackedCheckpoints` writes from *its* clock — so a `None` here
+        #: meant the reader silently fell back to the wall clock while the
+        #: writer was on a virtual one, and every subscriber looked either
+        #: brand new or years idle. Pass the Runtime's clock wherever there is
+        #: one; every call site in LOOM now does.
+        # Typed as the port rather than Any, so `_now()` returns a datetime
+        # instead of laundering one through Any.
+        self._clock: Clock = clock or SystemClock()
 
     def _now(self) -> datetime:
-        return self._clock.now() if self._clock is not None else datetime.now(UTC)
+        return self._clock.now()
 
     # -- the registry --------------------------------------------------------
 

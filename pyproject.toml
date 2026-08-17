@@ -170,11 +170,82 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF"]
 
+# Run in an environment installed as `pip install -e ".[dev]"` — deliberately
+# *not* `[all]`.
+#
+# `python_version` is the floor `requires-python` and the classifiers promise,
+# and checking against the oldest supported version is the whole point: it is
+# what catches a 3.12-only stdlib call. It is not negotiable to make a
+# dependency happy.
+#
+# The optional integration SDKs pull numpy transitively (langchain-community,
+# openai, agno, pydantic-ai), and numpy's stubs use PEP 695 `type` statements —
+# a *syntax* error below 3.12. mypy therefore failed to parse them and stopped
+# with "errors prevented further checking", never type-checking loom at all: a
+# clean tree reported 19 failures no change could fix, which is how a gate stops
+# being read. No per-module setting avoids this, because `follow_imports` and
+# `ignore_errors` are both ignored for stub files and the failure happens during
+# parsing regardless.
+#
+# The resolution is that the type-check environment is not the test environment.
+# None of those SDKs is needed to check loom — every one is imported lazily
+# inside a function and declared below as tolerable-when-absent — so `[dev]`,
+# which pulls none of them, is the environment this check is *for*. The full
+# suite still needs `[all]`; that is a separate environment with a separate job.
 [tool.mypy]
 python_version = "3.11"
 strict = true
 mypy_path = "src"
 packages = ["loom"]
+
+# Optional third-party SDKs, each behind an extra and imported lazily inside a
+# function. Absent is the normal case, not a defect in this code. Present, they
+# are still type-checked normally — `ignore_missing_imports` only applies when
+# mypy cannot find the module.
+#
+# Core and dev dependencies are deliberately absent from this list: pydantic,
+# httpx and fastapi missing *is* a real problem, and silencing it would hide it.
+[[tool.mypy.overrides]]
+module = [
+    "agents.*",
+    "agno.*",
+    "aioboto3.*",
+    "anthropic.*",
+    "asyncpg.*",
+    "autogen_agentchat.*",
+    "azure.*",
+    "boto3.*",
+    "botocore.*",
+    # pymongo ships `bson` as a separate top-level package; both arrive with the
+    # `[mongo]` extra.
+    "bson.*",
+    "crewai.*",
+    "ddgs.*",
+    # The bare namespace as well as the packages under it — `google` alone is
+    # what an `import google.auth` resolves first, and a `google.*` pattern does
+    # not match it.
+    "google",
+    "google.auth.*",
+    "google.cloud.*",
+    "google.genai.*",
+    "google.oauth2.*",
+    "langchain.*",
+    "langchain_anthropic.*",
+    "langchain_community.*",
+    "langchain_core.*",
+    "langgraph.*",
+    "mcp.*",
+    "motor.*",
+    "openai.*",
+    "opentelemetry.*",
+    "pydantic_ai.*",
+    "pymongo.*",
+    "redis.*",
+    "rich.*",
+    "textual.*",
+    "uvicorn.*",
+]
+ignore_missing_imports = true
 
 # Local `loom mcp` / `loom run <name>` without --module. Cookbook examples that
 # talk to a real service (Jira, Gmail) stay off this list so a bare server

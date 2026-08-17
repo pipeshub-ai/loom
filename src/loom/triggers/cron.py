@@ -113,7 +113,15 @@ class CronSchedule:
         return True
 
     def next_after(self, after: datetime | None = None) -> datetime:
-        """First moment strictly after ``after`` that matches this schedule."""
+        """First moment strictly after ``after`` that matches this schedule.
+
+        Pass one. Defaulting to the wall clock is the fallback for a caller
+        holding no moment at all, and it is why the dispatcher, the facade, and
+        ``Schedule.describe`` all supply ``clock.now()`` explicitly: a schedule
+        computed from the wall clock inside a run on virtual time answers a
+        question about a different day, and a trigger whose next fire is a year
+        away looks like one that is simply broken.
+        """
         tz = ZoneInfo(self.timezone) if self.timezone != "UTC" else UTC
         start = (after or datetime.now(UTC)).astimezone(tz)
         candidate = start.replace(microsecond=0) + timedelta(seconds=1)

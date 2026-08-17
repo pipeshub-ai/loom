@@ -10,10 +10,12 @@ from __future__ import annotations
 import traceback
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Self
+from typing import Annotated, Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
+from loom.core.compat import UNKNOWN as _UNKNOWN
+from loom.core.compat import tolerant_enum
 from loom.core.exceptions import WorkflowError
 from loom.core.ids import new_id
 
@@ -26,6 +28,16 @@ class ExecutionStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+    UNKNOWN = _UNKNOWN
+    """A status this version does not know, read from a record a newer one wrote.
+
+    Never written by this version. It exists so ``load_journal`` and
+    ``get_execution`` can return a record whose status they cannot interpret,
+    instead of raising and making the run unreadable — see
+    :mod:`loom.core.compat`. Deliberately **not** terminal: a run whose status
+    cannot be read must not be compacted or reported as finished on a guess.
+    """
 
     @property
     def is_terminal(self) -> bool:
@@ -58,6 +70,20 @@ class TriggerKind(StrEnum):
     ERROR_HANDLER = "error_handler"
     REPLAY = "replay"
 
+    UNKNOWN = _UNKNOWN
+    """A trigger kind written by a newer version. See :mod:`loom.core.compat`."""
+
+
+#: Persisted enum fields, annotated to survive a value this version predates.
+#: The tolerance lives here rather than on the enum so a typo in application
+#: code still raises.
+Status = Annotated[
+    ExecutionStatus, BeforeValidator(tolerant_enum(ExecutionStatus, ExecutionStatus.UNKNOWN))
+]
+Trigger = Annotated[
+    TriggerKind, BeforeValidator(tolerant_enum(TriggerKind, TriggerKind.UNKNOWN))
+]
+
 
 class ErrorInfo(BaseModel):
     """A serializable snapshot of a failure, including the traceback."""
@@ -70,10 +96,17 @@ class ErrorInfo(BaseModel):
 
     @classmethod
     def from_exception(cls, exc: BaseException, *, step_name: str | None = None) -> Self:
+        # `retryable` was never derived here, so it kept its `True` default for
+        # everything — including the exceptions whose whole purpose is to say
+        # "do not try this again". A run failing on a deleted payload or a
+        # missing scope was recorded as worth retrying, forever.
+        from loom.core.exceptions import NonRetryableError
+
         return cls(
             type=type(exc).__name__,
             message=str(exc) or type(exc).__name__,
             traceback="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+            retryable=not isinstance(exc, NonRetryableError),
             step_name=step_name,
         )
 
@@ -135,13 +168,28 @@ class StepRecord(BaseModel):
 class ExecutionRecord(BaseModel):
     """The queryable header for a single workflow run."""
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    # extra="allow", not the "ignore" default. The stores rewrite the whole
+    # record on every write, so ignoring an unknown field does not merely skip
+    # it — it *deletes* it. During a rolling deploy an old pod would read a
+    # record a new pod wrote, drop the new field, and write it back without it,
+    # leaving no way to tell a destroyed value from one never set. Allowing
+    # extras makes the round trip lossless. "forbid" would be strictly worse
+    # here: it converts silent loss into a hard failure on every old pod.
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
+
+    schema_version: int = 1
+    """Shape of this record, for a reader that has to ask "how old is this?".
+
+    Not branched on today. It exists because that question was unanswerable —
+    the only way to date a record was to notice which fields it happened to be
+    missing, which is exactly the guess a version tag removes.
+    """
 
     run_id: str = Field(default_factory=lambda: new_id("run"))
     workflow: str
     workflow_version: str = "1"
-    status: ExecutionStatus = ExecutionStatus.PENDING
-    trigger: TriggerKind = TriggerKind.MANUAL
+    status: Status = ExecutionStatus.PENDING
+    trigger: Trigger = TriggerKind.MANUAL
 
     input: Any = None
     output: Any = None
@@ -193,7 +241,11 @@ class TriggerRecord(BaseModel):
     Tracks when a trigger last fired and when it should fire next.
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    # See ExecutionRecord: this record is rewritten whole on every fire.
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
+
+    schema_version: int = 1
+    """Shape of this record. See :attr:`ExecutionRecord.schema_version`."""
 
     trigger_id: str = Field(default_factory=lambda: new_id("trg"))
     workflow: str

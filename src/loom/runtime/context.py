@@ -25,6 +25,7 @@ from loom.agents.memory import replace_history
 from loom.agents.result import AgentResult
 from loom.blobs.artifact import ArtifactVersion
 from loom.blobs.attachment import Attachment
+from loom.blobs.blob import BlobNotFoundError
 from loom.connectors.credentials import credential_store_scope
 from loom.core.exceptions import (
     AuthExpired,
@@ -33,6 +34,7 @@ from loom.core.exceptions import (
     ContinueAsNew,
     ContractChanged,
     ControlSignal,
+    DataUnavailable,
     RetriesExhausted,
     SerializationError,
     StepError,
@@ -177,7 +179,12 @@ class DurableCall(Generic[T]):
         )
         if recorded is not None and recorded.status is EntryStatus.COMPLETED:
             self._check_contract(recorded)
-            value = decode(await ctx._load_payload(recorded.output), self._output_type)
+            value = decode(
+                await ctx._load_payload(
+                    recorded.output, where=f"{self.kind.value} '{self.name}' (path {self.path})"
+                ),
+                self._output_type,
+            )
             self._note_drift(recorded, value)
             return value
         if (
@@ -697,6 +704,7 @@ class Context(Generic[DepsT]):
         self._compensation_stack: list[tuple[Callable[..., Awaitable[Any]], tuple[Any, ...]]] = []
         self._active_patches: frozenset[str] = frozenset()
         self._warned_journal_size = False
+        self._warned_payload_size = False
 
     def nested(self, path: str) -> Context[DepsT]:
         """A view of this context whose durable calls nest beneath ``path``.
@@ -1056,6 +1064,17 @@ class Context(Generic[DepsT]):
             return bool(answer.get("approved", False))
         return bool(answer)
 
+    def _next_chain_depth(self) -> int:
+        """How many workflow-to-workflow hops a newly published event carries.
+
+        One more than the depth of the event that triggered *this* run
+        (``loom.chain_depth``, set by ``EventDispatcher`` at submit), or ``0``
+        when this run was not itself started from an event — it is then the
+        first hop of whatever chain it starts, not the continuation of one.
+        """
+        depth = self._record.metadata.get("loom.chain_depth")
+        return int(depth) + 1 if depth is not None else 0
+
     async def signal(self, run_id: str, name: str, payload: Any = None) -> None:
         """Send an event to another execution, journaled so it fires exactly once."""
 
@@ -1085,10 +1104,25 @@ class Context(Generic[DepsT]):
         natural word for streaming a run's output, which is :meth:`report`.
         Two meanings under one name is the kind of ambiguity that produces code
         which reads correctly and does the other thing.
+
+        When the Runtime carries an :class:`~loom.events.log.EventLog`
+        (``Runtime(events=...)``), this also appends the event under topic
+        ``name`` — the same log an :class:`~loom.events.dispatcher.EventDispatcher`
+        reads, so a workflow's own event can start or filter into another
+        workflow's ``OnAppEvent`` subscription exactly as an external one would.
+        Off unless an ``EventLog`` is configured, so a Runtime with none pays
+        nothing extra here.
         """
 
         async def perform(attempt: int, step_ctx: StepContext) -> Any:
-            await self._runtime.send_event(None, name, payload)
+            await self._runtime.send_event(
+                None,
+                name,
+                payload,
+                to_topic=True,
+                event_id=f"loom:publish:{self.run_id}:{step_ctx.path}",
+                chain_depth=self._next_chain_depth(),
+            )
             return True
 
         await DurableCall(
@@ -1662,10 +1696,21 @@ class Context(Generic[DepsT]):
     def get_artifact(self, name: str, version: int | None = None) -> DurableCall[bytes]:
         """Read a named artifact's content. ``version=None`` means latest.
 
-        The resolved version is journaled, so a replay reads exactly what the
-        original run read even if newer versions have been published since —
-        without that, a replay is not a rehearsal of what happened but of what
-        would happen now.
+        A replay reads exactly what the original run read, even if newer
+        versions have been published since — without that, a replay would be a
+        rehearsal of what would happen now rather than of what happened.
+
+        **It is the content that is journaled, not the version.** That is worth
+        stating plainly because the guarantee sounds like it should cost a
+        version number and instead costs the bytes: reading a 500 MB artifact
+        writes ~667 MB into the journal, base64 included. With
+        ``Runtime(blobs=...)`` the payload goes back out to blob storage over
+        the offload threshold — and content-addressing means it dedupes against
+        the artifact's own bytes, so the cost is a reference. Without a blob
+        service it is inline, and ``journal_max_payload_bytes`` is what stops it.
+
+        For large artifacts prefer :meth:`artifact_url`, which is deliberately
+        not journaled, or pass the reference to a step that streams it.
         """
         label = f"artifact:get:{name}"
 
@@ -1993,6 +2038,16 @@ class Context(Generic[DepsT]):
         """
         blobs = self._runtime.blobs
         if blobs is None:
+            # No blob service is the *default*, and it used to mean no sizing at
+            # all — a step returning 200 MB was written to the journal verbatim.
+            # The entry budget could not see it either, because it counts
+            # entries and one enormous entry is `1`. So the only bound on a
+            # journal row was whatever the driver happened to raise: an opaque
+            # `DocumentTooLarge` on Mongo at 16 MB, and on SQLite or Postgres no
+            # error at all — just a row that is re-read and re-parsed on every
+            # subsequent replay, degrading exactly the way the entry budget
+            # exists to prevent while being invisible to it.
+            self._check_payload_size(encoded)
             return encoded
         raw = _json_bytes(encoded)
         if raw is None or not blobs.should_offload(raw):
@@ -2001,18 +2056,84 @@ class Context(Generic[DepsT]):
         self.logger.debug("offloaded %d bytes to %s", len(raw), ref)
         return {BLOB_KEY: ref}
 
-    async def _load_payload(self, stored: Any) -> Any:
+    async def _load_payload(self, stored: Any, *, where: str = "") -> Any:
         """Rehydrate a journal payload, following a blob reference if present."""
         if not _is_blob_marker(stored):
             return stored
         ref = stored[BLOB_KEY]
+        at = f" at {where}" if where else ""
         blobs = self._runtime.blobs
         if blobs is None:
             raise ConfigurationError(
                 f"journal entry references {ref} but this Runtime has no blob service. "
                 "Pass the same blobs=BlobService(...) used when the run was recorded."
             )
-        return json.loads(await blobs.load(ref))
+        try:
+            return json.loads(await blobs.load(ref))
+        except BlobNotFoundError as exc:
+            # A journal entry naming a blob that is gone is unrecoverable, and
+            # the raw error is a bare 64-character hash — no run, no step, and
+            # nothing suggesting where it went. Worse, it was reported
+            # `retryable=True`, so a run whose payload no longer exists was
+            # retried forever against a blob that will never come back.
+            #
+            # The usual cause is retention: `_drop_blobs` deletes by scanning
+            # one run's journal, and blobs are content-addressed, so a replay
+            # clone — or any run that produced identical bytes — shares the ref
+            # and loses it when the first of them is compacted.
+            raise DataUnavailable(
+                f"run {self.run_id!r}{at} recorded its output as {ref}, and "
+                "that blob no longer exists. A journaled payload cannot be "
+                "reconstructed, so this run cannot replay. The usual cause is "
+                "retention compaction deleting a blob that another run still "
+                "referenced — blobs are content-addressed, so runs producing "
+                "identical bytes share one. Check RetentionManager settings, "
+                "and whether this run is a replay clone of an "
+                "already-compacted run."
+            ) from exc
+
+    def _check_payload_size(self, encoded: Any) -> None:
+        """Warn, then fail, on a single journal payload that is too large.
+
+        Mirrors :meth:`_check_journal_size` one level down: that one bounds how
+        *many* entries a run writes, this one bounds how *big* one of them is.
+        Both were needed and only the first existed.
+
+        Only reached when no :class:`BlobService` is configured — with one, a
+        payload over the offload threshold becomes a `blob:` reference and never
+        gets here. So the fix this names is the real one.
+        """
+        runtime = self._runtime
+        limit = getattr(runtime, "journal_max_payload_bytes", 0)
+        warn_at = getattr(runtime, "journal_warn_payload_bytes", 0)
+        if not limit and not warn_at:
+            return
+
+        raw = _json_bytes(encoded)
+        if raw is None:
+            return
+        size = len(raw)
+
+        if limit and size >= limit:
+            raise BudgetExceeded(
+                f"run {self.run_id} tried to journal a {size:,}-byte payload, over "
+                f"the limit of {limit:,}. Configure Runtime(blobs=BlobService(...)) "
+                "so payloads this size are stored by content hash and referenced "
+                "from the journal, put the data in an artifact "
+                "(ctx.put_artifact), or raise journal_max_payload_bytes.",
+                budget_type="journal_payload_bytes",
+                limit=limit,
+                actual=size,
+            )
+
+        if warn_at and size >= warn_at and not self._warned_payload_size:
+            self._warned_payload_size = True
+            self.logger.warning(
+                "run %s journaled a %d-byte payload with no blob service "
+                "configured; it is stored inline and re-read on every replay",
+                self.run_id,
+                size,
+            )
 
     def _check_journal_size(self) -> None:
         """Warn, then fail, as a run's journal grows without bound.

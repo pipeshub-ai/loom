@@ -449,7 +449,52 @@ class TestTheCodingAgentKnows:
         from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
 
         assert "no natural bound" in DEFAULT_SYSTEM_PROMPT
-        assert "one page per step" in DEFAULT_SYSTEM_PROMPT
+        assert "bound the *window*" in DEFAULT_SYSTEM_PROMPT
+
+    def test_the_prompt_does_not_teach_a_parameter_no_tool_accepts(self) -> None:
+        """It told the model to page with ``cursor=``. Nothing accepts one.
+
+        Introspecting every shipped toolset finds 82 paged reads and 82 without
+        a ``cursor`` parameter, so code written exactly as instructed raised
+        ``TypeError`` — and `CodeValidator` does no signature checking, so it
+        survived to the smoke stage before anything noticed.
+        """
+        from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
+        from loom.agents.tool_registry import PAGING_HOWTO
+
+        assert "cursor=cursor" not in DEFAULT_SYSTEM_PROMPT
+        assert "cursor=cursor" not in "\n".join(PAGING_HOWTO)
+
+    def test_no_shipped_paged_read_takes_a_cursor(self) -> None:
+        """The fact the advice above is grounded in, asserted rather than recalled.
+
+        If a toolset ever gains real resumable paging, this fails and the prompt
+        should be changed back — which is the point of pinning it.
+        """
+        import importlib
+        import inspect
+
+        from loom.toolsets.pagination import paginates
+        from test_manifest_imports import FIRST_PARTY
+
+        with_cursor: list[str] = []
+        paged = 0
+        for manifest in FIRST_PARTY:
+            module = importlib.import_module(manifest.tools_module)
+            for op in manifest.all_operations():
+                fn = getattr(module, op.function, None) if op.function else None
+                if fn is None or not paginates(fn):
+                    continue
+                paged += 1
+                target = getattr(fn, "fn", fn)
+                if "cursor" in inspect.signature(target).parameters:
+                    with_cursor.append(op.function)
+
+        assert paged > 50, "expected the shipped toolsets to have many paged reads"
+        assert not with_cursor, (
+            "these reads now accept a cursor, so the prompt can teach resumable "
+            f"paging again: {with_cursor}"
+        )
 
     def test_the_prompt_asks_for_the_coverage_to_be_reported(self) -> None:
         from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
@@ -736,3 +781,250 @@ class TestSlacksNestedCursor:
         assert list(found) == [1, 2, 3]
         assert found.complete is True
         assert seen[1]["cursor"] == "c2"
+
+
+class TestFiltered:
+    """The counterpart to `.mapped()`, and why it cannot be built from it."""
+
+    def test_coverage_survives_a_filter(self) -> None:
+        from loom.toolsets.pagination import Results
+
+        page = Results([1, 2, 3, 4], complete=False, total=312, cursor="c")
+
+        kept = page.filtered(lambda n: n % 2 == 0)
+
+        assert list(kept) == [2, 4]
+        assert kept.complete is False
+        assert kept.cursor == "c"
+
+    def test_total_is_dropped_because_it_no_longer_describes_these_rows(self) -> None:
+        """`mapped` keeps `total`; a filter must not.
+
+        Keeping it would report a count larger than what is being returned —
+        the same "a number that does not describe these rows" failure `Results`
+        exists to prevent, arriving from the other direction. This is the exact
+        difference that makes `.filtered` un-fakeable with `.mapped`.
+        """
+        from loom.toolsets.pagination import Results
+
+        page = Results([1, 2, 3], complete=True, total=3)
+
+        assert page.mapped(str).total == 3
+        assert page.filtered(lambda n: n > 1).total is None
+
+    def test_a_comprehension_still_loses_everything(self) -> None:
+        """Stated as a test because it is the thing `filtered` exists to replace."""
+        from loom.toolsets.pagination import Results
+
+        page = Results([1, 2, 3], complete=False, total=312)
+
+        assert not hasattr([n for n in page if n > 1], "complete")
+
+    def test_it_is_a_results_and_not_a_list(self) -> None:
+        from loom.toolsets.pagination import Results
+
+        assert isinstance(Results([1]).filtered(lambda n: True), Results)
+
+
+class TestResumingFromACursor:
+    """`Results.cursor` documented a pattern the plumbing could not perform."""
+
+    async def test_collect_can_start_from_a_cursor(self) -> None:
+        from loom.toolsets.pagination import Page, collect
+
+        seen: list[str | None] = []
+
+        async def fetch(cursor: str | None, size: int) -> Page:
+            seen.append(cursor)
+            if cursor == "p2":
+                return Page(items=["c", "d"], cursor=None)
+            return Page(items=["a", "b"], cursor="p2")
+
+        rows = await collect(fetch, limit=10, page_size=2, start="p2")
+
+        assert seen[0] == "p2", "paging must begin where the caller said"
+        assert list(rows) == ["c", "d"]
+        assert rows.complete is True
+
+    async def test_starting_from_none_is_unchanged(self) -> None:
+        from loom.toolsets.pagination import Page, collect
+
+        async def fetch(cursor: str | None, size: int) -> Page:
+            return Page(items=["a"], cursor=None)
+
+        rows = await collect(fetch, limit=10, page_size=2)
+
+        assert list(rows) == ["a"]
+
+
+class TestCoverageStageBlindSpots:
+    """Each case silenced the whole stage while saying nothing about coverage."""
+
+    SPEC = "Show all the stories in project PA"
+
+    async def _issues(self, code: str):
+        from loom.agents.checks import CheckContext
+        from loom.agents.stages import CoverageStage
+
+        return (await CoverageStage().run(code, CheckContext(spec=self.SPEC))).issues
+
+    async def test_an_unrelated_total_seconds_no_longer_disarms_it(self) -> None:
+        """`(end - start).total_seconds()` contains the substring `.total`."""
+        code = (
+            "async def f(ctx):\n"
+            "    r = await ctx.step(jira_search_issues, 'x', max_results=100)\n"
+            "    d = (b - a).total_seconds()\n"
+            "    return len(r)\n"
+        )
+        assert await self._issues(code)
+
+    async def test_a_completed_field_no_longer_disarms_it(self) -> None:
+        """`task.completed` is a real field on Asana and ClickUp rows."""
+        code = (
+            "async def f(ctx):\n"
+            "    r = await ctx.step(jira_search_issues, 'x', max_results=100)\n"
+            "    return [t for t in r if t.completed]\n"
+        )
+        assert await self._issues(code)
+
+    async def test_a_cap_bound_to_a_name_is_seen(self) -> None:
+        """Lifting the number into a constant is ordinary tidying, not a fix."""
+        code = (
+            "CAP = 100\n"
+            "async def f(ctx):\n"
+            "    r = await ctx.step(jira_search_issues, 'x', max_results=CAP)\n"
+            "    return len(r)\n"
+        )
+        assert await self._issues(code)
+
+    async def test_other_cap_keywords_are_seen(self) -> None:
+        """`num_results` is Exa's spelling and was invisible."""
+        for kwarg in ("page_size", "per_page", "num_results", "top"):
+            code = (
+                "async def f(ctx):\n"
+                f"    r = await ctx.step(some_search, 'x', {kwarg}=10)\n"
+                "    return len(r)\n"
+            )
+            assert await self._issues(code), kwarg
+
+    async def test_a_genuine_coverage_read_is_still_silent(self) -> None:
+        """The negative control — a stage that flags everything is not a check."""
+        code = (
+            "async def f(ctx):\n"
+            "    r = await ctx.step(jira_search_issues, 'x', max_results=500)\n"
+            "    return r.summary()\n"
+        )
+        assert not await self._issues(code)
+
+    async def test_a_destructured_coverage_read_is_silent(self) -> None:
+        code = (
+            "async def f(ctx):\n"
+            "    r = await ctx.step(jira_search_issues, 'x', max_results=500)\n"
+            "    complete = r.complete\n"
+            "    return complete\n"
+        )
+        assert not await self._issues(code)
+
+
+class TestPlacementStage:
+    """Fetch-everything-then-filter passed all ten stages before this existed."""
+
+    async def _issues(self, code: str):
+        from loom.agents.checks import CheckContext
+        from loom.agents.stages import PlacementStage
+
+        return (await PlacementStage().run(code, CheckContext())).issues
+
+    async def test_a_filtered_comprehension_over_a_service_read_is_flagged(self) -> None:
+        code = (
+            "async def f(ctx):\n"
+            "    issues = await ctx.step(jira_search_issues, 'project = PA')\n"
+            "    return [i for i in issues if i.priority == 'High']\n"
+        )
+        issues = await self._issues(code)
+        assert issues
+        assert "issues" in issues[0].message
+
+    async def test_a_direct_toolset_call_counts_too(self) -> None:
+        """`ctx.step(op, ...)` and `await op(...)` are both sanctioned forms."""
+        code = (
+            "async def f(ctx):\n"
+            "    rows = await gmail_search_messages(q='')\n"
+            "    return [r for r in rows if r.unread]\n"
+        )
+        assert await self._issues(code)
+
+    async def test_a_generator_expression_counts_too(self) -> None:
+        code = (
+            "async def f(ctx):\n"
+            "    rows = await ctx.step(hubspot_find_contacts, '')\n"
+            "    return sum(1 for r in rows if r.active)\n"
+        )
+        assert await self._issues(code)
+
+    async def test_a_server_side_filter_is_silent(self) -> None:
+        code = (
+            "async def f(ctx):\n"
+            "    issues = await ctx.step(jira_search_issues, 'project = PA AND priority = High')\n"
+            "    return [i.key for i in issues]\n"
+        )
+        assert not await self._issues(code)
+
+    async def test_a_local_list_is_not_a_service_read(self) -> None:
+        """The false positive that would make the stage noise."""
+        code = (
+            "async def f(ctx):\n"
+            "    xs = [1, 2, 3]\n"
+            "    return [x for x in xs if x > 1]\n"
+        )
+        assert not await self._issues(code)
+
+    async def test_using_filtered_is_silent(self) -> None:
+        """The suggested fix must not itself trip the check."""
+        code = (
+            "async def f(ctx):\n"
+            "    issues = await ctx.step(jira_search_issues, 'project = PA')\n"
+            "    return issues.filtered(lambda i: i.priority == 'High')\n"
+        )
+        assert not await self._issues(code)
+
+    async def test_it_is_in_the_default_pipeline(self) -> None:
+        from loom.agents.stages import default_stages
+
+        assert "placement" in {s.name for s in default_stages(smoke=False)}
+
+
+class TestFakesKeepTheCoverageWrapper:
+    """A fake that fails validation must not hand back a bare list.
+
+    `_coerce` failed open, so a paged operation whose generated fake did not
+    validate returned a plain list — and generated code correctly calling
+    `.summary()` then died with `AttributeError` inside the *blocking* smoke
+    stage. `AttributeError` is explicitly classified as a code fault rather than
+    an environment one, so the repair loop's cheapest fix was to delete the
+    coverage check: the pipeline taught the model to remove the safety property.
+    """
+
+    def test_an_unvalidatable_payload_still_yields_results(self) -> None:
+        from pydantic import BaseModel
+
+        from loom.agents.fakes import _coerce
+        from loom.toolsets.pagination import Results
+
+        class Row(BaseModel):
+            id: str
+
+        out = _coerce([{"id": None}], Results[Row])
+
+        assert isinstance(out, Results)
+        assert out.summary()
+
+    def test_a_non_paged_type_is_unaffected(self) -> None:
+        from pydantic import BaseModel
+
+        from loom.agents.fakes import _coerce
+
+        class Row(BaseModel):
+            id: str
+
+        assert _coerce([{"id": None}], list[Row]) == [{"id": None}]

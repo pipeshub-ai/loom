@@ -98,6 +98,10 @@ _BODY_EXITS = {
 #: waiting for one.
 _UNFINISHED = (ExecutionStatus.PENDING, ExecutionStatus.RUNNING)
 
+#: Rows per store round trip while scanning for expired leases. Bigger than the
+#: number of orphans anyone expects, small enough that one page is a cheap read.
+_RECLAIM_PAGE = 500
+
 
 def _as_utc(value: datetime) -> datetime:
     """Treat a naive timestamp as UTC rather than raising on comparison.
@@ -152,6 +156,8 @@ class Runtime:
         lease_ttl: Duration = 60.0,
         journal_warn_entries: int = 5_000,
         journal_max_entries: int = 50_000,
+        journal_warn_payload_bytes: int = 1_048_576,
+        journal_max_payload_bytes: int = 8_388_608,
         inline_timer_threshold: Duration = 2.0,
         max_inline_wait: Duration = 0.0,
         flush_every: int = 1,
@@ -386,6 +392,22 @@ class Runtime:
         self.journal_warn_entries = journal_warn_entries
         """Log once when a run's journal passes this. A long-lived flow that never
         rotates degrades slowly and silently; this makes it visible early."""
+        self.journal_warn_payload_bytes = journal_warn_payload_bytes
+        """Log once when a single journal payload passes this, with no blob
+        service configured. 1 MiB — comfortably above any ordinary step result
+        and well under every backend's ceiling."""
+        self.journal_max_payload_bytes = journal_max_payload_bytes
+        """Fail the run when one journal payload passes this. Set to 0 to disable.
+
+        The entry budget below counts *entries*, so a single 200 MB step output
+        is `1` to it and passes unnoticed — then lands as an opaque
+        `DocumentTooLarge` on Mongo (16 MB BSON ceiling) or as a silent
+        multi-hundred-megabyte row on SQLite and Postgres that is re-read and
+        re-parsed on every replay thereafter. 8 MiB leaves room under Mongo's
+        limit for the rest of the document.
+
+        Only consulted when `blobs` is None. With a `BlobService` a payload over
+        its threshold becomes a `blob:` reference and never reaches this."""
         self.journal_max_entries = journal_max_entries
         """Fail the run when its journal passes this. Set to 0 to disable.
 
@@ -862,6 +884,9 @@ class Runtime:
         payload: Any = None,
         *,
         dedupe_key: str | None = None,
+        to_topic: bool = False,
+        event_id: str | None = None,
+        chain_depth: int = 0,
     ) -> EventDelivery:
         """Deliver an event. Resumes the target run if it is parked waiting for it.
 
@@ -870,6 +895,19 @@ class Runtime:
         a redelivered message resumes the run a second time. ``submit()`` has
         taken an ``idempotency_key`` since the beginning; this is the same
         protection for the event path.
+
+        Pass ``to_topic=True`` to also append the event to :attr:`events` — the
+        log an :class:`~loom.events.dispatcher.EventDispatcher` reads — under
+        topic *name*, when one is configured. Only :meth:`Context.publish` does
+        this. It must default to ``False`` for every other caller, and in
+        particular for the dispatcher's own internal
+        :meth:`~loom.events.dispatcher.EventDispatcher._wake_waiting`: that one
+        re-sends an event the dispatcher just *read from* this same log to wake
+        ``wait_for_event`` parkers, and appending it back under its own type
+        would feed the dispatcher's next pass its own output — a self-sustaining
+        loop with a fresh, uncapped ``chain_depth`` on every turn, immune to the
+        cap this exists to enforce. *event_id* and *chain_depth* only matter
+        when *to_topic* is set.
 
         Returns what happened rather than ``None`` because "already delivered"
         is a normal outcome an at-least-once consumer must be able to see: it
@@ -881,6 +919,33 @@ class Runtime:
             logger.info("event %s dropped: %s already delivered", name, dedupe_key)
             return EventDelivery(
                 delivered=False, reason="duplicate", dedupe_key=dedupe_key
+            )
+
+        if to_topic and run_id is None and self.events is not None:
+            from loom.events.models import EventRecord
+
+            if payload is None:
+                record_payload: dict[str, Any] = {}
+            elif isinstance(payload, dict):
+                record_payload = payload
+            else:
+                # `EventRecord.payload` is a mapping -- a subscription filter
+                # and `dict(event.payload)` in the dispatcher both assume one.
+                # A workflow publishing a scalar or a list still gets a topic
+                # entry rather than a rejected call.
+                record_payload = {"value": payload}
+
+            await self.events.append(
+                name,
+                [
+                    EventRecord(
+                        event_id=event_id or f"loom:publish:{uuid.uuid4()}",
+                        type=name,
+                        payload=record_payload,
+                        source="loom.publish",
+                        chain_depth=chain_depth,
+                    )
+                ],
             )
 
         await self.store.enqueue_event(Event(name=name, payload=encode(payload), run_id=run_id))
@@ -1838,7 +1903,11 @@ class Runtime:
         await self.store.update_execution(record)
 
     async def reclaim_orphans(
-        self, now: datetime | None = None, *, limit: int = 100
+        self,
+        now: datetime | None = None,
+        *,
+        limit: int = 100,
+        scan_limit: int = 10_000,
     ) -> list[str]:
         """Resume unfinished runs abandoned by a node that died or was stopped.
 
@@ -1856,21 +1925,87 @@ class Runtime:
         exactly the set of runs somebody has stopped working on.
 
         Call from a scheduler loop. Returns the run ids picked up.
+
+        ``limit`` bounds how many runs are *reclaimed*, not how many are looked
+        at. That distinction is the whole correctness of this method. The lease
+        lives inside the record's JSON payload, so it cannot be a ``WHERE``
+        clause and the filtering happens here — and it used to happen after a
+        single ``list_executions(limit=limit)``, which orders newest-first
+        because ``run_id`` is a ULID. An orphan is by definition a run that
+        stopped advancing, so orphans hold the *oldest* ids and were the first
+        to fall out of that window: with more than ``limit`` healthy runs in
+        flight, the exact set this exists to rescue became the set it could not
+        see, and it returned ``[]`` while reporting success.
+
+        So it pages to exhaustion instead, bounded by ``scan_limit`` for the
+        deployment where "all unfinished runs" is very large. Hitting that
+        ceiling is logged rather than passed over: a reclaim that quietly
+        examined a prefix is the bug being fixed, one page bigger.
         """
         moment = now or self.clock.now()
-        candidates = [
-            record
-            for status in _UNFINISHED
-            for record in await self.store.list_executions(status=status, limit=limit)
-        ]
-        stale = [
-            record
-            for record in candidates
-            if record.run_id not in self._driving
-            and record.lease_expires_at is not None
-            and _as_utc(record.lease_expires_at) <= moment
-        ]
+        stale: list[ExecutionRecord] = []
+        scanned = 0
+        truncated = False
 
+        indexed = getattr(self.store, "due_leases", None)
+        if indexed is not None:
+            # The predicate pushed into the store, where migration 1 gave it a
+            # column and an index. Whole answer, one round trip.
+            for record in await indexed(moment, _UNFINISHED, limit=limit):
+                if record.run_id not in self._driving:
+                    stale.append(record)
+            return await self._reclaim(stale[:limit])
+
+        # A host's own ExecutionStore need not implement it; paging to
+        # exhaustion is correct, just linear.
+        for status in _UNFINISHED:
+            offset = 0
+            while True:
+                if scanned >= scan_limit:
+                    # Exactly one row, only ever on the ceiling path: it is the
+                    # difference between "the data ended here" and "we stopped
+                    # here", and reporting the second as the first is the defect
+                    # this method is being fixed for.
+                    truncated = bool(
+                        await self.store.list_executions(
+                            status=status, limit=1, offset=offset
+                        )
+                    )
+                    break
+                page = await self.store.list_executions(
+                    status=status,
+                    limit=min(_RECLAIM_PAGE, scan_limit - scanned),
+                    offset=offset,
+                )
+                if not page:
+                    break
+                scanned += len(page)
+                offset += len(page)
+                for record in page:
+                    if (
+                        record.run_id not in self._driving
+                        and record.lease_expires_at is not None
+                        and _as_utc(record.lease_expires_at) <= moment
+                    ):
+                        stale.append(record)
+                if len(stale) >= limit:
+                    break
+            if truncated or len(stale) >= limit:
+                break
+
+        if truncated:
+            logger.warning(
+                "reclaim_orphans stopped after scanning %d unfinished runs "
+                "(scan_limit=%d); some orphaned runs may not have been examined. "
+                "Raise scan_limit, or shorten retention on unfinished runs.",
+                scanned,
+                scan_limit,
+            )
+
+        return await self._reclaim(stale[:limit])
+
+    async def _reclaim(self, stale: list[ExecutionRecord]) -> list[str]:
+        """Re-drive each abandoned run. Shared by both scan paths."""
         reclaimed: list[str] = []
         for record in stale:
             logger.warning(

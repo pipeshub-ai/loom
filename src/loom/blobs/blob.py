@@ -448,9 +448,22 @@ class BlobService:
     """
 
     OFFLOAD_THRESHOLD: int = 256 * 1024  # 256 KB
+    """Default size above which a journal payload is stored by content hash.
 
-    def __init__(self, backend: BlobBackend) -> None:
+    Kept as a class attribute so existing code reading it still works; pass
+    ``threshold=`` to tune one service. It was *only* a class attribute before,
+    which made the single number governing every journal payload in a
+    deployment adjustable exclusively by monkeypatching the class.
+    """
+
+    def __init__(self, backend: BlobBackend, *, threshold: int | None = None) -> None:
         self._backend = backend
+        self._threshold = self.OFFLOAD_THRESHOLD if threshold is None else threshold
+
+    @property
+    def threshold(self) -> int:
+        """Bytes above which :meth:`should_offload` says yes."""
+        return self._threshold
 
     @property
     def backend(self) -> BlobBackend:
@@ -473,7 +486,7 @@ class BlobService:
 
     def should_offload(self, data: bytes) -> bool:
         """Return ``True`` if *data* exceeds the offload threshold."""
-        return len(data) > self.OFFLOAD_THRESHOLD
+        return len(data) > self._threshold
 
     async def store(
         self, data: bytes, mime: str = "application/json"

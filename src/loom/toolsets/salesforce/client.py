@@ -230,9 +230,13 @@ class SalesforceClient:
             row=SalesforceRecord.from_api,
         )
 
-    async def _query_rows(self, soql: str, limit: int) -> list[dict[str, Any]]:
+    async def _query_rows(self, soql: str, limit: int) -> Results[dict[str, Any]]:
+        # `.mapped`, not a comprehension: `query` pages and computes coverage,
+        # and a comprehension over a `Results` yields a plain list — so
+        # `.complete` was discarded one line after being computed, on the way to
+        # every CRM finder below.
         rows = await self.query(soql, limit=limit)
-        return [r.fields for r in rows]
+        return rows.mapped(lambda r: r.fields)
 
     async def describe_object(self, sobject: str) -> dict[str, Any]:
         """Field names and types for one object.
@@ -292,18 +296,18 @@ class SalesforceClient:
 
     async def find_accounts(
         self, name: str = "", *, limit: int = 20
-    ) -> list[SalesforceAccount]:
+    ) -> Results[SalesforceAccount]:
         where = f"WHERE Name LIKE '%{_soql_escape(name)}%'" if name else ""
         rows = await self._query_rows(
             "SELECT Id, Name, Industry, Website, Phone, CreatedDate, Owner.Name "
             f"FROM Account {where} ORDER BY Name LIMIT {int(limit)}",
             limit,
         )
-        return [SalesforceAccount.from_api(r) for r in rows]
+        return rows.mapped(SalesforceAccount.from_api)
 
     async def find_contacts(
         self, name: str = "", *, account_id: str = "", limit: int = 20
-    ) -> list[SalesforceContact]:
+    ) -> Results[SalesforceContact]:
         clauses = []
         if name:
             escaped = _soql_escape(name)
@@ -316,7 +320,7 @@ class SalesforceClient:
             f"FROM Contact {where} ORDER BY Name LIMIT {int(limit)}",
             limit,
         )
-        return [SalesforceContact.from_api(r) for r in rows]
+        return rows.mapped(SalesforceContact.from_api)
 
     async def find_opportunities(
         self,
@@ -326,7 +330,7 @@ class SalesforceClient:
         stage: str = "",
         open_only: bool = False,
         limit: int = 20,
-    ) -> list[SalesforceOpportunity]:
+    ) -> Results[SalesforceOpportunity]:
         clauses = []
         if name:
             clauses.append(f"Name LIKE '%{_soql_escape(name)}%'")
@@ -343,11 +347,11 @@ class SalesforceClient:
             f"FROM Opportunity {where} ORDER BY CloseDate DESC LIMIT {int(limit)}",
             limit,
         )
-        return [SalesforceOpportunity.from_api(r) for r in rows]
+        return rows.mapped(SalesforceOpportunity.from_api)
 
     async def find_users(
         self, name: str = "", *, limit: int = 20
-    ) -> list[SalesforceUser]:
+    ) -> Results[SalesforceUser]:
         where = ""
         if name:
             escaped = _soql_escape(name)
@@ -357,7 +361,7 @@ class SalesforceClient:
             f"FROM User {where} ORDER BY Name LIMIT {int(limit)}",
             limit,
         )
-        return [SalesforceUser.from_api(r) for r in rows]
+        return rows.mapped(SalesforceUser.from_api)
 
     async def whoami(self) -> SalesforceUser:
         rows = await self._query_rows(

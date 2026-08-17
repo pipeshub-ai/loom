@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import re
 import textwrap
 from typing import Any
 
@@ -27,6 +28,50 @@ from loom.graph.wgir import (
     WGIRNode,
 )
 from loom.steps.definition import StepClass, StepDefinition
+
+_TRUE_LABEL = "True"
+_FALSE_LABEL = "False"
+_LOOP_LABEL = "loop"
+_DONE_LABEL = "done"
+
+_LABEL_PREVIEW_LIMIT = 60
+_ID_SAFE = re.compile(r"^[A-Za-z0-9_.:-]+$")
+_ID_WORD = re.compile(r"[A-Za-z0-9]+")
+
+
+def _preview(text: str, limit: int = _LABEL_PREVIEW_LIMIT) -> str:
+    """Collapse whitespace and cut free text to `limit` chars on a word
+    boundary, e.g. a ``ctx.agent("Write exactly one short, ...")`` prompt.
+
+    The full text still reaches the graph -- as the node's `description`,
+    which the canvas already renders in a hover tooltip and the inspector
+    panel -- so the *label* only has to read as a short human title, not
+    reproduce a paragraph a node card has no room for.
+    """
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    head = collapsed[: limit - 1]
+    if " " in head:
+        head = head.rsplit(" ", 1)[0]
+    return f"{head}…"
+
+
+def _slug_id(text: str, *, limit: int = 48) -> str:
+    """Deterministic, compact identifier fragment for `_alloc_id`.
+
+    Most labels are already id-shaped -- a function name, a dotted tool id
+    (``jira.create_issue``), or a keyword (``if``, ``return``) -- and pass
+    through untouched, since the dot in a tool id is a signal a renderer
+    relies on (see ``reactflow.py::_display_name``). Only free text needs
+    slugifying: an agent's literal prompt, left alone, makes the node *id* a
+    paragraph -- showing up unslugged in edge ids, DOM data attributes, and
+    ``SET_LAYOUT`` position keys.
+    """
+    if text and _ID_SAFE.match(text) and len(text) <= limit:
+        return text
+    slug = "_".join(_ID_WORD.findall(text.lower()))[:limit].rstrip("_")
+    return slug or "node"
 
 # Map ctx method names to node kinds
 _CTX_CALL_MAP: dict[str, NodeKind] = {
@@ -167,6 +212,25 @@ class ASTExtractor(ast.NodeVisitor):
         self._var_defs: dict[str, str] = {}
         self._depth = 0
         """Nesting depth inside a flow body; 0 means we are not in one."""
+        self._pending_edge_label: str | None = None
+        """Label for the *next* control edge `_add_node` emits, then cleared.
+
+        Set before entering a branch (`if`/`else`) so the first node inside it
+        records which branch it came from, without threading a parameter
+        through every `visit_*` method on the path there.
+        """
+        self._pending_edge_condition: str | None = None
+        """Same mechanism as `_pending_edge_label`, for the edge's `condition`
+        (the actual source text of the test), consumed alongside the label."""
+        self._pending_join_ids: list[str] = []
+        """Extra predecessors for the *next* node `_add_node` emits.
+
+        WGIR's AST pass tracks a single `_last_node_id` "current tip" of the
+        chain being built. An `if`/`else` produces two tips — one per branch
+        — and whatever statement follows the `if` is reachable from either,
+        so it needs a control edge from both, not just the one carried in
+        `_last_node_id`.
+        """
 
     # -- scoping -------------------------------------------------------------
 
@@ -211,41 +275,122 @@ class ASTExtractor(ast.NodeVisitor):
                 end_col=getattr(ast_node, "end_col_offset", 0),
             )
         self.nodes.append(node)
-        # Add control edge from previous node
+        label = self._pending_edge_label or ""
+        condition = self._pending_edge_condition
+        self._pending_edge_label = None
+        self._pending_edge_condition = None
         if self._last_node_id is not None:
             self.edges.append(WGIREdge(
                 source=self._last_node_id,
                 target=node.id,
                 kind=EdgeKind.CONTROL,
+                label=label,
+                condition=condition,
             ))
+        for extra_source in self._pending_join_ids:
+            self.edges.append(WGIREdge(
+                source=extra_source,
+                target=node.id,
+                kind=EdgeKind.CONTROL,
+            ))
+        self._pending_join_ids = []
         self._last_node_id = node.id
         return node.id
 
     def visit_If(self, node: ast.If) -> None:  # noqa: N802
-        nid = self._alloc_id("switch")
+        switch_id = self._alloc_id("switch")
+        condition_text = _unparse(node.test)
         self._add_node(
-            WGIRNode(id=nid, kind=NodeKind.SWITCH, label="if"), node
+            WGIRNode(
+                id=switch_id,
+                kind=NodeKind.SWITCH,
+                label="if",
+                description=f"Branches on `{condition_text}`." if condition_text else "",
+            ),
+            node,
         )
-        self.generic_visit(node)
+
+        # Both branches start fresh from the switch — not from wherever the
+        # previous branch left off — so "True" and "False" each label an
+        # edge that actually leaves the switch node.
+        self._last_node_id = switch_id
+        self._pending_edge_label = _TRUE_LABEL
+        self._pending_edge_condition = condition_text
+        for stmt in node.body:
+            self.visit(stmt)
+        true_tail = self._last_node_id
+
+        false_tail = switch_id
+        if node.orelse:
+            self._last_node_id = switch_id
+            self._pending_edge_label = _FALSE_LABEL
+            self._pending_edge_condition = (
+                f"not ({condition_text})" if condition_text else None
+            )
+            for stmt in node.orelse:
+                self.visit(stmt)
+            false_tail = self._last_node_id
+
+        # WGIR has no explicit join node, so whatever follows the `if`
+        # connects from both branch tails — `_last_node_id` carries one,
+        # `_pending_join_ids` carries the other (deduplicated when there was
+        # no `else`, since both tails are then the switch itself).
+        self._last_node_id = true_tail
+        self._pending_join_ids = [false_tail] if false_tail != true_tail else []
 
     def visit_For(self, node: ast.For) -> None:  # noqa: N802
-        nid = self._alloc_id("loop")
-        self._add_node(
-            WGIRNode(id=nid, kind=NodeKind.LOOP, label="for"), node
+        target, iterable = _unparse(node.target), _unparse(node.iter)
+        description = (
+            f"Repeats for each `{target}` in `{iterable}`." if target and iterable else ""
         )
-        self.generic_visit(node)
+        self._visit_loop(node, label="for", description=description)
 
     def visit_While(self, node: ast.While) -> None:  # noqa: N802
-        nid = self._alloc_id("loop")
+        condition_text = _unparse(node.test)
+        description = f"Repeats while `{condition_text}`." if condition_text else ""
+        self._visit_loop(node, label="while", description=description)
+
+    def _visit_loop(
+        self, node: ast.For | ast.While, *, label: str, description: str = ""
+    ) -> None:
+        loop_id = self._alloc_id("loop")
         self._add_node(
-            WGIRNode(id=nid, kind=NodeKind.LOOP, label="while"), node
+            WGIRNode(id=loop_id, kind=NodeKind.LOOP, label=label, description=description), node
         )
-        self.generic_visit(node)
+
+        self._last_node_id = loop_id
+        for stmt in node.body:
+            self.visit(stmt)
+        body_tail = self._last_node_id
+        if body_tail != loop_id:
+            # Back-edge: the body's last statement loops back to re-evaluate
+            # the loop condition, closing the cycle `layout.py` expects to
+            # find and route around rather than count as forward progress.
+            self.edges.append(WGIREdge(
+                source=body_tail,
+                target=loop_id,
+                kind=EdgeKind.CONTROL,
+                label=_LOOP_LABEL,
+            ))
+
+        # The exit test happens at the loop node, so whatever follows
+        # connects from there — not from the end of the body.
+        self._last_node_id = loop_id
+        self._pending_edge_label = _DONE_LABEL
+        for stmt in node.orelse:
+            self.visit(stmt)
 
     def visit_Return(self, node: ast.Return) -> None:  # noqa: N802
         nid = self._alloc_id("return")
+        value_text = _unparse(node.value) if node.value is not None else None
+        description = (
+            f"Ends the workflow, returning `{value_text}`."
+            if value_text
+            else "Ends the workflow."
+        )
         self._add_node(
-            WGIRNode(id=nid, kind=NodeKind.RETURN, label="return"), node
+            WGIRNode(id=nid, kind=NodeKind.RETURN, label="return", description=description),
+            node,
         )
 
     def visit_Assign(self, node: ast.Assign) -> None:  # noqa: N802
@@ -264,9 +409,11 @@ class ASTExtractor(ast.NodeVisitor):
             if method in _CTX_CALL_MAP:
                 kind = _CTX_CALL_MAP[method]
                 label = self._extract_label(node, method)
-                nid = self._alloc_id(label)
+                description = self._extract_description(node, method) or ""
+                nid = self._alloc_id(_slug_id(label))
                 self._add_node(
-                    WGIRNode(id=nid, kind=kind, label=label), node
+                    WGIRNode(id=nid, kind=kind, label=label, description=description),
+                    node,
                 )
         self.generic_visit(node)
 
@@ -313,7 +460,7 @@ class ASTExtractor(ast.NodeVisitor):
             if isinstance(first_arg, ast.Constant) and isinstance(
                 first_arg.value, str
             ):
-                return first_arg.value
+                return _preview(first_arg.value)
         if method == "wait_for_event" and node.args:
             first_arg = node.args[0]
             if isinstance(first_arg, ast.Constant) and isinstance(
@@ -323,6 +470,30 @@ class ASTExtractor(ast.NodeVisitor):
         if method in ("sleep", "sleep_until"):
             return "sleep"
         return method
+
+    @staticmethod
+    def _extract_description(node: ast.Call, method: str) -> str | None:
+        """The literal prompt behind an inline ``ctx.agent``/``ctx.child``
+        call, in full -- `_extract_label` only keeps a short preview of it."""
+        if method in ("child", "agent") and node.args:
+            first_arg = node.args[0]
+            if isinstance(first_arg, ast.Constant) and isinstance(
+                first_arg.value, str
+            ):
+                return " ".join(first_arg.value.split())
+        return None
+
+
+def _unparse(node: ast.expr) -> str | None:
+    """Best-effort source text for a condition, for the edge's `condition`
+    field (a tooltip's worth of context beyond the "True"/"False" label).
+    `None` rather than a raised error for anything `ast.unparse` itself
+    cannot handle, since a missing condition string degrades to the label
+    alone and is not worth failing extraction over."""
+    try:
+        return ast.unparse(node)
+    except (ValueError, RecursionError):
+        return None
 
 
 _FLOW_DECORATORS = frozenset({"workflow", "flow"})

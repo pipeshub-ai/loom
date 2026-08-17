@@ -182,6 +182,14 @@ class QueueConsumer:
         self._workflow = workflow
         self._max_attempts = max_attempts
         self._task: asyncio.Task[None] | None = None
+        # The Runtime's clock, exactly as `TriggerDispatcher` takes it. This
+        # consumer diverged from it by one line — a bare `asyncio.sleep` in the
+        # poll loop — which is enough to make it the one ingress a virtual-clock
+        # test cannot pace: the loop runs at wall speed inside a Runtime whose
+        # every other wait is instant.
+        from loom.runtime.clock import SystemClock
+
+        self._clock = getattr(runtime, "clock", None) or SystemClock()
 
         # Anything not passed explicitly falls back to what the workflow's own
         # OnEvent trigger declared. Ignoring the declaration here would make
@@ -317,7 +325,7 @@ class QueueConsumer:
                     await self.poll_once(max_messages=max_messages)
                 except Exception:
                     logger.exception("queue poll failed")
-                await asyncio.sleep(delay)
+                await self._clock.sleep(delay)
 
         self._task = asyncio.create_task(loop())
         # So Runtime.shutdown() stops taking messages before it drains the runs

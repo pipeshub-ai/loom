@@ -6,7 +6,8 @@ in-memory store in tests, SQLite on a laptop, and Postgres or Temporal in produc
 
 from __future__ import annotations
 
-from datetime import datetime
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
 from loom.core.models import (
@@ -16,6 +17,49 @@ from loom.core.models import (
     TriggerRecord,
 )
 from loom.runtime.journal import JournalEntry
+
+
+def as_utc(value: datetime) -> datetime:
+    """*value* as an aware UTC datetime, reading a naive one as UTC.
+
+    The instant-comparing backends need this for the same reason the
+    text-comparing ones need :func:`utc_iso`: a stored timestamp and the ``now``
+    it is compared against must be the same kind. Memory compared them directly
+    and raised ``TypeError: can't compare offset-naive and offset-aware
+    datetimes``; Postgres handed a naive value to a ``timestamptz`` column and
+    quietly returned the wrong set. Four backends, four answers, for an input
+    every one of them accepts.
+
+    Reading naive as UTC rather than as local time matches
+    :meth:`Context.sleep_until`, which is where a wake time normally comes from.
+    """
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+
+
+def utc_iso(value: datetime | None) -> str | None:
+    """ISO-8601 for *value*, normalised to UTC first.
+
+    The backends that keep timestamps as TEXT — SQLite and Mongo — answer
+    ``wake_at <= now`` and ``next_fire_at <= now`` by comparing those strings
+    lexicographically. That is only the same question as comparing the instants
+    when every string carries the same offset. It does not:
+    ``2026-08-17T15:00:00+05:30`` is *earlier* than ``2026-08-17T12:00:00+00:00``
+    as an instant and *later* as a string, so a run parked on a tz-aware
+    non-UTC wake time is never found by ``due_runs`` and sleeps forever — with
+    no error, and looking exactly like a run that is patiently waiting.
+
+    Postgres and Memory compare real instants and are unaffected, which is what
+    made this invisible: the divergence only appears on two of the four
+    backends, and the conformance suite built every timestamp from
+    ``datetime.now(UTC)``, where the two answers agree.
+
+    A naive datetime is read as UTC, matching :meth:`Context.sleep_until`.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC).isoformat()
+    return value.astimezone(UTC).isoformat()
 
 
 @runtime_checkable
@@ -209,3 +253,52 @@ class TriggerStore(Protocol):
     ) -> None: ...
 
     async def delete_trigger(self, trigger_id: str) -> None: ...
+
+
+@runtime_checkable
+class IndexedScans(Protocol):
+    """Predicate-pushdown reads, kept **out** of :class:`ExecutionStore` on purpose.
+
+    Both queries here filter on a field that used to live inside the record's
+    JSON payload, where no index reaches it. Filtering after a
+    ``list_executions`` page therefore meant filtering after a *newest-first*
+    page — and the records both callers want are the oldest ones, so past a few
+    hundred live runs neither ever saw them and both reported "nothing to do".
+    Migration 1 lifts the two fields into indexed columns; these are how the
+    engine asks for them.
+
+    This is a **separate protocol** because a ``runtime_checkable`` one is
+    all-or-nothing: adding a method to ``ExecutionStore`` would make every
+    host's existing store fail ``isinstance`` and stop being an execution store
+    at all. A capability nobody had yesterday must not be able to invalidate
+    what shipped. Callers probe with ``getattr(store, "due_leases", None)`` and
+    fall back to paging ``list_executions`` to exhaustion, which is correct —
+    only linear.
+    """
+
+    async def due_leases(
+        self,
+        before: datetime,
+        statuses: Sequence[ExecutionStatus],
+        *,
+        limit: int = 100,
+    ) -> list[ExecutionRecord]:
+        """Unfinished runs whose lease expired before *before*, oldest first.
+
+        What ``reclaim_orphans`` acts on: a worker died holding these, and no
+        timer covers them, because they are not waiting for one.
+        """
+        ...
+
+    async def terminal_before(
+        self,
+        cutoff: datetime,
+        statuses: Sequence[ExecutionStatus],
+        *,
+        limit: int = 100,
+    ) -> list[ExecutionRecord]:
+        """Terminal runs that finished before *cutoff*, oldest first.
+
+        What retention compacts.
+        """
+        ...

@@ -357,7 +357,7 @@ class CoverageStage:
 
     #: Reading any of these is evidence the question was asked.
     COVERAGE_CHECKS: ClassVar[tuple[str, ...]] = (
-        ".complete", ".truncated", ".summary(", ".total",
+        "complete", "truncated", "summary", "total",
     )
 
     async def run(self, code: str, context: CheckContext) -> CheckResult:
@@ -368,7 +368,7 @@ class CoverageStage:
         capped = _capped_calls(code)
         if not capped:
             return CheckResult(self.name)
-        if any(marker in code for marker in self.COVERAGE_CHECKS):
+        if _reads_coverage(code, self.COVERAGE_CHECKS):
             return CheckResult(self.name)
 
         where = ", ".join(sorted(capped))
@@ -389,11 +389,23 @@ class CoverageStage:
         )
 
 
+#: Every keyword a shipped toolset uses to cap a read. Recognising only
+#: `max_results` and `limit` left `num_results` (Exa) invisible, and a cap this
+#: does not know is a cap this stage cannot see.
+CAP_KEYWORDS: frozenset[str] = frozenset(
+    {"max_results", "limit", "page_size", "per_page", "num_results", "top", "count"}
+)
+
+
 def _capped_calls(code: str) -> set[str]:
-    """Calls that pass a literal row cap, by keyword name.
+    """Calls that pass a row cap, by keyword name.
 
     Parsed rather than pattern-matched: ``max_results=100`` in a comment or a
     docstring is not a cap, and a string search cannot tell the difference.
+
+    A cap bound to a name — ``CAP = 100`` then ``limit=CAP`` — counts too. Only
+    literals were recognised before, so lifting the number into a constant, the
+    ordinary thing a person does while tidying, silently disarmed the check.
     """
     try:
         tree = ast.parse(code)
@@ -405,13 +417,44 @@ def _capped_calls(code: str) -> set[str]:
         if not isinstance(node, ast.Call):
             continue
         for keyword in node.keywords:
-            if keyword.arg not in ("max_results", "limit"):
+            if keyword.arg not in CAP_KEYWORDS:
                 continue
             if isinstance(keyword.value, ast.Constant) and isinstance(
                 keyword.value.value, int
             ):
                 found.add(f"{keyword.arg}={keyword.value.value}")
+            elif isinstance(keyword.value, ast.Name):
+                found.add(f"{keyword.arg}={keyword.value.id}")
     return found
+
+
+def _reads_coverage(code: str, markers: tuple[str, ...]) -> bool:
+    """Whether the code actually reads a coverage field, as an attribute or call.
+
+    A substring scan over the whole file stood here, and ordinary code disarmed
+    it: ``task.completed`` — a real field on Asana and ClickUp rows — contains
+    ``.complete``, and ``(end - start).total_seconds()`` contains ``.total``.
+    Either one silenced the entire stage while saying nothing about coverage.
+    Matching attribute *names* exactly, on parsed attribute access, is the
+    difference between "this file mentions the word" and "this code asks the
+    question".
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        # A file that does not parse cannot be judged. `compile` is blocking and
+        # runs first, so this only happens when the pipeline was assembled
+        # without it — say nothing rather than pass it.
+        return False
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in markers:
+            return True
+        # `summary()` reaches here as the func of a Call, already covered above;
+        # a bare name is the destructured form: `complete = results.complete`.
+        if isinstance(node, ast.Name) and node.id in markers:
+            return True
+    return False
 
 
 #: See :attr:`ResolutionStage.COMMON`.
@@ -558,7 +601,14 @@ class GrantStage:
     async def run(self, code: str, context: CheckContext) -> CheckResult:
         registry = self._registry
         if registry is None or not getattr(registry, "list_toolsets", None):
-            return CheckResult(self.name, skipped="no toolset registry to check against")
+            # `skipped` is a bool and `reason` is the string. Passing the
+            # explanation as `skipped` worked by truthiness and left `reason`
+            # empty, so anything rendering *why* a stage was skipped — which is
+            # the whole point of distinguishing skipped from passed — showed
+            # nothing.
+            return CheckResult(
+                self.name, skipped=True, reason="no toolset registry to check against"
+            )
 
         issues: list[CodeIssue] = []
         for grant in _declared_grants(code):
@@ -611,6 +661,115 @@ def _declared_grants(code: str) -> list[Any]:
     return found
 
 
+@dataclass
+class PlacementStage:
+    """Was the filter pushed to the service, or applied after fetching everything?
+
+    Every integration LOOM ships can filter server-side — JQL, Gmail's ``q=``,
+    Graph's ``$filter``, SOQL, HubSpot search — and nothing anywhere told the
+    coding agent to use it. Fetching a whole project and keeping six rows in a
+    comprehension compiles, lints, types, smoke-runs and replays clean, so it
+    passed all ten stages while being wrong twice over: it pages an unbounded
+    amount of somebody else's data, and the comprehension turns a ``Results``
+    into a plain ``list``, discarding the coverage that would have said the
+    fetch was truncated. The visible answer is a short, confident, incomplete
+    list.
+
+    A warning, not an error. Filtering locally is sometimes the only option —
+    the predicate may not be expressible in the service's query language — and
+    the point is to make that a decision rather than an accident.
+    """
+
+    name: str = "placement"
+    cost: int = 17
+    blocking: bool = False
+
+    #: Names that mark a call as a *read* whose rows come from a service.
+    READ_MARKERS: ClassVar[tuple[str, ...]] = (
+        "search", "list_", "find_", "query", "fetch", "get_all",
+    )
+
+    async def run(self, code: str, context: CheckContext) -> CheckResult:
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return CheckResult(self.name)
+
+        fetched = _names_bound_to_reads(tree, self.READ_MARKERS)
+        if not fetched:
+            return CheckResult(self.name)
+
+        issues: list[CodeIssue] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ListComp | ast.SetComp | ast.GeneratorExp):
+                continue
+            for generator in node.generators:
+                if not generator.ifs:
+                    continue
+                source = generator.iter
+                if isinstance(source, ast.Name) and source.id in fetched:
+                    issues.append(
+                        CodeIssue(
+                            "placement",
+                            f"`{source.id}` comes from a service read and is then "
+                            "filtered in Python. Push the predicate into the "
+                            "query instead — JQL, `q=`, `$filter`, SOQL and "
+                            "HubSpot search all take one — so the service returns "
+                            "what you want rather than everything. Filtering "
+                            "after the fact also drops the coverage: a "
+                            "comprehension over a `Results` is a plain list, so "
+                            "`.complete` is gone and a truncated fetch reads as a "
+                            "complete answer. If the predicate genuinely cannot "
+                            "be expressed server-side, use `.filtered(...)` to "
+                            "keep it.",
+                            "warning",
+                        )
+                    )
+                    break
+        return CheckResult(self.name, issues=issues[:3])
+
+
+def _names_bound_to_reads(tree: ast.Module, markers: tuple[str, ...]) -> set[str]:
+    """Variables assigned from something that reads rows out of a service.
+
+    Both call shapes the prompt sanctions: ``await ctx.step(jira_search_issues,
+    ...)`` and a direct ``await jira_search_issues(...)``.
+    """
+
+    def is_read(value: ast.expr) -> bool:
+        call = value.value if isinstance(value, ast.Await) else value
+        if not isinstance(call, ast.Call):
+            return False
+        named: list[str] = []
+        func = call.func
+        if isinstance(func, ast.Attribute):
+            named.append(func.attr)
+            # ctx.step(<operation>, ...) — the operation is the first argument,
+            # so the name that matters is not the one being called.
+            if func.attr in ("step", "node") and call.args:
+                first = call.args[0]
+                if isinstance(first, ast.Name):
+                    named.append(first.id)
+        elif isinstance(func, ast.Name):
+            named.append(func.id)
+        return any(marker in name for name in named for marker in markers)
+
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and is_read(node.value):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    found.add(target.id)
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and node.value is not None
+            and is_read(node.value)
+            and isinstance(node.target, ast.Name)
+        ):
+            found.add(node.target.id)
+    return found
+
+
 def default_stages(
     *, supervisor: Any = None, smoke: bool = True, registry: Any = None
 ) -> list[Any]:
@@ -624,6 +783,7 @@ def default_stages(
         StaticStage(),
         GrantStage(registry),
         CoverageStage(),
+        PlacementStage(),
         ResolutionStage(),
         LintStage(),
         TypeStage(),

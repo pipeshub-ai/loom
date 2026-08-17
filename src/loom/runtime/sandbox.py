@@ -293,9 +293,18 @@ class RuntimeChannel:
             )
 
         if call.kind == "agent":
-            return EffectResult(
-                value=await self.ctx.agent(call.target, **call.arguments)
-            )
+            # `toolsets=`/`grants=` name *which capabilities* the call may
+            # reach; honouring them from the child would let untrusted body
+            # code widen its own toolset access past whatever the workflow's
+            # own `@workflow(grants=...)` declared, on the trusted side of the
+            # boundary this proxy exists to hold. Only the parent's
+            # already-configured defaults apply inside a sandbox.
+            arguments = {
+                k: v
+                for k, v in call.arguments.items()
+                if k not in ("toolsets", "grants")
+            }
+            return EffectResult(value=await self.ctx.agent(call.target, **arguments))
 
         if call.kind == "node":
             arguments = dict(call.arguments)

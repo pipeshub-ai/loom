@@ -146,7 +146,7 @@ async def salesforce_delete_record(
 @step(retry=_READ)
 async def salesforce_find_accounts(
     query: str = "", limit: int = 20
-) -> list[SalesforceAccount]:
+) -> Results[SalesforceAccount]:
     """Find accounts by name.
 
     Resolve a company here before filtering by it: every Salesforce write takes
@@ -168,7 +168,7 @@ async def salesforce_find_accounts(
 @step(retry=_READ)
 async def salesforce_find_contacts(
     query: str = "", account_id: str = "", limit: int = 20
-) -> list[SalesforceContact]:
+) -> Results[SalesforceContact]:
     """Find contacts by name or email, optionally within one account.
 
     Args:
@@ -193,7 +193,7 @@ async def salesforce_find_opportunities(
     stage: str = "",
     open_only: bool = False,
     limit: int = 20,
-) -> list[SalesforceOpportunity]:
+) -> Results[SalesforceOpportunity]:
     """Find opportunities, newest close date first.
 
     Args:
@@ -214,7 +214,7 @@ async def salesforce_find_opportunities(
 
 
 @step(retry=_READ)
-async def salesforce_find_users(query: str = "", limit: int = 20) -> list[SalesforceUser]:
+async def salesforce_find_users(query: str = "", limit: int = 20) -> Results[SalesforceUser]:
     """Find Salesforce users by name or email.
 
     Resolve a person here before assigning an owner: ``OwnerId`` takes an id,

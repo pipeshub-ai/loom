@@ -2,25 +2,24 @@
 
 `React Flow <https://reactflow.dev>`_ expects ``{ id, type, data, position }``
 nodes and ``{ id, source, target }`` edges, which WGIR maps onto almost exactly.
-This module does the translation and nothing else: no layout engine, no
-styling opinions beyond a stable node type per kind, so the canvas stays free to
-render however it likes.
+This module does the translation and nothing else: no styling opinions beyond
+a stable node type per kind, so the canvas stays free to render however it
+likes.
 
-Positions are the one thing WGIR does not carry. When a node has none, a simple
-layered fallback is computed from graph depth — enough to render something
-sensible before a human has dragged anything, and overwritten the moment a
-``SET_LAYOUT`` patch supplies real coordinates.
+Positions are computed by :func:`~loom.graph.layout.compute_layout` — a
+layered (Sugiyama-style) auto-layout — unless the caller supplies its own via
+``positions`` (typically accumulated from ``SET_LAYOUT`` patches), in which
+case a node without an entry there still falls back to the computed layout
+rather than the origin, so a partially-customized canvas never stacks nodes
+on top of each other.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from loom.graph.layout import compute_layout
 from loom.graph.wgir import EdgeKind, NodeKind, WGIRGraph
-
-#: Horizontal and vertical spacing for the fallback layout, in canvas units.
-_COLUMN_WIDTH = 260
-_ROW_HEIGHT = 110
 
 #: Edges that represent control flow rather than data flow, so a canvas can
 #: dash them without knowing what each kind means.
@@ -32,6 +31,7 @@ def to_react_flow(
     *,
     positions: dict[str, tuple[float, float]] | None = None,
     trace: Any | None = None,
+    direction: str = "LR",
 ) -> dict[str, Any]:
     """Convert a WGIR graph into a React Flow ``{nodes, edges}`` payload.
 
@@ -39,19 +39,22 @@ def to_react_flow(
     ----------
     positions:
         Node coordinates, typically accumulated from ``SET_LAYOUT`` patches.
-        Nodes without an entry get the fallback layered position.
+        Nodes without an entry get the computed layered-layout position.
     trace:
         Optional :class:`~loom.graph.trace.RunTrace`. When given,
         each node carries the status it reached in that run, so the same canvas
         renders both the static shape and a live execution.
+    direction:
+        Layout direction passed to :func:`~loom.graph.layout.compute_layout`
+        when a node has no explicit position. ``"LR"`` (default) or ``"TB"``.
     """
     coords = positions or {}
-    depths = _depths(graph)
+    computed = compute_layout(graph, direction=direction)
     statuses = _statuses(trace)
 
     nodes = []
     for node in graph.nodes:
-        x, y = coords.get(node.id, _fallback_position(node.id, depths))
+        x, y = coords.get(node.id, computed.get(node.id, (0.0, 0.0)))
         nodes.append(
             {
                 "id": node.id,
@@ -59,13 +62,19 @@ def to_react_flow(
                 "position": {"x": x, "y": y},
                 "data": {
                     "label": node.label,
+                    "displayName": _display_name(node.label),
                     "kind": node.kind.value,
                     "description": node.description,
+                    "hasDescription": bool(node.description),
                     "inputType": node.input_type,
                     "outputType": node.output_type,
                     "stepClass": node.step_class,
                     "source": node.source.model_dump() if node.source else None,
                     "status": statuses.get(node.id),
+                    "retryPolicy": node.retry_policy,
+                    "timeout": node.timeout,
+                    "tools": list(node.tools),
+                    "children": list(node.children),
                 },
             }
         )
@@ -75,9 +84,13 @@ def to_react_flow(
             "id": f"{edge.source}->{edge.target}:{edge.kind.value}",
             "source": edge.source,
             "target": edge.target,
-            "label": edge.label or None,
+            "label": edge.label or edge.condition or None,
             "animated": edge.kind in _CONTROL_EDGES,
-            "data": {"kind": edge.kind.value},
+            "data": {
+                "kind": edge.kind.value,
+                "condition": edge.condition,
+                "variable": edge.variable,
+            },
         }
         for edge in graph.edges
     ]
@@ -86,6 +99,7 @@ def to_react_flow(
         "flowId": graph.flow_id,
         "extractionHash": graph.extraction_hash,
         "sourceFile": graph.source_file,
+        "layout": {"direction": direction, "computed": positions is None},
         "nodes": nodes,
         "edges": edges,
     }
@@ -106,33 +120,18 @@ def _node_type(kind: NodeKind) -> str:
     return "default"
 
 
-def _depths(graph: WGIRGraph) -> dict[str, int]:
-    """Longest-path depth per node, used only for the fallback layout.
+def _display_name(label: str) -> str:
+    """``fetch_open_tickets`` -> ``"Fetch Open Tickets"``.
 
-    Iterates to a fixed point rather than doing a topological sort, so a cyclic
-    graph (a retry loop, say) still terminates instead of raising.
+    A dotted bridged-tool label (``jira.search_issues``) is left alone —
+    title-casing would mangle the operation id a canvas needs to show
+    verbatim, and the dot itself is already the signal a renderer uses to
+    tell a tool call apart from a plain step (see
+    ``bridges/tool_steps.py`` on the PipesHub side).
     """
-    depth = {node.id: 0 for node in graph.nodes}
-    for _ in range(len(graph.nodes)):
-        changed = False
-        for edge in graph.edges:
-            if edge.source not in depth or edge.target not in depth:
-                continue
-            candidate = depth[edge.source] + 1
-            if candidate > depth[edge.target]:
-                depth[edge.target] = candidate
-                changed = True
-        if not changed:
-            break
-    return depth
-
-
-def _fallback_position(node_id: str, depths: dict[str, int]) -> tuple[float, float]:
-    """Place a node in a column by depth, stacked by arrival order within it."""
-    depth = depths.get(node_id, 0)
-    siblings = sorted(other for other, d in depths.items() if d == depth)
-    row = siblings.index(node_id) if node_id in siblings else 0
-    return float(depth * _COLUMN_WIDTH), float(row * _ROW_HEIGHT)
+    if "." in label or not label:
+        return label
+    return label.replace("_", " ").replace("-", " ").title()
 
 
 def _statuses(trace: Any | None) -> dict[str, str]:
