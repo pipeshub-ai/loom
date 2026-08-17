@@ -37,7 +37,7 @@ with its own exit criteria.
 | Code projected to a graph (`loom check`, `graph.json`) | **Shipped** | `CLAUDE.md` — "Graph is projected from code" |
 | Typed toolsets exposed to the coding agent as a live catalog | **Shipped** (manifest-based) | [Toolsets](guides/toolsets.md) |
 | Toolset catalog auto-generated from an OpenAPI spec | Planned — Phase 3 | [`phases/phase-3-integrations.md`](../phases/phase-3-integrations.md) |
-| Sandboxed execution — generated code runs with no ambient credentials | Planned — Phase 3 (`ExecutionBackend`) | [Implementation plan](design/implementation-plan.md) §3.1 |
+| Sandboxed execution — generated code runs with no ambient credentials | **Shipped** — `ExecutionSandbox` (`InlineSandbox`, `SubprocessSandbox`, `DockerSandbox`) | [Implementation plan](design/implementation-plan.md) §3.1 |
 | Authority via a scoped grant, checked per call | **Shipped**, in-process only | [Grants and progress](guides/grants.md) |
 | Code saved and versioned, with commit/activate/rollback | Planned — Phase 5 (`SourceStore`/`VersionStore`) | [Implementation plan](design/implementation-plan.md) §4 |
 | Session-shaped execution trace for debugging | Planned — Phase 5 (`TraceView`) | [Implementation plan](design/implementation-plan.md) §4 |

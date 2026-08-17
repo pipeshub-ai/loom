@@ -79,12 +79,14 @@ than glossed over in the README's [Project
 Status](../README.md#project-status). Durable execution, the coding agent's
 verification pipeline, typed toolsets, and the CLI/MCP/HTTP surfaces are
 shipped and tested. What isn't built yet is the part that matters most for
-running **untrusted, model-generated code** at scale: sandboxed execution
-(`ExecutionBackend`) and per-call authority enforced across a process
-boundary. If your workflows are authored by people you trust and run in an
-environment you control, LOOM is usable today. If you plan to let
-arbitrary users generate and run workflows unsupervised, wait for
-`ExecutionBackend` to land, or contribute it — see
+running **untrusted, model-generated code** at scale used to be sandboxed
+execution. That port is now `ExecutionSandbox`: `InlineSandbox` (default,
+no isolation), `SubprocessSandbox` (rlimits, no network isolation), and
+`DockerSandbox` (`--network none`, cgroup memory, read-only root). If your
+workflows are authored by people you trust and run in an environment you
+control, the default Runtime is enough. If you plan to let arbitrary users
+generate and run workflows unsupervised, construct
+`Runtime(sandbox=DockerSandbox(image=...))` — see
 [Contributing](../CONTRIBUTING.md).
 
 ## What stops the coding agent from generating wrong or unsafe code?

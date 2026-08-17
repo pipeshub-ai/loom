@@ -17,6 +17,7 @@ Run *body*, proxying its durable calls to *channel*.
 ## Implementations
 
 - `runtime.sandbox.InlineSandbox`
+- `runtime.sandboxes.docker.DockerSandbox`
 - `runtime.sandboxes.subprocess.SubprocessSandbox`
 
 ## Consumers

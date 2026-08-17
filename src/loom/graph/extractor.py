@@ -210,6 +210,16 @@ class ASTExtractor(ast.NodeVisitor):
         self._last_node_id: str | None = None
         # Track variable → defining node id for data edges
         self._var_defs: dict[str, str] = {}
+        self._terminal_node_ids: set[str] = set()
+        """Node ids that end the flow (currently: `return` statements).
+
+        A branch tail in this set has no path to whatever follows it in
+        source order -- treating it as a live predecessor in `visit_If`
+        would wire an edge from an already-returned node to unrelated code,
+        which is what made two independent `return` statements (one per
+        branch, `if`/no-`else`) look like a linear chain instead of two
+        branches of one switch.
+        """
         self._depth = 0
         """Nesting depth inside a flow body; 0 means we are not in one."""
         self._pending_edge_label: str | None = None
@@ -319,8 +329,10 @@ class ASTExtractor(ast.NodeVisitor):
         for stmt in node.body:
             self.visit(stmt)
         true_tail = self._last_node_id
+        true_live = None if true_tail in self._terminal_node_ids else true_tail
 
         false_tail = switch_id
+        false_live: str | None = switch_id
         if node.orelse:
             self._last_node_id = switch_id
             self._pending_edge_label = _FALSE_LABEL
@@ -330,13 +342,35 @@ class ASTExtractor(ast.NodeVisitor):
             for stmt in node.orelse:
                 self.visit(stmt)
             false_tail = self._last_node_id
+            false_live = None if false_tail in self._terminal_node_ids else false_tail
 
         # WGIR has no explicit join node, so whatever follows the `if`
-        # connects from both branch tails — `_last_node_id` carries one,
-        # `_pending_join_ids` carries the other (deduplicated when there was
-        # no `else`, since both tails are then the switch itself).
-        self._last_node_id = true_tail
-        self._pending_join_ids = [false_tail] if false_tail != true_tail else []
+        # connects from every branch tail that can still reach it — a
+        # branch that returned is excluded, since there is no path from it
+        # to code after the `if`.
+        live_tails = [tail for tail in (true_live, false_live) if tail is not None]
+
+        if not live_tails:
+            # Both branches end the flow — nothing after the `if` is
+            # reachable, so nothing should be wired to it.
+            self._last_node_id = None
+            self._pending_join_ids = []
+        elif len(live_tails) == 1:
+            (only_live,) = live_tails
+            self._last_node_id = only_live
+            self._pending_join_ids = []
+            # No `else`, and the true branch returned: the implicit false
+            # path is now the *only* way to reach whatever follows, so it
+            # earns the same branch label the explicit-`else` case gets —
+            # instead of the unlabeled join edge this would otherwise be.
+            if only_live is switch_id and true_live is None:
+                self._pending_edge_label = _FALSE_LABEL
+                self._pending_edge_condition = (
+                    f"not ({condition_text})" if condition_text else None
+                )
+        else:
+            self._last_node_id = true_live
+            self._pending_join_ids = [tail for tail in live_tails if tail != true_live]
 
     def visit_For(self, node: ast.For) -> None:  # noqa: N802
         target, iterable = _unparse(node.target), _unparse(node.iter)
@@ -392,6 +426,7 @@ class ASTExtractor(ast.NodeVisitor):
             WGIRNode(id=nid, kind=NodeKind.RETURN, label="return", description=description),
             node,
         )
+        self._terminal_node_ids.add(nid)
 
     def visit_Assign(self, node: ast.Assign) -> None:  # noqa: N802
         # Track which variable is assigned by which node

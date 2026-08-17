@@ -870,6 +870,48 @@ async def my_workflow(ctx, input):
         preds = {e.source for e in ext.edges if e.target == finish_id}
         assert preds == {"big_handler", switch_id}
 
+    def test_if_without_else_where_true_branch_returns_forks_not_chains(self) -> None:
+        """`if x: return A` followed by `return B` (no `else`) must produce a
+        switch with two branch edges to two independent `return` nodes -- not
+        a linear chain from the first `return` into the second, which is
+        what an unreachable "return -> return" edge would otherwise draw."""
+        source = '''
+async def my_workflow(ctx, error_type):
+    if error_type:
+        return "failed"
+    return "succeeded"
+'''
+        ext = extract_from_source(source, flow_id="test")
+        return_nodes = [n for n in ext.nodes if n.kind is NodeKind.RETURN]
+        assert len(return_nodes) == 2
+        return_ids = {n.id for n in return_nodes}
+
+        # No edge should run from one return node to the other.
+        assert not any(
+            e.source in return_ids and e.target in return_ids for e in ext.edges
+        )
+
+        switch_id = next(n.id for n in ext.nodes if n.kind is NodeKind.SWITCH)
+        by_target = {e.target: e for e in ext.edges if e.source == switch_id}
+        assert set(by_target) == return_ids
+        assert {e.label for e in by_target.values()} == {"True", "False"}
+
+    def test_if_else_both_branches_return_leaves_dead_code_unwired(self) -> None:
+        """When both branches of an `if`/`else` return, nothing after the
+        `if` is reachable -- it must not be wired to either branch tail."""
+        source = '''
+async def my_workflow(ctx, x):
+    if x:
+        return "a"
+    else:
+        return "b"
+    await ctx.step(unreachable, x)
+'''
+        ext = extract_from_source(source, flow_id="test")
+        unreachable_id = next(n.id for n in ext.nodes if n.label == "unreachable")
+        preds = {e.source for e in ext.edges if e.target == unreachable_id}
+        assert preds == set()
+
     def test_for_loop_back_edge_and_done_label(self) -> None:
         source = '''
 async def my_workflow(ctx, items):

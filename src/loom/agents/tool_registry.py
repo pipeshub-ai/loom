@@ -553,19 +553,35 @@ class ToolsetRegistry(ToolsetCatalog):
                 # the capability exists and to name it in an agent prompt; the
                 # parameters and schemas are a tool call away and are the part
                 # that would make this grow without bound.
-                names = ", ".join(op.function or op.id for op in m.all_operations())
+                #
+                # A bridge toolset (e.g. PipesHub) routes every operation
+                # through ONE shared function, so `op.function` is identical
+                # for all of them. Showing "pipeshub_tool" repeated N times
+                # tells the model nothing; fall back to `op.id` (e.g.
+                # "gmail.send_email") which names the actual capability.
+                all_ops = list(m.all_operations())
+                functions = [op.function for op in all_ops if op.function]
+                use_ids = len(set(functions)) < len(functions)
+                names = ", ".join(
+                    op.id if use_ids else (op.function or op.id)
+                    for op in all_ops
+                )
                 lines.append(f"  Operations: {names}")
                 lines.append(
-                    f'  For signatures and schemas: show_toolset("{m.id}"). '
+                    f'  For signatures and schemas: show_toolset("{m.id}") '
+                    f'then get_tool_contract("{m.id}.<op_id>"). '
                     f'For examples: get_tool_docs("{m.id}").'
                 )
                 lines.append("")
                 continue
 
-            for op in m.all_operations():
-                # Show the function where there is one: that is the name the
-                # generated code has to contain.
-                sig = _schema_to_signature(op.function or op.id, op.input_schema)
+            # For a bridge toolset where all operations share one function,
+            # use the operation id — the function name repeated is not useful.
+            all_ops = list(m.all_operations())
+            use_ids = len(set(op.function for op in all_ops if op.function)) < len(all_ops)
+            for op in all_ops:
+                label = op.id if use_ids else (op.function or op.id)
+                sig = _schema_to_signature(label, op.input_schema)
                 suffix = f"  [{op.effect.value}]"
                 lines.append(f"  - {sig}{suffix}")
                 if op.summary:

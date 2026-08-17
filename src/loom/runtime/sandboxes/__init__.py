@@ -6,13 +6,14 @@ mechanism. Kept separate because an isolating sandbox has platform-specific
 imports — ``resource`` is POSIX-only — and the port must import on every
 platform Loom runs on.
 
-Nothing is re-exported eagerly: ``SubprocessSandbox`` is imported from its own
-module, the same way a store backend is, so the package costs nothing to have.
+Nothing is re-exported eagerly: ``SubprocessSandbox``/``DockerSandbox`` are
+each imported from their own module, the same way a store backend is, so the
+package costs nothing to have.
 """
 
 from __future__ import annotations
 
-__all__ = ["SubprocessSandbox"]
+__all__ = ["DockerSandbox", "SubprocessSandbox"]
 
 
 def __getattr__(name: str) -> object:
@@ -22,4 +23,8 @@ def __getattr__(name: str) -> object:
         from loom.runtime.sandboxes.subprocess import SubprocessSandbox
 
         return SubprocessSandbox
+    if name == "DockerSandbox":
+        from loom.runtime.sandboxes.docker import DockerSandbox
+
+        return DockerSandbox
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

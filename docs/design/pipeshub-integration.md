@@ -390,10 +390,10 @@ and network. For PipesHub that is not acceptable: the code was written by a
 model from a business user's sentence.
 
 The fix is not to sandbox LOOM's runtime wholesale — it is to make the boundary
-*pluggable*, exactly as the store already is. LOOM needs an `ExecutionBackend`
-port with `InProcessBackend` (today's behaviour, right for a developer's laptop
-and for tests) and `SubprocessBackend` / `ContainerBackend` beside it. PipesHub's
-`ISandboxSessionProvisioner` is the proof this factors cleanly.
+*pluggable*, exactly as the store already is. That port is `ExecutionSandbox`,
+with `InlineSandbox` (today's behaviour, right for a developer's laptop and for
+tests) and `SubprocessSandbox` / `DockerSandbox` beside it. PipesHub constructs
+`DockerSandbox` with a `ctx_shims=` compatibility layer for `pipeshub_tool`.
 
 **8.1.2 Authority.** `GrantSet` is not empty — it covers toolsets, agents,
 resources, subflows, egress, and budget. The differences are *where* and *when*:
@@ -428,7 +428,7 @@ knows about PipesHub.**
 
 | PipesHub capability | LOOM provides | PipesHub provides |
 |---|---|---|
-| Sandbox execution | `ExecutionBackend` + `SubprocessBackend` | container/E2B backend if it wants stronger isolation |
+| Sandbox execution | `ExecutionSandbox` + `SubprocessSandbox` + `DockerSandbox` | image, `ctx_shims`, and compose wiring |
 | Capability broker | `EffectBroker` + `GuardedBroker` + `Grant` | the policy that computes a grant from a `TaskDefinition` |
 | Capability catalog for the coding agent | toolset registry, resolution, effect classes, `ToolsetGenerator.from_openapi()` (Phase 3) | its own OpenAPI spec covering toolsets, knowledge, skills, and the agent builder |
 | `ctx.tool(name)` | toolset registry, resolution, effect classes | its own toolset manifests |

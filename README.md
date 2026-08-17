@@ -830,16 +830,17 @@ than papering over the gaps:
 | Workflow Coding Agent: 7-stage verification, entity resolution, code-or-judgement classification | **Shipped, tested** |
 | Typed toolsets (Gmail, Calendar, Jira, Confluence), pluggable agent backends | **Shipped, tested** |
 | CLI, TUI, MCP server, HTTP API over one `RuntimeFacade` | **Shipped, tested** |
-| Sandboxed execution (generated code runs with no ambient credentials) | **Designed, not built** — `ExecutionBackend` port, see [implementation plan](docs/design/implementation-plan.md) §3.1 |
+| Sandboxed execution (generated code runs with no ambient credentials) | **Shipped, tested** — `ExecutionSandbox` (`InlineSandbox`, `SubprocessSandbox`, `DockerSandbox`), see [implementation plan](docs/design/implementation-plan.md) §3.1 |
 | Versioned, activatable workflow source (commit/rollback, not just a code hash) | **Designed, not built** — `SourceStore`/`VersionStore`, see [implementation plan](docs/design/implementation-plan.md) §4 |
 | Session-shaped execution traces for debugging | **Designed, not built** — `TraceView`, same doc |
 | Agent-rendered visualization, verified against the extracted graph | **Designed, not built** — see [`phases/phase-4-visualization.md`](phases/phase-4-visualization.md) |
 
 The honest read: what's shipped is solid enough to build on for a laptop, a
-side project, or a non-adversarial internal tool. What's designed-but-not-built
-is exactly the part that matters most for running untrusted, model-generated
-code in production — isolation and per-call authority. Don't point this at
-untrusted input without `ExecutionBackend` landing first.
+side project, or a host that isolates generated code behind `DockerSandbox`.
+What's designed-but-not-built is versioned source, session-shaped traces, and
+agent-rendered visualization — not the isolation boundary. A host running
+untrusted, model-generated code should construct `Runtime(sandbox=DockerSandbox(...))`
+rather than the default `InlineSandbox`.
 
 **This is where the community makes the difference.** The gaps above are
 scoped, written down, and ordered by dependency (see

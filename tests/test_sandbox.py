@@ -15,8 +15,13 @@ into the default path.
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import sys
+import uuid
+from collections.abc import Iterator
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -32,6 +37,7 @@ from loom.runtime.sandbox import (
     SandboxBody,
     SandboxPolicy,
 )
+from loom.runtime.sandboxes.docker import DockerSandbox
 from loom.runtime.sandboxes.subprocess import SubprocessSandbox
 from loom.security.authority import Authority
 from loom.stores.memory import MemoryStore
@@ -39,6 +45,67 @@ from loom.stores.memory import MemoryStore
 POSIX_ONLY = pytest.mark.skipif(
     os.name != "posix", reason="rlimits are POSIX; this sandbox declares so in enforces"
 )
+
+
+def _docker_daemon_available() -> bool:
+    if shutil.which("docker") is None:
+        return False
+    try:
+        result = subprocess.run(["docker", "info"], capture_output=True, timeout=5)
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
+#: Computed once at collection time, not per test — `docker info` is a real
+#: subprocess round trip and every skip decision below wants the same answer.
+_DOCKER_AVAILABLE = _docker_daemon_available()
+
+
+@pytest.fixture(scope="session")
+def docker_test_image() -> Iterator[str]:
+    """Installs *this checkout's* `loom` plus `pytest` over `python:3.12-slim`
+    — not the real `deployment/docker-sandbox/Dockerfile`.
+
+    Two things a production sandbox image never needs, both artifacts of how
+    this conformance suite recovers a body's source: `Runtime._sandbox_source`
+    reads the whole *module* a workflow is defined in (see its own docstring),
+    so exec'ing this test module inside the container re-runs every import at
+    its top — `pytest` (this file imports it) and `loom` itself (`from loom
+    import Runtime, step, workflow`). A generated production workflow module
+    imports neither, which is exactly why the real Dockerfile installs only
+    `loomflow`/`pydantic` and nothing test-related.
+
+    Built once per session against this repository as the build context (so
+    local, possibly-unreleased changes to `loom` are what the container runs
+    against — the same property `DockerSandbox`'s own docstring asks of a real
+    deployment) and torn down after. A build failure (no network access to
+    pull the base image or resolve `loom`'s own dependencies) skips rather
+    than fails, since this is an environment gap the suite does not exist to
+    catch.
+    """
+    tag = f"loom-sandbox-test-{uuid.uuid4().hex[:8]}"
+    dockerfile = (
+        "FROM python:3.12-slim\n"
+        "COPY pyproject.toml README.md /tmp/loom/\n"
+        "COPY src/ /tmp/loom/src/\n"
+        "RUN pip install --no-cache-dir --no-compile pytest /tmp/loom "
+        "&& rm -rf /tmp/loom\n"
+        "RUN useradd --create-home --shell /usr/sbin/nologin sandbox\n"
+    )
+    repo_root = Path(__file__).resolve().parent.parent
+    build = subprocess.run(
+        ["docker", "build", "-t", tag, "-f", "-", str(repo_root)],
+        input=dockerfile.encode(),
+        capture_output=True,
+    )
+    if build.returncode != 0:
+        pytest.skip(
+            "could not build a Docker test image: "
+            f"{build.stderr.decode(errors='replace')}"
+        )
+    yield tag
+    subprocess.run(["docker", "rmi", "-f", tag], capture_output=True)
 
 
 # -- the workflow both adapters run ------------------------------------------
@@ -65,11 +132,25 @@ async def arithmetic(ctx: Context, payload: dict) -> int:
     return await ctx.step(add_ten, value=doubled)
 
 
-@pytest.fixture(params=["inline", "subprocess"])
+@pytest.fixture(params=["inline", "subprocess", "docker"])
 def sandbox(request) -> ExecutionSandbox:
-    """Every behavioural test runs against both. Adding a third adapter means
-    adding it here, and finding out immediately what it does differently."""
-    return InlineSandbox() if request.param == "inline" else SubprocessSandbox()
+    """Every behavioural test runs against all three. Adding a fourth adapter
+    means adding it here, and finding out immediately what it does
+    differently.
+
+    The Docker branch requests its image lazily
+    (`request.getfixturevalue`) rather than depending on
+    ``docker_test_image`` directly, so the ``inline``/``subprocess``
+    parametrizations never pay for a container build they do not use.
+    """
+    if request.param == "inline":
+        return InlineSandbox()
+    if request.param == "subprocess":
+        return SubprocessSandbox()
+    if not _DOCKER_AVAILABLE:
+        pytest.skip("Docker not available")
+    image = request.getfixturevalue("docker_test_image")
+    return DockerSandbox(image)
 
 
 class TestBothAdaptersAgree:

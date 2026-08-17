@@ -120,28 +120,41 @@ class EffectResult:
     error: str | None = None
 ```
 
-### 3.1 `ExecutionBackend` — where workflow code runs
+### 3.1 `ExecutionSandbox` — where workflow code runs
 
 ```python
 @runtime_checkable
-class ExecutionBackend(Protocol):
-    """Runs one workflow body to a terminal state or a suspension."""
+class ExecutionSandbox(Protocol):
+    """Runs a workflow body, and proxies its durable calls back."""
 
-    async def execute(
+    name: str
+    enforces: frozenset[str]
+
+    async def run(
         self,
-        definition: WorkflowDefinition,
-        request: ExecutionRequest,   # input, authority, journal handle
-    ) -> ExecutionOutcome: ...
+        *,
+        body: SandboxBody,
+        run_id: str,
+        input: Any,
+        channel: ContextChannel,
+        policy: SandboxPolicy,
+    ) -> SandboxOutcome: ...
 ```
 
-- `InProcessBackend` — today's behaviour, the default, what tests and a laptop
-  should keep using.
-- `SubprocessBackend` — stages the source, launches a harness, speaks
-  JSON-lines over stdin/stdout, applies `setrlimit` where available.
+- `InlineSandbox` — today's default, in-process, enforces nothing. What tests
+  and a laptop should keep using.
+- `SubprocessSandbox` — launches a harness, speaks JSON-lines over stdin/stdout,
+  applies `setrlimit` where the platform honours it.
+- `DockerSandbox` — the same harness and conversation loop inside
+  `docker run --rm -i --network none`, with cgroup memory, a read-only root,
+  and `--cap-drop ALL`. A host that needs real isolation constructs this
+  instead of a subprocess.
 
 Why it is a port rather than a flag: isolation is a spectrum (none → process →
-container → microVM → remote), the right point differs per deployment, and only
-the first two are LOOM's business to ship.
+container → microVM → remote), the right point differs per deployment, and the
+library ships the first three. "Sandbox" rather than "Backend" — that name
+already belongs to `AgentBackend` and `DurabilityBackend`, and this port is an
+isolation boundary, not a durability one.
 
 ### 3.2 `EffectBroker` — how effects are mediated
 
@@ -302,20 +315,20 @@ now measures `dispatch` against calling the same coroutine directly: **~2µs per
 call**, against a step doing real I/O — a fraction of one percent, and a bound
 that still catches a broker that grew a lock or an allocation.
 
-### P3 — `ExecutionBackend` (4 weeks)
+### P3 — `ExecutionSandbox` (4 weeks)
 
-**Not started.**
+**Done.** Ships `InlineSandbox` (default), `SubprocessSandbox`, and
+`DockerSandbox`. The two isolating adapters share one child harness
+(`sandboxes/_harness.py`) and one JSON-lines conversation loop
+(`sandboxes/_conversation.py`); a host extends the child's vocabulary with
+`ctx_shims=` rather than forking the script. `Runtime(sandbox=...)` is the
+constructor argument; `enforces` is honest per platform (macOS refuses
+`RLIMIT_AS`, a container does not).
 
-- The protocol; `InProcessBackend` as the default.
-- `SubprocessBackend`: staged source, JSON-lines harness, rlimits, journal and
-  broker access over the channel.
-- `loom run --isolate` and a Runtime argument.
-
-**Exit:** a workflow that reads the filesystem or imports a forbidden module
-fails under `SubprocessBackend` and succeeds under `InProcessBackend`, with
-identical journals otherwise. Kill the child at each step index → resumes with
-no duplicate effects. Documented honestly: a subprocess is not a container, and
-the guide says so.
+**Exit:** a workflow that reads the filesystem or opens a socket fails under
+`DockerSandbox` and succeeds under `InlineSandbox`, with identical journals
+otherwise. Kill the child at each step index → resumes with no duplicate
+effects. A subprocess is not a container, and `enforces` says so.
 
 ### P4 — `StateStore` and `RunStream` (2 weeks)
 
