@@ -3,7 +3,7 @@ requires = ["setuptools>=75.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "loomflow"
+name = "loomsdk"
 version = "0.1.0"
 description = "Library-first durable execution SDK for AI-powered workflows"
 readme = "README.md"
@@ -67,6 +67,18 @@ credentials = ["keyring>=25", "cryptography>=43"]
 # it by installing the core package.
 duckduckgo = ["ddgs>=9.0"]
 
+# Authoring-time observation. The coding agent uses this to *look* at a page
+# before writing a selector against it; generated workflows never import it.
+# Needs `playwright install chromium` after pip, since the browser is not a
+# Python package.
+browser = ["playwright>=1.40"]
+
+# Reading a PDF or a Word document — `transform.parse_document`. Optional
+# because plain text, Markdown, CSV and JSON need nothing, and a workflow that
+# never touches a binary document should not acquire two parsers to install
+# the core package.
+documents = ["pypdf>=5.0", "python-docx>=1.1"]
+
 # Model providers
 anthropic = ["anthropic>=0.40"]
 openai = ["openai>=1.60"]
@@ -100,7 +112,7 @@ cli = ["rich>=13.0"]
 mcp = ["mcp>=1.2"]
 
 # Terminal UI (`loom ui`)
-tui = ["loomflow[cli]", "textual>=0.80"]
+tui = ["loomsdk[cli]", "textual>=0.80"]
 
 # Conformance kits — `loom.testing.conformance`, for proving a third-party
 # EventLog/Checkpoints adapter correct. The kits ship in the main wheel so they
@@ -133,7 +145,7 @@ dev = [
 
 # Install everything
 all = [
-    "loomflow[mongo,postgres,s3,azure,gcs,google,identity,credentials,anthropic,openai,gemini,langchain,duckduckgo,api,cli,tui,mcp,testing]"
+    "loomsdk[mongo,postgres,s3,azure,gcs,google,identity,credentials,anthropic,openai,gemini,langchain,duckduckgo,browser,documents,api,cli,tui,mcp,testing]"
 ]
 
 [project.urls]
@@ -145,7 +157,7 @@ Issues = "https://github.com/pipeshub-ai/workflow/issues"
 
 [project.scripts]
 loom = "loom.cli:main"
-loomflow = "loom.cli:main"
+loomsdk = "loom.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -193,6 +205,7 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF"]
 # which pulls none of them, is the environment this check is *for*. The full
 # suite still needs `[all]`; that is a separate environment with a separate job.
 [tool.mypy]
+plugins = ["pydantic.mypy"]
 python_version = "3.11"
 strict = true
 mypy_path = "src"
@@ -221,6 +234,11 @@ module = [
     "bson.*",
     "crewai.*",
     "ddgs.*",
+    # Document extraction nodes; optional readers, imported inside a function.
+    "docx.*",
+    "pypdf.*",
+    # `python-docx` imports as `docx`. Both arrive with the `[documents]` extra.
+    "docx.*",
     # The bare namespace as well as the packages under it — `google` alone is
     # what an `import google.auth` resolves first, and a `google.*` pattern does
     # not match it.
@@ -238,8 +256,12 @@ module = [
     "motor.*",
     "openai.*",
     "opentelemetry.*",
+    # The browser probe's driver, behind the `browser` extra and imported
+    # inside a function with an ImportError guard — absent is the normal case.
+    "playwright.*",
     "pydantic_ai.*",
     "pymongo.*",
+    "pypdf.*",
     "redis.*",
     "rich.*",
     "textual.*",

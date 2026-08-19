@@ -34,10 +34,22 @@ def from_url(url: str) -> Any:
     Scheme                      Store
     ==========================  ====================================
     ``memory://``               :class:`MemoryStore`
-    ``sqlite:///path/to.db``    :class:`SQLiteStore`
+    ``sqlite://runs.db``        :class:`SQLiteStore`, relative to the cwd
+    ``sqlite:///var/lib/x.db``  :class:`SQLiteStore`, absolute
     ``postgres://…``            :class:`PostgresStore` (extra: postgres)
     ``mongodb://…``             :class:`MongoStore` (extra: mongo)
     ==========================  ====================================
+
+    **Two slashes for a relative path, three for an absolute one.** A URL's
+    authority position is what holds a bare name, so ``sqlite://runs.db`` is
+    ``runs.db`` beside you and ``sqlite:///runs.db`` is ``/runs.db`` at the
+    filesystem root -- which is a real path, just never the intended one. That
+    differs from SQLAlchemy, where three slashes is the relative form; it is
+    fixed here rather than translated because ``f"sqlite://{path}"`` over an
+    absolute path is how every caller in this repo spells the absolute case,
+    and reinterpreting three slashes would silently redirect those writes to a
+    relative file rather than failing. :class:`SQLiteStore` says all of this
+    again if the path it is handed cannot be opened.
 
     Raises :class:`ConfigurationError` for an unknown scheme, or for a known one
     whose driver is not installed — with the ``pip install`` line that fixes it,
@@ -64,7 +76,7 @@ def from_url(url: str) -> Any:
             from loom.stores.postgres import PostgresStore
         except ImportError as exc:  # pragma: no cover - depends on env
             raise ConfigurationError(
-                "PostgresStore needs asyncpg: pip install 'loomflow[postgres]'"
+                "PostgresStore needs asyncpg: pip install 'loomsdk[postgres]'"
             ) from exc
         # asyncpg wants the postgresql:// spelling.
         return PostgresStore(url.replace("postgres://", "postgresql://", 1))
@@ -74,13 +86,13 @@ def from_url(url: str) -> Any:
             from loom.stores.mongo import MongoStore
         except ImportError as exc:  # pragma: no cover - depends on env
             raise ConfigurationError(
-                "MongoStore needs motor: pip install 'loomflow[mongo]'"
+                "MongoStore needs motor: pip install 'loomsdk[mongo]'"
             ) from exc
         database = parsed.path.lstrip("/") or "loom"
         return MongoStore(url, database)
 
     raise ConfigurationError(
-        f"unsupported store URL {url!r}. Use memory://, sqlite:///path.db, "
+        f"unsupported store URL {url!r}. Use memory://, sqlite://runs.db, "
         "postgres://…, or mongodb://… — or construct the store yourself and pass "
         "store= to Runtime()."
     )

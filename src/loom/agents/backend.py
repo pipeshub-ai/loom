@@ -106,7 +106,7 @@ class BuiltInBackend:
         from loom.agents.agent import Agent
         from loom.agents.executor import AgentContext, AgentSettings
 
-        agent = Agent(
+        agent: Agent[Any] = Agent(
             name=agent_id or "builtin",
             instructions=self._instructions,
             model=self._model,

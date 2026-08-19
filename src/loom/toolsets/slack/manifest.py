@@ -62,6 +62,19 @@ SLACK_MANIFEST = ToolsetManifest(
         "token_url": "https://slack.com/api/oauth.v2.access",
     },
     tools_module="loom.toolsets.slack.tools",
+    opaque_ids={
+        # C024BE91L, U023BECGF — everything in Slack takes one of these and
+        # never the #name a person types.
+        #
+        # The lookahead demanding a digit is not decoration. Without it
+        # `C[A-Z0-9]{7,}` matches CANCELLED, COMPLETED, CRITICAL and
+        # UNASSIGNED — ordinary constants in generated code — and a check that
+        # flags ordinary data is one people switch off. The cost is a Slack id
+        # of letters alone going unchecked, which is the right way round: a
+        # missed guess is what this was before, a false alarm is worse.
+        r"\bC(?=[A-Z0-9]*\d)[A-Z0-9]{7,}\b": "channel",
+        r"\bU(?=[A-Z0-9]*\d)[A-Z0-9]{7,}\b": "user",
+    },
     egress_hosts=["slack.com", "files.slack.com"],
     rate_limits={
         "tiers": "per method, per workspace, per minute",
@@ -220,6 +233,7 @@ SLACK_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="conversations.invite",
+                access_control=True,
                 function="slack_invite_to_channel",
                 summary="Invite users to a channel. Takes user ids.",
                 effect=EffectClass.WRITE,
@@ -254,6 +268,7 @@ SLACK_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="conversations.archive",
+                idempotent=True,
                 function="slack_archive_channel",
                 summary="Archive a channel. Only an admin can undo it.",
                 effect=EffectClass.DESTRUCTIVE,
@@ -349,6 +364,7 @@ SLACK_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="messages.delete",
+                idempotent=True,
                 function="slack_delete_message",
                 summary="Delete a message. Not recoverable.",
                 effect=EffectClass.DESTRUCTIVE,

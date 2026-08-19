@@ -45,6 +45,13 @@ SALESFORCE_MANIFEST = ToolsetManifest(
     },
     tools_module="loom.toolsets.salesforce.tools",
     egress_hosts=["*.salesforce.com", "*.force.com"],
+    rate_limits={
+        "model": "org-wide daily API request allocation",
+        "signal": (
+            "a 403 with errorCode REQUEST_LIMIT_EXCEEDED is org quota and "
+            "clears with time; any other 403 is a permission and never will"
+        ),
+    },
     groups={
         "query": [
             OperationSpec(
@@ -52,6 +59,7 @@ SALESFORCE_MANIFEST = ToolsetManifest(
                 function="salesforce_query",
                 summary="Run a SOQL query, paging until Salesforce says done.",
                 effect=EffectClass.READ,
+                scopes=["api"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(SalesforceRecord),
@@ -65,6 +73,7 @@ SALESFORCE_MANIFEST = ToolsetManifest(
                     "fields cannot be guessed."
                 ),
                 effect=EffectClass.READ,
+                scopes=["api"],
                 idempotent=True,
                 output_schema={"type": "object"},
             ),
@@ -75,6 +84,7 @@ SALESFORCE_MANIFEST = ToolsetManifest(
                 function="salesforce_get_record",
                 summary="Fetch one record of any object type.",
                 effect=EffectClass.READ,
+                scopes=["api"],
                 idempotent=True,
                 output_schema=SalesforceRecord.model_json_schema(),
             ),
@@ -84,6 +94,7 @@ SALESFORCE_MANIFEST = ToolsetManifest(
                 summary="Create a record of any object type.",
                 description="Not retried: Salesforce has no idempotency key.",
                 effect=EffectClass.WRITE,
+                scopes=["api"],
                 output_schema=SalesforceWriteResult.model_json_schema(),
             ),
             OperationSpec(
@@ -91,6 +102,7 @@ SALESFORCE_MANIFEST = ToolsetManifest(
                 function="salesforce_update_record",
                 summary="Update a record. Only the fields passed are changed.",
                 effect=EffectClass.WRITE,
+                scopes=["api"],
                 idempotent=True,
                 output_schema=SalesforceWriteResult.model_json_schema(),
             ),
@@ -99,6 +111,7 @@ SALESFORCE_MANIFEST = ToolsetManifest(
                 function="salesforce_delete_record",
                 summary="Delete a record.",
                 effect=EffectClass.DESTRUCTIVE,
+                scopes=["api"],
                 idempotent=True,
                 output_schema=SalesforceWriteResult.model_json_schema(),
             ),
@@ -115,6 +128,7 @@ SALESFORCE_MANIFEST = ToolsetManifest(
                 ),
                 resolves="account",
                 effect=EffectClass.READ,
+                scopes=["api"],
                 idempotent=True,
                 output_schema=_array(SalesforceAccount),
             ),
@@ -125,6 +139,7 @@ SALESFORCE_MANIFEST = ToolsetManifest(
                 summary="Find contacts by name or email, optionally in one account.",
                 resolves="contact",
                 effect=EffectClass.READ,
+                scopes=["api"],
                 idempotent=True,
                 output_schema=_array(SalesforceContact),
             ),
@@ -134,6 +149,7 @@ SALESFORCE_MANIFEST = ToolsetManifest(
                 pagination=True,
                 summary="Find opportunities by name, account, stage, or openness.",
                 effect=EffectClass.READ,
+                scopes=["api"],
                 idempotent=True,
                 output_schema=_array(SalesforceOpportunity),
             ),
@@ -147,6 +163,7 @@ SALESFORCE_MANIFEST = ToolsetManifest(
                 description="Resolve before assigning an OwnerId.",
                 resolves="user",
                 effect=EffectClass.READ,
+                scopes=["api"],
                 idempotent=True,
                 output_schema=_array(SalesforceUser),
             ),
@@ -155,6 +172,7 @@ SALESFORCE_MANIFEST = ToolsetManifest(
                 function="salesforce_whoami",
                 summary="The user these credentials authenticate as.",
                 effect=EffectClass.READ,
+                scopes=["api"],
                 idempotent=True,
                 output_schema=SalesforceUser.model_json_schema(),
             ),

@@ -768,7 +768,7 @@ class TestABlockIsAnErrorNotAnEmptyList:
     matches on class *name* across the MRO precisely so this toolset imports
     without its optional extra installed — importing the real ones to test it
     would exercise the opposite, and would fail in any environment that has
-    ``loomflow[dev]`` but not ``loomflow[duckduckgo]``. Which is what CI
+    ``loomsdk[dev]`` but not ``loomsdk[duckduckgo]``. Which is what CI
     installs, and how this was found.
     """
 
@@ -852,7 +852,7 @@ class TestDuckDuckGoWithoutThePackage:
         with pytest.raises(ConfigurationError) as caught:
             DuckDuckGoClient()._ddgs()
 
-        assert "loomflow[duckduckgo]" in str(caught.value)
+        assert "loomsdk[duckduckgo]" in str(caught.value)
         assert "exa or tavily" in str(caught.value)
 
 
@@ -916,7 +916,7 @@ class TestTheManifestsAreHonest:
         front of it."""
         description = DUCKDUCKGO_MANIFEST.description
         assert "NOT AN OFFICIAL API" in description
-        assert "loomflow[duckduckgo]" in description
+        assert "loomsdk[duckduckgo]" in description
 
     @pytest.mark.parametrize(
         ("manifest", "variable"),

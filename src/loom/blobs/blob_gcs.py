@@ -93,7 +93,8 @@ class GCSBlobBackend:
         def _download() -> bytes:
             if not blob.exists():
                 raise BlobNotFoundError(ref)
-            return blob.download_as_bytes()
+            downloaded: bytes = blob.download_as_bytes()
+            return downloaded
 
         return await asyncio.to_thread(_download)
 
@@ -130,7 +131,8 @@ class GCSBlobBackend:
             kwargs["content_type"] = content_type
 
         def _sign() -> str:
-            return blob.generate_signed_url(**kwargs)
+            signed: str = blob.generate_signed_url(**kwargs)
+            return signed
 
         try:
             return await asyncio.to_thread(_sign)

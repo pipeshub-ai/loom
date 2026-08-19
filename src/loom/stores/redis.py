@@ -16,7 +16,7 @@ beside it for coordination.
 
 Requires ``redis``::
 
-    pip install loomflow[redis]
+    pip install loomsdk[redis]
 """
 
 from __future__ import annotations

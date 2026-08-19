@@ -179,7 +179,8 @@ class StagingManager:
             **extra,
         )
         await self.discard(name, run_id=run_id)
-        return version
+        committed: ArtifactVersion = version
+        return committed
 
     async def discard(self, name: str, *, run_id: str = "") -> None:
         """Drop a staged artifact. The blob is left in place (it may be shared)."""

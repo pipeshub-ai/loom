@@ -223,7 +223,7 @@ class TestAuth:
         except ImportError:
             with pytest.raises(GoogleAuthError) as exc:
                 auth._signed_assertion()
-            assert "loomflow[google]" in str(exc.value)
+            assert "loomsdk[google]" in str(exc.value)
 
 
 def _patch_token_transport(
@@ -2073,6 +2073,7 @@ class TestSharedAuthScopes:
             "google_calendar": "loom.toolsets.google.calendar.client",
             "google_drive": "loom.toolsets.google.drive.client",
             "google_meet": "loom.toolsets.google.meet.client",
+            "google_sheets": "loom.toolsets.google.sheets.client",
         }
         for manifest in GOOGLE_MANIFESTS:
             import importlib
@@ -2092,7 +2093,7 @@ class TestSharedAuthScopes:
             ), f"{manifest.id} promises a scope from a different API"
 
 
-class TestAllFourToolsetsTogether:
+class TestEveryGoogleToolsetTogether:
     def _registry(self):
         from loom.agents.tool_registry import ToolsetRegistry
         from loom.toolsets.google import GOOGLE_MANIFESTS
@@ -2112,8 +2113,9 @@ class TestAllFourToolsetsTogether:
             "app:loom:google_calendar",
             "app:loom:google_drive",
             "app:loom:google_meet",
+            "app:loom:google_sheets",
         }
-        assert len(registry.list_toolsets()) == 4
+        assert len(registry.list_toolsets()) == 5
 
     @pytest.mark.parametrize(
         ("query", "expected"),

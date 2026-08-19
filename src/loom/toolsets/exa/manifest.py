@@ -47,6 +47,12 @@ EXA_MANIFEST = ToolsetManifest(
     auth={"type": "api_key", "fields": ["EXA_API_KEY"], "header": "x-api-key"},
     tools_module="loom.toolsets.exa.tools",
     egress_hosts=["api.exa.ai"],
+    rate_limits={
+        "results": (
+            "100 maximum per search; there is no cursor, so a larger request "
+            "is refused rather than silently clamped"
+        ),
+    },
     groups={
         "search": [
             OperationSpec(

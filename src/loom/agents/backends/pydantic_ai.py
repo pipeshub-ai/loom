@@ -7,7 +7,7 @@ Example::
 
     from loom.agents.backends.pydantic_ai import PydanticAIBackend
 
-    backend = PydanticAIBackend(model="anthropic:claude-sonnet-4-6")
+    backend = PydanticAIBackend(model="anthropic:claude-sonnet-5")
     rt = Runtime(store=MemoryStore(), agent_backend=backend)
 """
 
@@ -25,7 +25,7 @@ class PydanticAIBackend:
     Parameters
     ----------
     model:
-        A Pydantic AI model string (e.g. ``"anthropic:claude-sonnet-4-6"``)
+        A Pydantic AI model string (e.g. ``"anthropic:claude-sonnet-5"``)
         or a model instance.
     instructions:
         Optional system prompt.
@@ -39,7 +39,7 @@ class PydanticAIBackend:
     def __init__(
         self,
         *,
-        model: str | Any = "anthropic:claude-sonnet-4-6",
+        model: str | Any = "anthropic:claude-sonnet-5",
         instructions: str = "",
     ) -> None:
         self._model = model
@@ -110,7 +110,8 @@ def _loom_tool_to_pai(tool: Any) -> Any:
 
     # Use get_type_hints-compatible annotation
     if asyncio.iscoroutinefunction(fn):
-        async def wrapper(ctx, **kwargs: Any) -> str:
+        async def wrapper(ctx: Any, **kwargs: Any) -> str:
+            tool.enforce_approval(kwargs)
             # tool.render_result, not str(): `str(Results([1,2,3],
             # complete=False, total=312))` is "[1, 2, 3]" — page one rendered
             # exactly like a complete answer, with the coverage the paging layer
@@ -118,7 +119,8 @@ def _loom_tool_to_pai(tool: Any) -> Any:
             rendered: str = tool.render_result(await fn(**kwargs))
             return rendered
     else:
-        async def wrapper(ctx, **kwargs: Any) -> str:
+        async def wrapper(ctx: Any, **kwargs: Any) -> str:
+            tool.enforce_approval(kwargs)
             result = fn(**kwargs)
             if inspect.isawaitable(result):
                 result = await result

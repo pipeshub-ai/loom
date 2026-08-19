@@ -3,23 +3,23 @@
 ## Installation
 
 ```bash
-pip install loomflow
+pip install loomsdk
 ```
 
 Optional extras for specific backends:
 
 ```bash
 # MongoDB storage
-pip install loomflow[mongo]
+pip install loomsdk[mongo]
 
 # PostgreSQL storage
-pip install loomflow[postgres]
+pip install loomsdk[postgres]
 
 # LangChain agent backend
-pip install loomflow[langchain]
+pip install loomsdk[langchain]
 
 # Everything
-pip install loomflow[all]
+pip install loomsdk[all]
 ```
 
 ## Your First Workflow

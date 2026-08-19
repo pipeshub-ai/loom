@@ -90,6 +90,21 @@ class EffectCall:
     effect: EffectClass = EffectClass.WRITE
     """Read, write, or destructive. Defaults to write: an operation whose class
     nobody declared is not safe to assume is harmless."""
+    reversible: bool = False
+    """Whether the effect can be undone by another operation.
+
+    Defaults to ``False``: an operation nobody said was recoverable is not safe
+    to assume is."""
+    access_control: bool = False
+    """Whether this changes who can reach data rather than the data itself."""
+    open_world: bool = True
+    """Whether this reaches outside the deployment's trust boundary.
+
+    Read by :class:`~loom.runtime.taint.TaintBroker`, which asks a different
+    question of the same call than the grant does: not how much damage it can
+    do, but whether what it returns came from somewhere nobody reviewed.
+    Defaults to ``True`` for the same reason ``effect`` defaults to ``WRITE`` —
+    an unclassified call is not safe to assume is self-contained."""
     run_id: str = ""
     path: str = ""
     """Journal path, so a denial can be traced to the exact call site."""

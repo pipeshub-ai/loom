@@ -81,6 +81,12 @@ GOOGLE_MEET_MANIFEST = ToolsetManifest(
     },
     tools_module="loom.toolsets.google.meet.tools",
     egress_hosts=["meet.googleapis.com", "oauth2.googleapis.com"],
+    rate_limits={
+        "model": (
+            "per-project quota units configured in the Google Cloud console; "
+            "no fixed per-second rate is published per method"
+        ),
+    },
     groups={
         "spaces": [
             OperationSpec(
@@ -141,6 +147,7 @@ GOOGLE_MEET_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="spaces.end_active_conference",
+                idempotent=True,
                 function="meet_end_active_conference",
                 summary="Hang up the call currently happening in a space.",
                 description=(

@@ -12,9 +12,11 @@ from typing import Any
 
 import pytest
 
+from loom import ExecutionStatus, Runtime, step, workflow
 from loom.runtime.effects import DirectBroker, EffectCall, EffectResult
 from loom.runtime.taint import TaintBroker, TaintPolicy, TaintState
 from loom.security.authority import Authority
+from loom.stores.memory import MemoryStore
 from loom.toolsets.manifest import EffectClass
 
 AUTHORITY = Authority()
@@ -236,3 +238,359 @@ class TestItComposes:
         made = Runtime(store=MemoryStore(), broker=TaintBroker(DirectBroker()))
         made.register(tainted_flow)
         assert (await made.run(tainted_flow)).output == "seen"
+
+
+class TestOpenWorldIsWhatTaints:
+    """A READ is evidence the run touched the world only if it *reached* the
+    world. Twenty of the twenty-six built-in nodes are READ and most are pure
+    computation, so keying on the class alone made filtering an in-memory list
+    refuse the next write — naming `step:control.filter` as the external data
+    it had read."""
+
+    @pytest.mark.asyncio
+    async def test_a_closed_world_node_does_not_taint(self) -> None:
+        """The regression. Filter a list the run was handed, then write."""
+        from loom.nodes.control import FilterIn
+        from loom.nodes.registry import load_builtin_nodes
+
+        load_builtin_nodes()
+
+        @step
+        async def post_to_slack(msg: str) -> str:
+            return "posted"
+
+        @workflow
+        async def flow(ctx: Any, _in: Any = None) -> str:
+            await ctx.node(
+                "control.filter",
+                FilterIn(items=[{"a": 1}, {"a": 2}], where={"a": 1}),
+            )
+            return await ctx.step(post_to_slack, msg="hi")
+
+        runtime = Runtime(store=MemoryStore(), broker=TaintBroker(DirectBroker()))
+        runtime.register(flow)
+        result = await runtime.run(flow, None)
+        assert result.status is ExecutionStatus.COMPLETED, getattr(
+            result, "error", None
+        )
+        assert result.output == "posted"
+
+    @pytest.mark.asyncio
+    async def test_an_open_world_read_still_taints(self) -> None:
+        """The property the rule exists for, unchanged."""
+        broker = TaintBroker(DirectBroker())
+
+        async def perform() -> str:
+            return "untrusted content"
+
+        await broker.dispatch(
+            EffectCall(
+                kind="step", target="exa_search", effect=EffectClass.READ,
+                open_world=True, run_id="r1", perform=perform,
+            ),
+            Authority(),
+        )
+        refused = await broker.dispatch(
+            EffectCall(
+                kind="step", target="jira_delete_issue",
+                effect=EffectClass.DESTRUCTIVE, run_id="r1", perform=perform,
+            ),
+            Authority(),
+        )
+        assert refused.ok is False
+        assert refused.needs == "approval"
+
+    @pytest.mark.asyncio
+    async def test_a_closed_world_read_does_not(self) -> None:
+        broker = TaintBroker(DirectBroker())
+
+        async def perform() -> str:
+            return "local"
+
+        await broker.dispatch(
+            EffectCall(
+                kind="step", target="control.filter", effect=EffectClass.READ,
+                open_world=False, run_id="r2", perform=perform,
+            ),
+            Authority(),
+        )
+        allowed = await broker.dispatch(
+            EffectCall(
+                kind="step", target="post", effect=EffectClass.WRITE,
+                run_id="r2", perform=perform,
+            ),
+            Authority(),
+        )
+        assert allowed.ok is True
+
+    def test_an_unclassified_call_is_assumed_to_reach_the_world(self) -> None:
+        """Same direction as `effect` defaulting to WRITE: the assumption that
+        adds a refusal, never one that removes it."""
+        assert EffectCall(kind="step", target="x").open_world is True
+
+    @pytest.mark.asyncio
+    async def test_a_journal_without_the_field_keeps_the_old_meaning(self) -> None:
+        """A run journalled before `open_world` existed cannot say, and
+        assuming 'open' preserves every refusal it would already have seen."""
+        from loom.runtime.journal import EntryKind, EntryStatus, Journal, JournalEntry
+
+        journal = Journal(
+            [
+                JournalEntry(
+                    path="0",
+                    kind=EntryKind.STEP,
+                    name="exa_search",
+                    status=EntryStatus.COMPLETED,
+                    metadata={"effect_class": EffectClass.READ},  # no open_world
+                )
+            ]
+        )
+        broker = TaintBroker(DirectBroker())
+        broker.observe_run("old", journal)
+        assert broker.state_for("old").tainted is True
+
+
+class TestTheNarrowDials:
+    """`block_writes` is the strict dial and almost every useful workflow
+    writes after reading — so a deployment that finds it unusable turns it off
+    and then has nothing. These two say the useful thing instead: after reading
+    the open web you may update a record, but you may not send the email or
+    share the folder."""
+
+    @staticmethod
+    async def _taint(broker: TaintBroker, run_id: str) -> None:
+        async def perform() -> str:
+            return "untrusted content from the open web"
+
+        await broker.dispatch(
+            EffectCall(
+                kind="step", target="exa_search", effect=EffectClass.READ,
+                open_world=True, run_id=run_id, perform=perform,
+            ),
+            AUTHORITY,
+        )
+
+    @staticmethod
+    def _call(target: str, **kw: Any) -> EffectCall:
+        async def perform() -> str:
+            return "done"
+
+        return EffectCall(kind="step", target=target, perform=perform, **kw)
+
+    @pytest.mark.asyncio
+    async def test_writes_allowed_but_the_send_is_not(self) -> None:
+        """The policy the whole phase exists to make expressible."""
+        broker = TaintBroker(
+            DirectBroker(),
+            policy=TaintPolicy(
+                block_writes=False,
+                block_destructive=False,
+                block_irreversible=True,
+            ),
+        )
+        await self._taint(broker, "r")
+
+        ordinary = await broker.dispatch(
+            self._call(
+                "jira_update_issue", effect=EffectClass.WRITE,
+                open_world=True, reversible=True, run_id="r",
+            ),
+            AUTHORITY,
+        )
+        assert ordinary.ok is True, "an ordinary reversible write should pass"
+
+        send = await broker.dispatch(
+            self._call(
+                "gmail_send_message", effect=EffectClass.WRITE,
+                open_world=True, reversible=False, run_id="r",
+            ),
+            AUTHORITY,
+        )
+        assert send.ok is False
+        assert send.needs == "approval"
+        assert "irreversible" in (send.error or "")
+
+    @pytest.mark.asyncio
+    async def test_the_gmail_inversion_is_resolved(self) -> None:
+        """Ranked by class, trashing outranks sending. Ranked by what a human
+        is actually being asked, it does not: untrash restores a message for
+        thirty days and nothing unsends an email."""
+        broker = TaintBroker(
+            DirectBroker(),
+            policy=TaintPolicy(
+                block_writes=False, block_destructive=False, block_irreversible=True
+            ),
+        )
+        await self._taint(broker, "r")
+
+        trash = await broker.dispatch(
+            self._call(
+                "gmail_trash_message", effect=EffectClass.DESTRUCTIVE,
+                open_world=True, reversible=True, run_id="r",
+            ),
+            AUTHORITY,
+        )
+        send = await broker.dispatch(
+            self._call(
+                "gmail_send_message", effect=EffectClass.WRITE,
+                open_world=True, reversible=False, run_id="r",
+            ),
+            AUTHORITY,
+        )
+        assert trash.ok is True, "the recoverable destructive op is permitted"
+        assert send.ok is False, "the irreversible write is not"
+
+    @pytest.mark.asyncio
+    async def test_access_control_can_be_blocked_on_its_own(self) -> None:
+        """Sharing exfiltrates without writing anything to the thing shared,
+        and reads as an ordinary additive write."""
+        broker = TaintBroker(
+            DirectBroker(),
+            policy=TaintPolicy(
+                block_writes=False, block_destructive=False,
+                block_access_control=True,
+            ),
+        )
+        await self._taint(broker, "r")
+
+        write = await broker.dispatch(
+            self._call("drive_upload_file", effect=EffectClass.WRITE, run_id="r"),
+            AUTHORITY,
+        )
+        share = await broker.dispatch(
+            self._call(
+                "drive_share_file", effect=EffectClass.WRITE,
+                access_control=True, run_id="r",
+            ),
+            AUTHORITY,
+        )
+        assert write.ok is True
+        assert share.ok is False
+        assert "access-control" in (share.error or "")
+
+    @pytest.mark.asyncio
+    async def test_both_dials_are_off_by_default(self) -> None:
+        """Populating `reversible` across a deployment's own toolsets is work
+        nobody has done yet, and turning this on before that reads every
+        operation as irreversible."""
+        policy = TaintPolicy()
+        assert policy.block_irreversible is False
+        assert policy.block_access_control is False
+
+    @pytest.mark.asyncio
+    async def test_a_dial_can_only_add_refusals(self) -> None:
+        """Checked as well as the class, never instead of it — so enabling one
+        cannot make a previously-refused call succeed."""
+        strict = TaintBroker(
+            DirectBroker(),
+            policy=TaintPolicy(block_writes=True, block_irreversible=True),
+        )
+        await self._taint(strict, "r")
+        result = await strict.dispatch(
+            self._call(
+                "jira_update_issue", effect=EffectClass.WRITE,
+                reversible=True, run_id="r",
+            ),
+            AUTHORITY,
+        )
+        assert result.ok is False, "block_writes still applies"
+
+    @pytest.mark.asyncio
+    async def test_an_untainted_run_is_untouched(self) -> None:
+        """These are taint dials. A run that has read nothing external may
+        still send email — that is what `ctx.wait_for_approval` is for."""
+        broker = TaintBroker(DirectBroker(), policy=TaintPolicy(block_irreversible=True))
+        result = await broker.dispatch(
+            self._call(
+                "gmail_send_message", effect=EffectClass.WRITE,
+                open_world=True, reversible=False, run_id="clean",
+            ),
+            AUTHORITY,
+        )
+        assert result.ok is True
+
+    @pytest.mark.asyncio
+    async def test_a_dial_never_refuses_the_read_itself(self) -> None:
+        """Every read is "irreversible" under the literal definition — nothing
+        un-reads. Applying the dial to reads would refuse the very call that
+        taints, stopping the run at step one."""
+        broker = TaintBroker(
+            DirectBroker(),
+            policy=TaintPolicy(
+                block_writes=False,
+                block_destructive=False,
+                block_irreversible=True,
+                block_access_control=True,
+            ),
+        )
+        await self._taint(broker, "r")
+        second_read = await broker.dispatch(
+            self._call(
+                "exa_search", effect=EffectClass.READ,
+                open_world=True, reversible=False, access_control=True, run_id="r",
+            ),
+            AUTHORITY,
+        )
+        assert second_read.ok is True
+
+
+class TestAgentToolCallsCarryTheFacets:
+    """A tool call inside an agent loop reaches the same broker a `ctx.step`
+    does — and an agent deciding to send an email is the case the narrow dials
+    exist for. Until the facets travelled with it, the tool dispatch carried
+    only `effect`, so `block_irreversible` saw every agent tool call as
+    irreversible and refused all of them rather than the right ones."""
+
+    def test_a_resolved_tool_carries_every_facet(self) -> None:
+        from loom.agents.tool_registry import Toolset
+        from loom.agents.tools import Tool
+        from loom.toolsets.google.gmail.manifest import GMAIL_MANIFEST
+
+        toolset = Toolset(
+            GMAIL_MANIFEST,
+            lambda op_id: Tool(fn=lambda: None, name=op_id, metadata={}),
+        )
+        send = toolset.resolve("messages.send").metadata
+        trash = toolset.resolve("messages.trash").metadata
+
+        assert send["effect"] is EffectClass.WRITE
+        assert send["reversible"] is False, "nothing unsends an email"
+        assert trash["effect"] is EffectClass.DESTRUCTIVE
+        assert trash["reversible"] is True, "untrash restores it for 30 days"
+        assert send["open_world"] is True
+
+    @pytest.mark.asyncio
+    async def test_the_dial_reaches_an_agents_tool_call(self) -> None:
+        broker = TaintBroker(
+            DirectBroker(),
+            policy=TaintPolicy(
+                block_writes=False, block_destructive=False, block_irreversible=True
+            ),
+        )
+
+        async def perform() -> str:
+            return "x"
+
+        await broker.dispatch(
+            EffectCall(
+                kind="tool", target="exa.search", effect=EffectClass.READ,
+                open_world=True, run_id="r", perform=perform,
+            ),
+            AUTHORITY,
+        )
+        update = await broker.dispatch(
+            EffectCall(
+                kind="tool", target="jira.update", effect=EffectClass.WRITE,
+                open_world=True, reversible=True, run_id="r", perform=perform,
+            ),
+            AUTHORITY,
+        )
+        send = await broker.dispatch(
+            EffectCall(
+                kind="tool", target="gmail.send", effect=EffectClass.WRITE,
+                open_world=True, reversible=False, run_id="r", perform=perform,
+            ),
+            AUTHORITY,
+        )
+        assert update.ok is True, "the agent may still update a record"
+        assert send.ok is False and send.needs == "approval"

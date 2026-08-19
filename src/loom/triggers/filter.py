@@ -158,7 +158,7 @@ def _eval_single(actual: Any, op: str, val: Any, path: str = "") -> bool:
         case "$regex":
             return bool(re.search(val, str(actual))) if actual is not None else False
         case "$exists":
-            return (actual is not None) == val
+            return bool((actual is not None) == val)
         case _:
             near = difflib.get_close_matches(op, sorted(OPERATORS), n=1, cutoff=0.6)
             hint = f" Did you mean {near[0]!r}?" if near else ""

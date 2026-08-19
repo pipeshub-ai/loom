@@ -56,6 +56,13 @@ OUTLOOK_MAIL_MANIFEST = ToolsetManifest(
     },
     tools_module="loom.toolsets.microsoft.outlook.mail.tools",
     egress_hosts=["graph.microsoft.com", "login.microsoftonline.com"],
+    rate_limits={
+        "model": (
+            "dynamic per-workload throttling; honour the Retry-After header "
+            "on a 429 rather than assuming a fixed rate"
+        ),
+        "source": "learn.microsoft.com/en-us/graph/throttling",
+    },
     groups={
         "messages": [
             OperationSpec(
@@ -68,6 +75,7 @@ OUTLOOK_MAIL_MANIFEST = ToolsetManifest(
                     "ordering contract."
                 ),
                 effect=EffectClass.READ,
+                scopes=["Mail.Read"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(OutlookMessage),
@@ -81,6 +89,7 @@ OUTLOOK_MAIL_MANIFEST = ToolsetManifest(
                     "Ranked by relevance, so there is no sort argument."
                 ),
                 effect=EffectClass.READ,
+                scopes=["Mail.Read"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(OutlookMessage),
@@ -90,6 +99,7 @@ OUTLOOK_MAIL_MANIFEST = ToolsetManifest(
                 function="outlook_get_message",
                 summary="Fetch one message including its body.",
                 effect=EffectClass.READ,
+                scopes=["Mail.Read"],
                 idempotent=True,
                 output_schema=OutlookMessage.model_json_schema(),
             ),
@@ -102,6 +112,7 @@ OUTLOOK_MAIL_MANIFEST = ToolsetManifest(
                     "retried: a retry mails everyone twice."
                 ),
                 effect=EffectClass.WRITE,
+                scopes=["Mail.Send"],
                 output_schema={"type": "boolean"},
             ),
             OperationSpec(
@@ -110,6 +121,7 @@ OUTLOOK_MAIL_MANIFEST = ToolsetManifest(
                 summary="Reply, keeping the conversation together.",
                 description="Not retried: a retry sends the reply twice.",
                 effect=EffectClass.WRITE,
+                scopes=["Mail.Send"],
                 output_schema={"type": "boolean"},
             ),
             OperationSpec(
@@ -118,6 +130,7 @@ OUTLOOK_MAIL_MANIFEST = ToolsetManifest(
                 summary="Forward a message.",
                 description="Not retried.",
                 effect=EffectClass.WRITE,
+                scopes=["Mail.Send"],
                 output_schema={"type": "boolean"},
             ),
             OperationSpec(
@@ -129,6 +142,7 @@ OUTLOOK_MAIL_MANIFEST = ToolsetManifest(
                     "ctx.wait_for_approval() parks, a person sends."
                 ),
                 effect=EffectClass.WRITE,
+                scopes=["Mail.ReadWrite"],
                 output_schema=OutlookMessage.model_json_schema(),
             ),
             OperationSpec(
@@ -141,6 +155,7 @@ OUTLOOK_MAIL_MANIFEST = ToolsetManifest(
                     "Accepted (202) is not delivered. Not retried."
                 ),
                 effect=EffectClass.WRITE,
+                scopes=["Mail.Send"],
                 output_schema={"type": "boolean"},
             ),
             OperationSpec(
@@ -148,6 +163,7 @@ OUTLOOK_MAIL_MANIFEST = ToolsetManifest(
                 function="outlook_update_message",
                 summary="Mark read/unread, categorise, or set importance.",
                 effect=EffectClass.WRITE,
+                scopes=["Mail.ReadWrite"],
                 idempotent=True,
                 output_schema=OutlookMessage.model_json_schema(),
             ),
@@ -160,6 +176,7 @@ OUTLOOK_MAIL_MANIFEST = ToolsetManifest(
                     "message, not the id you passed in."
                 ),
                 effect=EffectClass.WRITE,
+                scopes=["Mail.ReadWrite"],
                 idempotent=True,
                 output_schema=OutlookMessage.model_json_schema(),
             ),
@@ -169,6 +186,7 @@ OUTLOOK_MAIL_MANIFEST = ToolsetManifest(
                 summary="Move a message to Deleted Items.",
                 description="Recoverable, not a permanent delete.",
                 effect=EffectClass.DESTRUCTIVE,
+                scopes=["Mail.ReadWrite"],
                 idempotent=True,
                 output_schema={"type": "boolean"},
             ),
@@ -184,6 +202,7 @@ OUTLOOK_MAIL_MANIFEST = ToolsetManifest(
                 ),
                 resolves="folder",
                 effect=EffectClass.READ,
+                scopes=["Mail.Read"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(MailFolder),
@@ -196,6 +215,7 @@ OUTLOOK_MAIL_MANIFEST = ToolsetManifest(
                 summary="List a message's attachments, metadata only.",
                 description="Bytes are not inlined; fetch one at a time.",
                 effect=EffectClass.READ,
+                scopes=["Mail.Read"],
                 idempotent=True,
                 output_schema={"type": "array", "items": {"type": "object"}},
             ),
@@ -208,6 +228,7 @@ OUTLOOK_MAIL_MANIFEST = ToolsetManifest(
                     "no bytes."
                 ),
                 effect=EffectClass.READ,
+                scopes=["Mail.Read"],
                 idempotent=True,
                 output_schema={"type": "object", "title": "Attachment"},
             ),
@@ -219,6 +240,7 @@ OUTLOOK_MAIL_MANIFEST = ToolsetManifest(
                 summary="The person these credentials authenticate as.",
                 resolves="user",
                 effect=EffectClass.READ,
+                scopes=["User.Read"],
                 idempotent=True,
                 output_schema=MicrosoftUser.model_json_schema(),
             ),

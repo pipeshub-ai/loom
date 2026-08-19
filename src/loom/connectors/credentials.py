@@ -806,7 +806,7 @@ class LayeredCredentialStore:
             peek = getattr(layer, "peek", None)
             if peek is None:
                 continue
-            found = await peek(name)
+            found: StoredCredential | None = await peek(name)
             if found is not None:
                 return found
         return None

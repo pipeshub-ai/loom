@@ -60,6 +60,14 @@ TEAMS_MANIFEST = ToolsetManifest(
     },
     tools_module="loom.toolsets.microsoft.teams.tools",
     egress_hosts=["graph.microsoft.com", "login.microsoftonline.com"],
+    rate_limits={
+        "model": "dynamic per-workload throttling; honour Retry-After on a 429",
+        "polling": (
+            "Graph states that polling a resource more than once a day "
+            "violates the Microsoft APIs Terms of Use"
+        ),
+        "source": "learn.microsoft.com/en-us/graph/throttling",
+    },
     groups={
         "teams": [
             OperationSpec(
@@ -72,6 +80,7 @@ TEAMS_MANIFEST = ToolsetManifest(
                 ),
                 resolves="team",
                 effect=EffectClass.READ,
+                scopes=["Team.ReadBasic.All"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(Team),
@@ -82,6 +91,7 @@ TEAMS_MANIFEST = ToolsetManifest(
                 summary="Fetch one team by id.",
                 description="is_archived matters: an archived team is read-only.",
                 effect=EffectClass.READ,
+                scopes=["Team.ReadBasic.All"],
                 idempotent=True,
                 output_schema=Team.model_json_schema(),
             ),
@@ -95,6 +105,7 @@ TEAMS_MANIFEST = ToolsetManifest(
                 ),
                 resolves="channel",
                 effect=EffectClass.READ,
+                scopes=["Team.ReadBasic.All"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(Channel),
@@ -104,6 +115,7 @@ TEAMS_MANIFEST = ToolsetManifest(
                 function="teams_get_channel",
                 summary="Fetch one channel by id.",
                 effect=EffectClass.READ,
+                scopes=["Team.ReadBasic.All"],
                 idempotent=True,
                 output_schema=Channel.model_json_schema(),
             ),
@@ -117,6 +129,7 @@ TEAMS_MANIFEST = ToolsetManifest(
                 ),
                 resolves="user",
                 effect=EffectClass.READ,
+                scopes=["Team.ReadBasic.All"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(TeamsMember),
@@ -126,6 +139,7 @@ TEAMS_MANIFEST = ToolsetManifest(
                 function="teams_whoami",
                 summary="The person these credentials authenticate as.",
                 effect=EffectClass.READ,
+                scopes=["User.Read"],
                 idempotent=True,
                 output_schema=MicrosoftUser.model_json_schema(),
             ),
@@ -143,6 +157,7 @@ TEAMS_MANIFEST = ToolsetManifest(
                     "neither and ignores them."
                 ),
                 effect=EffectClass.READ,
+                scopes=["ChannelMessage.Read.All"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(ChatMessage),
@@ -152,6 +167,7 @@ TEAMS_MANIFEST = ToolsetManifest(
                 function="teams_get_channel_message",
                 summary="Fetch one channel message.",
                 effect=EffectClass.READ,
+                scopes=["ChannelMessage.Read.All"],
                 idempotent=True,
                 output_schema=ChatMessage.model_json_schema(),
             ),
@@ -165,6 +181,7 @@ TEAMS_MANIFEST = ToolsetManifest(
                     "thread with nothing saying so."
                 ),
                 effect=EffectClass.READ,
+                scopes=["ChannelMessage.Read.All"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(ChatMessage),
@@ -178,6 +195,7 @@ TEAMS_MANIFEST = ToolsetManifest(
                     "retried: a retry posts twice, visibly."
                 ),
                 effect=EffectClass.WRITE,
+                scopes=["ChannelMessage.Send"],
                 output_schema=ChatMessage.model_json_schema(),
             ),
             OperationSpec(
@@ -189,6 +207,7 @@ TEAMS_MANIFEST = ToolsetManifest(
                     "instead starts a second one that reads as a duplicate."
                 ),
                 effect=EffectClass.WRITE,
+                scopes=["ChannelMessage.Send"],
                 output_schema=ChatMessage.model_json_schema(),
             ),
         ],
@@ -204,6 +223,7 @@ TEAMS_MANIFEST = ToolsetManifest(
                 ),
                 resolves="chat",
                 effect=EffectClass.READ,
+                scopes=["Chat.Read"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(TeamsChat),
@@ -213,6 +233,7 @@ TEAMS_MANIFEST = ToolsetManifest(
                 function="teams_get_chat",
                 summary="Fetch one chat by id.",
                 effect=EffectClass.READ,
+                scopes=["Chat.Read"],
                 idempotent=True,
                 output_schema=TeamsChat.model_json_schema(),
             ),
@@ -221,6 +242,7 @@ TEAMS_MANIFEST = ToolsetManifest(
                 function="teams_list_chat_messages",
                 summary="List the messages in a chat.",
                 effect=EffectClass.READ,
+                scopes=["Chat.Read"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(ChatMessage),
@@ -235,6 +257,7 @@ TEAMS_MANIFEST = ToolsetManifest(
                 ),
                 resolves="user",
                 effect=EffectClass.READ,
+                scopes=["Chat.Read"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(TeamsMember),
@@ -245,6 +268,7 @@ TEAMS_MANIFEST = ToolsetManifest(
                 summary="Send a message to an existing chat.",
                 description="Needs DELEGATED credentials. Not retried.",
                 effect=EffectClass.WRITE,
+                scopes=["ChatMessage.Send"],
                 output_schema=ChatMessage.model_json_schema(),
             ),
         ],

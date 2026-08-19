@@ -41,7 +41,7 @@ def _args(tmp_path: Path, client: str, **overrides):
 
 
 def _is_loom_command(command: str) -> bool:
-    return Path(command).name in {"loom", "loomflow"}
+    return Path(command).name in {"loom", "loomsdk"}
 
 
 class TestBuildEntry:

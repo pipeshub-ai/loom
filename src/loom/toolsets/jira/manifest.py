@@ -9,6 +9,8 @@ from __future__ import annotations
 from loom.toolsets.jira.models import (
     Comment,
     CreatedIssue,
+    FieldLookup,
+    JiraField,
     JiraIssue,
     JiraProject,
     JiraProjectDetail,
@@ -44,7 +46,23 @@ JIRA_MANIFEST = ToolsetManifest(
         "fields": ["JIRA_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"],
     },
     tools_module="loom.toolsets.jira.tools",
+    opaque_ids={
+        # The number differs per site and nobody knows it from memory.
+        r"customfield_\d+": "field",
+    },
     egress_hosts=["*.atlassian.net"],
+    rate_limits={
+        "model": (
+            "points-based: each call consumes points scaled to the complexity "
+            "and volume of data, against a per-hour quota — so no fixed "
+            "requests-per-second figure applies"
+        ),
+        "enforcement": (
+            "tiered quotas for Forge, Connect and OAuth 2.0 (3LO) apps began "
+            "2026-03-02"
+        ),
+        "source": "developer.atlassian.com/cloud/jira/platform/rate-limiting/",
+    },
     groups={
         "issues": [
             OperationSpec(
@@ -59,6 +77,14 @@ JIRA_MANIFEST = ToolsetManifest(
                         "max_results": {
                             "type": "integer",
                             "default": 20,
+                        },
+                        "custom_fields": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "REST ids to fetch as well, e.g. "
+                                "customfield_10016. Resolve with fields.resolve."
+                            ),
                         },
                     },
                     "required": ["jql"],
@@ -76,6 +102,10 @@ JIRA_MANIFEST = ToolsetManifest(
                     "type": "object",
                     "properties": {
                         "issue_key": {"type": "string"},
+                        "custom_fields": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
                     },
                     "required": ["issue_key"],
                 },
@@ -105,6 +135,14 @@ JIRA_MANIFEST = ToolsetManifest(
                             "type": "array",
                             "items": {"type": "string"},
                         },
+                        "assignee_account_id": {"type": "string"},
+                        "custom_fields": {
+                            "type": "object",
+                            "description": (
+                                "Keyed by REST id, in Jira's own value shape. "
+                                "Resolve an id with fields.resolve."
+                            ),
+                        },
                     },
                     "required": ["project_key", "summary"],
                 },
@@ -113,8 +151,17 @@ JIRA_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="issues.update",
+                idempotent=True,
                 function="jira_update_issue",
                 summary="Update fields on an existing issue.",
+                description=(
+                    "`fields` is the Jira REST payload: named entities are "
+                    "objects ({'priority': {'name': 'High'}}), description is "
+                    "Atlassian Document Format rather than a string, and a "
+                    "custom field is keyed by REST id "
+                    "({'customfield_10016': 5}). Resolve a custom field's id "
+                    "with fields.resolve; the number differs per instance."
+                ),
                 effect=EffectClass.WRITE,
                 input_schema={
                     "type": "object",
@@ -163,6 +210,7 @@ JIRA_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="issues.transition",
+                idempotent=True,
                 function="jira_transition_issue",
                 summary="Move an issue to a new status.",
                 effect=EffectClass.WRITE,
@@ -270,6 +318,56 @@ JIRA_MANIFEST = ToolsetManifest(
                     "required": ["project_key"],
                 },
                 output_schema=ProjectMetadata.model_json_schema(),
+                idempotent=True,
+            ),
+        ],
+        "fields": [
+            OperationSpec(
+                id="fields.list",
+                function="jira_list_fields",
+                summary="List the custom fields this instance defines.",
+                description=(
+                    "Custom fields are per-instance configuration: 'Story "
+                    "Points' is customfield_10016 on one site and "
+                    "customfield_10024 on the next. Each row carries `id` "
+                    "(what a REST payload uses) and `clause_names` (what JQL "
+                    "accepts) — they are not interchangeable."
+                ),
+                effect=EffectClass.READ,
+                pagination=True,
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "max_results": {"type": "integer", "default": 200},
+                    },
+                },
+                output_schema={
+                    "type": "array",
+                    "items": JiraField.model_json_schema(),
+                },
+                idempotent=True,
+            ),
+            OperationSpec(
+                id="fields.resolve",
+                function="jira_resolve_field",
+                resolves="field",
+                summary="Resolve a custom field's display name to its REST id.",
+                description=(
+                    "Call before putting a custom field in JQL, a "
+                    "custom_fields list, or an update payload. Resolve once "
+                    "while authoring and write the id into the code with the "
+                    "name in a comment. Check `exact` before writing: 'Story "
+                    "Points' and 'Story point estimate' are different fields "
+                    "on instances that have both."
+                ),
+                effect=EffectClass.READ,
+                input_schema={
+                    "type": "object",
+                    "properties": {"field_name": {"type": "string"}},
+                    "required": ["field_name"],
+                },
+                output_schema=FieldLookup.model_json_schema(),
                 idempotent=True,
             ),
         ],

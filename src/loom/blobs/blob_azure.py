@@ -124,7 +124,8 @@ class AzureBlobBackend:
         blob = client.get_blob_client(self._key_for(ref))
         try:
             stream = await blob.download_blob()
-            return await stream.readall()
+            payload: bytes = await stream.readall()
+            return payload
         except ResourceNotFoundError as exc:
             raise BlobNotFoundError(ref) from exc
 

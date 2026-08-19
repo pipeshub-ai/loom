@@ -42,8 +42,15 @@ from loom.core.exceptions import (
     TimeoutExceeded,
     WorkflowCancelled,
 )
+from loom.core.ids import callable_name
 from loom.core.ids import fingerprint as make_fingerprint
 from loom.core.models import ErrorInfo, Usage
+from loom.core.redaction import (
+    DEFAULT_REDACT_KEYS,
+    redact,
+    redact_call_input,
+    strip_secret_values,
+)
 from loom.core.retry import Failure, OnError, Retry
 from loom.core.serde import decode, drift_of, encode
 from loom.core.types import DepsT, Duration, to_seconds
@@ -60,6 +67,7 @@ from loom.runtime.journal import (
 from loom.security.authority import Authority
 from loom.steps.context import StepContext
 from loom.steps.definition import StepDefinition
+from loom.toolsets.effects import resolve_effect
 from loom.toolsets.manifest import EffectClass
 
 if TYPE_CHECKING:
@@ -213,7 +221,7 @@ class DurableCall(Generic[T]):
             kind=self.kind,
             name=self.name,
             fingerprint=self._fingerprint,
-            input=_encode_debug(self._input),
+            input=_encode_debug(self._input, ctx._runtime.redact_keys),
             status=EntryStatus.PENDING,
             started_at=self._clock.now(),
             metadata={k: v for k, v in self._metadata.items() if v is not None},
@@ -376,7 +384,14 @@ class DurableCall(Generic[T]):
             kind=_EFFECT_KINDS.get(self.kind, self.kind.value),
             target=self._metadata.get("effect_target") or self.name,
             arguments=_effect_arguments(self._input),
-            effect=self._metadata.get("effect_class") or EffectClass.WRITE,
+            effect=resolve_effect(
+                self._metadata.get("effect_class") or EffectClass.WRITE,
+                self._metadata.get("effect_by") or {},
+                _effect_arguments(self._input),
+            ),
+            open_world=self._metadata.get("open_world", True),
+            reversible=self._metadata.get("reversible", False),
+            access_control=self._metadata.get("access_control", False),
             run_id=self._ctx.run_id,
             path=self.path,
             perform=perform,
@@ -536,15 +551,23 @@ def _encode_durable(value: Any, *, what: str) -> Any:
         raise SerializationError(f"{what}: {exc}") from exc
 
 
-def _encode_debug(value: Any) -> Any:
+def _encode_debug(value: Any, keys: Iterable[str] = DEFAULT_REDACT_KEYS) -> Any:
     """Encode a value recorded only for observability.
 
     Step inputs and signal payloads are written for humans reading a trace; they
     are never replayed into the workflow. Degrading here loses a debugging aid,
     not correctness, so a stubborn value is marked rather than fatal.
+
+    Three passes, in this order for a reason. Secret-typed values go first,
+    because :class:`~loom.core.secret.Secret` deliberately refuses to encode —
+    leaving one in place made the *whole* input degrade to
+    ``{"__unserializable__": "dict"}``, which is safe and tells a reader nothing
+    about the arguments beside it. Encoding turns models into mappings. Only
+    then does the name denylist run, so a nested model's ``api_key`` field is
+    reached by the same rule as a plain dict key.
     """
     try:
-        return encode(value)
+        return redact(encode(strip_secret_values(value)), keys)
     except Exception:
         return {"__unserializable__": type(value).__name__}
 
@@ -587,7 +610,8 @@ class WorkflowState:
         await self._store.delete(self._workflow, key)
 
     async def keys(self) -> list[str]:
-        return await self._store.keys(self._workflow)
+        found: list[str] = await self._store.keys(self._workflow)
+        return found
 
     @property
     def _store(self) -> Any:
@@ -629,9 +653,16 @@ def _as_declared(produced: Any, output_type: type[BaseModel], node_id: str) -> A
     )
 
 
+#: Where a caller's scopes are recorded, beside
+#: ``loom.identity.facade.PRINCIPAL_KEY``. On the *record* so the
+#: narrowing survives a park: a run resumed by a timer has no caller.
+SCOPES_KEY = "loom.scopes"
+
+
 def _authority_for(
     runtime: Runtime,
     definition: WorkflowDefinition[Any, Any, Any],
+    record: ExecutionRecord | None = None,
 ) -> Authority:
     """What a run of *definition* on *runtime* is permitted to do.
 
@@ -639,11 +670,29 @@ def _authority_for(
     Runtime's. They are consulted only when the Runtime declared none, where
     they act as a self-limitation. A workflow that could widen its own
     permissions by asking for more would make the declaration worthless.
+
+    The *caller's* scopes narrow it further. ``scopes_to_grant`` existed for
+    exactly this and was called from nowhere — so a token scoped to
+    ``jira:read`` started runs with the workflow's full declaration, and the
+    scope on the token described nothing that happened. Read from the record
+    rather than passed in, because a run resumed from a timer or an event has
+    no caller present to ask: the authority a run executes under has to survive
+    parking, and the record is the only thing that does.
     """
     base = runtime.authority or Authority()
     if base.grant.is_empty and definition.grants is not None:
-        return base.narrowed(grant=definition.grants)
-    return base
+        base = base.narrowed(grant=definition.grants)
+
+    scopes = (record.metadata or {}).get(SCOPES_KEY) if record is not None else None
+    if not scopes:
+        return base
+
+    from loom.identity.scopes import scopes_to_grant
+
+    # Narrows, never widens — the property `tests/test_identity.py` checks with
+    # Hypothesis. Applied after the self-limitation above so a token can only
+    # reduce what the workflow already asked for.
+    return base.narrowed(grant=scopes_to_grant(frozenset(scopes), base.grant))
 
 
 class Context(Generic[DepsT]):
@@ -687,7 +736,7 @@ class Context(Generic[DepsT]):
 
             self.env = RunEnvironment()
         """Per-run environment overrides. See :class:`RunEnvironment`."""
-        self._authority = _authority_for(runtime, definition)
+        self._authority = _authority_for(runtime, definition, record)
         self._grant_override: Any = None
         """Grant narrowed by an enclosing call, inherited by nested ones.
 
@@ -768,10 +817,10 @@ class Context(Generic[DepsT]):
         Accepts either a ``@step``-decorated definition or a bare async function, so a
         one-off side effect does not need ceremony.
         """
-        definition = (
+        definition: StepDefinition[Any, Any] = (
             target
             if isinstance(target, StepDefinition)
-            else StepDefinition(fn=target, name=name or getattr(target, "__name__", "anonymous"))
+            else StepDefinition(fn=target, name=name or callable_name(target, "anonymous"))
         )
         effective_retry = (
             definition.retry
@@ -809,7 +858,13 @@ class Context(Generic[DepsT]):
             name=step_name,
             perform=perform,
             fingerprint=make_fingerprint(step_name, args, kwargs),
-            input={"args": args, "kwargs": kwargs},
+            # Bound to the step's own signature, so a credential passed
+            # positionally — which is how every one of them is actually passed —
+            # is matched by the parameter it lands on rather than slipping past
+            # a denylist that can only see keys.
+            input=redact_call_input(
+                definition.fn, args, kwargs, self._runtime.redact_keys
+            ),
             output_type=definition.output_type,
             retry=effective_retry,
             timeout=definition.timeout if timeout is None else timeout,
@@ -835,11 +890,28 @@ class Context(Generic[DepsT]):
         would guess at the very thing the manifest exists to state.
         """
         registry = getattr(self._runtime, "toolsets", None)
-        resolve = getattr(registry, "effect_of", None)
+        resolve = getattr(registry, "profile_of", None)
         if resolve is None:
+            # A registry predating profiles still answers the narrow question.
+            legacy = getattr(registry, "effect_of", None)
+            if legacy is None:
+                return {}
+            declared = legacy(step_name)
+            return {"effect_class": declared} if declared is not None else {}
+        profile = resolve(step_name)
+        if profile is None:
             return {}
-        declared = resolve(step_name)
-        return {"effect_class": declared} if declared is not None else {}
+        # Every facet, not just the class: the grant rule asks how much damage,
+        # the taint rule asks whether it came from outside and whether anything
+        # undoes it. One lookup, because a facet added later should not mean
+        # editing this call site again.
+        return {
+            "effect_class": profile.effect,
+            "effect_by": profile.effect_by,
+            "open_world": profile.open_world,
+            "reversible": profile.reversible,
+            "access_control": profile.access_control,
+        }
 
     def call(
         self,
@@ -1326,7 +1398,7 @@ class Context(Generic[DepsT]):
     @overload
     def agent(
         self,
-        agent_or_prompt: Agent[Any, T],
+        agent_or_prompt: Agent[T],
         input: Any = ...,
         *,
         name: str | None = ...,
@@ -1339,7 +1411,7 @@ class Context(Generic[DepsT]):
 
     def agent(
         self,
-        agent_or_prompt: Agent[Any, T] | str,
+        agent_or_prompt: Agent[T] | str,
         input: Any = None,
         *,
         name: str | None = None,
@@ -1384,7 +1456,21 @@ class Context(Generic[DepsT]):
             authority its caller does not hold, and a nested ``ctx.agent()``
             inherits the narrowed set rather than the workflow's declaration.
         """
-        if isinstance(agent_or_prompt, str) and input is None:
+        if isinstance(agent_or_prompt, str):
+            if input is not None:
+                # Previously this fell through to the Agent path below, which
+                # immediately read `.name` off the string: `ctx.agent("...",
+                # input=x)` died with `AttributeError: 'str' object has no
+                # attribute 'name'` three frames down. The backend path is
+                # prompt-only by construction — there is nowhere to put a
+                # second argument — so this is a caller mistake, and it should
+                # say so rather than crash somewhere else.
+                raise ConfigurationError(
+                    "ctx.agent(<prompt>) takes no input=: a prompt string is the "
+                    "whole request, and the runtime's AgentBackend has nowhere to "
+                    "put a second argument. Put the data in the prompt, or pass an "
+                    "Agent object, which does take input."
+                )
             return self._agent_from_backend(
                 agent_or_prompt,
                 name=name,
@@ -1468,30 +1554,43 @@ class Context(Generic[DepsT]):
         agent_id: str = "",
         grants: Any = None,
     ) -> DurableCall[AgentResult[Any]]:
-        """Route a prompt-only ctx.agent() call through the runtime's backend."""
-        backend = self._runtime.agent_backend
-        if backend is None:
-            msg = (
-                "ctx.agent('prompt') requires an agent_backend on the Runtime. "
-                "Pass agent_backend=... to Runtime() or use ctx.agent(Agent(...), input) instead."
-            )
-            raise ConfigurationError(msg)
+        """Route a prompt-only ctx.agent() call through the runtime's backend.
 
+        The backend is checked inside ``perform``, not here. Both are the same
+        error at the same moment for a call that actually executes — but a call
+        whose result is already journaled never reaches ``perform``, because
+        ``DurableCall._resolve`` serves the recorded entry first. Raising at
+        construction made a *replay* demand the ability to recompute an answer
+        the journal already holds, so a finished run could not be replayed or
+        resumed in a worker with no model configured — which is what a CI
+        replay, and any process that only re-drives parked runs, is.
+        """
         identity = agent_id or "backend"
         label = name or f"agent:{identity}"
-
-        if session_id is not None and not getattr(backend, "supports_history", False):
-            raise ConfigurationError(
-                f"{type(backend).__name__} does not support conversation history, so "
-                f"session_id={session_id!r} would be ignored and every call would start "
-                "from a blank conversation. Use BuiltInBackend, or drop session_id."
-            )
 
         # Sessions are keyed by agent as well as conversation, so two agents
         # sharing a session id keep separate memories of it.
         memory_key = f"{identity}:{session_id}" if session_id else None
 
+        def resolved_backend() -> Any:
+            backend = self._runtime.agent_backend
+            if backend is None:
+                raise ConfigurationError(
+                    "ctx.agent('prompt') requires an agent_backend on the Runtime. "
+                    "Pass agent_backend=... to Runtime() or use "
+                    "ctx.agent(Agent(...), input) instead."
+                )
+            if session_id is not None and not getattr(backend, "supports_history", False):
+                raise ConfigurationError(
+                    f"{type(backend).__name__} does not support conversation history, so "
+                    f"session_id={session_id!r} would be ignored and every call would "
+                    "start from a blank conversation. Use BuiltInBackend, or drop "
+                    "session_id."
+                )
+            return backend
+
         async def perform(attempt: int, step_ctx: StepContext) -> Any:
+            backend = resolved_backend()
             # Layer 3: resolve tools lazily from the registry, narrowed to what
             # this workflow declared it may use.
             tools = self._runtime.toolsets.resolve_tools(
@@ -1545,17 +1644,25 @@ class Context(Generic[DepsT]):
         equivalent hand-written code would, and a node that parks the run raises
         ``Suspend`` the same way ``ctx.wait_for_approval`` does.
 
-        Three things happen **before** the call is journaled, deliberately: the
-        node is resolved, its runtime requirements are checked, and *payload* is
-        validated against the node's declared ``Input``. A missing capability or
-        a malformed payload is the caller's mistake, and surfacing it as a failed
-        step — or worse, as a run parked with nobody listening — puts the error
-        arbitrarily far from its cause.
+        Two things happen **before** the call is journaled, deliberately: the
+        node is resolved, and *payload* is validated against its declared
+        ``Input``. A malformed payload is the caller's mistake, and surfacing it
+        as a failed step puts the error arbitrarily far from its cause.
+
+        Runtime **requirements** are checked one step later, inside the
+        journaled call. Still before the body runs and before a suspending node
+        parks — so a run never parks with nobody listening, which is the worst
+        outcome available here because it is indistinguishable from patience.
+        But a call whose answer is already recorded never reaches that check,
+        so replaying a finished run no longer demands the capability that
+        produced it: a completed ``human.review_edit`` replays in a process with
+        no human channel, exactly as a completed ``ctx.agent`` replays in one
+        with no model.
         """
         from loom.nodes.base import NodeContext
 
         registry = self._runtime.nodes
-        node = registry.resolve(node_id, runtime=self._runtime)
+        node = registry.resolve(node_id)
         definition = type(node)
         spec = definition.spec
 
@@ -1575,6 +1682,9 @@ class Context(Generic[DepsT]):
         label = name or f"node:{node_id}"
 
         async def perform(attempt: int, step_ctx: StepContext) -> Any:
+            # Before the body, and before a suspending node parks — but only
+            # for a call that is actually going to run. See the docstring.
+            registry.check_requirements(node, self._runtime)
             scoped = self.nested(step_ctx.path)
             node_ctx = NodeContext(scoped)
             checked = validated
@@ -1614,6 +1724,8 @@ class Context(Generic[DepsT]):
                 "node_id": node_id,
                 "node_version": spec.version,
                 "effect_class": spec.effect,
+                "effect_by": spec.effect_by,
+                "open_world": spec.open_world,
                 "effect_target": node_id,
                 # Journaled so a node upgraded between a run and its replay is
                 # caught rather than decoding an old payload into a new model.
@@ -1841,9 +1953,10 @@ class Context(Generic[DepsT]):
         dead by the time a replay ran. Generating a fresh one is side-effect
         free and is the correct behaviour on re-entry.
         """
-        return await self._runtime.require_artifacts().url(
+        url: str = await self._runtime.require_artifacts().url(
             name, version, expires_in=expires_in
         )
+        return url
 
     # -- saga / compensation ------------------------------------------------------------
 
@@ -1878,7 +1991,9 @@ class Context(Generic[DepsT]):
                 kind=EntryKind.STEP,
                 name=f"compensate:{label}",
                 status=EntryStatus.COMPLETED,
-                output=_encode_debug({"fn": label, "args": args}),
+                output=_encode_debug(
+                    {"fn": label, "args": args}, self._runtime.redact_keys
+                ),
                 started_at=self._clock.now(),
                 finished_at=self._clock.now(),
                 attempts=1,

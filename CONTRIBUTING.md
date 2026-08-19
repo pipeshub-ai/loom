@@ -1,4 +1,4 @@
-# Contributing to loomflow
+# Contributing to loomsdk
 
 LOOM is a work in progress, not a finished product — the core (durable
 execution, the coding agent, toolsets) is shipped and tested; larger pieces of

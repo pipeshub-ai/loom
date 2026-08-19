@@ -1,4 +1,4 @@
-"""Public surface of the loomflow SDK."""
+"""Public surface of the loomsdk SDK."""
 
 from __future__ import annotations
 

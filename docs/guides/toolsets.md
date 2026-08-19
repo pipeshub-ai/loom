@@ -300,9 +300,90 @@ OperationSpec(id="issues.delete", summary="Delete.",
 ```
 
 This is what lets `resolve_tools(effects={EffectClass.READ})` hand an agent a
-read-only toolset, and what a `GuardedBroker` weighs per call. `from_steps`
-guesses from the operation name; pass `effects={"scrape": EffectClass.WRITE}`
-where the name lies.
+read-only toolset, and what a `GuardedBroker` weighs per call.
+
+**Declare it on every operation, including the reads.** `effect` defaults to
+`EffectClass.WRITE` — a fail-safe backstop, not a classification. Leaving it
+out does not get you a read-only operation; it gets you one that every write
+control applies to, and `loom certify` fails it (CERT-04, which asks whether
+you declared it rather than what the field holds). Reads have to say they are
+reads.
+
+**`from_steps` guesses from the operation name, and the guess fails toward
+READ.** Scored against the 320 operations LOOM ships, it under-classifies 14%
+— including seven destructive ones, because the verb list knows
+`delete/remove/drop/purge/revoke` and does not know `archive`, `trash`,
+`unshare`, or `end`. Pass `effects={"scrape": EffectClass.WRITE}` wherever the
+name does not carry the answer, and treat the guess as a fallback rather than
+a classification.
+
+Two habits that make the declaration checkable rather than merely asserted:
+
+- **Match the class to the client's HTTP verb.** `GET`→READ,
+  `POST`/`PUT`/`PATCH`→WRITE, `DELETE`→DESTRUCTIVE. Across LOOM's own toolsets
+  the verb agrees with the declaration 97% of the time, and both exceptions are
+  the same case — a search issued as a `POST`. If your class disagrees with your
+  verb and it is not a search, one of the two is wrong.
+- **Let the scope corroborate it.** Where a provider's scope says read-only
+  (`…​.readonly`, `…​.read`), the operation has never been anything but READ.
+  Declaring both means each checks the other.
+
+### Three facets beside the class
+
+`EffectClass` says how much damage. Three booleans say the things it cannot:
+
+```python
+OperationSpec(
+    id="messages.trash",
+    summary="Move a message to the bin.",
+    effect=EffectClass.DESTRUCTIVE,
+    reversible=True,
+    undone_by="messages.untrash",   # checked: CERT-14 resolves the id
+    open_world=True,                # default for a toolset — it is a network call
+    access_control=False,           # True for share / invite / remove_permission
+)
+```
+
+`reversible` is the one that matters most, and it is **not** "is there an
+opposite operation". Deleting an issue you created does not undo the create —
+the key is consumed, the comments are gone. Only a genuine restore counts.
+Ranked by class, trashing a message outranks sending one; ranked by whether
+anything undoes it, it does not, and that inversion is what
+`TaintPolicy(block_irreversible=True)` exists to fix.
+
+`access_control` is for operations that change *who can reach data* rather than
+the data itself. For an agent it is the highest-consequence category available:
+sharing a folder exfiltrates without writing anything to it.
+
+For an operation whose class depends on the call rather than the operation —
+one entry point that both reads and deletes — declare `effect_by`:
+
+```python
+effect_by={"method": {"GET": EffectClass.READ, "DELETE": EffectClass.DESTRUCTIVE}}
+```
+
+### Check it in your own CI
+
+```python
+from pathlib import Path
+
+import loom.toolsets.jira.client as jira_client       # your client module
+from loom.testing.conformance import verify_effect_profile
+from loom.toolsets.jira.manifest import JIRA_MANIFEST  # your manifest
+
+
+def test_effects_are_consistent():
+    source = Path(jira_client.__file__).read_text()
+    verify_effect_profile(JIRA_MANIFEST, client_source=source)
+
+
+test_effects_are_consistent()
+```
+
+It asserts every operation declares a class, that declared `idempotent` matches
+the `@step`'s actual retry policy, that `undone_by` resolves, and — given the
+client source — that no declaration contradicts its own HTTP verb. Omit
+`client_source` and the verb check is *skipped* rather than passed.
 
 ### 4. Say which operation resolves an entity
 
@@ -317,6 +398,26 @@ OperationSpec(id="users.search", summary="Find a person by name.",
 
 The coding agent is then told to resolve before filtering, without knowing
 anything about your service.
+
+If your ids have a shape nobody types from memory, say so as well:
+
+```python
+MY_MANIFEST = ToolsetManifest(
+    ...,
+    opaque_ids={r"\bwid_[A-Za-z0-9]{12}\b": "widget"},   # pattern -> entity kind
+)
+```
+
+The `identifiers` check then flags a generated workflow containing one of those
+ids when the spec never mentioned it *and* no resolver for that kind was
+actually called — the guess that survives every other stage, because a resolved
+id and an invented one look identical in the file.
+
+Declare a pattern only where a false match is implausible. A numeric id is
+indistinguishable from any other number, and Slack's `C[A-Z0-9]{7,}` matches
+`CANCELLED` and `COMPLETED` until you require a digit. An absent pattern costs
+you a check; a loose one costs everybody the check, because a warning that
+fires on ordinary constants gets switched off.
 
 ### 5. Make the manifest importable
 
@@ -576,7 +677,7 @@ coding agent will read it. DuckDuckGo publishes no web-search API — their one
 documented endpoint returns instant answers and no web results — so this
 toolset rides on the third-party [`ddgs`](https://pypi.org/project/ddgs/)
 package, which parses search result pages. Install it with
-`pip install 'loomflow[duckduckgo]'`. Two consequences worth knowing:
+`pip install 'loomsdk[duckduckgo]'`. Two consequences worth knowing:
 
 - **Being blocked raises**, rather than returning an empty list. `ddgs` is
   rate-limited hard, and a search that answers `[]` when it was turned away is

@@ -24,12 +24,19 @@ states is an adapter that cannot be written for a partitioned backend.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 from loom.events.models import EventRecord, RetentionPolicy
 
-__all__ = ["verify_checkpoints", "verify_event_log", "verify_event_source"]
+__all__ = [
+    "verify_checkpoints",
+    "verify_effect_profile",
+    "verify_event_log",
+    "verify_event_source",
+    "verify_probe",
+    "verify_vector_store",
+]
 
 Factory = Callable[[], Any]
 
@@ -401,3 +408,382 @@ class _NullCache:
 
     async def delete(self, key: str) -> None:
         self._data.pop(key, None)
+
+
+def verify_effect_profile(
+    manifest: Any,
+    *,
+    tools_module: Any = None,
+    client_source: str | None = None,
+) -> None:
+    """Assert that *manifest* classifies its own effects consistently.
+
+    The kit a toolset author runs in their own CI. Everything it checks is
+    verified against something else the author already wrote, so none of it is
+    an opinion about their service:
+
+    * every operation **declares** an effect class, rather than inheriting the
+      fail-safe default — which is a backstop, not a classification;
+    * declared ``idempotent`` matches the ``@step``'s actual retry policy,
+      because those are two sources of truth for one fact and they drift;
+    * ``undone_by`` names an operation that exists and agrees with
+      ``reversible``, since an id that resolves to nothing produces an
+      operation that reads as recoverable and is not;
+    * where a client's HTTP verb can be recovered, no declaration contradicts
+      it — a ``DELETE`` declared read is how an operation reads as harmless to
+      a read-only agent.
+
+    Args:
+        manifest: The ``ToolsetManifest`` to check.
+        tools_module: The module holding the ``@step`` functions. Defaults to
+            importing ``manifest.tools_module``. Pass it explicitly to avoid a
+            second import, or when the module is not importable by name.
+        client_source: The text of ``client.py``. When given, the verb check
+            runs; when omitted it is skipped rather than silently passing —
+            a check that cannot run has found nothing.
+
+    Raises:
+        AssertionError: naming the operation and what disagrees.
+    """
+    import importlib
+
+    from loom.toolsets.derive import verbs_in_client, wiring_in_tools
+    from loom.toolsets.effects import verb_disagreement
+
+    problems: list[str] = []
+    operations = list(manifest.all_operations())
+
+    for op in operations:
+        if "effect" not in op.model_fields_set:
+            problems.append(
+                f"{op.id}: no declared effect class. The default is a fail-safe "
+                "backstop, not a classification."
+            )
+        if op.undone_by:
+            if op.undone_by not in {o.id for o in operations}:
+                problems.append(
+                    f"{op.id}: undone_by={op.undone_by!r} names no operation here"
+                )
+            if not op.reversible:
+                problems.append(
+                    f"{op.id}: names an inverse but is not marked reversible, so "
+                    "policy will treat it as irreversible"
+                )
+
+    module = tools_module
+    if module is None and manifest.tools_module:
+        try:
+            module = importlib.import_module(manifest.tools_module)
+        except ImportError:
+            module = None
+
+    if module is not None:
+        for op in operations:
+            fn = getattr(module, op.function, None) if op.function else None
+            retry = getattr(fn, "retry", None) if fn is not None else None
+            attempts = getattr(retry, "max_attempts", None) if retry else None
+            if attempts is not None and op.idempotent != (attempts > 1):
+                problems.append(
+                    f"{op.id}: declared idempotent={op.idempotent} but its step "
+                    f"retries {attempts}x. A non-idempotent operation that "
+                    "retries performs it twice."
+                )
+
+    if client_source is not None and module is not None:
+        verbs = verbs_in_client(client_source)
+        source = getattr(module, "__file__", None)
+        wiring = {}
+        if source:
+            try:
+                from pathlib import Path
+
+                wiring = wiring_in_tools(Path(source).read_text(encoding="utf-8"))
+            except OSError:
+                wiring = {}
+        for op in operations:
+            method = wiring.get(op.function or "")
+            verb = verbs.get(method) if method else None
+            if verb and (message := verb_disagreement(op, verb)):
+                problems.append(message)
+
+    if problems:
+        raise AssertionError(
+            f"{manifest.id} does not classify its effects consistently:\n  "
+            + "\n  ".join(problems)
+        )
+
+
+# ---------------------------------------------------------------------------
+# Vector stores
+# ---------------------------------------------------------------------------
+
+
+async def verify_vector_store(
+    factory: Factory, *, namespace: str = "conformance"
+) -> None:
+    """Assert that *factory* builds a conforming ``VectorStore``.
+
+    *factory* is called more than once and **must return a handle to the same
+    underlying storage each time** — that is what proves an index survives a
+    restart rather than merely a variable.
+
+    What this checks is deliberately the part an author would not think to
+    test. That a re-upsert of the same id *updates* rather than appends, so a
+    re-run of an ingest does not double the index while looking like it worked.
+    That results come back ordered by score with the score attached, because a
+    match with no score cannot be thresholded and an unthresholded RAG answer
+    is the model citing the least-bad row. That a metadata filter narrows
+    *before* ``top_k`` rather than after, so a caller asking for five matching
+    rows gets five rather than however many of five happened to match. And that
+    an index refuses a second embedding model, because two models occupy two
+    different spaces and the arithmetic across them succeeds while meaning
+    nothing.
+
+    The parts an author *does* test — "my adapter talks to my database" — are
+    their own tests.
+    """
+    await _vectors_round_trip(factory, namespace)
+    await _vectors_upsert_is_an_update(factory, f"{namespace}-upsert")
+    await _vectors_rank_by_score(factory, f"{namespace}-rank")
+    await _vectors_filter_before_top_k(factory, f"{namespace}-filter")
+    await _vectors_empty_namespace_is_empty(factory, f"{namespace}-empty")
+    await _vectors_delete_removes(factory, f"{namespace}-delete")
+    await _vectors_survive_a_restart(factory, f"{namespace}-restart")
+    await _vectors_refuse_a_second_model(factory, f"{namespace}-model")
+
+
+def _chunk(identifier: str, text: str = "", **metadata: Any) -> Any:
+    from loom.knowledge.models import Chunk
+
+    return Chunk(id=identifier, text=text or identifier, metadata=metadata)
+
+
+def _unit(*components: float) -> list[float]:
+    from loom.knowledge.models import normalise
+
+    return normalise(list(components))
+
+
+async def _vectors_round_trip(factory: Factory, namespace: str) -> None:
+    store = await _maybe(factory())
+    written = await store.upsert(
+        namespace,
+        [_chunk("a", "alpha"), _chunk("b", "beta")],
+        [_unit(1, 0), _unit(0, 1)],
+        model="m1",
+    )
+
+    assert written == 2, "upsert must report how many rows it stored"
+    assert await store.count(namespace) == 2
+
+    found = await store.query(namespace, _unit(1, 0), top_k=1, model="m1")
+    assert len(found) == 1, "top_k must bound the result"
+    assert found[0].chunk.id == "a", "the nearest vector must rank first"
+    assert found[0].chunk.text == "alpha", "the chunk must round-trip whole"
+
+
+async def _vectors_upsert_is_an_update(factory: Factory, namespace: str) -> None:
+    store = await _maybe(factory())
+    await store.upsert(namespace, [_chunk("a", "first")], [_unit(1, 0)], model="m1")
+    await store.upsert(namespace, [_chunk("a", "second")], [_unit(1, 0)], model="m1")
+
+    assert await store.count(namespace) == 1, (
+        "re-upserting one id must update it. Appending instead doubles the "
+        "index on every re-ingest while looking like it worked."
+    )
+    found = await store.query(namespace, _unit(1, 0), top_k=1, model="m1")
+    assert found[0].chunk.text == "second", "the later write must win"
+
+
+async def _vectors_rank_by_score(factory: Factory, namespace: str) -> None:
+    store = await _maybe(factory())
+    await store.upsert(
+        namespace,
+        [_chunk("near"), _chunk("mid"), _chunk("far")],
+        [_unit(1, 0), _unit(1, 1), _unit(0, 1)],
+        model="m1",
+    )
+
+    found = await store.query(namespace, _unit(1, 0), top_k=3, model="m1")
+    assert [m.chunk.id for m in found] == ["near", "mid", "far"], (
+        "matches must come back ordered by similarity, closest first"
+    )
+    scores = [m.score for m in found]
+    assert scores == sorted(scores, reverse=True)
+    assert scores[0] > scores[-1], (
+        "the score must be carried. A match with no score cannot be "
+        "thresholded, and an unthresholded RAG answer is the model citing the "
+        "least-bad row in the index."
+    )
+
+
+async def _vectors_filter_before_top_k(factory: Factory, namespace: str) -> None:
+    store = await _maybe(factory())
+    await store.upsert(
+        namespace,
+        [
+            _chunk("keep-1", lang="en"),
+            _chunk("drop-1", lang="fr"),
+            _chunk("drop-2", lang="fr"),
+            _chunk("keep-2", lang="en"),
+        ],
+        [_unit(1, 0), _unit(0.9, 0.1), _unit(0.8, 0.2), _unit(0.7, 0.3)],
+        model="m1",
+    )
+
+    found = await store.query(
+        namespace, _unit(1, 0), top_k=2, where={"lang": "en"}, model="m1"
+    )
+    assert [m.chunk.id for m in found] == ["keep-1", "keep-2"], (
+        "the filter must narrow before top_k, not after. Filtering afterwards "
+        "returns however many of the top rows happened to match, which a "
+        "caller asking for two matching rows reads as 'only one exists'."
+    )
+
+
+async def _vectors_empty_namespace_is_empty(factory: Factory, namespace: str) -> None:
+    store = await _maybe(factory())
+    assert await store.count(namespace) == 0
+    assert await store.query(namespace, _unit(1, 0), top_k=5, model="m1") == [], (
+        "an unknown namespace must answer empty, not raise — a workflow "
+        "searching before its first ingest is ordinary."
+    )
+
+
+async def _vectors_delete_removes(factory: Factory, namespace: str) -> None:
+    store = await _maybe(factory())
+    await store.upsert(
+        namespace, [_chunk("a"), _chunk("b")], [_unit(1, 0), _unit(0, 1)], model="m1"
+    )
+
+    assert await store.delete(namespace, ["a"]) == 1
+    assert await store.count(namespace) == 1
+
+    assert await store.delete(namespace) == 1, (
+        "delete with no ids must drop the whole namespace and report how many"
+    )
+    assert await store.count(namespace) == 0
+
+
+async def _vectors_survive_a_restart(factory: Factory, namespace: str) -> None:
+    first = await _maybe(factory())
+    await first.upsert(namespace, [_chunk("a")], [_unit(1, 0)], model="m1")
+
+    second = await _maybe(factory())
+    assert await second.count(namespace) == 1, (
+        "an index must outlive the handle that wrote it — otherwise every "
+        "process restart silently empties it."
+    )
+
+
+async def _vectors_refuse_a_second_model(factory: Factory, namespace: str) -> None:
+    store = await _maybe(factory())
+    await store.upsert(namespace, [_chunk("a")], [_unit(1, 0)], model="m1")
+
+    try:
+        await store.upsert(namespace, [_chunk("b")], [_unit(0, 1)], model="m2")
+    except Exception:
+        return
+    raise AssertionError(
+        "a namespace must refuse a vector from a second embedding model. Two "
+        "models occupy two different spaces: the arithmetic succeeds, the "
+        "ranking is noise, and the scores look entirely ordinary."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Probes
+# ---------------------------------------------------------------------------
+
+
+async def verify_probe(
+    probe: Any,
+    *,
+    target: str,
+    unsupported: str = "not-a-target://nothing",
+    methods_seen: Callable[[], Iterable[str]] | None = None,
+) -> None:
+    """Assert that *probe* is a conforming :class:`~loom.agents.probes.Probe`.
+
+    *target* is something the probe genuinely handles — point it at a fixture
+    you control, not at a third party's site, so a red test means your probe
+    broke rather than someone else's server did.
+
+    Pass *methods_seen* when the target can report how it was accessed: a local
+    server that records request methods, say. That is the only mechanical proof
+    of the property that matters most here, and the one an author is least
+    likely to write a test for, because the code obviously does not write —
+    right up until a redirect, a retry, or a helpfully-added POST fallback means
+    it does. A probe is handed to a model; read-only has to be demonstrable.
+
+    What it does not check: what your probe *reports*. That is your test, and it
+    is the part you will remember to write.
+    """
+    from loom.agents.probes.base import Observation, ProbeError
+
+    if not isinstance(getattr(probe, "id", None), str) or not probe.id:
+        raise AssertionError("a probe needs a non-empty string id to be selected by")
+
+    if not probe.supports(target):
+        raise AssertionError(
+            f"{probe.id} was asked to verify against {target!r} and says it does "
+            "not support it. Pass a target this probe handles."
+        )
+
+    if probe.supports(unsupported):
+        raise AssertionError(
+            f"{probe.id}.supports({unsupported!r}) is True. A probe that claims "
+            "everything is chosen for targets it cannot read, and its failure "
+            "surfaces as an error rather than as a different probe being picked."
+        )
+
+    for junk in ("", "   ", "://", "\x00"):
+        try:
+            probe.supports(junk)
+        except Exception as exc:
+            raise AssertionError(
+                f"{probe.id}.supports({junk!r}) raised {exc!r}. Selection runs "
+                "over every registered probe, so one that raises here removes "
+                "the others from consideration too."
+            ) from exc
+
+    try:
+        first = await probe.observe(target, hint="conformance")
+    except ProbeError:
+        raise
+    except Exception as exc:
+        raise AssertionError(
+            f"{probe.id} raised {type(exc).__name__} rather than ProbeError. The "
+            "caller distinguishes 'could not look' from 'the code is wrong', and "
+            "collapsing the two puts a model to work repairing nothing."
+        ) from exc
+
+    if not isinstance(first, Observation):
+        raise AssertionError(f"{probe.id}.observe must return an Observation")
+    if first.target != target:
+        raise AssertionError(
+            f"{probe.id} reported target {first.target!r} for {target!r}; an "
+            "observation is attributed to what was asked for."
+        )
+    if not first.summary.strip():
+        raise AssertionError(
+            f"{probe.id} returned an empty summary. The summary is the part a "
+            "model reads first and sometimes the only part it reads."
+        )
+    if first.probe and first.probe != probe.id:
+        raise AssertionError(
+            f"{probe.id} attributed its observation to {first.probe!r}"
+        )
+
+    second = await probe.observe(target, hint="conformance")
+    if not second.summary.strip():
+        raise AssertionError(f"{probe.id} returned nothing on a second look")
+
+    if methods_seen is not None:
+        used = {m.upper() for m in methods_seen()}
+        if not used <= {"GET", "HEAD"}:
+            raise AssertionError(
+                f"{probe.id} used {sorted(used - {'GET', 'HEAD'})}. Looking must "
+                "not change anything: authoring runs against systems the author "
+                "has not agreed to let a model write to."
+            )

@@ -17,6 +17,10 @@
 | 13 | `13_cron_trigger.py` | Cron-scheduled workflow | None |
 | 14 | `14_workflow_manager_cli.py` | Agent that manages workflows | ANTHROPIC_API_KEY |
 
+> The table above is partial — the cookbook has grown past it. `python
+> scripts/run_examples.py --list` is the authoritative listing, because it is
+> generated from the directory rather than maintained beside it.
+
 ## Running
 
 ```bash
@@ -28,6 +32,36 @@ set -a && source .env && set +a
 python3 examples/cookbook/06_ai_agent_step.py
 ```
 
+## Running all of them
+
+```bash
+python3 scripts/run_examples.py              # every example, pass/skip/fail
+python3 scripts/run_examples.py --list       # just enumerate
+python3 scripts/run_examples.py examples/reference   # only these
+```
+
+This runs in CI as the `examples` job. A script is executed; a reference
+workflow, which defines a graph and executes nothing, is imported — which is
+what catches an API that has moved underneath it. An example stopping for want
+of a credential or an optional extra is reported as **skipped**, not passed.
+
+An example that needs arguments to run non-interactively says so in its own
+docstring:
+
+```
+run-examples: --example 1
+```
+
 ## Reference Workflows
 
-The `reference/` directory contains 10 production-pattern workflows (wf01-wf10) with matching specs in `reference_specs/`.
+The `reference/` directory contains 10 workflows (wf01-wf10) drawn from n8n and
+Gumloop, with matching specs in `reference_specs/`. They show the shape of each
+pipeline and are being rewritten onto the toolset layer — see
+[the audit](../docs/design/reference-workflows-audit.md) for what is not yet
+production-ready about them, and
+[the plan](../docs/design/reference-workflows-plan.md) for the order it is being
+fixed in.
+
+`tests/test_phase8.py` runs all ten against seeded journals, and
+`tests/test_example_conventions.py` holds the rules an example must follow, with
+the current violations recorded per file.

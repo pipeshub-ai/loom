@@ -116,7 +116,7 @@ the generated workflow code — see [Agent Backends](../README.md#agent-backends
 
 ## How is this different from Temporal / Prefect / Airflow?
 
-loomflow is **library-first**: `pip install loomflow` and you have a working runtime with no external services. Temporal requires a cluster. Prefect and Airflow require a server. loomflow runs embedded with SQLite or in-memory, and you can later swap in MongoDB/PostgreSQL for production without changing workflow code.
+loomsdk is **library-first**: `pip install loomsdk` and you have a working runtime with no external services. Temporal requires a cluster. Prefect and Airflow require a server. loomsdk runs embedded with SQLite or in-memory, and you can later swap in MongoDB/PostgreSQL for production without changing workflow code.
 
 It is also **agent-native**: `ctx.agent()` is a first-class durable operation. Agent turns are journaled and replayed like any other step. Other orchestrators bolt on LLM support after the fact.
 

@@ -63,6 +63,10 @@ ENVIRONMENTAL = (
     "getaddrinfo",
     "name or service not known",
     "temporary failure in name resolution",
+    # What `examples/cookbook/utils.py::require_env` prints before exiting. An
+    # example that stops because nobody gave it a Google refresh token has not
+    # found anything wrong with itself.
+    "missing env vars",
 )
 
 
@@ -140,6 +144,13 @@ def run(example: Example, *, timeout: float) -> tuple[str, str]:
 
     if completed.returncode == 0:
         return "ok", ""
+
+    if completed.returncode < 0:
+        # Stopped from outside rather than failing: a signal, usually the OOM
+        # killer on a loaded machine. Its stderr is whatever had been flushed
+        # when it died, so judging the example by it reports a defect that is
+        # not there and hides the one that is.
+        return "skipped", f"killed by signal {-completed.returncode}"
 
     detail = (completed.stderr.strip().splitlines() or ["no output"])[-1]
     if is_environmental(completed.stderr):

@@ -16,7 +16,7 @@ Example::
         LangChainAgentExecutor,
     )
 
-    llm = ChatAnthropic(model="claude-sonnet-4-6")
+    llm = ChatAnthropic(model="claude-sonnet-5")
     graph = create_agent(llm, tools=[search_tool, fetch_tool])
 
     researcher = Agent(

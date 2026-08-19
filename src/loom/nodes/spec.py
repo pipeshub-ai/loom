@@ -109,6 +109,41 @@ class NodeSpec(BaseModel):
     """Reused from toolsets rather than redefined — a node and an operation mean
     the same thing by "this writes", and two enums would drift."""
 
+    effect_by: dict[str, dict[str, EffectClass]] = Field(default_factory=dict)
+    """Argument-dependent effect: ``{"method": {"GET": READ, "DELETE": DESTRUCTIVE}}``.
+
+    :attr:`effect` is a property of the operation; for a few it is a property
+    of the *call*. ``io.http_request`` is one node with one class, and
+    ``method="GET"`` is a read while ``method="DELETE"`` destroys — and it is
+    precisely the node a generated workflow reaches for when no toolset covers
+    the API.
+
+    Declarative rather than a callable, deliberately: grant validation and the
+    catalog read manifest metadata without importing a toolset, and a callable
+    would need the module.
+
+    A matched rule wins in **either** direction — ``GET`` lowers the class and
+    ``DELETE`` raises it, and both are the author's own declaration about their
+    own operation. :attr:`effect` is the fallback, used whenever the argument
+    was not passed or its value is not in the table, so an unrecognised method
+    keeps the cautious class rather than falling to a read.
+    """
+
+    open_world: bool = False
+    """Does the body reach outside this process?
+
+    Defaults to ``False``, the opposite of :class:`OperationSpec`, and the
+    difference is the point: a toolset operation is a network call by
+    definition, while most nodes are computation. ``control.filter`` and
+    ``transform.map_fields`` touch nothing; ``io.http_request`` and the
+    ``agent.*`` nodes do.
+
+    Read by the taint rule. Before this existed, twenty of the twenty-six
+    built-in nodes were classified READ and therefore counted as "this run has
+    read external data" — so filtering an in-memory list refused the next
+    write, naming ``step:control.filter`` as the external source it had read.
+    """
+
     suspends: bool = False
     """Whether this node can park the run. The agent needs this at the point of
     choosing, not after writing the call, because a suspending node changes what

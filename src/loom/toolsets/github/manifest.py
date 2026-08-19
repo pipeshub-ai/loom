@@ -34,6 +34,13 @@ GITHUB_MANIFEST = ToolsetManifest(
     auth={"type": "bearer", "fields": ["GITHUB_TOKEN", "GITHUB_API_URL"]},
     tools_module="loom.toolsets.github.tools",
     egress_hosts=["api.github.com", "*.githubusercontent.com"],
+    rate_limits={
+        "search": "30 requests per minute",
+        "primary": (
+            "quota reported by x-ratelimit-remaining; a 403 with zero "
+            "remaining is retryable, any other 403 never is"
+        ),
+    },
     groups={
         "repos": [
             OperationSpec(

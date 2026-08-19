@@ -61,6 +61,12 @@ GOOGLE_DRIVE_MANIFEST = ToolsetManifest(
     },
     tools_module="loom.toolsets.google.drive.tools",
     egress_hosts=["www.googleapis.com", "oauth2.googleapis.com"],
+    rate_limits={
+        "model": (
+            "per-project quota units configured in the Google Cloud console; "
+            "no fixed per-second rate is published per method"
+        ),
+    },
     groups={
         "files": [
             OperationSpec(
@@ -276,6 +282,8 @@ GOOGLE_DRIVE_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="files.trash",
+                reversible=True,
+                undone_by="files.restore",
                 function="drive_trash_file",
                 summary="Move a file to the bin. Recoverable for 30 days.",
                 effect=EffectClass.DESTRUCTIVE,
@@ -296,7 +304,7 @@ GOOGLE_DRIVE_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="files.delete",
-                function="drive_delete_file",
+                                function="drive_delete_file",
                 summary="Delete permanently, skipping the bin. Not recoverable.",
                 effect=EffectClass.DESTRUCTIVE,
                 input_schema=_file_id,
@@ -325,6 +333,10 @@ GOOGLE_DRIVE_MANIFEST = ToolsetManifest(
         "sharing": [
             OperationSpec(
                 id="sharing.share",
+                idempotent=True,
+                reversible=True,
+                undone_by="sharing.remove_permission",
+                access_control=True,
                 function="drive_share_file",
                 summary="Grant someone access to a file or folder.",
                 description=(
@@ -383,6 +395,8 @@ GOOGLE_DRIVE_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="sharing.remove_permission",
+                idempotent=True,
+                access_control=True,
                 function="drive_remove_permission",
                 summary="Revoke one person's access to a file.",
                 effect=EffectClass.DESTRUCTIVE,

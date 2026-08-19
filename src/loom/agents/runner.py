@@ -599,7 +599,15 @@ async def _dispatch_tool(
     Outside a workflow there is no broker and no authority, and the call runs
     exactly as it always has — an agent used directly is not a durable run, and
     inventing a policy for it would be inventing one nobody set.
+
+    ``needs_approval`` is the exception, and applies with or without a broker:
+    it is not an invented policy but one the tool's author wrote on the tool,
+    and a declaration that silently does nothing is worse than no declaration —
+    somebody sets ``needs_approval=lambda args: args["amount_cents"] > 50_00``
+    and believes the refund is gated.
     """
+    tool.enforce_approval(dict(call.arguments or {}))
+
     broker = getattr(context, "broker", None)
     if broker is None:
         return await tool.invoke(call.arguments, tool_ctx)
@@ -620,6 +628,9 @@ async def _dispatch_tool(
             target=f"{toolset}.{operation}" if toolset else operation,
             arguments=dict(call.arguments or {}),
             effect=metadata.get("effect") or EffectClass.WRITE,
+            open_world=metadata.get("open_world", True),
+            reversible=metadata.get("reversible", False),
+            access_control=metadata.get("access_control", False),
             run_id=getattr(context, "run_id", ""),
             perform=perform,
         ),

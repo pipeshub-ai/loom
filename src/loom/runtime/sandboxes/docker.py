@@ -78,6 +78,13 @@ class DockerSandbox:
 
     name = "docker"
 
+    #: Backstop only. `_remove_container` ordinarily stops on evidence -- the
+    #: container appeared and was removed, or the `docker run` process exited
+    #: without creating one -- and this bounds the case where a wedged daemon
+    #: supplies neither.
+    _REMOVE_DEADLINE_SECONDS = 30.0
+    _REMOVE_POLL_SECONDS = 0.1
+
     def __init__(
         self,
         image: str,
@@ -272,15 +279,82 @@ class DockerSandbox:
         return ["sh", "-c", 'exec python3 -I -c "$1"', "sh", self._child]
 
     async def _kill(self, container_name: str, process: Any) -> None:
+        """Remove the container, *then* kill the `docker run` CLI.
+
+        That order is the whole point. Killing the CLI first is a race it
+        loses under load: SIGKILL does not cancel a create the daemon has
+        already accepted, so a remove issued after it finds no such name, and
+        the container is created *afterwards* -- landing in `Created`, which
+        `--rm` never covers because the container never ran. A short
+        `max_wall_seconds` is exactly the window that makes the CLI likeliest
+        to die mid-create, so the wall-timeout path leaked a container in most
+        runs under load while passing every time it was run alone.
+
+        Leaving the CLI alive is what makes the removal converge: the create
+        completes as it normally would, and removing the container is itself
+        what makes `docker run` exit, so the kill below is the backstop it was
+        always meant to be rather than the mechanism.
+        """
+        await self._remove_container(container_name, process)
         with contextlib.suppress(ProcessLookupError):
             process.kill()
         with contextlib.suppress(Exception):
             await process.wait()
-        # Backstop: `--rm` handles the ordinary case, but a container whose
-        # `docker run` CLI process was itself killed (rather than exiting on
-        # its own) can outlive `process.kill()`. Force-remove by the
-        # deterministic name regardless of whether it already exited --
-        # `docker rm` on an already-gone name is a harmless no-op error.
+
+    async def _remove_container(self, container_name: str, process: Any) -> None:
+        """Wait for the container to exist, force-remove it, confirm it is
+        gone.
+
+        The waiting is what the daemon's create latency requires, and the
+        confirming is what `docker rm` requires: **`docker rm -f` exits 0 for
+        a container that does not exist**, so its status says only that the
+        daemon answered, never that anything was removed. Reading it as proof
+        is how a removal that ran too early reports success and the container
+        appears a second later.
+
+        What bounds the wait is the `docker run` process, not a duration.
+        A create the daemon has accepted lands eventually and no fixed
+        deadline is right for "eventually" -- a ten-second one still leaked
+        under load, because a saturated daemon took longer. But the CLI
+        cannot exit before its container exists, so *the CLI having exited
+        with no container* is positive evidence that none is coming, which a
+        timer can only ever guess at. `_REMOVE_DEADLINE_SECONDS` stays as a
+        backstop for a daemon wedged badly enough to do neither.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._REMOVE_DEADLINE_SECONDS
+        while True:
+            if await self._exists(container_name):
+                await self._remove(container_name)
+                if not await self._exists(container_name):
+                    return
+            elif process.returncode is not None:
+                # `docker run` is gone and created nothing -- it failed before
+                # the create, or its container ran and `--rm` took it. Either
+                # way nothing is coming, and this is the ordinary exit.
+                return
+            if loop.time() >= deadline:
+                logger.warning(
+                    "sandbox container %s was neither created nor removed "
+                    "within %.1fs; leaving it to the next orphan sweep",
+                    container_name, self._REMOVE_DEADLINE_SECONDS,
+                )
+                return
+            await asyncio.sleep(self._REMOVE_POLL_SECONDS)
+
+    async def _exists(self, container_name: str) -> bool:
+        """Whether a container by that exact name is known to the daemon,
+        `Created` and never started included."""
+        lookup = await asyncio.create_subprocess_exec(
+            self._docker, "ps", "-aq", "--filter", f"name=^{container_name}$",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await lookup.communicate()
+        return bool(stdout.strip())
+
+    async def _remove(self, container_name: str) -> None:
+        """`docker rm -f` one container. The exit status is deliberately
+        ignored -- see `_remove_container`."""
         remover = await asyncio.create_subprocess_exec(
             self._docker, "rm", "-f", container_name,
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,

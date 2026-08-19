@@ -1,4 +1,4 @@
-# loomflow
+# loomsdk
 
 [License: MIT](LICENSE)
 [Python 3.11+](https://www.python.org/downloads/)
@@ -148,32 +148,32 @@ between the two runs and the second one still picks up where the first stopped.
 
 ```bash
 # Core (MemoryStore + SQLite, zero infra)
-pip install loomflow
+pip install loomsdk
 
 # With storage backends
-pip install loomflow[mongo]        # MongoDB (motor)
-pip install loomflow[postgres]     # PostgreSQL (asyncpg)
+pip install loomsdk[mongo]        # MongoDB (motor)
+pip install loomsdk[postgres]     # PostgreSQL (asyncpg)
 
 # With agent framework backends
-pip install loomflow[langchain]    # LangChain / LangGraph
-pip install loomflow[agno]         # Agno
-pip install loomflow[pydantic-ai]  # Pydantic AI
+pip install loomsdk[langchain]    # LangChain / LangGraph
+pip install loomsdk[agno]         # Agno
+pip install loomsdk[pydantic-ai]  # Pydantic AI
 
 # Google Workspace service-account auth (Gmail/Calendar work without it)
-pip install loomflow[google]
+pip install loomsdk[google]
 
 # With FastAPI webhook server
-pip install loomflow[api]
+pip install loomsdk[api]
 
 # Command line and terminal UI
-pip install loomflow[cli]          # rich output
-pip install loomflow[tui]          # loom ui
+pip install loomsdk[cli]          # rich output
+pip install loomsdk[tui]          # loom ui
 
 # MCP server — drive workflows from Claude Code, Claude Desktop, Cursor
-pip install loomflow[mcp]
+pip install loomsdk[mcp]
 
 # Everything
-pip install loomflow[all]
+pip install loomsdk[all]
 
 # Development
 pip install -e ".[dev]"
@@ -618,7 +618,7 @@ asyncio.run(main())
 ## Command Line
 
 ```bash
-pip install "loomflow[cli]"
+pip install "loomsdk[cli]"
 ```
 
 ```bash
@@ -647,7 +647,7 @@ remote LOOM instead of importing locally.
 Drive workflows from Claude Code, Claude Desktop, or Cursor.
 
 ```bash
-pip install "loomflow[mcp]"
+pip install "loomsdk[mcp]"
 claude mcp add loom -- loom mcp --module flows.py
 ```
 
@@ -677,7 +677,7 @@ from loom.stores.memory import MemoryStore
 
 rt = Runtime(
     store=MemoryStore(),
-    agent_backend=LangChainBackend(llm=ChatAnthropic(model="claude-sonnet-4-6")),
+    agent_backend=LangChainBackend(llm=ChatAnthropic(model="claude-sonnet-5")),
 )
 
 

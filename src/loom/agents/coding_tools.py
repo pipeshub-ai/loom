@@ -40,32 +40,53 @@ def register_tool_docs(toolset_id: str, docs: str | Any) -> None:
     _TOOL_DOCS_REGISTRY[toolset_id] = docs
 
 
+#: ``toolset id -> (module, symbol)`` for the docs LOOM ships.
+#:
+#: A table rather than a stack of ``if`` blocks, because the stack is what let
+#: five toolsets build docs that nothing registered. ``get_tool_docs`` is step
+#: 3 of the coding agent's own process — "DOCS: get_tool_docs for exact imports
+#: and signatures" — so an unregistered toolset answered that step with
+#: ``{"error": "No tool docs registered for 'slack'"}`` while its
+#: ``SLACK_TOOL_DOCS`` sat fully rendered one import away. The agent then wrote
+#: against whatever ``show_toolset`` gave it, which is schemas rather than
+#: calls.
+#:
+#: ``tests/test_toolset_docs_honest.py`` asserts this table covers every module
+#: that defines a ``*_TOOL_DOCS`` symbol, so the next one cannot go missing
+#: quietly.
+BUILTIN_TOOL_DOCS: tuple[tuple[str, str, str], ...] = (
+    ("jira", "loom.toolsets.jira.tools", "JIRA_TOOL_DOCS"),
+    ("confluence", "loom.toolsets.confluence.tools", "CONFLUENCE_TOOL_DOCS"),
+    ("slack", "loom.toolsets.slack.tools", "SLACK_TOOL_DOCS"),
+    ("zoom", "loom.toolsets.zoom.tools", "ZOOM_TOOL_DOCS"),
+    ("gmail", "loom.toolsets.google.gmail.tools", "GMAIL_TOOL_DOCS"),
+    ("google_calendar", "loom.toolsets.google.calendar.tools", "CALENDAR_TOOL_DOCS"),
+    ("google_drive", "loom.toolsets.google.drive.tools", "DRIVE_TOOL_DOCS"),
+    ("google_meet", "loom.toolsets.google.meet.tools", "MEET_TOOL_DOCS"),
+    # Not a toolset: guidance for generating LangChain-flavoured code.
+    ("langchain", "loom.integrations.langchain_tools_docs", "LANGCHAIN_TOOL_DOCS"),
+)
+
+
 def _ensure_builtin_docs() -> None:
-    """Lazily register built-in toolset docs if not already registered."""
-    if "jira" not in _TOOL_DOCS_REGISTRY:
+    """Lazily register built-in toolset docs if not already registered.
+
+    An ``ImportError`` is passed over rather than raised: a toolset whose
+    optional dependency is absent has no docs to offer, and that is a narrower
+    problem than a coding agent that cannot start.
+    """
+    import importlib
+
+    for toolset_id, module_name, symbol in BUILTIN_TOOL_DOCS:
+        if toolset_id in _TOOL_DOCS_REGISTRY:
+            continue
         try:
-            from loom.toolsets.jira.tools import (
-                JIRA_TOOL_DOCS,
-            )
-            _TOOL_DOCS_REGISTRY["jira"] = JIRA_TOOL_DOCS
+            module = importlib.import_module(module_name)
         except ImportError:
-            pass
-    if "confluence" not in _TOOL_DOCS_REGISTRY:
-        try:
-            from loom.toolsets.confluence.tools import (
-                CONFLUENCE_TOOL_DOCS,
-            )
-            _TOOL_DOCS_REGISTRY["confluence"] = CONFLUENCE_TOOL_DOCS
-        except ImportError:
-            pass
-    if "langchain" not in _TOOL_DOCS_REGISTRY:
-        try:
-            from loom.integrations.langchain_tools_docs import (
-                LANGCHAIN_TOOL_DOCS,
-            )
-            _TOOL_DOCS_REGISTRY["langchain"] = LANGCHAIN_TOOL_DOCS
-        except ImportError:
-            pass
+            continue
+        docs = getattr(module, symbol, None)
+        if docs is not None:
+            _TOOL_DOCS_REGISTRY[toolset_id] = docs
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +174,8 @@ async def get_tool_docs(toolset_id: str) -> str:
         })
     if callable(docs):
         docs = docs()
-    return docs
+    rendered: str = docs
+    return rendered
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +280,8 @@ async def _node_contract(node_id: str, *, registry: Any | None) -> str:
     from loom.nodes.errors import NodeNotFound
 
     try:
-        return _nodes(registry).contract(node_id)
+        contract: str = _nodes(registry).contract(node_id)
+        return contract
     except NodeNotFound as exc:
         return json.dumps({"error": str(exc), "suggestions": exc.suggestions})
 
@@ -301,6 +324,92 @@ async def validate_code(code: str) -> str:
     return _format_issues(_default_validator().validate(code))
 
 
+#: How much of an observation to spend on the model. A DOM census is structured
+#: and repetitive, so the first few thousand characters carry the shape and the
+#: rest is more of the same.
+_OBSERVATION_CHARS = 6000
+
+
+@tool
+async def observe_target(target: str, hint: str = "", probe: str = "") -> str:
+    """Look at a real system before writing code against it. **Read-only.**
+
+    Use this when the spec names something outside loom whose shape you would
+    otherwise guess at: a URL, an API endpoint, a page with a form on it. What
+    comes back is what is actually there — a JSON response's real field names, a
+    page's real controls — rather than what the spec's author remembered.
+
+    Guessing is not a small risk here. A field name that does not exist produces
+    a workflow that runs, completes, and returns nulls; a selector that matches
+    nothing produces one that reports zero results and no error. Neither fails
+    in a way any check can see.
+
+    Nothing is changed by looking. This cannot submit a form, click a button,
+    send a request that writes, or create anything.
+
+    Args:
+        target: What to look at — usually an ``https://`` URL.
+        hint: What you are trying to find out. Shapes what is reported.
+        probe: Which probe to use. Leave empty for the default. Pass
+            ``"browser"`` for a page that builds its content in the browser —
+            fetching such a page over HTTP returns the empty shell, and a
+            selector written against that shell finds nothing at runtime.
+
+    Returns:
+        JSON with a one-line ``summary`` and a structured ``detail``, or an
+        ``error`` explaining why the look did not happen.
+    """
+    return json.dumps({"error": "no probes are configured in this environment"})
+
+
+def make_observe_tool(registry: Any) -> Tool:
+    """Bind :func:`observe_target` to a probe registry.
+
+    Returned only when the registry holds something. A tool that is present and
+    always answers "not configured" spends context on every turn to say nothing,
+    and teaches the model to distrust the one capability that would have told it
+    the truth — the same reason ``ask_user`` is omitted rather than stubbed.
+    """
+    from loom.agents.probes.base import ProbeError
+
+    async def bound(target: str, hint: str = "", probe: str = "") -> str:
+        available = ", ".join(sorted(p.id for p in registry.all())) or "none"
+        chosen = registry.get(probe) if probe else registry.for_target(target)
+        if chosen is None:
+            missing = f"no probe named {probe!r}" if probe else (
+                f"nothing here can look at {target!r}"
+            )
+            return json.dumps({"error": missing, "probes": available})
+        probe_id = chosen.id
+        try:
+            observation = await chosen.observe(target, hint=hint)
+        except ProbeError as exc:
+            # Not a defect in the code being written, and phrased so the model
+            # does not try to repair one.
+            return json.dumps({"error": str(exc), "observed": False})
+        except Exception as exc:  # a third-party probe may raise anything
+            return json.dumps(
+                {"error": f"{probe_id} failed: {exc}", "observed": False}
+            )
+
+        payload: dict[str, Any] = {
+            "target": observation.target,
+            "probe": observation.probe or probe_id,
+            "summary": observation.summary,
+            "detail": observation.detail[:_OBSERVATION_CHARS],
+        }
+        if len(observation.detail) > _OBSERVATION_CHARS:
+            payload["detail_truncated"] = True
+        if observation.evidence:
+            payload["evidence"] = [
+                {"filename": a.filename, "mime": a.mime, "size": a.size}
+                for a in observation.evidence
+            ]
+        return json.dumps(payload, indent=2)
+
+    return replace(observe_target, fn=bound)
+
+
 # ---------------------------------------------------------------------------
 # Builder — returns the complete tool list for the coding agent
 # ---------------------------------------------------------------------------
@@ -315,7 +424,7 @@ async def call_read_operation(
     """Execute a **read-only** toolset operation while authoring, and return its result.
 
     For resolving what a spec refers to before writing code that depends on it:
-    which account id is "Vishwjeet", which statuses this board actually uses,
+    which account id belongs to a named person, which statuses this board actually uses,
     whether project "PA" exists. Guessing those produces code that runs
     perfectly and returns nothing.
 
@@ -326,7 +435,7 @@ async def call_read_operation(
 
     Args:
         op_path: Fully qualified operation, e.g. ``"jira.users.resolve"``.
-        arguments: The operation's arguments, e.g. ``{"name": "Vishwjeet"}``.
+        arguments: The operation's arguments, e.g. ``{"name": "<the name the spec used>"}``.
 
     Returns:
         JSON with the result, or an error explaining what to do instead.
@@ -505,6 +614,7 @@ def build_coding_tools(
     validator: Any | None = None,
     node_registry: Any | None = None,
     interaction: Any | None = None,
+    probes: Any | None = None,
     budget: int = 5,
     gate: Any | None = None,
 ) -> list[Tool]:
@@ -529,6 +639,12 @@ def build_coding_tools(
         When provided, an ``ask_user`` tool is included; when ``None`` the
         tool is omitted entirely, so the model cannot call something that
         will fail.
+    probes:
+        Optional :class:`~loom.agents.probes.registry.ProbeRegistry`. When it
+        holds anything, an ``observe_target`` tool is included, and the agent
+        can look at the system it is writing code against instead of guessing
+        at its shape. Empty or ``None`` omits the tool, and the agent behaves
+        exactly as it did before probes existed.
     budget:
         Maximum ``ask_user`` calls per generation. Ignored when *gate* is
         passed (the gate carries its own budget).
@@ -609,6 +725,12 @@ def build_coding_tools(
             replace(node_contract, fn=bound_node_contract),
             replace(validate_code, fn=bound_validate),
         ]
+
+    if probes:
+        # Truthiness, not `is not None`: an empty registry means the same thing
+        # as no registry, and offering a tool that can never look at anything
+        # spends context every turn to say "not configured".
+        tools.append(make_observe_tool(probes))
 
     if interaction is not None:
         tools.append(

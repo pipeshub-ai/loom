@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from loom.core.exceptions import ConcurrentUpdateError
+from loom.core.exceptions import ConcurrentUpdateError, ConfigurationError
 from loom.core.models import (
     Event,
     ExecutionRecord,
@@ -104,15 +104,42 @@ class SQLiteStore:
 
     def _connect(self) -> sqlite3.Connection:
         if self._connection is None:
-            connection = sqlite3.connect(self.path, check_same_thread=False)
-            connection.row_factory = sqlite3.Row
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("PRAGMA busy_timeout=5000")
-            connection.executescript(SCHEMA)
-            connection.commit()
-            self._migrate(connection)
+            try:
+                connection = sqlite3.connect(self.path, check_same_thread=False)
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.execute("PRAGMA busy_timeout=5000")
+                connection.executescript(SCHEMA)
+                connection.commit()
+                self._migrate(connection)
+            except sqlite3.OperationalError as exc:
+                # Covers the whole opening, not just connect(): a directory that
+                # is readable and not writable connects fine and fails on the
+                # first PRAGMA, which is the same problem one line later.
+                raise ConfigurationError(self._unopenable(exc)) from exc
             self._connection = connection
         return self._connection
+
+    def _unopenable(self, exc: sqlite3.OperationalError) -> str:
+        """Say which file could not be opened, and why the URL may be the reason.
+
+        ``sqlite3`` reports "unable to open database file" and not which file,
+        so a URL typo surfaces as a stack trace ending in a sentence that names
+        nothing. The common typo has one cause: ``sqlite:///runs.db`` is three
+        slashes, which is an *absolute* path to ``/runs.db`` at the filesystem
+        root -- a directory nobody can write to. The relative spelling this
+        store wants keeps the name in the URL's authority position, with two.
+        """
+        detail = f"cannot open SQLite database at {Path(self.path).absolute()}: {exc}"
+        if Path(self.path).parent == Path("/") and self.path.startswith("/"):
+            return (
+                f"{detail}\n"
+                "  A store URL of 'sqlite:///name.db' resolves to '/name.db' at the "
+                "filesystem root.\n"
+                "  For a file beside you, use two slashes: sqlite://name.db\n"
+                "  For an absolute path, give it in full: sqlite:///var/lib/loom/name.db"
+            )
+        return detail
 
     @staticmethod
     def _migrate(connection: sqlite3.Connection) -> None:

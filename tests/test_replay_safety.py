@@ -216,6 +216,34 @@ class TestIngressValidation:
         result = await rt.run(place_order, {"sku": "abc", "quantity": 2})
         assert result.output == "2xabc"
 
+    @pytest.mark.asyncio
+    async def test_the_declared_model_is_accepted_as_itself(self) -> None:
+        """Passing the input model the workflow declares must not be refused.
+
+        A workflow annotated ``order: Order`` publishes an object schema, and
+        an object schema accepted only ``dict``. So the most obvious call there
+        is — hand it an ``Order`` — was rejected by an error that named the
+        type it was refusing as the type it wanted: "takes object, but the
+        input was Order", for a workflow that "expects order: Order".
+        """
+        @workflow(name="place_order_model")
+        async def place_order(ctx: Context, order: Order) -> str:
+            return f"{order.quantity}x{order.sku}"
+
+        rt = Runtime(store=MemoryStore())
+        result = await rt.run(place_order, Order(sku="abc", quantity=2))
+        assert result.status is ExecutionStatus.COMPLETED
+        assert result.output == "2xabc"
+
+    def test_a_model_is_not_a_free_pass_for_other_types(self) -> None:
+        """The widening is for objects only — a model where a list is declared
+        is still a mismatch, so this did not turn the check off."""
+        from loom.runtime.validation import shape_error
+
+        assert shape_error({"type": "array"}, Order(sku="a", quantity=1)) is not None
+        assert shape_error({"type": "object"}, Order(sku="a", quantity=1)) is None
+        assert shape_error({"type": "object"}, "not an object") is not None
+
 
 # ---------------------------------------------------------------------------
 # Compatibility
@@ -389,3 +417,120 @@ class TestReplayedValueContractDrift:
         value = decode({"sku": "abc"}, Order)
         assert isinstance(value, Order)
         assert drift_of(value, Order) is None
+
+
+# ---------------------------------------------------------------------------
+# Replay must not need the capability that produced the answer
+# ---------------------------------------------------------------------------
+
+
+class TestReplayDoesNotNeedTheCapability:
+    """A recorded answer is an answer, whatever this process can reach.
+
+    Both checks below used to run when the *call was constructed*, so they
+    fired on every body re-entry — including the ones where the journal
+    already held the result. That made replaying a finished run demand the
+    ability to recompute it: a completed ``human.review_edit`` could not be
+    replayed in a worker with no human channel, and a completed ``ctx.agent``
+    could not be replayed in one with no model. Both are ordinary deployments —
+    a CI replay, or a process that only re-drives parked runs.
+
+    They now run inside the journaled call, which for a first execution is the
+    same moment for every purpose that matters: still before the node body, and
+    still before a suspending node parks.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_completed_human_node_replays_with_no_channel(self) -> None:
+        from loom.nodes.human import ApprovalIn
+        from loom.nodes.human.channels import AutoRespondChannel
+
+        @workflow(name="needs_a_person")
+        async def needs_a_person(ctx: Context, _: None = None) -> bool:
+            answer = await ctx.node(
+                "human.approval", ApprovalIn(subject="refund", question="ok?")
+            )
+            return bool(answer.approved)
+
+        store = MemoryStore()
+        channel = AutoRespondChannel(approve=True)
+        answering = Runtime(store=store, human=channel)
+        channel.bind(answering)
+        answering.register(needs_a_person)
+        first = await answering.run(needs_a_person)
+        assert first.status is ExecutionStatus.COMPLETED
+        assert first.output is True
+
+        # A different process, with no way to ask anybody anything.
+        deaf = Runtime(store=store)
+        deaf.register(needs_a_person)
+        assert deaf.human is None
+        replayed = await deaf.replay(first.run_id)
+
+        assert replayed.status is ExecutionStatus.COMPLETED
+        assert replayed.output is True
+
+    @pytest.mark.asyncio
+    async def test_a_fresh_run_still_refuses_before_it_parks(self) -> None:
+        """The property the eager check existed for, and it is unchanged.
+
+        A run parked with nobody listening is indistinguishable from patience,
+        so it is found a day late. Nothing recorded means the check still runs.
+        """
+        from loom.nodes.errors import HumanChannelMissing
+        from loom.nodes.human import ApprovalIn
+
+        @workflow(name="nobody_listening")
+        async def nobody_listening(ctx: Context, _: None = None) -> bool:
+            answer = await ctx.node(
+                "human.approval", ApprovalIn(subject="refund", question="ok?")
+            )
+            return bool(answer.approved)
+
+        runtime = Runtime(store=MemoryStore())
+        result = await runtime.run(nobody_listening)
+
+        assert result.status is ExecutionStatus.FAILED
+        assert result.error is not None
+        assert result.error.type == HumanChannelMissing.__name__
+        record = await runtime.get(result.run_id)
+        assert record is not None
+        assert record.awaiting_event is None, "it must not have parked"
+
+    @pytest.mark.asyncio
+    async def test_a_completed_agent_call_replays_with_no_backend(self) -> None:
+        from loom.agents.result import AgentResult
+        from loom.testing import given, run_with
+
+        @workflow(name="needs_a_model")
+        async def needs_a_model(ctx: Context, _: None = None) -> str:
+            answer = await ctx.agent("summarise this", name="think")
+            return str(answer.output)
+
+        store = MemoryStore()
+        runtime = Runtime(store=store)
+        assert runtime.agent_backend is None
+
+        # Seeded rather than generated: the point is that a *recorded* agent
+        # result is served without the backend that would have produced it.
+        first = await run_with(
+            needs_a_model,
+            None,
+            given("think", kind=EntryKind.AGENT, returns=AgentResult(output="done")),
+            runtime=runtime,
+        )
+        assert first.status is ExecutionStatus.COMPLETED
+        assert first.output == "done"
+
+    @pytest.mark.asyncio
+    async def test_a_fresh_agent_call_still_names_the_missing_backend(self) -> None:
+        @workflow(name="no_backend_at_all")
+        async def no_backend_at_all(ctx: Context, _: None = None) -> str:
+            answer = await ctx.agent("summarise this")
+            return str(answer.output)
+
+        result = await Runtime(store=MemoryStore()).run(no_backend_at_all)
+
+        assert result.status is ExecutionStatus.FAILED
+        assert result.error is not None
+        assert "agent_backend" in result.error.message

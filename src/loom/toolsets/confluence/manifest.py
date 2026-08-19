@@ -49,6 +49,18 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
     },
     tools_module="loom.toolsets.confluence.tools",
     egress_hosts=["*.atlassian.net"],
+    rate_limits={
+        "model": (
+            "points-based: each call consumes points scaled to the complexity "
+            "and volume of data, against a per-hour quota — so no fixed "
+            "requests-per-second figure applies"
+        ),
+        "enforcement": (
+            "tiered quotas for Forge, Connect and OAuth 2.0 (3LO) apps began "
+            "2026-03-02"
+        ),
+        "source": "developer.atlassian.com/cloud/confluence/rate-limiting/",
+    },
     groups={
         "pages": [
             OperationSpec(
@@ -103,6 +115,7 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="pages.update",
+                idempotent=True,
                 function="confluence_update_page",
                 summary="Update an existing page.",
                 effect=EffectClass.WRITE,
@@ -121,6 +134,7 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="pages.delete",
+                idempotent=True,
                 function="confluence_delete_page",
                 summary="Delete a page.",
                 effect=EffectClass.DESTRUCTIVE,

@@ -3,7 +3,7 @@
 Implements the ``ModelProvider`` protocol, so any ``Agent`` can use Gemini by
 passing a ``GeminiProvider`` as ``agent.model``.
 
-    pip install loomflow[gemini]
+    pip install loomsdk[gemini]
 
 Gemini's wire format diverges from the OpenAI-shaped one more than most:
 

@@ -37,6 +37,12 @@ GITLAB_MANIFEST = ToolsetManifest(
     },
     tools_module="loom.toolsets.gitlab.tools",
     egress_hosts=["gitlab.com", "*.gitlab.com"],
+    rate_limits={
+        "model": (
+            "per-instance and per-endpoint; self-managed instances configure "
+            "their own limits, so no fixed rate can be assumed"
+        ),
+    },
     groups={
         "projects": [
             OperationSpec(

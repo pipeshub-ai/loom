@@ -154,7 +154,7 @@ class CodeSupervisor:
         from loom.agents.limits import UsageLimits
         from loom.agents.models import ModelSettings
 
-        reviewer = Agent(
+        reviewer: Agent[Any] = Agent(
             name="workflow_supervisor",
             instructions=self.build_prompt(),
             model=self._model,

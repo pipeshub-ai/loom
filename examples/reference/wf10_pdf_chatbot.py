@@ -1,49 +1,114 @@
-"""Workflow: RAG Chat with PDF."""
+"""Workflow: RAG Chat with a PDF.
+
+Ingest a document once, then answer questions about it in a durable loop — the
+run parks between questions at no cost and survives a restart mid-conversation.
+
+What this shows, and why each part is the way it is:
+
+* **This is the workflow LOOM could not express.** The version it replaces
+  faked every step: "extract text" decoded PDF bytes as UTF-8, "embed and
+  index" POSTed to an invented host, and "semantic search" returned whatever
+  came back. There was no document parser, no embedding port, and no vector
+  store in the library at all. All three exist now, which is what makes this
+  the *whole* pipeline rather than a shape.
+
+* **A search always returns something, so it is thresholded.** With ``top_k=4``
+  against an index of unrelated pages, four come back and only the score says
+  they are all wrong. ``min_score`` is what turns that into "I could not find
+  it" instead of a confident answer assembled from the least-bad rows — and
+  ``dropped_below_threshold`` distinguishes "nothing scored well" from "the
+  index is empty".
+
+* **The answer cites what it used.** Every match carries its chunk's source and
+  ordinal, so the reply can say where it came from. An unsourced RAG answer is
+  the one nobody can check.
+
+* **The loop is bounded by ``continue_as_new``, not by a counter.** Three
+  durable calls per question in one journal is what makes a long conversation
+  slow to replay and eventually fail the entry budget. Rotating hands the
+  successor a clean journal and the same namespace, so the index is not
+  rebuilt — which is the pattern this workflow should have been teaching all
+  along.
+
+* **The ingest is re-runnable.** Chunk ids are derived from content, so
+  re-indexing the same document updates rows instead of doubling the index.
+  That is what makes a rotated run safe to re-enter the ingest branch.
+
+Credentials: ``GOOGLE_*`` (Drive, to fetch the PDF), ``SLACK_BOT_TOKEN``, and
+whatever the embedding provider needs. Reading a PDF needs
+``pip install 'loomflow[documents]'``.
+"""
 
 from __future__ import annotations
 
-import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from loom import Context, Retry, step, workflow
+from loom.knowledge import Chunk
+from loom.nodes.documents import ParseDocumentIn
+from loom.nodes.knowledge import ChunkIn, IndexIn, SearchIn
+from loom.security.grants import GrantSet
+from loom.toolsets.google.drive.tools import drive_download_file
+from loom.toolsets.slack.tools import slack_post_message
+from loom.triggers import Manual
 
 # ---------------------------------------------------------------------------
-# Models
+# Data models
 # ---------------------------------------------------------------------------
 
 
 class ChatbotConfig(BaseModel):
-    """Input configuration for the PDF chatbot."""
+    """One document, and where the conversation happens."""
 
-    pdf_url: str
-    session_id: str
-    chunk_size: int = 500
-    chunk_overlap: int = 50
-    max_questions: int = 20
-    openai_api_key: str = ""
+    file_id: str = Field(description="Drive file id of the PDF to answer about.")
+    session_id: str = Field(description="Names this conversation, and its index.")
+    channel: str = "#doc-qa"
+    chunk_size: int = 1000
+    chunk_overlap: int = 150
+    top_k: int = 4
+    min_score: float = 0.15
+    """Below this, a match is not evidence.
 
+    Cosine similarity, so the useful range depends on the embedding model —
+    this is a starting point to tune, not a constant. Zero would accept
+    anything the index happens to contain."""
 
-class TextChunk(BaseModel):
-    """A chunk of text with its embedding."""
+    questions_per_run: int = 20
+    """How many questions before ``continue_as_new``.
 
-    chunk_id: int
-    text: str
-    embedding: list[float] = []
+    Not a limit on the conversation — a limit on one journal. The successor
+    carries the same namespace, so nothing is re-indexed."""
 
+    questions_answered: int = 0
+    """Carried across rotations, so the reported total is the conversation's
+    rather than this segment's."""
 
-class SearchResult(BaseModel):
-    """A search result from the vector store."""
-
-    chunk_id: int
-    text: str
-    score: float = 0.0
+    indexed: int = 0
+    """Chunks already in the namespace. Non-zero means a successor run, which
+    is how the ingest branch is skipped."""
 
 
 class ChatMessage(BaseModel):
-    """A chat message from the user."""
+    """One question from a person."""
 
     question: str
+    asked_by: str = ""
+
+
+class ChatResult(BaseModel):
+    """What the workflow returns when the conversation ends."""
+
     session_id: str
+    chunks_indexed: int = 0
+    questions_answered: int = 0
+    unanswered: int = 0
+    """Questions where every match fell below the threshold.
+
+    Reported rather than hidden: a chatbot that answered nine of ten is a
+    different thing from one that answered ten."""
+
+    ended_by: str = ""
+    """``end``, ``timeout``, or ``rotated``."""
 
 
 # ---------------------------------------------------------------------------
@@ -51,240 +116,26 @@ class ChatMessage(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-@step(retry=Retry(max_attempts=3, delay=2.0))
-async def extract_text(pdf_url: str) -> str:
-    """Download and extract text from a PDF.
+@step(retry=Retry(max_attempts=3, initial_delay=2.0))
+async def fetch_document(file_id: str) -> object:
+    """The PDF's bytes, as an Attachment carrying its own filename and MIME.
 
-    Args:
-        pdf_url: URL of the PDF to process.
-
-    Returns:
-        Extracted plain text.
+    ``drive_download_file`` rather than ``drive_export_file``: this is a real
+    PDF with bytes. A *Google Doc* has none and must be exported — downloading
+    one is a 403 that reads as a permissions problem.
     """
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.get(pdf_url)
-        resp.raise_for_status()
-        raw = resp.content
-
-    # In production, use PyPDF2 or pdfplumber
-    return raw.decode("utf-8", errors="replace")
+    return await drive_download_file(file_id=file_id)
 
 
-@step
-async def chunk_text(
-    text: str,
-    chunk_size: int,
-    chunk_overlap: int,
-) -> list[TextChunk]:
-    """Split text into overlapping chunks for embedding.
-
-    Args:
-        text: Full document text.
-        chunk_size: Characters per chunk.
-        chunk_overlap: Overlap between chunks.
-
-    Returns:
-        List of text chunks.
-    """
-    chunks: list[TextChunk] = []
-    start = 0
-    chunk_id = 0
-    while start < len(text):
-        end = min(start + chunk_size, len(text))
-        chunks.append(TextChunk(
-            chunk_id=chunk_id,
-            text=text[start:end],
-        ))
-        chunk_id += 1
-        start += chunk_size - chunk_overlap
-        if start >= len(text):
-            break
-    return chunks
-
-
-@step(retry=Retry(max_attempts=2, delay=1.0))
-async def embed_and_index(
-    chunks: list[TextChunk],
-    session_id: str,
-    api_key: str,
-) -> int:
-    """Generate embeddings and index chunks in a vector store.
-
-    Args:
-        chunks: Text chunks to embed.
-        session_id: Session ID for namespacing the index.
-        api_key: OpenAI API key.
-
-    Returns:
-        Number of chunks indexed.
-    """
-    batch_size = 20
-    indexed = 0
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        for i in range(0, len(chunks), batch_size):
-            batch = chunks[i : i + batch_size]
-            texts = [c.text for c in batch]
-
-            # Get embeddings from OpenAI
-            resp = await client.post(
-                "https://api.openai.com/v1/embeddings",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                },
-                json={
-                    "model": "text-embedding-3-small",
-                    "input": texts,
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()["data"]
-
-            # Store in vector DB
-            vectors = []
-            for chunk, emb in zip(batch, data, strict=True):
-                vectors.append({
-                    "id": f"{session_id}-{chunk.chunk_id}",
-                    "values": emb["embedding"],
-                    "metadata": {"text": chunk.text},
-                })
-
-            await client.post(
-                "https://vectordb.example.com/api/upsert",
-                json={
-                    "namespace": session_id,
-                    "vectors": vectors,
-                },
-            )
-            indexed += len(batch)
-
-    return indexed
-
-
-@step(retry=Retry(max_attempts=2, delay=1.0))
-async def semantic_search(
-    query: str,
-    session_id: str,
-    api_key: str,
-    top_k: int = 5,
-) -> list[SearchResult]:
-    """Search the vector store for relevant chunks.
-
-    Args:
-        query: The user's question.
-        session_id: Session namespace.
-        api_key: OpenAI API key.
-        top_k: Number of results to return.
-
-    Returns:
-        Ranked search results.
-    """
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        # Embed the query
-        emb_resp = await client.post(
-            "https://api.openai.com/v1/embeddings",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "model": "text-embedding-3-small",
-                "input": [query],
-            },
-        )
-        emb_resp.raise_for_status()
-        query_vec = emb_resp.json()["data"][0]["embedding"]
-
-        # Search vector DB
-        search_resp = await client.post(
-            "https://vectordb.example.com/api/query",
-            json={
-                "namespace": session_id,
-                "vector": query_vec,
-                "top_k": top_k,
-            },
-        )
-        search_resp.raise_for_status()
-        matches = search_resp.json().get("matches", [])
-
-    return [
-        SearchResult(
-            chunk_id=m.get("id", 0),
-            text=m.get("metadata", {}).get("text", ""),
-            score=m.get("score", 0.0),
-        )
-        for m in matches
-    ]
-
-
-@step(retry=Retry(max_attempts=2, delay=1.0))
-async def generate_answer(
-    question: str,
-    context_chunks: list[SearchResult],
-    api_key: str,
-) -> str:
-    """Generate an answer using retrieved context.
-
-    Args:
-        question: The user's question.
-        context_chunks: Relevant text chunks.
-        api_key: OpenAI API key.
-
-    Returns:
-        AI-generated answer.
-    """
-    context_text = "\n---\n".join(
-        r.text for r in context_chunks if r.text
+@step(retry=Retry(max_attempts=1))
+async def reply(channel: str, question: str, answer: str, sources: list[str]) -> str:
+    """Post the answer with its citations. Not retried — a retry posts twice."""
+    cited = "\n".join(f"> {source}" for source in sources)
+    posted = await slack_post_message(
+        channel=channel,
+        text=f"*{question}*\n\n{answer}" + (f"\n\n_Sources_\n{cited}" if cited else ""),
     )
-    prompt = (
-        "Answer the question using only the context below. "
-        "If the answer is not in the context, say so.\n\n"
-        f"Context:\n{context_text[:3000]}\n\n"
-        f"Question: {question}"
-    )
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "model": "gpt-4o-mini",
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "Answer from provided context.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-            },
-        )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
-
-
-@step
-async def send_response(
-    session_id: str,
-    question: str,
-    answer: str,
-) -> bool:
-    """Send the chatbot response back to the user.
-
-    Args:
-        session_id: Chat session ID.
-        question: Original question.
-        answer: Generated answer.
-
-    Returns:
-        True if response was delivered.
-    """
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        await client.post(
-            "https://chat.example.com/api/messages",
-            json={
-                "session_id": session_id,
-                "role": "assistant",
-                "content": answer,
-                "in_reply_to": question[:100],
-            },
-        )
-    return True
+    return posted.ts
 
 
 # ---------------------------------------------------------------------------
@@ -292,70 +143,154 @@ async def send_response(
 # ---------------------------------------------------------------------------
 
 
-@workflow(name="pdf_chatbot", version="1")
-async def pdf_chatbot(
-    ctx: Context,
-    config: ChatbotConfig,
-) -> dict:
-    """Extract a PDF, build a vector index, then chat in a loop.
+@workflow(
+    name="pdf_chatbot",
+    version="2",
+    triggers=[Manual()],
+    grants=GrantSet(toolsets=["google_drive", "slack"]),
+)
+async def pdf_chatbot(ctx: Context, config: ChatbotConfig) -> ChatResult:
+    """Ingest a document once, then answer questions about it until told to stop."""
+    indexed = config.indexed
 
-    Pipeline:
-      1. Extract text -> chunk -> embed and index
-      2. Loop: wait for question -> search -> generate -> respond
-    """
-    # Phase 1: Ingest the PDF
-    text = await ctx.step(extract_text, config.pdf_url)
-    chunks = await ctx.step(
-        chunk_text, text, config.chunk_size, config.chunk_overlap,
-    )
-    chunks_indexed = await ctx.step(
-        embed_and_index,
-        chunks,
-        config.session_id,
-        config.openai_api_key,
-    )
+    # Skipped on a successor run: the namespace already holds the document, and
+    # re-indexing would be correct but wasteful. Chunk ids are derived from
+    # content, so doing it anyway would update rather than duplicate — the
+    # branch is an optimisation, not a correctness requirement.
+    if not indexed:
+        document = await ctx.step(fetch_document, config.file_id)
+        parsed = await ctx.node(
+            "transform.parse_document", ParseDocumentIn(document=document)
+        )
+        chunked = await ctx.node(
+            "knowledge.chunk",
+            ChunkIn(
+                text=parsed.text,
+                size=config.chunk_size,
+                overlap=config.chunk_overlap,
+                source=config.file_id,
+            ),
+        )
+        stored = await ctx.node(
+            "knowledge.index",
+            IndexIn(namespace=config.session_id, chunks=chunked.chunks),
+        )
+        indexed = stored.indexed
+        await ctx.step(
+            reply,
+            config.channel,
+            "Ready",
+            f"Indexed {indexed} chunks from {parsed.filename or config.file_id}"
+            + (
+                f" (only {len(parsed.pages)} of {parsed.page_count} pages were read)"
+                if parsed.truncated
+                else ""
+            ),
+            [],
+        )
 
-    # Phase 2: Chat loop -- wait for questions
-    questions_answered = 0
+    answered = config.questions_answered
+    unanswered = 0
 
-    for _ in range(config.max_questions):
-        # Park until a user sends a question
+    for _ in range(config.questions_per_run):
         message: ChatMessage | None = await ctx.wait_for_event(
             "user_question",
             timeout=3600,
             default=None,
+            # Without this the payload arrives as the raw dict it was delivered
+            # as, and `message.question` below raises — only once a question
+            # actually lands, so a run that times out looks fine.
+            output_type=ChatMessage,
         )
-
         if message is None:
-            break  # Timed out waiting for a question
+            return ChatResult(
+                session_id=config.session_id,
+                chunks_indexed=indexed,
+                questions_answered=answered,
+                unanswered=unanswered,
+                ended_by="timeout",
+            )
+        if message.question.strip().lower() == "end":
+            return ChatResult(
+                session_id=config.session_id,
+                chunks_indexed=indexed,
+                questions_answered=answered,
+                unanswered=unanswered,
+                ended_by="end",
+            )
 
-        # Retrieve relevant chunks
-        results = await ctx.step(
-            semantic_search,
-            message.question,
-            config.session_id,
-            config.openai_api_key,
+        found = await ctx.node(
+            "knowledge.search",
+            SearchIn(
+                namespace=config.session_id,
+                query=message.question,
+                top_k=config.top_k,
+                min_score=config.min_score,
+            ),
         )
 
-        # Generate answer from context
-        answer = await ctx.step(
-            generate_answer,
-            message.question,
-            results,
-            config.openai_api_key,
+        if not found.matches:
+            # Nothing cleared the bar. Saying so is the whole point of the
+            # threshold — the alternative is a fluent answer assembled from
+            # rows the score already said were irrelevant.
+            await ctx.step(
+                reply,
+                config.channel,
+                message.question,
+                "I could not find anything in this document that answers that."
+                + (
+                    f" ({found.dropped_below_threshold} passage(s) were close "
+                    "but not close enough.)"
+                    if found.dropped_below_threshold
+                    else ""
+                ),
+                [],
+            )
+            unanswered += 1
+            continue
+
+        context = "\n\n---\n\n".join(
+            f"[{_cite(match.chunk)}]\n{match.chunk.text}" for match in found.matches
+        )
+        answer = await ctx.agent(
+            "Answer the question using only the passages below. Quote the "
+            "bracketed citation for anything you assert. If the passages do "
+            "not answer it, say so rather than filling the gap.\n\n"
+            f"Question: {message.question}\n\nPassages:\n{context}",
+            name="answer",
         )
 
-        # Send response
         await ctx.step(
-            send_response,
-            config.session_id,
+            reply,
+            config.channel,
             message.question,
-            answer,
+            str(answer.output),
+            [_cite(match.chunk) for match in found.matches],
         )
-        questions_answered += 1
+        answered += 1
 
-    return {
-        "session_id": config.session_id,
-        "chunks_indexed": chunks_indexed,
-        "questions_answered": questions_answered,
-    }
+    # The journal, not the conversation, is what is bounded. The successor
+    # keeps the namespace and the running total, so nothing is re-indexed and
+    # the count a person sees is the conversation's.
+    await ctx.continue_as_new(
+        config.model_copy(
+            update={"questions_answered": answered, "indexed": indexed}
+        )
+    )
+    return ChatResult(
+        session_id=config.session_id,
+        chunks_indexed=indexed,
+        questions_answered=answered,
+        unanswered=unanswered,
+        ended_by="rotated",
+    )
+
+
+def _cite(chunk: Chunk) -> str:
+    """How one chunk is referred to in an answer.
+
+    A pure function, so it needs no journal entry — and a citation a reader can
+    act on, rather than an opaque id.
+    """
+    where = chunk.source or "document"
+    return f"{where} #{chunk.ordinal + 1}"

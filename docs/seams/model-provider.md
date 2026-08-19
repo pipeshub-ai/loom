@@ -22,5 +22,6 @@ The single integration point for any LLM vendor.
 ## Consumers
 
 - `agents.agent`
+- `agents.coding_agent`
 
 <!-- END GENERATED -->

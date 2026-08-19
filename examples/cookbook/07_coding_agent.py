@@ -44,7 +44,7 @@ async def main() -> None:
     require_env("ANTHROPIC_API_KEY")
 
     model = AnthropicProvider(
-        model_name="claude-sonnet-4-6", api_key=os.environ["ANTHROPIC_API_KEY"]
+        model_name="claude-sonnet-5", api_key=os.environ["ANTHROPIC_API_KEY"]
     )
     agent = WorkflowCodingAgent(
         model=model,

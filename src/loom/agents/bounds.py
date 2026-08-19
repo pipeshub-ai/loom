@@ -128,7 +128,8 @@ class BlobSpillStore:
         )
 
     async def read(self, locator: str, *, offset: int = 0, limit: int = 4_000) -> str:
-        text = (await self._blobs.load(locator)).decode("utf-8", errors="replace")
+        raw: bytes = await self._blobs.load(locator)
+        text = raw.decode("utf-8", errors="replace")
         return text[offset : offset + limit]
 
     async def grep(

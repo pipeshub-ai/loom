@@ -1,10 +1,6 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Project Overview
 
-**Loom** — `pip install loomflow`, `import loom` — is a **library-first** durable execution SDK for AI-powered workflows. The primary deliverable is a **Workflow Coding Agent**: an LLM-powered agent that _authors_ workflow code — mixing third-party SDK calls, workflow constructs (`@workflow`, `@step`, `ctx.*`), and raw Python — so that users describe what they want and receive a ready-to-run workflow.
+**Loom** — `pip install loomsdk`, `import loom` — is a **library-first** durable execution SDK for AI-powered workflows. The primary deliverable is a **Workflow Coding Agent**: an LLM-powered agent that _authors_ workflow code — mixing third-party SDK calls, workflow constructs (`@workflow`, `@step`, `ctx.*`), and raw Python — so that users describe what they want and receive a ready-to-run workflow.
 
 Generated workflows are execution-portable: they run embedded (SQLite store, no infra), in a user-supplied sandbox, or against an external durable backend (Temporal, DBOS, Restate). The SDK never forces a specific runtime.
 
@@ -12,14 +8,14 @@ The SDK's core engine design is **deterministic re-entry**: workflow bodies can 
 
 ## CLI
 
-Installed as both `loom` and `loomflow`.
+Installed as both `loom` and `loomsdk`.
 
 ```bash
 # authoring
 loom check flows/order.py              # write order.graph.json + order.description.md
 loom check flows/order.py --fail-on-change   # CI: fail if the committed graph is stale
 loom graph flows/order.py --format react-flow
-loom describe flows/order.py
+loom describe flows/order.py -w order   # -w picks one, when a file holds several
 loom init my-project
 
 # running
@@ -30,13 +26,22 @@ loom show <run> / loom watch <run>
 
 # acting on a run
 loom approve <run> refund [--reject]
+loom respond <run> <request> '{"choice": "b"}'   # answer a non-approval human request
+loom pending                           # every run parked on a human, across workflows
 loom send <run> <event> '{"token": "x"}'
 loom cancel / retry / replay <run>
+loom artifacts <run>                   # what the run produced
 
 # credentials
+loom providers                         # OAuth providers with endpoints built in
 loom connect gmail                     # OAuth a credential a workflow can read
 loom whoami                            # what is stored, and whether it is ok/due/expired
 loom refresh [--all] [--force]         # renew what is near expiry; exit 1 if any failed
+loom disconnect gmail / loom logout    # drop one credential, or all of them
+
+# catalogue
+loom toolsets / loom toolset <id>      # integrations this process can reach
+loom nodes / loom node <id>            # the node catalogue, and one node's contract
 
 # serving
 loom workflows
@@ -89,6 +94,41 @@ hide a step. Both outputs are meant to be committed: the graph makes structural
 changes reviewable in a diff, the description makes them readable by someone who
 does not read Python.
 
+**One graph per workflow, not per file.** A module holding two workflows holds
+two graphs, and `check` writes a pair of artifacts for each — qualified as
+`<stem>.<flow>.graph.json` once there is more than one, plain `<stem>.graph.json`
+while there is one. Merging them produced a graph named after the first
+containing the second's steps, which defeats the point: the diff is only
+evidence that no step was added or hidden if each graph covers one flow. The
+now-stale unqualified file is *reported*, never deleted — `check` writes what a
+commit should contain and does not remove what a commit does contain.
+
+**Every journaled `ctx.*` call must draw.** `DURABLE_CTX_CALLS` names them and
+`_CTX_CALL_MAP` says how each one renders; a test asserts the first is a subset
+of the second, because a method missing from the map is wrong for *every*
+workflow at once and so no check over generated code can find it. `ctx.node` sat
+in exactly that state for the node system's whole life — a workflow calling a
+catalogued node projected to a graph that never mentioned it, so the canvas, the
+narration and the committed `graph.json` all under-reported the flow. Nodes draw
+by category: `human.*` as human, `agent.*` as agent, the rest as tool.
+Deliberately not `control.switch` → `SWITCH`, since that kind carries branch
+edges and a node call has one successor however the node behaves inside.
+
+`ProjectionStage` covers the other half — a method the extractor *does* model,
+in a code shape its walker never reaches. A durable call is extracted wherever
+it sits in an expression: the returned value, an `if` test, a loop's iterable.
+`if await ctx.wait_for_approval("refund"):` is an approval *and* a branch, and
+until the stage found it in the shipped cookbook, only the branch drew. It warns rather than errors: a hole there is the
+extractor's defect, not the generated code's, and asking a model to repair it
+invites it to reshape correct code into whatever happens to draw.
+
+**The AST pass decides which nodes exist**, and the registry pass says what each
+one is. The registry knows what the module declares, not what this flow runs, so
+seeding the graph from it put every `@step` in the file into every flow's graph.
+That is also why a durable call inside a `return` is extracted: `return await
+ctx.step(finalise, x)` is a step *and* a return, and it was previously only in
+the graph by accident, via the registry catch-all that put it in every flow.
+
 ## MCP Server
 
 `loom mcp` (`[mcp]` extra) serves the same Runtime to Claude Code, Claude
@@ -98,14 +138,18 @@ Desktop, and Cursor over the Model Context Protocol, built on the official SDK's
 so status goes to stderr.
 
 ```bash
-claude mcp add loom -- loom mcp --module flows.py
+loom setup claude          # or cursor, codex, all — writes the client's MCP config
+claude mcp add loom -- loom mcp --module flows.py   # the same thing by hand
 ```
 
 **One port, two clients.** `loom/facade.py` defines `RuntimeFacade`,
 the protocol the CLI and the MCP server both depend on, with `LocalFacade`
 (in-process Runtime) and `RemoteFacade` (`LoomClient`) implementing it. Add a
-capability there and both surfaces get it. `RuntimeBridge` is a deprecated alias
-for `LocalFacade`.
+capability there and both surfaces get it. `mcp_server/bridge.py::RuntimeBridge`
+is a deprecated shim over `LocalFacade`, not an alias for it — it warns once per
+call site and remaps the old key names, emitting `workflow_id`/`id` where the
+facade emits `workflow`/`name`. Swapping one for the other changes the payload,
+so port the key names with it.
 
 **Layering inside `mcp_server/`:** `tools.py`, `resources.py`, and `prompts.py`
 are plain coroutines over a facade and import nothing from `mcp`; `server.py` is
@@ -141,9 +185,21 @@ pytest tests/test_runtime.py::test_basic_workflow
 # Lint
 ruff check src tests
 
-# Type checking — in a `[dev]` environment, deliberately not `[all]`
-mypy
+# Type checking — in a `[dev]` environment, deliberately not `[all]`.
+# The wrapper fails loudly when mypy stopped before checking anything.
+python scripts/typecheck.py
 ```
+
+Type checking goes through `scripts/typecheck.py`, not `mypy` directly, and the
+CI job is **blocking**. Both because the obvious arrangement hid 42 real errors:
+`mypy || true` let them merge, and running mypy by hand in this repo's usual
+environment reports a numpy stub and *"errors prevented further checking"* —
+which looks like somebody else's problem and means **nothing was checked**. The
+wrapper asserts the `checked N source files` summary and exits **2** when it is
+missing, so "the gate did not run" is distinguishable from "the gate failed"
+(exit 1) by anything reading the code. `--strict-env` refuses outright when
+numpy is importable. `tests/test_typecheck_gate.py` drives it against each
+summary mypy can print.
 
 **mypy runs against `[dev]`, not `[all]`, and that is a decision rather than an
 accident.** `python_version = "3.11"` is the floor `requires-python` and the
@@ -221,10 +277,22 @@ Workflows park themselves by raising `Suspend(wake_at=datetime)` or `Suspend(awa
 
 ### Public API Surface
 
-`src/loom/__init__.py` re-exports ~10 symbols that form the user-facing API:
-`Context`, `ExecutionResult`, `ExecutionStatus`, `Failure`, `OnError`, `Retry`, `Usage`, `Runtime`, `StepContext`, `step`, `workflow`.
+`src/loom/__init__.py` re-exports 36 symbols that form the user-facing API —
+`loom.__all__` is the authoritative list, in four groups:
 
-All internal modules (~200+ classes) are implementation details.
+- **Authoring** — `workflow`, `step`, `pure`, `effect`, `node`, `StepClass`,
+  `Context`, `StepContext`, `Depends`, `Retry`, `OnError`, `Failure`
+- **Running** — `Runtime`, `ExecutionResult`, `ExecutionStatus`, `Usage`,
+  `DurabilityBackend`, `EmbeddedBackend`
+- **Data** — `Attachment`, `BlobService`, `ArtifactVersion`, `Result`, `Page`,
+  `Batch`, `CachePolicy`
+- **Policy** — `GrantSet`, `derive_grants`, `Role`, `FilterSpec`,
+  `FlowControlPolicy`, `AdmissionController`, `AdmissionRejected`,
+  `ResourceScope`, `resource`, `ToolsetManifest`, `register_toolset`
+
+Everything else (~200+ classes) is an implementation detail. Note that
+`loom.nodes` and `loom.toolsets` are deliberately *not* re-exported here — see
+the Nodes section for why.
 
 ### Workflow Coding Agent
 
@@ -234,7 +302,7 @@ The agent is the primary user-facing feature. It takes a natural-language descri
 - **Tools available to the coding agent:** Any `@step` or `WorkflowDefinition` can be surfaced as a `Tool` via `tool_from_step()` / `tool_from_workflow()` / `coerce_tool()` in `agents/tools.py`. The agent's toolset is therefore the SDK itself — it can call steps and sub-workflows as tools to introspect capabilities.
 - **Configuring it:** `WorkflowCodingAgent(instructions=...)` replaces `DEFAULT_SYSTEM_PROMPT` outright; `extra_instructions=` appends house rules; `allowed_packages={...}` states what the target environment has installed, which both goes into the prompt and is enforced by `CodeValidator` against imports. Pass `tool_registry=rt.toolsets` so the agent discovers exactly the toolsets the generated workflow can call.
 - **Schema derivation:** Tool schemas are derived from function signatures + docstring `Args:` sections (`agents/tools.py::build_parameter_schema`). Keep docstrings accurate — they are the source of truth for the model.
-- **Execution target:** Generated code must be runnable with just `pip install loomflow` and `MemoryStore` (no external infra). Sandbox or cloud execution is a deployment detail, not a code change.
+- **Execution target:** Generated code must be runnable with just `pip install loomsdk` and `MemoryStore` (no external infra). Sandbox or cloud execution is a deployment detail, not a code change.
 - **Agent persistence:** Coding sessions are durable artifacts. The authoring session (spec, decision log, diagnostics) is itself a workflow run that can be resumed — use `session`/`persistent` agent classes, not ephemeral.
 
 ### Extension Points
@@ -248,12 +316,12 @@ The agent is the primary user-facing feature. It takes a natural-language descri
 | Provider | Extra | Default model |
 |---|---|---|
 | `AnthropicProvider` | `[anthropic]` | `claude-sonnet-5` |
-| `OpenAIProvider` | `[openai]` | `gpt-5.6-luna` |
+| `OpenAIProvider` | `[openai]` | `gpt-5.6-terra` |
 | `GeminiProvider` | `[gemini]` | `gemini-2.5-pro` |
 
 ```python
 from loom.agents.providers import OpenAIProvider
-agent = Agent(name="x", model=OpenAIProvider())          # gpt-5.6-luna
+agent = Agent(name="x", model=OpenAIProvider())          # gpt-5.6-terra
 agent = Agent(name="x", model=OpenAIProvider("gpt-4.1")) # or name one
 ```
 
@@ -302,6 +370,7 @@ Detailed implementation plans are in `phases/`. Each file includes HLD, LLD, int
 - **`phases/phase-9-mcp-server.md`** — MCP server with tools/resources/prompts for Claude Desktop, Cursor, Claude Code; stdio and SSE transports
 - **`phases/phase-10-agent-framework-integrations.md`** — Bi-directional adapters for LangGraph, CrewAI, Pydantic AI, OpenAI Agents SDK, Claude SDK, Agno, AutoGen; conformance suite
 - **`phases/phase-11-testing-dx.md`** — Property-based tests (Hypothesis), chaos tests, CI pipeline, interactive playground, quickstart scaffolding, actionable error diagnostics
+- **`phases/phase-12-effect-classification.md`** — Derived `EffectProfile`, `schema_version` gate, taint keyed on `open_world`, reversibility and access-control facets, MCP annotations projected rather than hand-written, third-party conformance kit
 
 ### Key Design Principles
 
@@ -487,6 +556,19 @@ MCP-sourced one distinguishable.
 operation name; pass `effects={"scrape": EffectClass.WRITE}` when the name lies.
 `resolve_tools(effects={EffectClass.READ})` hands an agent a read-only toolset.
 
+**`OperationSpec.effect` defaults to `WRITE`**, and CERT-04 requires an
+explicit declaration — it checks `model_fields_set`, because the older
+`if not op.effect` could never fire against a truthy `StrEnum`. Declare
+`effect` on every operation, reads included; the default is a fail-safe
+backstop, not a classification, and a corpus test asserts no shipped operation
+reaches it.
+
+One live trap remains, still fail-open: the **name guess** in
+`from_steps`/`from_callables` falls back to READ, under-classifying 14% of
+LOOM's own 320 operations including seven destructive ones (`archive`, `trash`,
+`unshare`, `end` are absent from its verb list). Audited in
+`docs/design/effect-classification.md`.
+
 **Manifests must say how to import themselves.** Set `tools_module` on the
 manifest and `function=` on each `OperationSpec`; `import_line()` composes them
 and `registry.describe()` puts the result in front of the coding agent. Without
@@ -496,85 +578,17 @@ match. An operation id names a capability; only a function name is something
 anyone can write. `tests/test_manifest_imports.py` executes every declared
 import, so the docs cannot promise a symbol that is not there.
 
-### GitHub and GitLab Toolsets
+### Per-vendor toolset detail
 
-`toolsets/github/` (15 operations) and `toolsets/gitlab/` (14). Research and
-schema in `docs/design/github-gitlab-toolsets.md`.
+The API traps specific to one vendor — Slack's HTTP-200 failures, Zoom's
+double-encoded uuids, HubSpot's silent 10,000-result cap, ClickUp's two token
+shapes, Graph's second colon — live in **`src/loom/toolsets/CLAUDE.md`**, which
+loads when you work in that tree. Each one is also backed by the research it
+was built from under `docs/design/*-toolsets.md`.
 
-**Both signal pagination in response headers**, which no earlier dialect could
-read — by the time `page_through` hands a style the response, headers are gone.
-So these clients return `{"items": rows, "headers": {…}}` and `HeaderPaging`
-reads both halves: GitHub's `Link: …; rel="next"` (absence of `rel="next"` is
-the documented end) and GitLab's `x-next-page` (empty means the same as
-absent). Plain data deliberately — an httpx object in a paging style would make
-the style untestable without a transport.
-
-**GitHub's issue listings contain pull requests.** Its own model: *every pull
-request is an issue, but not every issue is a pull request*, told apart by a
-`pull_request` key. `github_list_issues` filters them out by default, because
-"how many open issues" answered over an unfiltered listing is wrong with
-nothing to notice. `GitHubIssue.is_pull_request` keeps it visible, and the
-filtered `Results` drops its `total` rather than reporting one that counted PRs.
-
-**Three GitHub signals mean "partial", none of them an error**: search caps at
-1,000 results however large `total_count` is, search is limited to 30
-requests/minute, and `incomplete_results` means the query timed out server-side.
-All three surface through `.complete`.
-
-**GitLab's `iid` is not its `id`.** The number in a URL is the per-project
-`iid`; the global `id` is a different number most endpoints reject. Both are
-carried under GitLab's own names. Two more traps encoded: `state="opened"`, not
-`"open"` (an unknown state is ignored and returns everything), and closing takes
-`state_event="close"`, not a state. A `group/project` path is URL-encoded for
-you — an unencoded slash is a different route and 404s.
-
-**Both return 404 for a resource the token cannot see**, so `GitHubNotFound` and
-`GitLabNotFound` say so in the message; otherwise a permissions problem is
-debugged as a typo. GitHub's 403 splits on `x-ratelimit-remaining`: zero is
-"wait", anything else is "never".
-
-### Salesforce and HubSpot Toolsets
-
-`toolsets/salesforce/` (11 operations) and `toolsets/hubspot/` (15) — the two
-CRMs, built from vendor docs read during the work rather than recalled. The
-research, schema, and phasing are in
-`docs/design/salesforce-hubspot-toolsets.md`.
-
-**Salesforce has no constant base URL.** Every org answers on its own host,
-returned by the OAuth exchange as `instance_url`; `login.salesforce.com`
-authenticates and does not serve data. The client therefore refuses to
-construct without either an explicit instance URL or the refresh credentials
-that produce one — a wrong base URL otherwise surfaces as 404s that look like
-missing records. Sandboxes need `SALESFORCE_LOGIN_URL=https://test.salesforce.com`;
-a sandbox token against the production host fails as `invalid_grant`, which
-reads like a bad token rather than a wrong host.
-
-**It also refreshes.** Access tokens expire mid-workflow, so the client owns
-the exchange, under a lock, and retries a 401 exactly once — the same
-arrangement `toolsets/google/auth.py` uses. Twice would turn a revoked grant
-into a loop against the login host.
-
-**A 403 splits.** `REQUEST_LIMIT_EXCEEDED` is org quota and clears if you wait;
-any other 403 is a permission that never will. Same rule the Google toolset
-applies to quota versus scope, and the reason `errorCode` is carried on the
-exception rather than just the status.
-
-**SOQL literals are escaped.** `O'Brien` is the most predictable surname in any
-CRM, and unescaped it terminates the string literal.
-
-**HubSpot's two caps both truncate silently.** Search returns at most 10,000
-results — paging past it is a 400 — so the client stops there and reports
-`complete=False` rather than turning a large query into an error at the end.
-And properties are opt-in: a response carries only what `properties=` asked
-for, so a default field list is declared per object type. Omitting it returns
-a contact with no company, which reads as missing data rather than as an
-under-specified request.
-
-Both APIs are uniform across object types, so both expose **generic CRUD plus
-typed finders** rather than five near-identical copies — a custom `Deal__c` or
-a custom HubSpot object is reachable without a library change. HubSpot's path
-version is a constructor argument, since it has begun publishing dated versions
-(`/crm/objects/2026-03/…`) alongside `v3`.
+Everything cross-cutting stays here: the three-layer lazy tool system,
+pagination, `resolves` and entity resolution, grant validation, and the
+walkthrough for adding a toolset.
 
 ### Listing toolsets from the CLI
 
@@ -584,365 +598,6 @@ resolves, and the import line generated code needs. Both read manifests only —
 Layer 1 — so listing costs no vendor imports and no credentials. Before this,
 the only way to answer "is Salesforce wired up here?" was to start an MCP
 server and ask it.
-
-### ClickUp and Asana Toolsets
-
-`toolsets/clickup/` and `toolsets/asana/` — 14 operations each, the same three
-files every shipped toolset uses, pure httpx, no vendor SDK.
-
-**Auth differs in a way worth knowing.** Asana is a plain bearer token
-(`ASANA_ACCESS_TOKEN`). ClickUp has two shapes sent *differently*: a personal
-token goes in `Authorization` **raw**, an OAuth token takes the `Bearer` prefix,
-and sending a personal token as `Bearer pk_…` returns 401 with no hint why.
-`CLICKUP_OAUTH_TOKEN` wins over `CLICKUP_API_TOKEN` when both are set.
-
-**Paging.** ClickUp counts *pages* — `page=0,1,…` with a `last_page` flag — which
-is `PageNumberPaging`, a dialect distinct from `OffsetPaging` because sending a
-row offset where a page number belongs returns the wrong window and no error.
-Asana carries an opaque offset inside `next_page.uri`, which `CursorPaging`
-already parses.
-
-**Asana's search neither pages nor ships on every plan.** It returns
-`list[AsanaTask]`, not `Results`, and declares `pagination=False` — Asana states
-results are unstable across identical queries, so there is no page to follow and
-no coverage to report. `AsanaPremiumRequired` is its own error class because a
-workflow can act on it: fall back to `asana_list_tasks` on a known project.
-
-**Writes with no idempotency key are not retried** — creating a task, posting a
-comment. A timeout after the service accepted it is indistinguishable from a
-failure, so a retry files it twice. Updates and deletes retry once, since naming
-the same task twice reaches the same end state.
-
-Both mark their people-lookup as `resolves="user"`: every write in either API
-takes an id (numeric in ClickUp, a `gid` in Asana), and a name passed where an id
-belongs matches nothing and reports **no error**.
-
-### Google Workspace Toolsets
-
-`toolsets/google/` — four separately-grantable toolsets (`gmail`,
-`google_calendar`, `google_drive`, `google_meet`) over one shared OAuth layer,
-pure httpx, no vendor SDK. Four rather than one because a workflow reading a
-calendar has no business holding a mail-send or a Drive-delete scope, and
-`GrantSet(toolsets=["google_calendar"])` should mean exactly that.
-`GOOGLE_MANIFESTS` registers all four in a line.
-
-Credentials resolve from the environment in order: `GOOGLE_ACCESS_TOKEN`, then
-`GOOGLE_CLIENT_ID`+`GOOGLE_CLIENT_SECRET`+`GOOGLE_REFRESH_TOKEN`, then
-`GOOGLE_SERVICE_ACCOUNT_FILE` (the only one needing the `[google]` extra). One
-cached token serves all four, refreshed under a lock — and a later toolset's
-scopes are *merged into* it rather than dropped. Without that the second
-toolset used gets a token carrying only the first one's scopes, which under a
-service account is a Drive call authenticated for Gmail: a 403 that reads as a
-broken credential rather than a shared cache. `python -m loom.toolsets.google.setup
---scopes drive` mints a refresh token; `read`/`write` are composed from the
-per-toolset sets, so a scope added to one cannot be missing from the combined one.
-
-**Errors are classified, not blanket-retried.** Google 4xx (bar 429) raises a
-`NonRetryableError` subclass, so a plain `Retry` policy stops on a malformed
-query rather than sleeping through three attempts. A 403 splits on `reason`:
-quota is retryable, missing scope is not.
-
-**Anything that a retry would duplicate has retries off.**
-`gmail_send_message`/`gmail_reply_to_message`/`gmail_forward_message`,
-`drive_upload_file`, and `meet_create_space`: none of those APIs offers an
-idempotency key, so a timeout after the effect is indistinguishable from a
-failure. Journaling covers replay; this covers the attempt. Calendar and Drive
-metadata writes retry once — a duplicate event or a re-applied rename is
-recoverable.
-
-**Defaults that avoid surprises:** `send_updates="none"` and Drive's
-`notify=False`, so bulk work does not email hundreds of people as a side effect
-of a default; `singleEvents=True` so recurring series come back as instances;
-`trashed = false` on every Drive search, so a workflow processing a folder does
-not re-process the bin.
-
-**Pagination is per-endpoint, because Google is not consistent with itself.**
-Gmail and Calendar read `maxResults`, Drive and Meet read `pageSize`, and each
-*ignores* the other rather than rejecting it — so the wrong name is not an
-error, it is every request silently asking for the server default. Page
-ceilings differ too (Drive files 1000, Drive permissions 100, Meet artifacts
-10). `GoogleSession.paginate(size_param=…, page_size=…)` takes both, every
-paged read returns `Results`, and `tests/test_manifest_imports.py` checks the
-client, the return type, and the manifest agree.
-
-**Every one of the six marks a resolver**, because every one of them accepts an
-id where a person says a name: Gmail a *label* (`gmail_modify_labels` takes
-`Label_7`, and passing "Urgent" applies nothing and reports success), Calendar a
-*calendar* (a secondary calendar's id is an opaque
-`...@group.calendar.google.com`), Drive a *folder*, Slack a *channel* and a
-*user*, Zoom a *user*. Meet is the exception and needs none — its inputs are
-resource names produced by other calls.
-
-A resolver that pages has a **third** answer, and the two that scan a list say
-so: `slack_find_channel` and `calendar_find_calendar` raise when the scan ran
-out before matching, rather than answering `None`. "Not found" is a fact a
-caller acts on — it creates the channel, or reports the gap — and it is only a
-fact if the whole list was searched. `None` from a truncated scan silently loses
-things that plainly exist, in exactly the workspaces big enough for it to
-matter.
-
-**Timeouts are configurable, and split in two.** Every client takes `timeout=`
-(30s, an API call) and the four that move bytes also take `transfer_timeout=`
-(300s). One budget for both would either fail every large Drive export and Zoom
-recording, or leave an ordinary API call hanging for five minutes.
-
-Two seams matter more than the individual tools, because in both cases the
-obvious toolset is the wrong one:
-
-- **Scheduling a meeting is a Calendar operation.** The Meet API cannot
-  schedule anything — `meet_create_space` makes a room with a link and no time,
-  no invitees and no calendar entry, which looks like success until nobody
-  joins. `calendar_create_event(..., add_meet=True)` is the real path; it sends
-  `conferenceDataVersion=1`, without which Google accepts the request, ignores
-  the conference block, and returns an event with no link and no error. The
-  `requestId` is *derived* from the event rather than random, so it is both
-  deterministic and an idempotency key against a re-driven step.
-- **A meeting's recording and transcript live in Drive.** Meet reports the ids;
-  `drive_download_file` fetches a recording and `drive_export_file` reads a
-  transcript — which is a Google Doc and so has no bytes to download.
-  `MeetRecording.is_ready` exists because Meet reports a recording the moment
-  it stops and the Drive file appears later.
-
-**Drive's failure modes are silent, so the client closes them.** A missing
-`fields` mask returns a file with no timestamps; a missing
-`includeItemsFromAllDrives` returns an empty list for a team whose files live
-on a shared drive; downloading a Google Doc is a 403 that reads as a
-permissions problem. All three answer 200-shaped and make a workflow report
-something untrue, so the mask is always sent, both shared-drive flags are
-always on, and a Doc download is refused up front naming the export call.
-`drive_find_folder` is marked `resolves="folder"` and matches exactly — a
-`name contains` query returns "Reports Archive" for "Reports", and writing to
-the wrong folder is worse than finding nothing.
-
-**Gmail permanent delete is deliberately not exposed.** `messages.delete` needs
-`https://mail.google.com/`, a *restricted* scope granting full mailbox access,
-so shipping one unrecoverable operation would widen what every Gmail workflow
-is granted. Trash is recoverable for 30 days and `gmail_untrash_message` undoes
-it. Threads are the better triage unit — Gmail's UI groups by conversation, so
-labelling one message of a thread looks like nothing happened — and
-`gmail_list_threads` is one request per page where `gmail_search_messages` is
-one per hit. `gmail_create_draft` is the safe half of sending: an agent writes,
-`ctx.wait_for_approval()` parks, a human sends.
-
-### Web Search Toolsets
-
-`toolsets/exa/`, `toolsets/tavily/`, `toolsets/duckduckgo/` — three because
-they are not interchangeable, and the manifests carry enough for the coding
-agent to choose.
-
-| Toolset | Credential | Paginates | Distinctive |
-|---|---|---|---|
-| `exa` (4 ops) | `EXA_API_KEY` (`x-api-key`) | no, cap 100 | Embeddings search — a *description*, not keywords. Page text, similar pages, cited answers. |
-| `tavily` (3 ops) | `TAVILY_API_KEY` (bearer) | no, cap 20 | `include_answer` returns a written answer beside the results. News/finance topics, page extract, site map. |
-| `duckduckgo` (3 ops) | none | **yes** | No key. Best-effort — see below. |
-
-**Neither Exa nor Tavily has a cursor of any kind**, so a request above the cap
-cannot be made whole. Both clients **refuse** rather than clamp: a caller that
-asked for 500, received 100, and reported 100 as the total is the failure
-`Results` exists to prevent, one layer earlier. The error is a
-`NonRetryableError` naming the ceiling and the alternative, so `Retry` stops
-instead of failing the same impossible request three times. Their reads return
-plain `list`s with `pagination=False`; `duckduckgo` returns `Results` because
-`ddgs` exposes a page number and the client follows it.
-
-**Partial success is carried.** Exa's `/contents` and Tavily's `/extract`
-answer 200 for a request in which some URLs failed, so the side array reaches
-the caller as `.failed` — a short list with nothing saying it is short is the
-same bug as a silent page cap.
-
-**DuckDuckGo is not an official API.** They publish none; their one documented
-endpoint returns instant answers and no web results. This rides on the
-third-party `ddgs` package, which parses result pages — `pip install
-'loomflow[duckduckgo]'`, optional precisely because it is a different
-reliability contract from the other two. Two things are engineered around it:
-being blocked raises a *retryable* `DuckDuckGoRateLimited` rather than
-returning `[]` (which a workflow reads as "nothing matched" and acts on), and
-the client drives the paging itself so `.complete` distinguishes "that is
-everything" from "it stopped early" — asking `ddgs` for 30 returns whatever it
-managed, silently. A *soft* block, no rows and no error, stays
-indistinguishable from a genuine miss; that one cannot be fixed here. `ddgs` is
-synchronous, so every call goes through `asyncio.to_thread`.
-
-**All ten operations are `READ` and `idempotent`**, which is load-bearing
-rather than bookkeeping: web search is the canonical taint source, so under
-`TaintBroker` a run that has searched needs a human before it writes. Classified
-as writes, no read could taint and the rule would be unreachable.
-
-Tavily's own `timeout` parameter is exposed as `read_timeout`, because
-`ctx.step` claims `timeout` and a tool declaring it is unreachable by keyword.
-
-### OneDrive and SharePoint Toolsets
-
-`docs/design/onedrive-sharepoint-toolsets.md` is the research these were built
-from — Graph API notes, schemas, and the decision each fact forced, with sources.
-
-`toolsets/microsoft/` — two separately-grantable toolsets (`onedrive`,
-`sharepoint`; 18 and 19 operations) over one shared Graph layer, pure httpx, no
-vendor SDK. **A SharePoint document library *is* a `drive` and its files *are*
-`driveItem`s**, so `models.py` is shared and a file moved between the two keeps
-one shape. They stay separate toolsets because the grant boundary is real.
-
-Credentials resolve in order: `MS_TENANT_ID`+`MS_CLIENT_ID`+`MS_CLIENT_SECRET`
-+`MS_REFRESH_TOKEN` (delegated — acts as a person), the same three without it
-(client credentials — acts as the app), then `MS_GRAPH_ACCESS_TOKEN`.
-`AZURE_TENANT_ID`/`AZURE_CLIENT_ID`/`AZURE_CLIENT_SECRET` are accepted as
-fallbacks, since that is the trio the Azure SDKs already put in an environment.
-The durable credential outranks the ready-made one for the same reason it does
-in `GoogleAuth`. One cached token serves both toolsets.
-
-**`/me` does not exist under an app-only token.** Client credentials
-authenticate the application, so there is no signed-in person and `/me/drive`
-fails with a 400 that reads as a broken toolset rather than a missing argument.
-The clients refuse **before the request**, naming both fixes: `MS_ONEDRIVE_USER`
-/ `MS_ONEDRIVE_DRIVE_ID`, or authenticate as a person.
-
-**Paging reuses `LinkPaging`**, and the reference is why: `@odata.nextLink` is a
-complete URL and the docs say *"Don't try to extract the `$skiptoken` […] and
-use it in a different request"* — which is what `CursorPaging` does. The
-follow-up therefore sends the URL verbatim with no parameters of its own; note
-that `httpx` clears a URL's query when handed even an empty `params` dict, which
-silently re-fetches page one forever.
-
-**A SharePoint column has two names and the wrong one fails silently.** Item
-values are keyed by the *internal* name ("Due Date" is `DueDate` or
-`Due_x0020_Date`); a write using display names is accepted and sets nothing, so
-the row is created and the value is missing. `sharepoint_list_columns` carries
-`resolves="column"` and returns both. Likewise `$expand=fields` is always sent,
-because Graph hides item values by default and an unexpanded read looks like an
-empty list rather than a missing parameter.
-
-Two smaller traps, both test-pinned: Graph's path escape needs a *second* colon
-when anything follows it (`/root:/Reports:/children`), which is why
-`addressing.py` exists; and an upload session's fragment `PUT`s must carry **no**
-`Authorization` header — the upload URL is pre-authenticated and signing it can
-401 — making them the only deliberately unsigned requests in the codebase.
-`onedrive_upload_file` refuses over 10 MiB and names
-`onedrive_upload_large_file`, whose 5 MiB chunk is a multiple of 320 KiB by
-construction, because a violation of that rule fails only after the last
-fragment. `onedrive_list_changes` wraps `delta` — Graph names polling as a
-leading cause of throttling — and returns the delta link beside the items,
-since a caller that drops it re-enumerates the whole drive next time.
-
-### Teams, OneNote, and Outlook Toolsets
-
-`docs/design/teams-onenote-outlook-toolsets.md` is the research these were built
-from. Four toolsets — `teams` (16 ops), `onenote` (12), `outlook_mail` (15),
-`outlook_calendar` (11) — over the same `toolsets/microsoft/` layer OneDrive and
-SharePoint use. **Outlook is two toolsets, not one**, for the reason the Google
-package already gives: reading a calendar should not confer sending mail.
-
-**The theme is that Microsoft restricts app-only auth inconsistently**, and the
-rule adopted is *refuse what cannot work, document what might not*.
-`microsoft/scope.py::user_root` is the shared refusal, now used by five clients:
-a `/me` path under client credentials cannot resolve, so it raises before the
-request naming `MS_TEAMS_USER`/`MS_ONENOTE_USER`/`MS_OUTLOOK_USER` and
-`MS_REFRESH_TOKEN`. A resource addressable without a user — `drive_id`, a
-OneNote `site_id`/`group_id` — bypasses it. Two restrictions are *not* refused:
-**sending a Teams message is delegated-only** (application permissions cover
-only `Teamwork.Migrate.All`, and a migration app is a real caller), and
-**OneNote's overview says app-only is unsupported while its per-operation pages
-list an application permission** — a contradiction quoted in the manifest rather
-than resolved by guessing.
-
-**Teams.** Graph's own docs say polling a resource more than once a day violates
-the Microsoft APIs Terms of Use; that is in the manifest because the coding
-agent is what would otherwise write the cron. Channel messages support **only**
-`$top` and `$expand` — no filter, no sort, silently ignored — so the client
-offers neither. `$top` caps at 50. Replies get their own operation because
-`$expand=replies` truncates at 200 behind a *nested* `replies@odata.nextLink`,
-and `$expand=members` on chats caps at 25 with no marker. Channel ids
-(`19:…@thread.tacv2`) carry a colon and an `@` through a path segment.
-
-**OneNote.** A page's content is an **HTML document, not JSON**: reading returns
-a string, and creating posts `Content-Type: text/html` whose `<title>` *becomes*
-the page title — there is no title field, so posting a bare fragment yields an
-untitled page and no error. `create_page` therefore assembles the document from
-a title and a body. Updates are `target`/`action`/`content` commands, and
-targeting anything but `body`/`title` needs `includeIDs=true` on the read.
-
-**Outlook mail.** Bodies come back as HTML unless `Prefer:
-outlook.body-content-type="text"` is sent, so the client sends it by default —
-and re-sends it per page, since a next-link carries parameters but not headers.
-`$filter` and `$orderby` have an ordering contract (sorted properties must
-appear in the filter, in order, first) or Graph answers `InefficientFilter`.
-Listings project a field set because a large page of full messages can hit a
-504. `sendMail` returns **202 = accepted, not delivered**, and the tool says so.
-
-**Outlook calendar.** `calendarView` versus `events` is the whole design:
-`/events` returns series *masters*, so "what is on Tuesday" asked there misses
-every recurring meeting and returns a plausible short list. `calendarView`
-expands occurrences over a required window — the same call `singleEvents=True`
-makes for Google Calendar. Times are UTC unless `Prefer: outlook.timezone` is
-set, and that header does *not* reinterpret the window, so the range values need
-their own offsets. `add_teams_meeting` sets `isOnlineMeeting` **and**
-`onlineMeetingProvider`; setting only the first yields an event that claims to
-be online and carries no join link. `cancel` notifies attendees where `delete`
-leaves their invitations in place.
-
-### Slack and Zoom Toolsets
-
-`docs/design/slack-zoom-toolsets.md` is the research these were built from —
-API notes, schemas, and the decisions each fact forced, with sources.
-
-**Slack's failures are HTTP 200s.** `{"ok": false, "error": "channel_not_found"}`
-with a 200 status line. A client written to the shape every other toolset here
-uses — raise above 399, else decode — treats every failure as an *empty
-success*, so a workflow posting to a channel it was never invited to reports the
-message as sent and delivers nothing. `toolsets/slack/errors.py` therefore
-classifies on the `error` string, and every response goes through
-`raise_for_status`. `missing_scope` gets its own type because the fix is a
-different action in kind — a reinstall, by a person — and Slack names the scope
-it wanted.
-
-**Slack's cursor is nested, and that needed no new dialect.** It lives at
-`response_metadata.next_cursor` and signals exhaustion with an empty string.
-Both are already `TokenPaging` behaviours — a tuple `token_field` addresses a
-nested position, as HubSpot's `paging.next.after` does — so Slack uses that. A
-`NestedTokenPaging` class was written and then deleted: it was the same dialect
-twice, which is the second source of truth `pagination.py` exists to prevent.
-
-**Everything in Slack takes an id, never a name.** `#incidents` is what people
-type and `C024BE91L` is what Slack accepts, so `slack_find_channel`
-(`resolves="channel"`) and `slack_find_user_by_email` (`resolves="user"`) are
-the two resolvers, and both match *exactly* — a prefix match would return
-`#eng-alerts` for `#eng` and post to the wrong room. `files.upload` stopped
-working in March 2025, so `slack_upload_file` is three calls to two hosts behind
-one tool, and the bot token is deliberately not sent to the pre-signed storage
-URL.
-
-**Zoom has two identifiers and they are not interchangeable.** `meeting.id` is
-numeric and names the *series*; `meeting.uuid` names one *occurrence*, and every
-past-meeting endpoint takes the second. Worse, a uuid is base64: one beginning
-with `/` or containing `//` must be **double** URL-encoded or Zoom answers
-`3001 Meeting does not exist` for a meeting that plainly does. `encode_uuid`
-applies the rule conditionally — double-encoding one that does not need it
-produces the same 3001 from the other direction.
-
-**`meeting.start_url` is a host credential**, carrying an embedded token that
-lets anyone who opens it run the meeting. That warning is a pydantic `Field`
-description rather than an attribute docstring, deliberately: only the former
-reaches `model_json_schema()`, which is what the manifest publishes and what the
-coding agent reads. A warning that lives only in the source is one the agent
-writing the code never sees.
-
-**A Zoom daily rate limit is non-retryable on purpose.** Both limits arrive as a
-429, and only the message text tells them apart — but a per-second limit clears
-while a step backs off and a daily one does not clear until midnight UTC, so
-retrying against it burns the run to reach the same answer. `ZoomDailyLimitReached`
-is a `NonRetryableError`; `ZoomRateLimited` is not.
-
-**Auth differs between them.** Slack is an ordinary bot token — `loom connect
-slack` (already a provider) or `$SLACK_BOT_TOKEN`. Zoom's default is
-Server-to-Server OAuth, which has **no refresh token**: the client id and secret
-*are* the durable credential and an hourly token is minted from them on demand,
-so the credential-store refresh machinery does not apply and `toolsets/zoom/auth.py`
-caches its own under a lock, as `GoogleAuth` does for a service account.
-`loom connect zoom` (a new provider entry) covers the user-delegated case.
-
-Neither posts nor schedules under a retry: `chat.postMessage` and
-`meetings.create` have no idempotency key, so a retry after a post-delivery
-timeout posts the message twice — visibly, to everyone — or puts a second
-meeting on the calendar with a different join link.
 
 ### Production Layer
 
@@ -1188,14 +843,32 @@ importable in the process doing the replay.
 ### Read-to-write taint
 
 `Runtime(broker=TaintBroker(GuardedBroker()))`. One rule: **once a run has read
-data it did not bring with it, a write or a destructive call needs a human.** A
+data it did not bring with it, a write or a destructive call needs a human.**
+
+**A read taints only if it was open-world.** The rule keys on `EffectClass.READ`
+**and** `open_world` — reaching outside the deployment — because those are not
+the same question. 20 of the 26 built-in nodes are READ and 16 of them are pure
+computation, so keying on the class alone meant `control.filter` on a list the
+run was handed refused the next write, naming the filter as external data it had
+read. Toolset operations default open (a toolset is a network call); nodes
+default closed and `io.*`, `agent.*` and `human.*` opt in. A journal entry
+without the field is treated as open, so an in-flight run keeps every refusal it
+would already have seen. A
 workflow that searches the web and then deletes tickets has taken instructions
 from something nobody reviewed — the property you want when a model wrote the
 body. Off unless composed in; taint sits *outside* whatever performs the effect,
 because it decides whether to dispatch at all.
 
 `block_writes` and `block_destructive` are separate dials: nearly every useful
-workflow writes after reading, and very few need to delete. `ctx.wait_for_approval`
+workflow writes after reading, and very few need to delete. Two narrower ones,
+**off by default**, are what make the rule usable when `block_writes` is too
+strict: `block_irreversible` refuses what nothing can undo — the axis
+`EffectClass` cannot express, since `gmail_trash_message` is DESTRUCTIVE and
+recoverable while `gmail_send_message` is WRITE and is not — and
+`block_access_control` refuses a change to *who can reach data*, which
+exfiltrates without writing anything and reads as an ordinary additive write.
+Neither applies to a read, and both are checked as well as the class, so
+enabling one can only add refusals. `ctx.wait_for_approval`
 clears the taint, and a read after that approval taints again.
 
 **Taint is derived from the journal, never accumulated in memory** — and the
@@ -1378,7 +1051,7 @@ available to anyone writing a workflow by hand.
 implementations, and importers. `--check` fails when a page no longer matches
 the code, and runs in CI.
 
-Nine seams and one gate, not a doc-sync suite: the value is the alarm, not the
+Fifteen seams and one gate, not a doc-sync suite: the value is the alarm, not the
 document. Implementations are found structurally as well as by declared base,
 because a Protocol is usually satisfied without naming it — listing only
 subclasses reported "none found" for exactly the seams whose implementations
@@ -1482,6 +1155,134 @@ properties. Anything deeper is the input model's own job and its error is
 better. `None` is never rejected: `run()` defaults its input to `None`, so it
 is indistinguishable from "not supplied". `Runtime(validate_input=False)` is
 the escape hatch for a codebase whose annotations were never meant as contracts.
+
+**The declared model is accepted as itself.** An object schema used to admit
+only a `dict`, so a workflow annotated `config: LeadConfig` refused a
+`LeadConfig` — with an error naming the type it refused as the type it wanted.
+A model instance is now an object; its required fields need no check here
+because constructing it already enforced them, with a better message.
+
+### Keeping credentials out of the journal
+
+`core/redaction.py`. A step's **inputs** are recorded for a person reading a
+trace and are never replayed — which also made them the shortest path from a
+credential to durable storage. `ctx.step(call_api, "hello", api_key)` recorded
+the key, and `loom show` printed it back.
+
+Three layers, strongest first, because the weakest is the only one that works
+on code nobody wrote with secrets in mind:
+
+| Layer | Guarantee |
+|---|---|
+| `loom.core.secret.Secret` | Refuses to serialize, so returning one fails loudly rather than leaking quietly. Travels with the value. |
+| `pydantic.SecretStr` | Encodes as `'**********'` — pydantic's own, pinned by a test rather than reimplemented. |
+| A name denylist | Any mapping key or parameter reading like a credential becomes `***`. Runs *after* encoding, so a nested model's `api_key` field is caught by the rule that catches a dict key. |
+
+**Positional arguments are bound to parameter names first**, because a denylist
+over keys cannot see `ctx.step(parse, text, api_key)` — and that is how a
+credential is actually passed. Matching is on whole words: a multi-word entry
+(`api_key`) matches a run anywhere, a single-word one (`token`, `secret`) must
+be the last word, so `openai_api_key` is caught while `tokenizer_config`,
+`secret_santa_list`, and `idempotency_key` are not. A denylist that redacts
+ordinary data is one people switch off.
+
+`Runtime(redact_keys=…)` widens it; an empty set records inputs verbatim, as
+every version before this did.
+
+**A run's own input is redacted at the display boundary, not at rest** —
+`describe_record`, beside `_public_metadata` — because that value *is* replayed:
+the body receives it on every re-entry, so redacting it in storage would change
+what the workflow runs with.
+
+What remains, and is asserted so nobody mistakes it for coverage: a secret
+interpolated into a string (`f"Bearer {token}"`) is not caught. Detecting it
+means guessing at contents, and a heuristic that redacts anything resembling a
+key eventually eats a legitimate identifier.
+
+### Calling a service with no toolset
+
+`ctx.node("io.http_request", {..., "connection": "acme"})` resolves a credential
+through `Runtime(connections=ConnectionBroker())` at call time. The field is
+`connection` and not `credential` for two reasons that agree: it holds an id
+rather than a secret, and a field named `credential` is redacted out of the
+journal by the rule above — erasing the one part worth recording. `auth_header`
+and `auth_scheme` cover an API that wants `X-Api-Key` or a raw token; several
+reject a prefixed one with a 401 and no explanation.
+
+Resolution happens **outside** the journaled call, so the token is never part
+of what a replay serves back. The node deliberately does not declare
+`connections` in `NodeSpec.requires`: requirements are checked before every
+call, and most calls name no connection — a node that demanded a broker to
+fetch a public URL would be worse than one that explains itself when a
+credential is actually asked for.
+
+### Retrieval — chunk, embed, index, search
+
+`loom/knowledge/`. **LOOM ships no vector database.** It ships two ports, a
+reference store built only on capabilities every LOOM store already has, and a
+conformance kit (`loom.testing.conformance.verify_vector_store`) so a host
+proves its own pgvector, Pinecone, or Qdrant adapter correct. Same position
+`loom/events/` takes about brokers, for the same reason: every adapter shipped
+is one that must be tested against a real server forever.
+
+```python
+rt = Runtime(store=store, embeddings=MockEmbeddings(),
+             vectors=StoreBackedVectorStore(store))
+```
+
+Both default to `None`; nothing is enforced unless a host composes them in.
+Three nodes reach them — `knowledge.chunk`, `knowledge.index`,
+`knowledge.search` — and the split is the code-or-judgement rule made
+structural: **chunking is a rule**, so it is deterministic and needs no ports,
+while indexing and searching reach a service and declare `requires`.
+
+**The failure this exists to prevent is that a search always returns
+something.** With `top_k=5` against an index of six unrelated documents, five
+come back, and only the score says they are all wrong — so an unthresholded RAG
+answer is the model citing the least-bad row, confidently. Every `Match` carries
+its score, `min_score` is how a workflow refuses one, and
+`dropped_below_threshold` is reported because *"nothing scored well"* and *"the
+index is empty"* are different facts a caller acts on differently.
+
+**Two embedding models occupy two different spaces.** The arithmetic across
+them succeeds and the scores look ordinary, so a namespace records the model
+that built it and refuses a write or a query from another. A dimension
+*mismatch* raises in `cosine` for the same reason — it is a configuration error
+worth finding at the first query rather than a ranking by noise.
+
+**Chunk ids are derived from content**, so re-indexing the same document
+updates rows instead of doubling the index. That is what makes an ingest safe
+to re-run, and what lets `ctx.continue_as_new` hand a successor the same
+namespace. **Overlap is the whole design** of the splitter: split cleanly, a
+fact straddling a boundary is in neither chunk, so a query for it matches
+nothing and the run reports "not found" about a document that plainly says it.
+
+`OpenAIEmbeddings` and `GeminiEmbeddings` ride the existing `[openai]` and
+`[gemini]` extras. There is no `AnthropicEmbeddings` — Anthropic publishes no
+embedding endpoint, and wrapping somebody else's model under that name would
+put a second vendor's dependency behind a first vendor's. Gemini distinguishes
+a query from a document through `task_type`, which is why the port has two
+methods rather than one: a provider that needs the distinction can make it, and
+the caller — who does not know which providers need it — is not asked to.
+
+`MockEmbeddings` is deterministic and **not a model**: it hashes, so "cat" and
+"kitten" are as far apart as "cat" and "tax law". A test asserting semantic
+similarity would pass or fail on hash luck; assert on exact text.
+
+### Reading a document
+
+`ctx.node("transform.parse_document", {"document": attachment})` returns a
+PDF, Word document, or text file as text — per page and joined. In `transform`
+rather than `io` because it reaches nothing.
+
+`pypdf` and `python-docx` are the `[documents]` extra; text, Markdown, CSV and
+JSON need nothing. **A page cap reports itself**: `max_pages` exists so a
+thousand-page filing does not become a context window by accident, but
+`truncated` says when it fired and `page_count` stays the document's, not the
+read's — the failure `Results.complete` prevents one layer up. Format comes
+from the mime type, then the filename, then the leading bytes, in that order of
+how much each can be trusted; an unrecognised one is refused by name rather
+than decoded into mojibake.
 
 ### Files and Artifacts
 
@@ -1653,6 +1454,19 @@ guess about what someone meant. `ResolutionStage` catches both by flagging a
 match operator whose operand came from the spec; an exact comparison is left
 alone, because `status = "In Progress"` is a plausible resolved value.
 
+**Nor is a remembered identifier**, which is the same failure one step later:
+`customfield_10016` or `C024BE91L` differs per account, so one nobody looked up
+is right somewhere else and silently wrong here. Baking an id in is *correct* —
+rung 2 says to — so a resolved id and an invented one are identical in the file,
+and the code cannot be the evidence. `IdentifierStage` weighs an id against
+whether a resolver for that kind was actually **called**, read from the agent's
+own tool calls rather than from anything it reports; a self-report would certify
+exactly the case the check exists to catch. `ToolsetManifest.opaque_ids` maps a
+pattern to the kind whose resolver produces it, so this is a declaration each
+toolset makes rather than a list of vendors in the agent layer. An id the spec
+supplied is never flagged, and most toolsets declare no pattern — silence is
+weak evidence, hence a warning rather than an error.
+
 ### Code or judgement
 
 Before writing anything the agent classifies each node: *can I write a rule
@@ -1674,6 +1488,58 @@ rather than with each one's size; detail comes from `show_toolset` on demand.
 registered, and a refusal returns the agent's explanation as a single
 `unsupported` issue rather than "no @workflow found".
 
+### Observing the target before writing against it
+
+`loom.agents.probes`. The coding agent could always ask what *loom* offers —
+which toolsets exist, what a node's contract is, whether the code compiles. It
+could never ask anything about the world its code would run in, so it wrote
+against whatever the spec's author remembered and found out only if the code
+crashed. A workflow that runs, completes, and answers wrongly looked exactly
+like one that worked.
+
+```python
+WorkflowCodingAgent(model=…, probes=default_probes())
+```
+
+`Probe` is two methods — `supports(target)` and `observe(target, hint=…)` —
+returning an `Observation` with a one-line `summary`, a structured `detail`, and
+`evidence` as `Attachment`s. Two rather than one `explore()`, so a probe that
+cannot handle a target says so without being asked to guess at it; the same
+reason `EventSource` is four small methods instead of one `handle()`.
+
+| Probe | Reaches | Extra |
+|---|---|---|
+| `HttpProbe` | a URL: status, content type, and a JSON response's *real field names* | core |
+| `BrowserProbe` | a rendered page: a census of native controls **and** role-based widgets, plus a screenshot | `[browser]` |
+
+**Read-only is a property of the implementation, not a promise in a docstring.**
+A probe is handed to a model, so "please do not write" is not a control.
+`HttpProbe` has no code path that sends anything but GET; `BrowserProbe`
+navigates, reads and screenshots and cannot click or type. `verify_probe` in
+`loom.testing.conformance` takes a `methods_seen` callback and fails on anything
+outside GET/HEAD — the check an author is least likely to write, because the
+code obviously does not write right up until a redirect or a retry means it does.
+
+**Absence degrades to exactly what shipped before.** An empty registry is falsy,
+and `build_coding_tools` omits `observe_target` entirely rather than offering a
+tool that always answers "not configured" — the rule `ask_user` already follows.
+An agent with no probes is bit-for-bit the agent that existed before them.
+
+**The two probes escalate rather than compete.** `HttpProbe` wins for a URL
+because it is cheap and right for an API; handed HTML it says so and names
+`probe='browser'`, and the model asks again. That matters because the failure
+this exists for is precisely a client-rendered page: fetching one over HTTP
+returns the shell, and a selector written against that shell finds nothing at
+runtime. The browser census reports *both* populations — "0 native form
+control(s), 4 role-based widget(s)" — because that sentence is not a description
+of the page, it is the reason the obvious selector will not work on it.
+
+**Authoring-time only, and not journaled.** Nothing in `loom.agents.probes` is
+reachable from a workflow body. A workflow reaches the world through `@step`,
+`ctx.node` and toolsets, which is what makes its graph a graph; a probe is the
+agent looking before it writes, and looking is not something the workflow later
+does.
+
 ### Verification Pipeline
 
 `agents/checks.py` defines `Check` and `CheckPipeline`; `agents/stages.py` holds
@@ -1683,13 +1549,41 @@ the stages. They run cheapest-first and stop at the first blocking error:
 |---|---|---|---|
 | `compile` | 0 | yes | `compile()` — everything after assumes it |
 | `static` | 10 | yes | the AST rules, toolset availability, store choice |
+| `grants` | 12 | no | a `GrantSet` entry that names nothing, so permits nothing |
 | `coverage` | 15 | no | the spec asked for *all* and the code caps a fetch |
-| `resolution` | 16 | no | a fuzzy match on a word the spec supplied |
+| `resolution` | 16 | no | a fuzzy match on a word the spec supplied — **errors** |
+| `placement` | 17 | no | filtered after fetching everything, not server-side |
+| `projection` | 18 | no | a durable call the graph does not draw |
+| `catalogue` | 19 | no | a step re-implementing a catalogued node |
+| `identifiers` | 18 | no | an opaque vendor id nothing looked up |
+| `judgement` | 19 | no | the answer comes out of a model the spec did not ask for — **errors** |
 | `lint` | 20 | no | ruff `F,E9` only; skips when absent |
 | `types` | 30 | no | mypy; warnings, not errors |
 | `smoke` | 50 | yes | runs it against fakes, faked clock |
+| `outcome` | 55 | no | the run finished — did it *answer*? |
 | `replay` | 60 | no | runs twice, compares — determinism observed |
 | `critique` | 100 | no | a second model, when configured |
+
+**Blocking and severity are different dials, and three stages use the second.**
+Blocking stops the pipeline; severity decides whether the *repair loop* is
+shown the finding, because it reads `report.errors`. `outcome`, `resolution`
+and `judgement` are therefore non-blocking errors: a warning there was a
+finding nobody saw, and each is safe to escalate for the same reason —
+**unchanged code ends the repair**, so a model that judges the finding wrong
+says so by leaving the file alone, and each message says that in as many words.
+
+The last two — one escalated, one new — came from a single generation that
+passed every stage. It matched a spec word as free text after looking in two
+of a tracker's several namespaces — an epic bore the name — and then spent a
+model call fetching a field its typed rows already carried and rendering the
+table. So the prompt's
+lookup budget is now **per namespace** rather than two per entity, with the
+namespaces named; `ResolutionStage` names the resolvers the registry actually
+declares rather than repeating "look it up" at an agent that had; and
+`JudgementStage` reports a workflow whose *answer* comes out of `ctx.agent()`
+when the spec asked for no judgement at all. It follows the value through
+assignment but stops at `ctx.step`/`ctx.node`, so the prescribed split — a
+model decides, a step composes — is not reported as the failure it fixes.
 
 Adding a stage is registration, not surgery — `WorkflowCodingAgent(stages=[...])`
 replaces the arrangement. A stage whose tool is missing reports itself
@@ -1698,6 +1592,28 @@ replaces the arrangement. A stage whose tool is missing reports itself
 Repair consumes the pipeline's issues, so a type error and a traceback reach the
 model by one path. Errors about the environment rather than the code never drive
 a repair — that is how a workflow came back gutted.
+
+**The repair prompt carries what the code returned**, beside the traceback it
+always carried. `smoke_run` recorded `output_preview` from the beginning and
+handed it only to the replay comparison, which asks whether two runs are *equal*
+and never whether either makes sense — so a model repairing "you returned
+nothing useful" could not see what it had returned. Verification the agent is
+not told about cannot correct anything.
+
+`OutcomeStage` is what turns a green run with a useless answer into a repair.
+Two conditions coincide before it says anything, the discipline `coverage` uses:
+the spec asked for completeness (its vocabulary, imported rather than copied),
+**and** the run came back with an empty collection anyway. It is an *error*
+rather than a warning because the repair loop runs on `report.errors`, so a
+warning is a finding nobody sees — and that is safe because the loop already
+stops on unchanged code: a model that judges the empty result correct says so by
+leaving the file alone, and the message tells it so.
+
+It reads `SmokeResult.empty_paths`, computed in the runner where the output is
+whole, rather than parsing `output_preview`. The first version did parse it,
+passed every test written for it, and then skipped the very workflow it was
+built for — whose empty `fields` list sat behind 1500 characters of page text,
+past the preview's 400-character cap.
 
 **Fakes** (`agents/fakes.py`) are built from each operation's `output_schema`,
 not hand-written, so they cannot drift from the contract. Without them the
@@ -2008,11 +1924,20 @@ before.
 | Store | URL | Driver | Install |
 |-------|-----|--------|---------|
 | `MemoryStore` | `memory://` | in-process | default |
-| `SQLiteStore` | `sqlite:///runs.db` | sqlite3 | default |
-| `MongoStore` | `mongodb://…` | motor | `pip install loomflow[mongo]` |
-| `PostgresStore` | `postgres://…` | asyncpg | `pip install loomflow[postgres]` |
+| `SQLiteStore` | `sqlite://runs.db` | sqlite3 | default |
+| `MongoStore` | `mongodb://…` | motor | `pip install loomsdk[mongo]` |
+| `PostgresStore` | `postgres://…` | asyncpg | `pip install loomsdk[postgres]` |
 
 All implement: `ExecutionStore + TriggerStore + CacheStore + LockProvider`.
+
+**SQLite takes the path in the URL's authority position: two slashes for a file
+beside you, three for an absolute one.** `sqlite://runs.db` is `./runs.db`;
+`sqlite:///runs.db` is `/runs.db` at the filesystem root, which is a real path
+and never the intended one. That is the opposite of SQLAlchemy's convention and
+stays that way deliberately — `f"sqlite://{path}"` over an absolute path is how
+every caller here spells the absolute case, so reinterpreting three slashes
+would silently redirect those writes rather than fail. `SQLiteStore` says all of
+this again if the path it is handed cannot be opened.
 
 **Workflows do not choose a store.** Where the journal lives is a deployment
 decision — tests want memory, a laptop wants SQLite, production wants Postgres,
@@ -2022,26 +1947,42 @@ declares steps and workflows and nothing else; the host supplies the store:
 ```python
 Runtime(store=PostgresStore(dsn))   # explicit
 Runtime.from_env()                  # from $LOOM_STORE, defaults to memory://
-from_url("sqlite:///runs.db")       # loom.stores.from_url
+from_url("sqlite://runs.db")        # loom.stores.from_url
 ```
 
 `CodeValidator` warns when a generated module constructs a store at import time.
 Doing it inside `if __name__ == "__main__"` is fine — that block is a script, not
 the library.
 
-### Workflow Management Tools (new)
+### Workflow Management Tools
 
-`agents/workflow_tools.py` provides 7 agent-facing tools: `list_workflows`, `get_workflow_info`, `run_workflow`, `schedule_workflow`, `list_runs`, `get_run_status`, `cancel_run`. These let a ReAct agent manage workflows via natural language.
+`agents/workflow_tools.py::build_workflow_tools` provides 9 agent-facing tools —
+`list_workflows`, `get_workflow_info`, `run_workflow`, `schedule_workflow`,
+`list_runs`, `get_run_status`, `cancel_run`, `list_artifacts`, `put_artifact` —
+so a ReAct agent can manage workflows in natural language. They are built over
+a `RuntimeFacade`, the same port `mcp_server/tools.py` uses, and
+`tests/test_surface_parity.py` is what keeps the two surfaces from drifting.
 
 ### Pip Extras
 
+`pyproject.toml` is authoritative; 24 extras, grouped:
+
+| Group | Extras |
+|---|---|
+| Stores | `postgres`, `mongo` |
+| Blobs | `s3`, `azure`, `gcs` |
+| Models | `anthropic`, `openai`, `gemini` |
+| Agent frameworks | `langchain`, `agno`, `pydantic-ai` |
+| Surfaces | `cli`, `tui`, `api`, `mcp` |
+| Toolsets | `google` (service-account JWT only), `duckduckgo` (`ddgs`) |
+| Authoring | `browser` (playwright, for the observation probe) |
+| Auth | `identity` (token verification), `credentials` (OS keyring) |
+| Meta | `dev`, `testing`, `all` |
+
 ```bash
-pip install loomflow              # core
-pip install loomflow[mongo]       # + MongoDB
-pip install loomflow[postgres]    # + PostgreSQL
-pip install loomflow[langchain]   # + LangChain/LangGraph
-pip install loomflow[agno]        # + Agno
-pip install loomflow[pydantic-ai] # + Pydantic AI
-pip install loomflow[duckduckgo]  # + ddgs, for the duckduckgo toolset only
-pip install loomflow[all]         # everything
+pip install loomsdk              # core — nothing above is needed to run a workflow
+pip install 'loomsdk[all]'       # everything
 ```
+
+Only two toolsets need an extra at all; the rest are pure `httpx`. Note `mypy`
+runs against `[dev]`, never `[all]` — see the Commands section for why.

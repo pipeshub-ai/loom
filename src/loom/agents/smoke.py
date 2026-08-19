@@ -78,6 +78,13 @@ class SmokeResult:
     run that executed nothing has demonstrated nothing about the code inside it.
     """
     output_preview: str = ""
+    empty_paths: list[str] = field(default_factory=list)
+    """Paths in the output holding an empty collection, e.g. ``stage2.fields``.
+
+    Computed in the runner, where the output is whole. ``output_preview`` is
+    capped at 400 characters, so a nested empty collection inside a large
+    result is not recoverable from it — which is exactly the shape the real
+    failure had."""
     workflows_found: list[str] = field(default_factory=list)
 
     @property
@@ -432,12 +439,20 @@ _RUNNER = textwrap.dedent('''\
         except Exception:
             executed = 0
 
+        try:
+            from loom.agents.outcome import empty_paths
+
+            empties = empty_paths(result.output)
+        except Exception:
+            empties = []
+
         report(
             ok=True,
             phase="done",
             status=result.status.value,
             steps_executed=executed,
             output_preview=str(result.output)[:400],
+            empty_paths=empties,
             workflows_found=names,
         )
 

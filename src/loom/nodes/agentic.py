@@ -73,6 +73,7 @@ class ClassifyNode(Node[ClassifyIn, ClassifyOut]):
 
     spec = agent_spec(
         id="agent.classify",
+        open_world=True,
         summary="Assign text to one of a fixed set of labels, using a model.",
         description=(
             "Reach for this instead of a keyword list. If you can state the rule "
@@ -136,6 +137,7 @@ class ExtractStructuredNode(Node[ExtractStructuredIn, ExtractStructuredOut]):
 
     spec = agent_spec(
         id="agent.extract_structured",
+        open_world=True,
         summary="Pull structured fields out of prose, using a model.",
         description=(
             "For text with no reliable shape. When the shape is reliable — an "
@@ -199,6 +201,7 @@ class SummarizeNode(Node[SummarizeIn, SummarizeOut]):
 
     spec = agent_spec(
         id="agent.summarize",
+        open_world=True,
         summary="Summarise text in a requested style and focus, using a model.",
         tags=["summarize", "digest", "condense", "judgement"],
         examples=[
@@ -241,6 +244,7 @@ class JudgeNode(Node[JudgeIn, JudgeOut]):
 
     spec = agent_spec(
         id="agent.judge",
+        open_world=True,
         summary="Score a candidate against stated criteria, using a model.",
         description=(
             "Returns a reason as well as a score, because a score nobody can "

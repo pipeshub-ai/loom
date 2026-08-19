@@ -78,7 +78,7 @@ class AutoGenExecutor:
 
 # -- static protocol check ---------------------------------------------------
 def _check() -> None:
-    _: AgentExecutor = AutoGenExecutor(team=None)  # type: ignore[arg-type]
+    _: AgentExecutor = AutoGenExecutor(team=None)
 
 
 # -- Direction B --------------------------------------------------------------

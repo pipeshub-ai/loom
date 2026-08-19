@@ -125,7 +125,10 @@ class SelfEncoding(Protocol):
 #: Decoding cannot import arbitrary classes named in a payload — that is how a
 #: journal becomes an execution vector — so a type opts in by registering, and
 #: an unknown name decodes to its plain data rather than raising.
-_WIRE_TYPES: dict[str, type] = {}
+# Typed as the protocol the registry actually holds. A bare `type` made
+# `target.__from_wire__` an attribute error on every decode — the registry's
+# whole purpose is that its members have that method.
+_WIRE_TYPES: dict[str, type[SelfEncoding]] = {}
 
 
 def register_wire_type(cls: type) -> type:

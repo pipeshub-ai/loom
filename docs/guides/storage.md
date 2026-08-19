@@ -49,7 +49,7 @@ from loom.stores.mongo import MongoStore
 runtime = Runtime(store=MongoStore("mongodb://localhost:27017/workflows"))
 ```
 
-Install: `pip install loomflow[mongo]`
+Install: `pip install loomsdk[mongo]`
 
 Requires a MongoDB 5.0+ instance. Supports:
 - Concurrent access from multiple workers
@@ -81,7 +81,7 @@ from loom.stores.postgres import PostgresStore
 runtime = Runtime(store=PostgresStore("postgresql://user:pass@localhost:5432/workflows"))
 ```
 
-Install: `pip install loomflow[postgres]`
+Install: `pip install loomsdk[postgres]`
 
 Requires PostgreSQL 14+. Supports:
 - Concurrent access with row-level locking

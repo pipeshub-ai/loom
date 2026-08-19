@@ -46,6 +46,15 @@ ASANA_MANIFEST = ToolsetManifest(
     auth={"type": "bearer", "fields": ["ASANA_ACCESS_TOKEN"]},
     tools_module="loom.toolsets.asana.tools",
     egress_hosts=["app.asana.com"],
+    rate_limits={
+        "model": "per-minute windows, tiered by whether the domain is free or paid",
+        "search": "60 requests per minute",
+        "concurrency": (
+            "duplication, instantiation and export endpoints allow 5 "
+            "concurrent jobs per user"
+        ),
+        "source": "developers.asana.com/docs/rate-limits",
+    },
     groups={
         "structure": [
             OperationSpec(

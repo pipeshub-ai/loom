@@ -10,6 +10,7 @@ say". These models are the flattened form, and the client does the walk once.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -206,7 +207,7 @@ class GmailHistory(BaseModel):
     start_history_id: str
     history_id: str
     """Where the next read starts. Persist this, not ``start_history_id``."""
-    records: list[dict] = Field(default_factory=list)
+    records: list[dict[str, Any]] = Field(default_factory=list)
     """Raw history records. Deliberately not flattened into typed models: Gmail
     adds history types over time, and a model that dropped an unknown one would
     silently lose changes rather than pass them through."""

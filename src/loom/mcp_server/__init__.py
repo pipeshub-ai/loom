@@ -4,7 +4,7 @@ Exposes a Runtime to any MCP client — Claude Code, Claude Desktop, Cursor — 
 tools (run a workflow, approve a parked one, read a journal), resources
 (``loom://workflows``, ``loom://runs/{id}``), and prompts (debug this run).
 
-    pip install loomflow[mcp]
+    pip install loomsdk[mcp]
     loom mcp --module flows.py
 
 The layering is deliberate:
@@ -33,7 +33,7 @@ __all__ = ["build_server", "create_server", "serve"]
 
 _MISSING = (
     "The MCP server needs the 'mcp' package. "
-    "Install with: pip install 'loomflow[mcp]'"
+    "Install with: pip install 'loomsdk[mcp]'"
 )
 
 

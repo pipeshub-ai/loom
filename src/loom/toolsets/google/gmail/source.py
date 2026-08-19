@@ -159,7 +159,7 @@ class GmailSource:
         except ImportError as exc:  # pragma: no cover - depends on extras
             raise VerificationFailed(
                 "verifying a Gmail push token needs `google-auth` "
-                "(pip install 'loomflow[google]'). Without it the signature "
+                "(pip install 'loomsdk[google]'). Without it the signature "
                 "cannot be checked, and reading the claims anyway would accept "
                 "a token anyone can mint."
             ) from exc

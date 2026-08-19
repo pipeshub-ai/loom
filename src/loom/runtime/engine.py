@@ -14,10 +14,11 @@ import inspect
 import logging
 import uuid
 import weakref
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
+from loom.blobs.refcount import record_refs
 from loom.core.exceptions import (
     AdmissionRejected,
     AuthExpired,
@@ -39,6 +40,7 @@ from loom.core.models import (
     ExecutionStatus,
     TriggerKind,
 )
+from loom.core.redaction import DEFAULT_REDACT_KEYS
 from loom.core.secret import Secret
 from loom.core.serde import decode, encode
 from loom.core.types import Duration, to_seconds
@@ -75,6 +77,7 @@ from loom.runtime.workflow import WorkflowDefinition
 from loom.security.authority import Authority
 from loom.security.rbac import Permission, Role, require
 from loom.steps.definition import StepDefinition
+from loom.stores.base import CacheStore
 from loom.stores.memory import MemoryStore
 
 logger = logging.getLogger("workflow.engine")
@@ -164,6 +167,10 @@ class Runtime:
         compatibility: CompatibilityMode = CompatibilityMode.STRICT,
         verify: VerifyMode = VerifyMode.WARN,
         validate_input: bool = True,
+        connections: Any | None = None,
+        embeddings: Any | None = None,
+        vectors: Any | None = None,
+        redact_keys: Iterable[str] | None = None,
         spill: Any | None = None,
         strict_determinism: bool = False,
         sandbox: ExecutionSandbox | None = None,
@@ -180,7 +187,11 @@ class Runtime:
             self.store = self.backend._store
         else:
             self.store = store or MemoryStore()
-        self.cache = cache if cache is not None else self.store
+        # Falls back to the store, and all four shipped stores implement
+        # CacheStore as well as ExecutionStore — but the ExecutionStore
+        # protocol does not promise it, so the fallback is the one place
+        # that has to assert the arrangement the store table documents.
+        self.cache: CacheStore = cache if cache is not None else cast("CacheStore", self.store)
         self.tracer: Tracer = tracer or NoopTracer()
         self.credentials = credentials
         self.credential_resolver = credential_resolver
@@ -423,6 +434,39 @@ class Runtime:
         journaled by design — legitimately differ across replays, so raising by
         default would break correct workflows to catch an uncommon one.
         """
+        self.connections = connections
+        """A :class:`~loom.toolsets.connections.ConnectionBroker`, or ``None``.
+
+        Where a named credential is exchanged for a token. ``io.http_request``
+        reads it so a workflow can call a service LOOM has no toolset for
+        without putting the token in the node's payload — which is journaled.
+        Naming a credential is safe to record; holding one is not."""
+        self.embeddings = embeddings
+        """An :class:`~loom.knowledge.EmbeddingProvider`, or ``None``.
+
+        What turns text into vectors for the ``knowledge.*`` nodes. ``None``
+        means nothing can be indexed or searched, and the nodes say so rather
+        than failing as an AttributeError from inside a body."""
+        self.vectors = vectors
+        """A :class:`~loom.knowledge.VectorStore`, or ``None``.
+
+        ``StoreBackedVectorStore(store)`` needs no service beyond the one
+        already backing the journal. A host with a million vectors implements
+        the port over pgvector, Pinecone, or Qdrant — which is what it is
+        for."""
+        self.redact_keys = (
+            DEFAULT_REDACT_KEYS if redact_keys is None else frozenset(redact_keys)
+        )
+        """Argument and field names replaced with ``***`` in recorded step inputs.
+
+        Step inputs are written for a person reading a trace and are never
+        replayed, so removing a credential from one costs a debugging aid and
+        nothing else. Pass a wider set to add house names; pass an empty one to
+        record inputs verbatim, as every version before this did.
+
+        This decides on *names*. A value typed :data:`loom.Secret` redacts
+        itself wherever it is written and is the stronger guarantee — see
+        :mod:`loom.core.secrets`."""
         self.validate_input = validate_input
         """Whether a payload is checked against ``input_schema()`` before a run opens.
 
@@ -491,7 +535,7 @@ class Runtime:
         laptop, and Postgres in production without the code knowing which — the
         environment decides, which is where that decision belongs.
 
-            LOOM_STORE=sqlite:///runs.db  python -m my_app
+            LOOM_STORE=sqlite://runs.db  python -m my_app
 
         Defaults to ``memory://`` when unset. Any keyword argument overrides,
         so ``Runtime.from_env(blobs=...)`` still works.
@@ -606,7 +650,8 @@ class Runtime:
         """Every workflow in the durable catalog, whether or not this process
         imported it. Compare ``record.name in self.workflows`` to tell what this
         Runtime can actually execute."""
-        return await self.catalog.list()
+        published: list[WorkflowRecord] = await self.catalog.list()
+        return published
 
     async def version_of(self, run_id: str) -> Any:
         """The :class:`WorkflowVersion` whose source produced *run_id*.
@@ -637,7 +682,8 @@ class Runtime:
                 and candidate.code_hash
                 and candidate.code_hash == record.code_hash
             ):
-                return candidate
+                found: WorkflowRecord = candidate
+                return found
         return None
 
     @property
@@ -854,7 +900,13 @@ class Runtime:
         clone.error = None
         clone.finished_at = None
         await self.store.create_execution(clone)
-        await self.store.save_journal(clone.run_id, await self.store.load_journal(run_id))
+        # The clone shares every blob ref with its source, which is precisely
+        # how compacting one used to destroy the other's payloads. Copying the
+        # journal without recording the clone as a referent would leave that
+        # sharing invisible to retention.
+        copied = await self.store.load_journal(run_id)
+        await self.store.save_journal(clone.run_id, copied)
+        await record_refs(self.cache, clone.run_id, copied)
         source_store = self._run_credentials.get(run_id)
         if source_store is not None:
             self._run_credentials[clone.run_id] = source_store
@@ -913,6 +965,18 @@ class Runtime:
         is a normal outcome an at-least-once consumer must be able to see: it
         is how the consumer knows to ack a redelivery rather than retry it.
         """
+        if run_id is not None and not run_id:
+            # A falsy target means "broadcast" below, and the stores persist it
+            # as a row any run awaiting this name may take. `None` says that on
+            # purpose -- ctx.publish waking every parker. An empty string is a
+            # caller that meant to name a run and did not, so it is refused
+            # here rather than becoming an approval left lying in the queue for
+            # whichever run reaches that gate next.
+            raise RegistryError(
+                f"send_event needs a run id to deliver '{name}' to; got ''. "
+                "Pass run_id=None to broadcast to every run awaiting it."
+            )
+
         if dedupe_key is not None and not await self.store.claim_event_delivery(
             dedupe_key
         ):
@@ -1294,8 +1358,14 @@ class Runtime:
 
     async def persist_journal(self, record: ExecutionRecord, journal: Journal) -> None:
         dirty = journal.drain_dirty()
-        if dirty:
-            await self.store.save_journal(record.run_id, dirty)
+        if not dirty:
+            return
+        await self.store.save_journal(record.run_id, dirty)
+        # The one point every journal flush passes through, and therefore the
+        # only place that sees a run id beside the entries that name its blobs.
+        # Costs nothing unless a payload was actually offloaded — see
+        # loom.blobs.refcount.
+        await record_refs(self.cache, record.run_id, dirty)
 
     # -- the core loop ----------------------------------------------------------------
 
@@ -1404,13 +1474,13 @@ class Runtime:
                 # credential, so 'loom connect <name>' plus that event
                 # delivery is what resumes it (never a bare retry loop; see
                 # AuthExpired's presence in core/retry.py::PERMANENT_ERRORS).
-                suspension = Suspend(
+                parked = Suspend(
                     str(expired),
                     path="",
                     awaiting_event=f"credential:{expired.name}" if expired.name else None,
                 )
                 await self.persist_journal(record, journal)
-                should_continue = await self._park(record, suspension, journal)
+                should_continue = await self._park(record, parked, journal)
                 if should_continue:
                     continue
                 span.set_status("suspended")
@@ -1800,7 +1870,7 @@ class Runtime:
         for handler in dict.fromkeys(handlers):
             try:
                 self._spawn(
-                    self.run(handler, envelope, trigger=TriggerKind.ERROR_HANDLER)  # type: ignore[arg-type]
+                    self.run(handler, envelope, trigger=TriggerKind.ERROR_HANDLER)
                 )
             except RegistryError:
                 logger.error("failure handler '%s' is not registered", handler)
@@ -2112,7 +2182,8 @@ class Runtime:
         task = asyncio.ensure_future(coro)
         self._background.add(task)
         task.add_done_callback(self._background.discard)
-        return task
+        spawned: asyncio.Task[Any] = task
+        return spawned
 
 
 def _backend_from_env() -> Any | None:

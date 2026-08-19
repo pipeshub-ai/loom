@@ -1,6 +1,6 @@
 """DuckDuckGo search client, over the third-party ``ddgs`` package.
 
-    pip install 'loomflow[duckduckgo]'
+    pip install 'loomsdk[duckduckgo]'
 
 No credentials. ``DDGS_PROXY`` is honoured by ``ddgs`` itself if you need to
 route through one.
@@ -113,7 +113,7 @@ class DuckDuckGoClient:
         except ImportError as exc:  # pragma: no cover - depends on the install
             raise ConfigurationError(
                 "The duckduckgo toolset needs the ddgs package: "
-                "pip install 'loomflow[duckduckgo]'. Note that ddgs parses "
+                "pip install 'loomsdk[duckduckgo]'. Note that ddgs parses "
                 "search result pages rather than calling an API — DuckDuckGo "
                 "publishes no web-search API. For a supported search API use "
                 "the exa or tavily toolsets."

@@ -54,6 +54,10 @@ BUILTIN_TOOLSETS: tuple[tuple[str, str], ...] = (
         f"{_TOOLSETS}.google.meet.manifest.GOOGLE_MEET_MANIFEST",
         f"{_TOOLSETS}.google.meet.tools",
     ),
+    (
+        f"{_TOOLSETS}.google.sheets.manifest.GOOGLE_SHEETS_MANIFEST",
+        f"{_TOOLSETS}.google.sheets.tools",
+    ),
     (f"{_TOOLSETS}.slack.manifest.SLACK_MANIFEST", f"{_TOOLSETS}.slack.tools"),
     (f"{_TOOLSETS}.zoom.manifest.ZOOM_MANIFEST", f"{_TOOLSETS}.zoom.tools"),
     (f"{_TOOLSETS}.clickup.manifest.CLICKUP_MANIFEST", f"{_TOOLSETS}.clickup.tools"),
@@ -63,6 +67,12 @@ BUILTIN_TOOLSETS: tuple[tuple[str, str], ...] = (
         f"{_TOOLSETS}.salesforce.tools",
     ),
     (f"{_TOOLSETS}.hubspot.manifest.HUBSPOT_MANIFEST", f"{_TOOLSETS}.hubspot.tools"),
+    (f"{_TOOLSETS}.stripe.manifest.STRIPE_MANIFEST", f"{_TOOLSETS}.stripe.tools"),
+    (f"{_TOOLSETS}.airtable.manifest.AIRTABLE_MANIFEST", f"{_TOOLSETS}.airtable.tools"),
+    (
+        f"{_TOOLSETS}.quickbooks.manifest.QUICKBOOKS_MANIFEST",
+        f"{_TOOLSETS}.quickbooks.tools",
+    ),
     (f"{_TOOLSETS}.github.manifest.GITHUB_MANIFEST", f"{_TOOLSETS}.github.tools"),
     (f"{_TOOLSETS}.gitlab.manifest.GITLAB_MANIFEST", f"{_TOOLSETS}.gitlab.tools"),
     (

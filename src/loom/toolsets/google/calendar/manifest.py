@@ -59,6 +59,12 @@ GOOGLE_CALENDAR_MANIFEST = ToolsetManifest(
     },
     tools_module="loom.toolsets.google.calendar.tools",
     egress_hosts=["www.googleapis.com", "oauth2.googleapis.com"],
+    rate_limits={
+        "model": (
+            "per-project quota units configured in the Google Cloud console; "
+            "no fixed per-second rate is published per method"
+        ),
+    },
     groups={
         "events": [
             OperationSpec(
@@ -229,6 +235,7 @@ GOOGLE_CALENDAR_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="events.update",
+                idempotent=True,
                 function="calendar_update_event",
                 summary="Patch fields on an existing event.",
                 effect=EffectClass.WRITE,
@@ -247,6 +254,7 @@ GOOGLE_CALENDAR_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="events.delete",
+                idempotent=True,
                 function="calendar_delete_event",
                 summary="Delete an event. Not recoverable.",
                 effect=EffectClass.DESTRUCTIVE,
@@ -373,6 +381,7 @@ GOOGLE_CALENDAR_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="calendars.delete",
+                idempotent=True,
                 function="calendar_delete_calendar",
                 summary="Delete a secondary calendar and every event on it.",
                 description=(
@@ -409,6 +418,10 @@ GOOGLE_CALENDAR_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="sharing.share",
+                idempotent=True,
+                reversible=True,
+                undone_by="sharing.unshare",
+                access_control=True,
                 function="calendar_share_calendar",
                 summary="Grant standing access to a whole calendar.",
                 description=(
@@ -447,6 +460,8 @@ GOOGLE_CALENDAR_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="sharing.unshare",
+                idempotent=True,
+                access_control=True,
                 function="calendar_unshare_calendar",
                 summary="Revoke one person's standing access to a calendar.",
                 effect=EffectClass.DESTRUCTIVE,

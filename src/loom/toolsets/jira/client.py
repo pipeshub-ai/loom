@@ -17,12 +17,16 @@ from __future__ import annotations
 
 import base64
 import os
+from collections.abc import Sequence
 from typing import Any
 
 from loom.connectors.credentials import current_credential_store, resolve_bearer_token
+from loom.core.exceptions import NonRetryableError, WorkflowError
 from loom.toolsets.jira.models import (
     Comment,
     CreatedIssue,
+    FieldLookup,
+    JiraField,
     JiraIssue,
     JiraProject,
     JiraProjectDetail,
@@ -41,6 +45,78 @@ from loom.toolsets.pagination import (
 #: Jira Cloud caps a page here whatever ``maxResults`` asks for, and reports
 #: no error when it does.
 JIRA_PAGE_CAP = 100
+
+#: What a search asks for when the caller names nothing. Jira returns *only*
+#: what ``fields=`` lists, so this is the whole of what a ``JiraIssue`` can be
+#: built from — and why a custom field is absent until something asks for it.
+DEFAULT_ISSUE_FIELDS = (
+    "summary", "status", "assignee", "priority",
+    "issuetype", "created", "updated", "duedate", "description",
+    "comment", "labels", "project",
+)
+
+# Jira REST id -> the JiraIssue attribute that carries it. What `resolve_field`
+# reads to say whether a system field needs a ``custom_fields`` entry: the ones
+# absent here (``resolutiondate``, ``parent``, ``fixVersions``, ...) are fetched
+# and returned only when a read names them.
+SYSTEM_FIELD_ATTRS = {
+    "summary": "summary",
+    "status": "status",
+    "assignee": "assignee",
+    "priority": "priority",
+    "issuetype": "issue_type",
+    "project": "project",
+    "labels": "labels",
+    "created": "created",
+    "updated": "updated",
+    "duedate": "due_date",
+}
+
+
+class JiraError(WorkflowError):
+    """A Jira request failed. Retryable unless a subclass says otherwise."""
+
+    def __init__(
+        self, message: str, *, status: int = 0, fields: dict[str, str] | None = None
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.fields = fields or {}
+        """Jira's per-field complaints, field id -> what is wrong with it.
+
+        The actionable half of a 400. Setting an unknown or unscreened custom
+        field is reported here and nowhere else, so discarding it leaves a
+        caller — or a repair loop — with "400 Bad Request" and no field name.
+        """
+
+
+class JiraPermanentError(JiraError, NonRetryableError):
+    """A request that fails the same way however often it is sent.
+
+    The two-level shape is load-bearing: a flat
+    ``class E(WorkflowError, NonRetryableError)`` has no consistent MRO and
+    fails at import.
+    """
+
+
+class JiraAuthError(JiraPermanentError):
+    """Missing, malformed, expired, or revoked credentials."""
+
+
+class JiraNotFound(JiraPermanentError):  # noqa: N818 - names a state
+    """No such issue, project, or field — or the token cannot see it.
+
+    Jira returns 404 for a resource the credential lacks permission on, so
+    this reads as "not visible to you" rather than strictly "absent".
+    """
+
+
+class JiraRateLimited(JiraError):  # noqa: N818 - names a state
+    """Quota spent. Retryable, and the caller should back off."""
+
+    def __init__(self, message: str, *, retry_after: float = 0.0, **kw: Any) -> None:
+        super().__init__(message, **kw)
+        self.retry_after = retry_after
 
 
 class JiraClient:
@@ -115,44 +191,42 @@ class JiraClient:
     # Low-level HTTP
     # ------------------------------------------------------------------
 
-    async def _get(self, path: str, **params: Any) -> Any:
+    async def _request(
+        self, method: str, path: str, *, params: Any = None, json: Any = None
+    ) -> Any:
+        """One place where a Jira response becomes a value or an exception.
+
+        Every method went through ``raise_for_status`` before, which discards
+        the body — and Jira puts the only useful part of a 400 in the body,
+        keyed by the field that caused it. A caller setting an unknown custom
+        field got ``Client error '400 Bad Request' for url ...`` and no way to
+        learn which field, while three retries were spent re-asking.
+        """
         import httpx
 
         url = f"{self._base_url}/rest/api/3/{path.lstrip('/')}"
         headers = await self._headers()
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(url, headers=headers, params=params)
-            resp.raise_for_status()
-            return resp.json()
+            resp = await client.request(
+                method, url, headers=headers, params=_clean(params), json=json
+            )
+        if resp.status_code >= 400:
+            raise _classify(resp)
+        if not resp.content:
+            return {}
+        return resp.json()
+
+    async def _get(self, path: str, **params: Any) -> Any:
+        return await self._request("GET", path, params=params)
 
     async def _post(self, path: str, json: dict[str, Any]) -> Any:
-        import httpx
-
-        url = f"{self._base_url}/rest/api/3/{path.lstrip('/')}"
-        headers = await self._headers()
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(url, headers=headers, json=json)
-            resp.raise_for_status()
-            return resp.json()
+        return await self._request("POST", path, json=json)
 
     async def _put(self, path: str, json: dict[str, Any]) -> Any:
-        import httpx
-
-        url = f"{self._base_url}/rest/api/3/{path.lstrip('/')}"
-        headers = await self._headers()
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.put(url, headers=headers, json=json)
-            resp.raise_for_status()
-            return resp.json() if resp.content else {}
+        return await self._request("PUT", path, json=json)
 
     async def _delete(self, path: str, **params: Any) -> None:
-        import httpx
-
-        url = f"{self._base_url}/rest/api/3/{path.lstrip('/')}"
-        headers = await self._headers()
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.delete(url, headers=headers, params=params)
-            resp.raise_for_status()
+        await self._request("DELETE", path, params=params)
 
     # ------------------------------------------------------------------
     # Issues
@@ -163,7 +237,8 @@ class JiraClient:
         jql: str,
         max_results: int = 20,
         fields: list[str] | None = None,
-    ) -> Results:
+        custom_fields: list[str] | None = None,
+    ) -> Results[Any]:
         """Search using JQL and return typed issues, following every page.
 
         Uses POST /rest/api/3/search/jql (Jira Cloud current endpoint), which
@@ -173,17 +248,21 @@ class JiraClient:
 
         The result is a list, so existing callers are unaffected; check
         ``.complete`` to find out whether ``max_results`` cut it off.
+
+        ``custom_fields`` are REST ids (``customfield_10016``) *appended* to
+        the defaults, where ``fields`` replaces them. Jira returns only what
+        was asked for, so a custom field absent from both arrives as absent
+        data rather than as an error — resolve the id with
+        :meth:`resolve_field` rather than guessing it.
         """
-        default_fields = [
-            "summary", "status", "assignee", "priority",
-            "issuetype", "created", "updated", "description",
-            "comment", "labels", "project",
-        ]
+        requested = list(custom_fields or [])
+        asked = list(fields or DEFAULT_ISSUE_FIELDS)
+        asked += [f for f in requested if f not in asked]
 
         return await page_through(
             lambda params: self._post(
                 "search/jql",
-                {"jql": jql, "fields": fields or default_fields, **params},
+                {"jql": jql, "fields": asked, **params},
             ),
             style=TokenPaging(
                 items="issues",
@@ -193,13 +272,25 @@ class JiraClient:
             ),
             limit=max_results,
             page_size=JIRA_PAGE_CAP,
-            row=_flatten_issue,
+            row=lambda data: _flatten_issue(data, requested),
         )
 
-    async def get_issue(self, issue_key: str) -> JiraIssue:
-        """Fetch a single issue by key, e.g. ``'PROJ-123'``."""
-        data = await self._get(f"issue/{issue_key}")
-        return _flatten_issue(data)
+    async def get_issue(
+        self, issue_key: str, custom_fields: list[str] | None = None
+    ) -> JiraIssue:
+        """Fetch a single issue by key, e.g. ``'PROJ-123'``.
+
+        ``custom_fields`` names REST ids to fetch alongside the standard set;
+        they arrive on :attr:`JiraIssue.custom_fields`.
+        """
+        params: dict[str, Any] = {}
+        requested = list(custom_fields or [])
+        if requested:
+            asked = list(DEFAULT_ISSUE_FIELDS)
+            asked += [f for f in requested if f not in asked]
+            params["fields"] = ",".join(asked)
+        data = await self._get(f"issue/{issue_key}", **params)
+        return _flatten_issue(data, requested)
 
     async def create_issue(
         self,
@@ -210,8 +301,16 @@ class JiraClient:
         priority: str = "Medium",
         labels: list[str] | None = None,
         assignee_account_id: str | None = None,
+        custom_fields: dict[str, Any] | None = None,
     ) -> CreatedIssue:
-        """Create a new issue. Returns key, id, and browse URL."""
+        """Create a new issue. Returns key, id, and browse URL.
+
+        ``custom_fields`` is merged in after the named arguments, keyed by
+        REST id and carrying Jira's own value shape — a number for a number
+        field, ``{"value": "High"}`` for a select. A project that makes a
+        custom field mandatory cannot be created in without it, and Jira
+        reports that as a 400 naming the field.
+        """
         fields: dict[str, Any] = {
             "project": {"key": project_key},
             "summary": summary,
@@ -230,6 +329,8 @@ class JiraClient:
             fields["labels"] = labels
         if assignee_account_id:
             fields["assignee"] = {"accountId": assignee_account_id}
+        if custom_fields:
+            fields.update(custom_fields)
 
         data = await self._post("issue", {"fields": fields})
         key = data["key"]
@@ -304,7 +405,7 @@ class JiraClient:
         )
         return issue_key
 
-    async def get_comments(self, issue_key: str, max_results: int = 20) -> Results:
+    async def get_comments(self, issue_key: str, max_results: int = 20) -> Results[Any]:
         """Read an issue's comments, flattened out of Atlassian Document Format.
 
         Offset-paged rather than token-paged — the same endpoint family, a
@@ -380,10 +481,10 @@ class JiraClient:
             active=bool(data.get("active", True)),
         )
 
-    async def search_users(self, query: str, max_results: int = 10) -> Results:
+    async def search_users(self, query: str, max_results: int = 10) -> Results[Any]:
         """Find users by display name or email.
 
-        The bridge between a human saying "Vishwjeet" and JQL, which addresses
+        The bridge between a human saying a colleague's name and JQL, which addresses
         people by ``accountId``. Matching on a display name inside JQL works
         until two people share one, or somebody is renamed; an accountId does
         not move.
@@ -403,6 +504,173 @@ class JiraClient:
             ),
         )
 
+
+    # ------------------------------------------------------------------
+    # Fields
+    # ------------------------------------------------------------------
+
+    async def _catalogue(self) -> list[dict[str, Any]]:
+        """``GET /field`` — every field it will admit to, system ones included.
+
+        Only this endpoint carries ``clauseNames``, and only it covers system
+        fields — but on an instance with no company-managed project it omits
+        app-created custom fields entirely (about 45 of 85 in the report that
+        prompted this), so it cannot be the source of the custom field list.
+        It is the enrichment; ``field/search`` is the list.
+        """
+        rows = await self._get("field")
+        return [r for r in (rows or []) if isinstance(r, dict) and r.get("id")]
+
+    @staticmethod
+    def _clause_names(catalogue: list[dict[str, Any]]) -> dict[str, list[str]]:
+        """Field id -> the names JQL accepts for it."""
+        return {
+            str(row["id"]): list(row.get("clauseNames") or []) for row in catalogue
+        }
+
+    async def list_fields(
+        self, query: str = "", max_results: int = 200
+    ) -> Results[Any]:
+        """Every custom field this instance defines, optionally name-filtered.
+
+        Over ``field/search`` rather than ``field``: the paginated endpoint
+        returns app-created custom fields regardless of which project types
+        exist, where the plain one silently omits them on an instance with
+        only team-managed projects. Silently is the operative word — the
+        missing field looks like a field nobody created.
+
+        ``query`` is Jira's own substring match over name and description.
+        Check ``.complete``: an instance with a thousand custom fields will
+        not fit one call, and "not in the first 200" is not "does not exist".
+        """
+        clause_names = self._clause_names(await self._catalogue())
+
+        def request(params: dict[str, Any]) -> Any:
+            return self._get(
+                "field/search", type="custom", query=query or None, **params
+            )
+
+        return await page_through(
+            request,
+            style=OffsetPaging(items="values", total_field="total"),
+            limit=max_results,
+            page_size=JIRA_PAGE_CAP,
+            row=lambda item: _field_row(item, clause_names),
+        )
+
+    @staticmethod
+    def _system_field_note(wanted: str, field_id: str) -> str:
+        """What a caller has to do to read a system field, per field.
+
+        JiraIssue carries ten of them and no more, so a blanket "already
+        carried" sent a read for a due date away with nothing to ask for and
+        an empty mapping to read from.
+        """
+        attr = SYSTEM_FIELD_ATTRS.get(field_id)
+        if attr:
+            return (
+                f"{wanted!r} is a system field ({field_id}), not a custom one. "
+                f"JiraIssue carries it as issue.{attr} — no custom_fields entry "
+                "is needed to read it."
+            )
+        return (
+            f"{wanted!r} is a system field ({field_id}), not a custom one, and "
+            "JiraIssue has no attribute for it. Read it the same way as a "
+            f"custom field: custom_fields=[{field_id!r}] on the search or get, "
+            f"then issue.custom_fields[{field_id!r}]. In JQL use the clause "
+            "name, not the id."
+        )
+
+    async def resolve_field(
+        self, field_name: str, cutoff: float = 0.6
+    ) -> FieldLookup:
+        """Resolve a field's display name to the id a REST payload needs.
+
+        The field equivalent of :meth:`resolve_user`, and the same failure
+        without it: "Story Points" is a name a person uses and
+        ``customfield_10016`` is what Jira stores, the number differs per
+        instance, and a guess either 400s on a write or filters on nothing.
+
+        Near matches are returned labelled rather than silently accepted.
+        "Story Points" and "Story point estimate" are different fields on
+        instances that have both, and picking one writes to the wrong column.
+        """
+        import difflib
+
+        wanted = field_name.strip()
+        found = await self.list_fields(wanted, max_results=200)
+
+        exact = [f for f in found if f.name.lower() == wanted.lower()]
+        if exact:
+            note = ""
+            if len(exact) > 1:
+                note = (
+                    f"{len(exact)} fields are named {wanted!r} "
+                    f"({', '.join(f.id for f in exact)}). Jira allows duplicate "
+                    "names; pick by id, do not assume the first."
+                )
+            return FieldLookup(query=wanted, matches=exact, exact=True, note=note)
+
+        # A system field before a fuzzy guess. `field/search` returns custom
+        # fields only, so "Summary" finds nothing there and would otherwise be
+        # scored against every custom field on the site — confidently
+        # returning whichever happened to look most like it.
+        catalogue = await self._catalogue()
+        clause_names = self._clause_names(catalogue)
+        system = [
+            _field_row(row, clause_names)
+            for row in catalogue
+            if not row.get("custom") and (row.get("name") or "").lower() == wanted.lower()
+        ]
+        if system:
+            return FieldLookup(
+                query=wanted,
+                matches=system,
+                exact=True,
+                note=self._system_field_note(wanted, system[0].id),
+            )
+
+        # Jira's `query` is a substring match, so a wrong word order or a
+        # typo returns nothing at all. Sweep the catalogue and rank it.
+        candidates = list(found) or list(await self.list_fields(max_results=1000))
+        if not candidates:
+            return FieldLookup(
+                query=wanted,
+                note=(
+                    f"No field matches {wanted!r}, and no near match either. "
+                    "Check the spelling against jira_list_fields rather than "
+                    "assuming an id."
+                ),
+            )
+
+        scored = sorted(
+            (
+                (difflib.SequenceMatcher(None, wanted.lower(), f.name.lower()).ratio(), f)
+                for f in candidates
+            ),
+            key=lambda pair: -pair[0],
+        )
+        close = [f for score, f in scored if score >= cutoff]
+        if not close:
+            return FieldLookup(
+                query=wanted,
+                matches=[f for _, f in scored[:3]],
+                note=(
+                    f"No field is named {wanted!r}. The closest were "
+                    f"{[f.name for _, f in scored[:3]]} — none close enough to "
+                    "assume. Confirm which one before writing to it."
+                ),
+            )
+
+        return FieldLookup(
+            query=wanted,
+            matches=close,
+            note=(
+                f"No exact match for {wanted!r}; {close[0].name!r} "
+                f"({close[0].id}) is the closest. Treat as a suggestion, not a "
+                "fact, before writing."
+            ),
+        )
 
     async def resolve_user(self, name: str, cutoff: float = 0.6) -> UserLookup:
         """Find a person by name, tolerating a misspelling.
@@ -482,8 +750,101 @@ def _flatten_adf(node: Any) -> str:
     return joined + "\n" if node.get("type") == "paragraph" else joined
 
 
-def _flatten_issue(raw: dict[str, Any]) -> JiraIssue:
-    """Flatten a Jira issue API response into a typed model."""
+def _clean(params: Any) -> Any:
+    """Drop unset filters — httpx would otherwise send the string ``"None"``."""
+    if not isinstance(params, dict):
+        return params
+    return {k: v for k, v in params.items() if v is not None}
+
+
+def _classify(response: Any) -> JiraError:
+    """Turn a failed response into the narrowest error that fits.
+
+    Jira reports a bad field twice over: a sentence in ``errorMessages`` and a
+    map in ``errors`` keyed by the field id. Both go into the message, and the
+    map is kept on the exception, because "which field" is the only part a
+    caller can act on.
+    """
+    status = response.status_code
+    try:
+        body = response.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    messages = [str(m) for m in (body.get("errorMessages") or [])]
+    raw_fields = body.get("errors")
+    fields = (
+        {str(k): str(v) for k, v in raw_fields.items()}
+        if isinstance(raw_fields, dict)
+        else {}
+    )
+    detail = "; ".join(
+        [*messages, *(f"{k}: {v}" for k, v in fields.items())]
+    ) or (response.text or "").strip()[:300]
+    message = f"Jira {status}: {detail or 'request failed'}"
+
+    if status == 429:
+        return JiraRateLimited(
+            message,
+            status=status,
+            fields=fields,
+            retry_after=float(response.headers.get("Retry-After", 0) or 0),
+        )
+    if status == 401:
+        return JiraAuthError(message, status=status, fields=fields)
+    if status == 404:
+        return JiraNotFound(message, status=status, fields=fields)
+    if 400 <= status < 500:
+        return JiraPermanentError(message, status=status, fields=fields)
+    return JiraError(message, status=status, fields=fields)
+
+
+def _field_row(
+    item: dict[str, Any], clause_names: dict[str, list[str]] | None = None
+) -> JiraField:
+    """One row of ``field``/``field/search`` as a typed model.
+
+    ``field/search`` carries no ``clauseNames``, so they are taken from the
+    ``field`` catalogue where it knows the id and synthesised where it does
+    not: JQL accepts a custom field by display name and by ``cf[10016]``, and
+    an empty list would read as "this field cannot be used in JQL".
+    """
+    schema = item.get("schema") or {}
+    field_id = str(item.get("id", ""))
+    name = item.get("name") or ""
+    custom_id = schema.get("customId")
+    known = (clause_names or {}).get(field_id)
+    if known:
+        clauses = list(known)
+    else:
+        clauses = [name] if name else []
+        if custom_id is not None:
+            clauses.append(f"cf[{custom_id}]")
+    return JiraField(
+        id=field_id,
+        name=name,
+        custom=bool(item.get("custom", schema.get("custom") is not None)),
+        field_type=str(schema.get("type", "") or ""),
+        custom_id=int(custom_id) if isinstance(custom_id, int) else None,
+        clause_names=clauses,
+    )
+
+
+def _flatten_issue(
+    raw: dict[str, Any], requested: Sequence[str] = ()
+) -> JiraIssue:
+    """Flatten a Jira issue API response into a typed model.
+
+    ``requested`` is what the read named in ``custom_fields=``; each one is
+    carried back on :attr:`JiraIssue.custom_fields` under the id it was asked
+    for. Keying that off a ``customfield_`` prefix instead was the bug this
+    argument exists to close: ``jira_resolve_field`` resolves a *system* field
+    to a bare id (``duedate``, ``resolutiondate``), the client duly fetched it,
+    and the flattener then dropped it — a read that asked for a due date got
+    an empty mapping and no error.
+    """
     f = raw.get("fields", {})
     base_url = raw.get("self", "").split("/rest/")[0]
     key = raw.get("key", "")
@@ -501,7 +862,19 @@ def _flatten_issue(raw: dict[str, Any]) -> JiraIssue:
         labels=f.get("labels", []),
         created=f.get("created", ""),
         updated=f.get("updated", ""),
+        due_date=f.get("duedate") or "",
         url=f"{base_url}/browse/{key}",
+        # Only present when the read asked for them. Left in Jira's own shape:
+        # a select is {"value": ..., "id": ...}, a user an account object, and
+        # flattening those would decide, wrongly and per instance, which half
+        # the caller wanted.
+        custom_fields={
+            **{k: v for k, v in f.items() if k.startswith("customfield_")},
+            # Present with a None value when the field was asked for and the
+            # issue has nothing in it — "asked and empty" and "never asked"
+            # are different answers and a caller acts on them differently.
+            **{k: f.get(k) for k in requested if k in f},
+        },
     )
 
 

@@ -100,3 +100,19 @@ def idempotency_key(*parts: Any) -> str:
 def worker_id() -> str:
     """Identify this process within a worker fleet (used for lease ownership)."""
     return f"{os.uname().nodename}:{os.getpid()}"
+
+
+def callable_name(target: object, default: str) -> str:
+    """``__name__`` as the string it is in practice, never ``Any``.
+
+    ``getattr`` returns ``Any``, and an ``Any`` passed as a ``name=`` spreads:
+    every step, tool, workflow and guardrail built this way had an unchecked
+    name, and so did every journal entry and fingerprint derived from it. Five
+    call sites shared the defect, which is why this is here rather than beside
+    any one of them.
+
+    Tested rather than annotated, so a target whose ``__name__`` is not a string
+    gets *default* instead of a ``str()`` of whatever it happened to be.
+    """
+    found = getattr(target, "__name__", None)
+    return found if isinstance(found, str) else default

@@ -42,8 +42,9 @@ from loom.core.exceptions import ConfigurationError, InsufficientScope
 from loom.facade import RuntimeFacade
 from loom.identity.principal import Principal
 from loom.identity.scopes import Scope
+from loom.runtime.context import SCOPES_KEY
 
-__all__ = ["PRINCIPAL_KEY", "AuthorizedFacade"]
+__all__ = ["PRINCIPAL_KEY", "SCOPES_KEY", "AuthorizedFacade"]
 
 PRINCIPAL_KEY = "loom.principal"
 """The ``record.metadata`` key a run's owning principal's ``subject`` is
@@ -89,7 +90,17 @@ class AuthorizedFacade:
                 "connect the credential on the server with 'loom connect', or "
                 "start the run in-process."
             )
-        pinned = {**(metadata or {}), PRINCIPAL_KEY: self.principal.subject}
+        # The scopes go on the record beside the subject, because they decide
+        # what the *run* may reach — and `scopes_to_grant` was written for that
+        # and called from nowhere, so a token scoped to `jira:read` started runs
+        # with the workflow's full declaration and the scope described nothing
+        # that happened. Recorded rather than passed, so the narrowing survives
+        # a park: a run resumed by a timer has no caller to ask.
+        pinned = {
+            **(metadata or {}),
+            PRINCIPAL_KEY: self.principal.subject,
+            SCOPES_KEY: sorted(self.principal.scopes),
+        }
         result = await self.inner.start(
             workflow,
             payload,

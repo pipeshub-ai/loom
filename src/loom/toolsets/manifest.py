@@ -41,11 +41,102 @@ class OperationSpec(BaseModel):
     """One-line description (~40 tokens)."""
     description: str = ""
     """Full documentation."""
-    effect: EffectClass = EffectClass.READ
+    effect: EffectClass = EffectClass.WRITE
+    """What this operation does to the world. **Declare it on every operation,
+    including the reads** — the default is a backstop, not a classification.
+
+    It defaults to ``WRITE`` because the alternative fails open. ``READ`` is the
+    one class exempt from every write and destructive control, so defaulting to
+    it means an operation nobody classified is *granted* rather than flagged: a
+    forgotten ``delete`` is reachable by an agent resolved with
+    ``resolve_tools(effects={EffectClass.READ})``. Defaulting to ``WRITE`` makes
+    the failure mode a refused call instead, which is recoverable by reading the
+    error. ``EffectCall.effect`` in ``runtime/effects.py`` has always defaulted
+    this way; this makes the manifest agree with the broker.
+
+    All 320 operations LOOM ships declare this explicitly, so the default is
+    reached only by a toolset that has not been classified yet — which is
+    exactly the case that should not be trusted with a read-only grant.
+    """
     input_schema: dict[str, Any] = Field(default_factory=dict)
     """JSON Schema for the input payload (if no Pydantic model)."""
     output_schema: dict[str, Any] = Field(default_factory=dict)
     """JSON Schema for the output payload."""
+    reversible: bool = False
+    """Can this operation's effect be undone, restoring the prior state?
+
+    **Not** "is there an opposite operation". Deleting an issue you created
+    does not undo the create — the key is consumed, the comments are gone — so
+    ``issues.create`` is not reversible by ``issues.delete``. Only a genuine
+    restore counts: trash/untrash, share/unshare.
+
+    This is the axis ``EffectClass`` cannot express, and the one that matters
+    most when a model is choosing. Ranked by damage, ``gmail_trash_message`` is
+    DESTRUCTIVE and ``gmail_send_message`` is WRITE — but trashing is
+    recoverable for thirty days and nothing unsends an email. A policy that
+    blocks DESTRUCTIVE and permits WRITE therefore stops the recoverable
+    operation and allows the irreversible one.
+
+    Declared, never derived. Whether an inverse genuinely restores the prior
+    state is a judgement about the service, and :func:`~loom.toolsets.certify`
+    checks only that the id resolves (CERT-14)."""
+
+    undone_by: str = ""
+    """The operation id that reverses this one, when one exists.
+
+    Richer than the boolean and checkable — and eventually actionable: this is
+    what ``ctx.compensate()`` would register to unwind a failed saga, which is
+    machinery LOOM already has, wired to a declaration it already needs."""
+
+    access_control: bool = False
+    """Does this change *who can reach data*, rather than the data itself?
+
+    ``share`` / ``unshare`` / ``invite`` / ``remove_permission``. AWS promotes
+    the same idea to a top-level access level (``Permissions management``)
+    rather than a flavour of Write, and for an agent it is the highest-
+    consequence category available: **sharing a folder exfiltrates without
+    writing anything to it**, and reads as an ordinary additive write.
+
+    Declared, never derived. A scope-based derivation was measured against all
+    320 shipped operations and matched **zero** — Google covers permissions
+    with the broad scope, so ``drive_share_file`` declares exactly what an
+    ordinary write declares, and the Microsoft toolsets declare no scopes at
+    all. A name-based one is the F3 mistake in a second place."""
+
+    effect_by: dict[str, dict[str, EffectClass]] = Field(default_factory=dict)
+    """Argument-dependent effect: ``{"method": {"GET": READ, "DELETE": DESTRUCTIVE}}``.
+
+    :attr:`effect` is a property of the operation; for a few it is a property
+    of the *call*. ``io.http_request`` is one node with one class, and
+    ``method="GET"`` is a read while ``method="DELETE"`` destroys — and it is
+    precisely the node a generated workflow reaches for when no toolset covers
+    the API.
+
+    Declarative rather than a callable, deliberately: grant validation and the
+    catalog read manifest metadata without importing a toolset, and a callable
+    would need the module.
+
+    A matched rule wins in **either** direction — ``GET`` lowers the class and
+    ``DELETE`` raises it, and both are the author's own declaration about their
+    own operation. :attr:`effect` is the fallback, used whenever the argument
+    was not passed or its value is not in the table, so an unrecognised method
+    keeps the cautious class rather than falling to a read.
+    """
+
+    open_world: bool = True
+    """Does this reach outside the deployment's trust boundary?
+
+    ``True`` for anything that calls a remote service — which is every
+    operation in a toolset, so it is only worth setting to ``False`` on a
+    manifest wrapping computation the deployment already owns.
+
+    What reads it is the read-to-write taint rule. That rule keys on *reading
+    the world*, and it used to approximate that as ``EffectClass.READ``, which
+    is not the same thing: filtering a list the run was handed is a READ and
+    reads nothing. MCP names the same axis ``openWorldHint`` and gives the same
+    example — a web search is open, a memory tool is not.
+    """
+
     scopes: list[str] = Field(default_factory=list)
     """Required OAuth / API scopes."""
     pagination: bool = False
@@ -115,6 +206,24 @@ class ToolsetManifest(BaseModel):
     documentation built from a manifest without it lists operation ids that
     exist in no namespace, and a model writing code against that guesses an
     import — plausibly, confidently, and wrongly."""
+    opaque_ids: dict[str, str] = Field(default_factory=dict)
+    """Regex for an identifier only this service can issue → the entity kind
+    whose resolver produces it.
+
+    The counterpart to :meth:`resolvers`. That says *how* to turn a person's
+    word into an id; this says what such an id looks like once it is in the
+    code, so a generated workflow containing ``customfield_10042`` can be
+    checked against whether anything was ever resolved to produce it. A
+    fabricated id is the failure entity resolution exists to prevent, arriving
+    one step later: it validates, it runs against fakes, and in production it
+    either 400s or writes to whichever field happens to hold that number.
+
+    Only patterns nobody would type from knowledge belong here — a Jira
+    ``customfield_10016`` or a Slack ``C024BE91L``, not an integer id that is
+    indistinguishable from any other number. **An absent pattern is not a claim
+    that a toolset's ids are safe to guess**, only that no pattern describes
+    them precisely enough to check, and a check that flags ordinary data is one
+    people switch off."""
 
     def resolvers(self) -> dict[str, OperationSpec]:
         """Entity kind → the operation that resolves it."""

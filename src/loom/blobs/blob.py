@@ -342,7 +342,8 @@ class S3BlobBackend:
                 response = await s3.get_object(
                     Bucket=self._bucket, Key=self._key_for(ref)
                 )
-                return await response["Body"].read()
+                payload: bytes = await response["Body"].read()
+                return payload
         except ClientError as exc:
             if exc.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
                 raise BlobNotFoundError(ref) from exc
@@ -388,8 +389,10 @@ class S3BlobBackend:
                 ExpiresIn=expires_in,
             )
             if hasattr(url, "__await__"):
-                return await url
-            return url
+                awaited: str = await url
+                return awaited
+            signed: str = url
+            return signed
 
     async def head(self, ref: str) -> BlobMeta:
         from botocore.exceptions import ClientError
@@ -533,6 +536,14 @@ class BlobService:
                 "LocalBlobBackend with base_url set."
             )
         raw = ref.removeprefix("blob:")
+        # isinstance here as well as in `supports_signed_urls`: the property
+        # runs the extra `can_sign()` check, but a property cannot narrow
+        # `self._backend` for the caller, so without this the call is made on
+        # the base protocol — which has no such method.
+        if not isinstance(self._backend, SignableBackend):  # pragma: no cover
+            raise ConfigurationError(
+                f"{type(self._backend).__name__} does not support signed URLs."
+            )
         return await self._backend.signed_url(
             raw,
             method=method,
@@ -548,7 +559,13 @@ class BlobService:
                 "Use a cloud backend or LocalBlobBackend."
             )
         raw = ref.removeprefix("blob:")
-        return await self._backend.head(raw)
+        # See signed_url: the guard above cannot narrow for the type checker.
+        if not isinstance(self._backend, HeadableBackend):  # pragma: no cover
+            raise ConfigurationError(
+                f"{type(self._backend).__name__} does not support head()."
+            )
+        meta: BlobMeta = await self._backend.head(raw)
+        return meta
 
     @staticmethod
     def is_blob_ref(ref: str) -> bool:
@@ -599,7 +616,7 @@ def blob_backend_from_url(url: str, **kwargs: Any) -> BlobBackend:
             import aioboto3  # noqa: F401
         except ImportError as exc:
             raise ConfigurationError(
-                "S3BlobBackend needs aioboto3: pip install 'loomflow[s3]'"
+                "S3BlobBackend needs aioboto3: pip install 'loomsdk[s3]'"
             ) from exc
         bucket = parsed.netloc
         if not bucket:
@@ -615,7 +632,7 @@ def blob_backend_from_url(url: str, **kwargs: Any) -> BlobBackend:
         except ImportError as exc:
             raise ConfigurationError(
                 "AzureBlobBackend needs azure-storage-blob: "
-                "pip install 'loomflow[azure]'"
+                "pip install 'loomsdk[azure]'"
             ) from exc
         from loom.blobs.blob_azure import AzureBlobBackend
 
@@ -638,7 +655,7 @@ def blob_backend_from_url(url: str, **kwargs: Any) -> BlobBackend:
         except ImportError as exc:
             raise ConfigurationError(
                 "GCSBlobBackend needs google-cloud-storage: "
-                "pip install 'loomflow[gcs]'"
+                "pip install 'loomsdk[gcs]'"
             ) from exc
         from loom.blobs.blob_gcs import GCSBlobBackend
 

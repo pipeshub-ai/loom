@@ -11,12 +11,13 @@ schema from the function signature and docstring, which is why the signatures
 below are typed and documented rather than accompanied by hand-written schemas
 that would drift from them.
 
-    pip install loomflow[mcp]
+    pip install loomsdk[mcp]
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from loom.mcp_server import authoring, prompts, resources, tools
 from loom.mcp_server.authoring_config import AuthoringConfig
@@ -28,6 +29,24 @@ if TYPE_CHECKING:
     from loom.identity.config import IdentitySettings
 
 __all__ = ["build_server", "create_server"]
+
+_Handler = TypeVar("_Handler", bound=Callable[..., Any])
+
+
+def _registrar(register: Any) -> Callable[..., Callable[[_Handler], _Handler]]:
+    """One of FastMCP's registration decorators, with the handler's type kept.
+
+    ``mcp`` is an optional extra, and the type-check environment installs
+    ``[dev]`` only — so there ``server.tool(...)`` is an expression of type
+    ``Any``, and ``disallow_untyped_decorators`` erases the signature of every
+    handler it wraps. Thirty-odd tools then report as untyped in exactly the
+    environment that could not have checked them anyway. An inline
+    ``type: ignore`` is the wrong shape for that: FastMCP ships ``py.typed``,
+    so wherever the extra *is* installed the ignore is unused and strict mode
+    fails on that instead. Restating the decorator's shape once is the only
+    form that is right in both.
+    """
+    return cast("Callable[..., Callable[[_Handler], _Handler]]", register)
 
 
 def _principal_facade(base_facade: RuntimeFacade, auth_enabled: bool) -> RuntimeFacade:
@@ -229,14 +248,16 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
     """Expose the actions. Signatures are the schema, so keep them typed."""
     from mcp.types import ToolAnnotations
 
-    @server.tool(
+    tool = _registrar(server.tool)
+
+    @tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
     )
     async def list_workflows() -> str:
         """List every workflow this server can run, with input schemas."""
         return await tools.list_workflows(_principal_facade(base_facade, auth_enabled))
 
-    @server.tool(
+    @tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
     )
     async def get_workflow_info(workflow: str) -> str:
@@ -252,7 +273,7 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
             _principal_facade(base_facade, auth_enabled), workflow
         )
 
-    @server.tool(
+    @tool(
         annotations=ToolAnnotations(
             readOnlyHint=False, destructiveHint=False, idempotentHint=False,
             openWorldHint=False,
@@ -274,7 +295,7 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
             _principal_facade(base_facade, auth_enabled), workflow, cron, timezone
         )
 
-    @server.tool(
+    @tool(
         annotations=ToolAnnotations(
             readOnlyHint=False, destructiveHint=False, openWorldHint=True
         )
@@ -297,7 +318,7 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
             idempotency_key=idempotency_key,
         )
 
-    @server.tool(
+    @tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
     )
     async def get_run_status(run_id: str) -> str:
@@ -308,7 +329,7 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
         """
         return await tools.get_run_status(_principal_facade(base_facade, auth_enabled), run_id)
 
-    @server.tool(
+    @tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
     )
     async def list_runs(
@@ -326,7 +347,7 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
             _principal_facade(base_facade, auth_enabled), workflow, status, limit
         )
 
-    @server.tool(
+    @tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
     )
     async def get_run_journal(run_id: str, offset: int = 0) -> str:
@@ -344,7 +365,7 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
             _principal_facade(base_facade, auth_enabled), run_id, offset
         )
 
-    @server.tool(
+    @tool(
         annotations=ToolAnnotations(
             readOnlyHint=True, idempotentHint=False, openWorldHint=False
         )
@@ -364,7 +385,7 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
             _principal_facade(base_facade, auth_enabled), run_id, offset
         )
 
-    @server.tool(
+    @tool(
         annotations=ToolAnnotations(
             readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
         )
@@ -381,7 +402,7 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
             _principal_facade(base_facade, auth_enabled), run_id, subject, approved
         )
 
-    @server.tool(
+    @tool(
         annotations=ToolAnnotations(
             readOnlyHint=False, destructiveHint=False, openWorldHint=True
         )
@@ -398,7 +419,7 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
             _principal_facade(base_facade, auth_enabled), run_id, event, payload_json
         )
 
-    @server.tool(
+    @tool(
         annotations=ToolAnnotations(
             readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
         )
@@ -411,7 +432,7 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
         """
         return await tools.cancel_run(_principal_facade(base_facade, auth_enabled), run_id)
 
-    @server.tool(
+    @tool(
         annotations=ToolAnnotations(
             readOnlyHint=False, destructiveHint=False, openWorldHint=True
         )
@@ -427,7 +448,7 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
         """
         return await tools.retry_run(_principal_facade(base_facade, auth_enabled), run_id)
 
-    @server.tool(
+    @tool(
         annotations=ToolAnnotations(
             readOnlyHint=False, destructiveHint=False, openWorldHint=False
         )
@@ -443,7 +464,7 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
         """
         return await tools.replay_run(_principal_facade(base_facade, auth_enabled), run_id)
 
-    @server.tool(
+    @tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
     )
     async def search_toolsets(query: str) -> str:
@@ -454,7 +475,7 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
         """
         return await tools.search_toolsets(query)
 
-    @server.tool(
+    @tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
     )
     async def show_toolset(toolset_id: str, group: str | None = None) -> str:
@@ -466,14 +487,14 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
         """
         return await tools.show_toolset(toolset_id, group)
 
-    @server.tool(
+    @tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
     )
     async def list_artifacts() -> str:
         """List named artifacts stored on this runtime, latest version of each."""
         return await tools.list_artifacts(_principal_facade(base_facade, auth_enabled))
 
-    @server.tool(
+    @tool(
         annotations=ToolAnnotations(
             readOnlyHint=True, idempotentHint=False, openWorldHint=False
         )
@@ -492,7 +513,7 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
             _principal_facade(base_facade, auth_enabled), name, version, expires_in
         )
 
-    @server.tool(
+    @tool(
         annotations=ToolAnnotations(
             readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
         )
@@ -533,6 +554,7 @@ def _register_authoring_tools(server: FastMCP, config: AuthoringConfig) -> None:
     """
     from mcp.types import ToolAnnotations
 
+    tool = _registrar(server.tool)
     _seen: dict[str, int] = {}
 
     def _too_large(code: str) -> str | None:
@@ -546,7 +568,7 @@ def _register_authoring_tools(server: FastMCP, config: AuthoringConfig) -> None:
             }
         )
 
-    @server.tool(
+    @tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
     )
     async def get_tool_contract(op_path: str) -> str:
@@ -559,7 +581,7 @@ def _register_authoring_tools(server: FastMCP, config: AuthoringConfig) -> None:
         """
         return await authoring.get_tool_contract(op_path)
 
-    @server.tool(
+    @tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
     )
     async def get_tool_docs(toolset_id: str) -> str:
@@ -571,7 +593,7 @@ def _register_authoring_tools(server: FastMCP, config: AuthoringConfig) -> None:
         """
         return await authoring.get_tool_docs(toolset_id)
 
-    @server.tool(
+    @tool(
         annotations=ToolAnnotations(
             readOnlyHint=False, destructiveHint=False, openWorldHint=True
         )
@@ -590,7 +612,7 @@ def _register_authoring_tools(server: FastMCP, config: AuthoringConfig) -> None:
         """
         return await authoring.call_read_operation(op_path, arguments_json, seen=_seen)
 
-    @server.tool(
+    @tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
     )
     async def validate_workflow_code(
@@ -615,7 +637,7 @@ def _register_authoring_tools(server: FastMCP, config: AuthoringConfig) -> None:
             return error
         return await authoring.validate_workflow_code(code, allowed_packages, spec)
 
-    @server.tool(
+    @tool(
         annotations=ToolAnnotations(
             readOnlyHint=True, idempotentHint=False, openWorldHint=False
         )
@@ -638,7 +660,7 @@ def _register_authoring_tools(server: FastMCP, config: AuthoringConfig) -> None:
             code, workflow_input_json, timeout=config.smoke_timeout
         )
 
-    @server.tool(
+    @tool(
         annotations=ToolAnnotations(
             readOnlyHint=False, destructiveHint=False, openWorldHint=False
         )
@@ -666,22 +688,24 @@ def _register_authoring_tools(server: FastMCP, config: AuthoringConfig) -> None:
 def _register_resources(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: bool) -> None:
     """Expose the read-only documents a client can pull into context."""
 
-    @server.resource("loom://workflows")
+    resource = _registrar(server.resource)
+
+    @resource("loom://workflows")
     async def workflows() -> str:
         """Every workflow this server can run."""
         return await resources.read_workflows(_principal_facade(base_facade, auth_enabled))
 
-    @server.resource("loom://workflows/{name}")
+    @resource("loom://workflows/{name}")
     async def workflow(name: str) -> str:
         """One workflow's definition and input schema."""
         return await resources.read_workflow(_principal_facade(base_facade, auth_enabled), name)
 
-    @server.resource("loom://runs/{run_id}")
+    @resource("loom://runs/{run_id}")
     async def run(run_id: str) -> str:
         """One run's status, input, output, and error."""
         return await resources.read_run(_principal_facade(base_facade, auth_enabled), run_id)
 
-    @server.resource("loom://runs/{run_id}/journal")
+    @resource("loom://runs/{run_id}/journal")
     async def run_journal(run_id: str) -> str:
         """The durable operations a run recorded."""
         return await resources.read_run_journal(
@@ -702,14 +726,16 @@ def _register_prompts(
 ) -> None:
     """Expose the reusable task templates."""
 
-    @server.prompt()
+    prompt = _registrar(server.prompt)
+
+    @prompt()
     def create_workflow(description: str) -> str:
         """Draft a LOOM workflow from a plain-English description."""
         return prompts.build_create_workflow_prompt(
             description, authoring_enabled=authoring_enabled
         )
 
-    @server.prompt()
+    @prompt()
     async def debug_run(run_id: str) -> str:
         """Diagnose a failed run from its status and journal."""
         facade = _principal_facade(base_facade, auth_enabled)
@@ -717,7 +743,7 @@ def _register_prompts(
         journal = await facade.journal(run_id) if "error" not in status else []
         return prompts.build_debug_run_prompt(status, journal)
 
-    @server.prompt()
+    @prompt()
     async def explain_workflow(workflow: str) -> str:
         """Explain what a workflow does, step by step."""
         facade = _principal_facade(base_facade, auth_enabled)
@@ -726,12 +752,12 @@ def _register_prompts(
         )
         return prompts.build_explain_workflow_prompt(workflow, match)
 
-    @server.prompt()
+    @prompt()
     def optimize_workflow(workflow: str) -> str:
         """Suggest durability and performance improvements for a workflow."""
         return prompts.build_optimize_prompt(workflow)
 
-    @server.prompt()
+    @prompt()
     def review_workflow(workflow_code: str) -> str:
         """Review workflow source for correctness and durability."""
         return prompts.build_review_prompt(workflow_code)

@@ -186,7 +186,8 @@ class AgentSession(Generic[OutputT]):
 
     async def history(self) -> list[Any]:
         """Every turn recorded so far, oldest first."""
-        return await self.store.get(f"{self.agent.name}:{self.key}")
+        turns: list[Any] = await self.store.get(f"{self.agent.name}:{self.key}") or []
+        return turns
 
     async def reset(self) -> None:
         """Forget this conversation. The agent itself is unchanged."""

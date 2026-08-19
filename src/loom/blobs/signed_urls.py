@@ -16,7 +16,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from loom.blobs.artifact import ArtifactVersion
-from loom.blobs.blob import BlobNotFoundError, BlobService
+from loom.blobs.blob import BlobNotFoundError, BlobService, HeadableBackend
 from loom.core.exceptions import ConfigurationError
 
 logger = logging.getLogger("workflow.storage.signed_urls")
@@ -178,7 +178,14 @@ class SignedUrlService:
         backend = self._blobs.backend
         try:
             if self._blobs.supports_head:
-                meta = await backend.head(session.key)  # type: ignore[union-attr]
+                # Narrowed rather than ignored: `supports_head` cannot narrow
+                # `backend` for the type checker, and the old ignore named a
+                # code mypy no longer reports here.
+                if not isinstance(backend, HeadableBackend):  # pragma: no cover
+                    raise ConfigurationError(
+                        f"{type(backend).__name__} does not support head()"
+                    )
+                meta = await backend.head(session.key)
                 size = meta.size
             else:
                 size = None
@@ -218,7 +225,8 @@ class SignedUrlService:
             _SESSION_GRACE,
         )
         logger.info("confirmed upload %s as %s", upload_id, version.qualified_name)
-        return version
+        confirmed: ArtifactVersion = version
+        return confirmed
 
     async def abort_upload(self, upload_id: str) -> None:
         """Clean up an abandoned upload session. No-op if already gone."""

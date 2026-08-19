@@ -25,6 +25,7 @@ Usage::
 from __future__ import annotations
 
 import inspect
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -44,6 +45,8 @@ from loom.toolsets.manifest import (
     ToolsetManifest,
 )
 from loom.toolsets.pagination import paginates
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -83,6 +86,15 @@ class Toolset:
             metadata.setdefault("operation", op_id)
             if spec is not None:
                 metadata.setdefault("effect", spec.effect)
+                # The other three facets travel with it, because a tool call
+                # inside an agent loop reaches the same broker a `ctx.step`
+                # does — and an agent deciding to send an email is the case
+                # `block_irreversible` exists for. Without these the dial sees
+                # every agent tool call as irreversible and open-world, which
+                # makes it refuse everything rather than the right things.
+                metadata.setdefault("open_world", spec.open_world)
+                metadata.setdefault("reversible", spec.reversible)
+                metadata.setdefault("access_control", spec.access_control)
         return tool
 
     def resolve_all(self) -> list[Any]:
@@ -133,7 +145,7 @@ class Toolset:
             t = coerce_tool(step_fn)
             op_id = t.name
             tool_map[op_id] = t
-            effect = declared.get(op_id) or _guess_effect(t.name)
+            effect = declared.get(op_id) or _resolve_guess(t.name)
 
             ops.append(OperationSpec(
                 id=op_id,
@@ -183,8 +195,18 @@ class Toolset:
         ops: list[OperationSpec] = []
 
         for fn in callables:
-            name = getattr(fn, "name", None) or getattr(fn, "__name__", "tool")
-            desc = getattr(fn, "description", None) or (inspect.getdoc(fn) or "")
+            # Tested rather than annotated. `getattr` returns Any, and
+            # unannotated that Any spread into the OperationSpec id, the
+            # function name and the tool_map key — so nothing downstream was
+            # checked at all. A callable whose `name` is not a string gets
+            # the fallback rather than a str() of whatever it was.
+            raw_name = getattr(fn, "name", None) or getattr(fn, "__name__", None)
+            name: str = raw_name if isinstance(raw_name, str) else "tool"
+            raw_desc = getattr(fn, "description", None) or inspect.getdoc(fn)
+            # Tested rather than annotated: `description` comes off an
+            # arbitrary callable, so a non-string one should become no
+            # description rather than a str() of whatever it was.
+            desc: str = raw_desc if isinstance(raw_desc, str) else ""
             desc_oneline = desc.split("\n")[0] if desc else name
 
             # Try to get schema
@@ -200,7 +222,7 @@ class Toolset:
                     schema = {"type": "object", "properties": {}}
 
             tool_map[name] = fn
-            effect = declared.get(name) or _guess_effect(name)
+            effect = declared.get(name) or _resolve_guess(name)
             ops.append(OperationSpec(
                 id=name,
                 function=name,
@@ -320,7 +342,7 @@ class ToolsetRegistry(ToolsetCatalog):
 
     # -- lookup ---------------------------------------------------------------
 
-    def get(self, toolset_id: str) -> ToolsetManifest | None:  # type: ignore[override]
+    def get(self, toolset_id: str) -> ToolsetManifest | None:
         found = super().get(toolset_id)
         if found is None and self._parent is not None:
             return self._parent.get(toolset_id)
@@ -378,7 +400,7 @@ class ToolsetRegistry(ToolsetCatalog):
         return ids
 
     @property
-    def toolset_ids(self) -> list[str]:  # type: ignore[override]
+    def toolset_ids(self) -> list[str]:
         return self.list_toolsets()
 
     def search(self, query: str, *, limit: int = 10) -> list[Any]:
@@ -590,22 +612,97 @@ class ToolsetRegistry(ToolsetCatalog):
         return "\n".join(lines)
 
 
-_WRITE_WORDS = ("create", "update", "add", "transition", "assign", "upsert", "index", "send")
-_DESTRUCTIVE_WORDS = ("delete", "remove", "drop", "purge", "revoke")
+#: Words that mean the call destroys or withdraws something.
+#:
+#: Grown from the operations LOOM ships: the original list knew
+#: ``delete/remove/drop/purge/revoke`` and missed ``archive``, ``trash``,
+#: ``unshare`` and ``end`` — seven destructive operations that a read-only
+#: grant would therefore have handed to an agent.
+#:
+#: ``clear`` joined them when the Sheets toolset arrived, and it is the same
+#: shape: emptying a range is irreversible through the API, the word carries no
+#: hint of that, and ``sheets_clear_range`` read as an ordinary write. That is
+#: what ``tests/test_effect_guess.py`` is for — every new toolset scores the
+#: heuristic against operations classified by hand, and a miss is a hard
+#: failure rather than a tolerance, because under-classifying costs a deletion.
+_DESTRUCTIVE_WORDS = (
+    "delete", "remove", "drop", "purge", "revoke", "destroy", "wipe", "erase",
+    "archive", "trash", "unshare", "unassign", "unpublish", "expire",
+    "terminate", "cancel_subscription", "end_active", "close_account",
+    "clear",
+)
+
+#: Words that mean the call changes something.
+#:
+#: Also grown from the corpus. ``upload``, ``reply``, ``move``, ``share``,
+#: ``invite``, ``copy``, ``rename``, ``forward`` and a dozen more were all
+#: reading as harmless.
+_WRITE_WORDS = (
+    "create", "update", "add", "transition", "assign", "upsert", "index",
+    "send", "post", "put", "patch", "write", "set", "edit", "modify", "batch",
+    "upload", "reply", "forward", "move", "copy", "rename", "share", "invite",
+    "restore", "untrash", "unarchive", "respond", "append", "complete",
+    "close", "cancel", "join", "leave", "schedule", "publish", "submit",
+    "approve", "reject", "merge", "import", "sync", "start", "stop", "resume",
+)
 
 
-def _guess_effect(name: str) -> EffectClass:
-    """Best-effort effect classification from an operation name.
+#: Words that positively indicate a read. Required rather than assumed: an
+#: operation is only classified READ when its name says so.
+_READ_WORDS = (
+    "get", "list", "search", "find", "read", "fetch", "query", "describe",
+    "show", "view", "download", "export", "lookup", "whoami", "check",
+    "status", "count", "peek", "resolve", "recent", "changes", "history",
+)
 
-    A fallback, not an authority — pass ``effects={...}`` to the factory when
-    the name does not tell the truth about what the call does.
+
+def _guess_effect(name: str) -> EffectClass | None:
+    """Best-effort effect classification from an operation name, or ``None``.
+
+    ``None`` means *the name carries no signal*, which is different from
+    "this is a read". The distinction is the whole point: this used to return
+    ``READ`` for anything it did not recognise, and READ is the one class
+    exempt from every write and destructive control — so an unrecognised verb
+    was not flagged, it was granted. Scored against the 320 operations LOOM
+    ships, that fallback under-classified 14% of them, always toward more
+    permitted.
+
+    Callers resolve ``None`` to ``WRITE`` and say so in the log. A fallback
+    that guesses cautiously costs an approval; one that guesses permissively
+    costs a deletion.
+
+    Still a fallback and not an authority: pass ``effects={...}`` to the
+    factory whenever the name does not tell the truth about the call.
     """
     lowered = name.lower()
     if any(word in lowered for word in _DESTRUCTIVE_WORDS):
         return EffectClass.DESTRUCTIVE
     if any(word in lowered for word in _WRITE_WORDS):
         return EffectClass.WRITE
-    return EffectClass.READ
+    if any(word in lowered for word in _READ_WORDS):
+        return EffectClass.READ
+    return None
+
+
+def _resolve_guess(name: str) -> EffectClass:
+    """The guess, or ``WRITE`` when the name says nothing — and a log line.
+
+    The log matters more than it looks. A toolset built from callables whose
+    names carry no verb gets every operation classified ``WRITE``, which is
+    safe and also useless: ``resolve_tools(effects={READ})`` will hand an agent
+    nothing. Saying which operation could not be classified is what turns that
+    from a mystery into a one-line fix — ``effects={"scrape": ...}``.
+    """
+    guessed = _guess_effect(name)
+    if guessed is not None:
+        return guessed
+    logger.info(
+        "no effect class could be guessed from the name %r; defaulting to "
+        "WRITE. Pass effects={%r: EffectClass...} to classify it.",
+        name, name,
+    )
+    return EffectClass.WRITE
+
 
 
 def _output_schema(fn: Any) -> dict[str, Any]:

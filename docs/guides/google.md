@@ -92,7 +92,7 @@ importing a toolset reads nothing.
 |---|---|
 | `GOOGLE_ACCESS_TOKEN` | A token minted elsewhere: a test, a gateway, the OAuth playground. |
 | `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` + `GOOGLE_REFRESH_TOKEN` | The usual choice — a workflow acting as one person. Self-renewing. |
-| `GOOGLE_SERVICE_ACCOUNT_FILE` (+ `GOOGLE_IMPERSONATE_SUBJECT`) | Workspace domain-wide delegation. Needs `pip install 'loomflow[google]'`. |
+| `GOOGLE_SERVICE_ACCOUNT_FILE` (+ `GOOGLE_IMPERSONATE_SUBJECT`) | Workspace domain-wide delegation. Needs `pip install 'loomsdk[google]'`. |
 
 Tokens are cached until just before expiry and refreshed under a lock, so ten
 parallel Gmail steps mint one token between them. Gmail and Calendar share the

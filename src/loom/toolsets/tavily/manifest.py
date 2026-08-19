@@ -42,6 +42,12 @@ TAVILY_MANIFEST = ToolsetManifest(
     auth={"type": "bearer", "fields": ["TAVILY_API_KEY"]},
     tools_module="loom.toolsets.tavily.tools",
     egress_hosts=["api.tavily.com"],
+    rate_limits={
+        "results": (
+            "20 maximum per search; there is no cursor, so a larger request "
+            "is refused rather than silently clamped"
+        ),
+    },
     groups={
         "search": [
             OperationSpec(

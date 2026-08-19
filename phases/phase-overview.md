@@ -37,7 +37,9 @@ Phase 1 ─── Core Library
    │        │
    │        └──▶ Phase 6 ─── Ecosystem (full: community toolsets, importers)
    │
-   └──▶ Phase 11 ── Testing Infrastructure & DX (spans all phases)
+   ├──▶ Phase 11 ── Testing Infrastructure & DX (spans all phases)
+   │
+   └──▶ Phase 12 ── Effect Classification (hardens Phase 3 + 5; touches Phase 9)
 ```
 
 ### Phase Summary
@@ -55,6 +57,7 @@ Phase 1 ─── Core Library
 | **9** | MCP Server | MCP tools/resources/prompts for Claude, Cursor, Claude Code |
 | **10** | Agent Frameworks | LangGraph, CrewAI, Pydantic AI, OpenAI, Claude, Agno, AutoGen adapters |
 | **11** | Testing & DX | Property tests, chaos tests, CI, playground, quickstart, diagnostics |
+| **12** | Effect Classification | Derived effect profiles, reversibility + access-control facets, taint fix, MCP projection, conformance kit |
 
 ### Dependency Rules
 
@@ -71,6 +74,7 @@ Phase 1 ─── Core Library
 | **Phase 9** | Phase 1-3 (runtime, store, toolsets) | Phase 4 (WGIR resources), Phase 8 (examples) |
 | **Phase 10** | Phase 2 (AgentExecutor protocol) | Phase 9 (MCP for Mastra) |
 | **Phase 11** | Phase 1 (core test targets) | All phases (comprehensive coverage) |
+| **Phase 12** | Phase 3 (manifests, certify), Phase 5 (broker, taint) | Phase 9 (MCP annotations projected from EffectProfile) |
 
 ### Parallelization Opportunities
 

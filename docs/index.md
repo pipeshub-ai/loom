@@ -1,6 +1,6 @@
-# loomflow Documentation
+# loomsdk Documentation
 
-**loomflow** (LOOM) is a library-first durable execution SDK for AI-powered workflows. Install with pip, write Python, and get deterministic replay, agent orchestration, and pluggable storage out of the box.
+**loomsdk** (LOOM) is a library-first durable execution SDK for AI-powered workflows. Install with pip, write Python, and get deterministic replay, agent orchestration, and pluggable storage out of the box.
 
 ## Why LOOM
 
@@ -76,5 +76,7 @@ this story — the product built on top of LOOM that this table is describing.
 
 See the [examples/](https://github.com/pipeshub-ai/workflow/tree/main/examples) directory:
 
-- `examples/cookbook/` -- 19 runnable cookbook examples, including `19_pagination.py` (paged reads, bounded and unbounded)
-- `examples/reference/` -- 10 production-pattern reference workflows
+- `examples/cookbook/` -- 29 runnable cookbook examples, including `19_pagination.py` (paged reads, bounded and unbounded)
+- `examples/reference/` -- 10 reference workflows drawn from n8n and Gumloop. They demonstrate the *shape* of each pipeline; they are being rewritten onto the toolset layer, and what is not yet production-ready about them is catalogued in [the audit](design/reference-workflows-audit.md).
+
+Every file under `examples/` is executed in CI by `scripts/run_examples.py`.

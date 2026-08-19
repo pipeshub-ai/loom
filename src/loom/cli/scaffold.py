@@ -1,4 +1,4 @@
-"""Project scaffolding templates for ``loomflow init``.
+"""Project scaffolding templates for ``loomsdk init``.
 
 Provides ready-to-use template strings and a helper that computes
 which files a ``scaffold_project`` call would create, so the CLI can
@@ -71,7 +71,7 @@ QUICKSTART_WORKFLOW: str = dedent('''\
             # decision, so the same workflow runs in a test, on a laptop, and
             # in production unchanged.
             #
-            #     LOOM_STORE=sqlite:///runs.db python workflows/quickstart.py
+            #     LOOM_STORE=sqlite://runs.db python workflows/quickstart.py
             result = await Runtime.from_env().run(quickstart_workflow, "alice")
             print(f"{result.status.value}: {result.output}")
 
@@ -133,7 +133,7 @@ QUICKSTART_PYPROJECT: str = dedent("""\
     version = "0.1.0"
     requires-python = ">=3.11"
     dependencies = [
-        "loomflow>=0.1",
+        "loomsdk>=0.1",
         "httpx>=0.27",
     ]
 
@@ -142,6 +142,12 @@ QUICKSTART_PYPROJECT: str = dedent("""\
         "pytest>=8.0",
         "pytest-asyncio>=0.24",
     ]
+
+    # Where `loom` looks for workflows when you name one without a path, so
+    # `loom run quickstart` works and `loom approve <run> <subject>` can find
+    # the code to resume. Add a line per file as the project grows.
+    [tool.loom]
+    modules = ["workflows/quickstart.py"]
 
     [tool.pytest.ini_options]
     testpaths = ["tests"]

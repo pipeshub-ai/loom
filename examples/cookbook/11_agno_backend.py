@@ -46,7 +46,7 @@ def _build_backend_and_tools():
     from agno.models.anthropic import Claude
 
     log("setup", "Creating Agno backend with Claude")
-    backend = AgnoBackend(model=Claude(id="claude-sonnet-4-6"))
+    backend = AgnoBackend(model=Claude(id="claude-sonnet-5"))
 
     try:
         from agno.tools.duckduckgo import DuckDuckGoTools

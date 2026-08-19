@@ -9,7 +9,7 @@ called with ``ctx.step(...)``::
     if not found.complete:
         await ctx.report(found.summary())
 
-Needs ``pip install 'loomflow[duckduckgo]'``.
+Needs ``pip install 'loomsdk[duckduckgo]'``.
 
 All three return :class:`Results`. ``complete`` is True only when the source
 was genuinely exhausted, so a short answer is no longer ambiguous: ``ddgs``

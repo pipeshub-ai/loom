@@ -324,7 +324,46 @@ assert guarded.broker.policy.block_destructive
 
 For this to see anything, your toolset manifests must declare each operation's
 `EffectClass` — that declaration is what tells a read from a write at the call
-site.
+site. An operation nobody classified defaults to `READ`, which under this broker
+means it *taints* rather than being ignored.
+
+**One sharp edge worth knowing before you turn this on.**
+
+The rule keys on an operation being both a *read* and **open-world** — reaching
+outside the deployment. Pure computation does not taint: `control.filter`,
+`transform.map_fields` and the rest of `control.*`/`transform.*`/`guard.*` are
+reads that read nothing, and a workflow that filters a list it was handed and
+then writes is not refused. Toolset operations are open-world by default,
+because a toolset is a network call; set `open_world=False` on an
+`OperationSpec` for one that wraps computation you already own.
+
+**Two narrow dials, off by default.** `block_writes` is the strict one, and
+almost every useful workflow writes after reading — so a deployment that finds
+it unusable turns it off and then has nothing. These say the useful thing
+instead:
+
+```python
+from loom.runtime.taint import TaintPolicy
+
+TaintPolicy(
+    block_writes=False,          # updating a record after reading is fine
+    block_irreversible=True,     # sending the email is not
+    block_access_control=True,   # nor is sharing the folder
+)
+```
+
+`block_irreversible` reads `reversible`, which is what `EffectClass` cannot
+express. `gmail_trash_message` is DESTRUCTIVE and reversible for thirty days;
+`gmail_send_message` is WRITE and reversible by nothing — so ranked by class the
+policy stops the recoverable operation and permits the irreversible one, and
+ranked by this dial it does the opposite. `block_access_control` is separate
+because sharing exfiltrates without writing anything to the thing shared, and
+reads as an ordinary additive write.
+
+Both are off until you have populated `reversible` on your own toolsets —
+turning them on before that reads every operation as irreversible. Neither
+applies to a read, and both are checked *as well as* the class, so enabling one
+can only add refusals.
 
 ## Middleware around every operation
 

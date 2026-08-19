@@ -80,7 +80,7 @@ class LangGraphExecutor:
 
 # -- static protocol check ---------------------------------------------------
 def _check() -> None:
-    _: AgentExecutor = LangGraphExecutor(graph=None)  # type: ignore[arg-type]
+    _: AgentExecutor = LangGraphExecutor(graph=None)
 
 
 # -- Direction B --------------------------------------------------------------

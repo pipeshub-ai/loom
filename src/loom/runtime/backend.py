@@ -152,7 +152,7 @@ class DurabilityBackend(Protocol):
 class EmbeddedBackend:
     """The built-in durable backend: wraps ``ExecutionStore`` for journal + state.
 
-    This is what you get when you ``pip install loomflow`` and pass
+    This is what you get when you ``pip install loomsdk`` and pass
     ``MemoryStore`` or ``SQLiteStore``. No external infrastructure required.
     """
 

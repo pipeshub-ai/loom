@@ -8,6 +8,8 @@ subprocess. No network, no servers.
 
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -766,6 +768,29 @@ class TestCli:
         assert ran.returncode == 0, ran.stderr
         assert "completed" in ran.stdout
 
+    def test_init_makes_bare_workflow_names_resolve(self, tmp_path: Path) -> None:
+        """`loom init` has to write `[tool.loom] modules` or half the CLI is
+        unreachable in the project it just made.
+
+        Without it `loom run quickstart` cannot find the workflow, and neither
+        can `loom approve <run> <subject>`, which has to import the code to
+        resume it -- both failing on a project whose only content came from the
+        scaffold.
+        """
+        project = tmp_path / "proj"
+        _loom("init", str(project))
+
+        listed = subprocess.run(
+            [sys.executable, "-m", "loom.cli", "workflows"],
+            capture_output=True,
+            text=True,
+            cwd=project,
+            env={**os.environ, "LOOM_STORE": "memory://"},
+        )
+
+        assert listed.returncode == 0, listed.stderr
+        assert "quickstart" in listed.stdout
+
     def test_init_is_additive_not_destructive(self, tmp_path: Path) -> None:
         project = tmp_path / "proj"
         (project / "workflows").mkdir(parents=True)
@@ -866,6 +891,131 @@ class TestGraphPipeline:
         assert graph_path.exists() and description_path.exists()
         assert set(report.written) == {graph_path, description_path}
         assert report.problems == []
+
+    def test_a_module_of_two_workflows_gets_two_graphs(self, tmp_path: Path) -> None:
+        """One graph per workflow, each holding only its own steps.
+
+        Both bodies used to merge into a single graph named after the first, so
+        `first.graph.json` listed the second's steps. A committed graph is only
+        evidence that no step was added or hidden if it covers one flow.
+        """
+        from loom.graph.pipeline import check_module
+
+        source = tmp_path / "pair.py"
+        source.write_text(
+            "from loom import Context, step, workflow\n\n"
+            "@step\n"
+            "async def alpha(n: int) -> int:\n"
+            "    return n\n\n"
+            "@step\n"
+            "async def beta(n: int) -> int:\n"
+            "    return n\n\n"
+            "@workflow(name='first')\n"
+            "async def first(ctx: Context, n: int) -> int:\n"
+            "    return await ctx.step(alpha, n)\n\n"
+            "@workflow(name='second')\n"
+            "async def second(ctx: Context, n: int) -> int:\n"
+            "    return await ctx.step(beta, n)\n"
+        )
+
+        reports = check_module(source)
+
+        assert [r.flow_id for r in reports] == ["first", "second"]
+        assert (tmp_path / "pair.first.graph.json").exists()
+        assert (tmp_path / "pair.second.graph.json").exists()
+
+        payload = json.loads((tmp_path / "pair.first.graph.json").read_text())
+        labels = {node["label"] for node in payload["nodes"]}
+        assert "alpha" in labels
+        assert "beta" not in labels
+
+    def test_one_workflow_keeps_the_unqualified_artifact_name(
+        self, flow_file: Path
+    ) -> None:
+        """The common case is untouched: one flow, one `<stem>.graph.json`."""
+        from loom.graph.pipeline import check_module
+
+        reports = check_module(flow_file)
+
+        assert len(reports) == 1
+        assert flow_file.with_suffix(".graph.json").exists()
+
+    def test_a_stale_unqualified_graph_is_reported(self, tmp_path: Path) -> None:
+        """Adding a second workflow renames the artifacts. The old one is left
+        on disk -- `loom check` writes what a commit should contain and does not
+        delete what it does contain -- so it has to be named, or it sits in the
+        repo passing --fail-on-change forever."""
+        from loom.graph.pipeline import check_module
+
+        source = tmp_path / "pair.py"
+        source.write_text(
+            "from loom import Context, workflow\n\n"
+            "@workflow(name='only')\n"
+            "async def only(ctx: Context, n: int) -> int:\n"
+            "    return n\n"
+        )
+        check_module(source)
+        assert (tmp_path / "pair.graph.json").exists()
+
+        source.write_text(
+            source.read_text()
+            + "\n@workflow(name='added')\n"
+            "async def added(ctx: Context, n: int) -> int:\n"
+            "    return n\n"
+        )
+        problems = [p for r in check_module(source) for p in r.problems]
+
+        assert any("stale" in problem for problem in problems)
+
+    def test_a_step_inside_a_return_is_a_node(self, tmp_path: Path) -> None:
+        """`return await ctx.step(f, x)` is a step and a return, not a return.
+
+        The registry pass used to add the step as an unconnected node, which
+        looked like coverage and was not -- it appeared in every flow in the
+        file, whether or not that flow called it.
+        """
+        from loom.graph.pipeline import build_graph
+
+        source = tmp_path / "tail.py"
+        source.write_text(
+            "from loom import Context, step, workflow\n\n"
+            "@step\n"
+            "async def finalise(n: int) -> int:\n"
+            "    return n\n\n"
+            "@workflow(name='tail')\n"
+            "async def tail(ctx: Context, n: int) -> int:\n"
+            "    return await ctx.step(finalise, n)\n"
+        )
+
+        graph = build_graph(source)
+        labels = [node.label for node in graph.nodes]
+
+        assert labels == ["finalise", "return"]
+        assert [(e.source, e.target) for e in graph.edges] == [("finalise", "return")]
+
+    def test_an_uncalled_step_is_not_in_the_graph(self, tmp_path: Path) -> None:
+        """The AST decides membership: the registry knows what the module
+        declares, not what this flow runs."""
+        from loom.graph.pipeline import build_graph
+
+        source = tmp_path / "spare.py"
+        source.write_text(
+            "from loom import Context, step, workflow\n\n"
+            "@step\n"
+            "async def used(n: int) -> int:\n"
+            "    return n\n\n"
+            "@step\n"
+            "async def never_called(n: int) -> int:\n"
+            "    return n\n\n"
+            "@workflow(name='spare')\n"
+            "async def spare(ctx: Context, n: int) -> int:\n"
+            "    return await ctx.step(used, n)\n"
+        )
+
+        labels = {node.label for node in build_graph(source).nodes}
+
+        assert "used" in labels
+        assert "never_called" not in labels
 
     def test_check_is_idempotent(self, flow_file: Path) -> None:
         """Re-running with no source change must not produce a noisy diff."""

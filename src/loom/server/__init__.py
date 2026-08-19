@@ -1,6 +1,6 @@
 """HTTP surface for a Runtime, and a client for it.
 
-``create_app`` needs the ``api`` extra (``pip install loomflow[api]``);
+``create_app`` needs the ``api`` extra (``pip install loomsdk[api]``);
 ``LoomClient`` needs ``httpx``. Both are imported lazily so the rest of the SDK
 stays installable without either.
 """

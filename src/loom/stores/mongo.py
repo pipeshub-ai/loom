@@ -1,6 +1,6 @@
 """MongoDB store — implements ExecutionStore, CacheStore, LockProvider, TriggerStore.
 
-Requires ``motor`` (async MongoDB driver): ``pip install loomflow[mongo]``
+Requires ``motor`` (async MongoDB driver): ``pip install loomsdk[mongo]``
 
 Usage::
 
@@ -543,7 +543,8 @@ class MongoStore:
             {"_id": key, "owner": owner},
             {"$set": {"expires_at": time.time() + ttl_seconds}},
         )
-        return result.modified_count > 0
+        renewed: bool = result.modified_count > 0
+        return renewed
 
     async def release(self, key: str, owner: str) -> None:
         await (await self._ready()).locks.delete_one(

@@ -58,6 +58,18 @@ SEAMS: dict[str, tuple[str, str]] = {
         "Turning a provider pointer into the events it stands for",
     ),
     "Watch": ("events/watch.py", "A provider-side subscription that expires"),
+    "EmbeddingProvider": (
+        "knowledge/embeddings.py",
+        "One embedding vendor behind two methods — document and query",
+    ),
+    "VectorStore": (
+        "knowledge/store.py",
+        "Where vectors live, and how similarity is searched",
+    ),
+    "Probe": (
+        "agents/probes/base.py",
+        "Looking, read-only, at the system a workflow is being written against",
+    ),
 }
 
 MARKER_BEGIN = "<!-- BEGIN GENERATED — do not edit below this line -->"

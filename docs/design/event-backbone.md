@@ -570,7 +570,7 @@ of.
 
 **LOOM ships protocols, one reference implementation per protocol, and a
 conformance kit. It does not ship the long tail.** The reference implementation
-exists so `pip install loomflow` works with no infrastructure; the kit exists so
+exists so `pip install loomsdk` works with no infrastructure; the kit exists so
 the long tail can be correct without being vendored. Every time the answer to
 "should we add an adapter for X" is *no, but here is the kit*, the maintenance
 surface stays flat while the ecosystem grows.
@@ -835,9 +835,9 @@ def test_my_redis_streams_log():
 ```
 
 Importing it without the extra raises the same shape of error the service-account
-path already uses: *"the conformance kit needs `pip install 'loomflow[testing]'`"*.
+path already uses: *"the conformance kit needs `pip install 'loomsdk[testing]'`"*.
 
-**Why not a separate `loomflow-testkit`.** The kit's whole job is to assert *this
+**Why not a separate `loomsdk-testkit`.** The kit's whole job is to assert *this
 version's* contract. A separately versioned package can be installed against a
 different LOOM, and then it tests a contract that is not the one in force —
 silently passing an adapter that is wrong, which is worse than having no kit. One

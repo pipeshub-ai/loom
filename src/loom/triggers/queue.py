@@ -200,6 +200,10 @@ class QueueConsumer:
         else:
             self._prefix = declared.name if declared else "queue"
 
+        # Annotated: the attribute's type is inferred from whichever branch
+        # assigns first, and the two branches disagree — an explicit str
+        # here, a declared-or-nothing there.
+        self._idempotency_field: str | None
         if idempotency_field is not None:
             self._idempotency_field = idempotency_field
         else:

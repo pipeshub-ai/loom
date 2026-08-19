@@ -8,9 +8,9 @@ is a one-line change at the ``Agent``.
 Imports are lazy: the vendor SDKs are optional extras, and importing this
 package must not require any of them.
 
-    pip install loomflow[anthropic]   # AnthropicProvider
-    pip install loomflow[openai]      # OpenAIProvider
-    pip install loomflow[gemini]      # GeminiProvider
+    pip install loomsdk[anthropic]   # AnthropicProvider
+    pip install loomsdk[openai]      # OpenAIProvider
+    pip install loomsdk[gemini]      # GeminiProvider
 """
 
 from __future__ import annotations

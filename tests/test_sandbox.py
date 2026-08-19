@@ -74,7 +74,7 @@ def docker_test_image() -> Iterator[str]:
     its top — `pytest` (this file imports it) and `loom` itself (`from loom
     import Runtime, step, workflow`). A generated production workflow module
     imports neither, which is exactly why the real Dockerfile installs only
-    `loomflow`/`pydantic` and nothing test-related.
+    `loomsdk`/`pydantic` and nothing test-related.
 
     Built once per session against this repository as the build context (so
     local, possibly-unreleased changes to `loom` are what the container runs

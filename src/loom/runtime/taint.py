@@ -54,6 +54,27 @@ class TaintPolicy:
     strict can keep the destructive one, which is the part that cannot be
     undone."""
 
+    block_irreversible: bool = False
+    """Refuse an operation nothing can undo, once tainted.
+
+    Off by default, because populating ``reversible`` across a deployment's own
+    toolsets is work nobody has done yet and turning this on before that reads
+    every operation as irreversible.
+
+    Its value is as the *narrow* dial. ``block_writes`` is the strict one and
+    almost every useful workflow writes after reading, so a deployment that
+    finds it unusable turns it off — and then has nothing. ``block_writes=False,
+    block_irreversible=True`` says the useful thing instead: after reading the
+    open web you may update a record, but you may not send the email."""
+
+    block_access_control: bool = False
+    """Refuse a change to who can reach data, once tainted.
+
+    Separate from ``block_destructive`` because sharing is not destruction and
+    is the more dangerous of the two here: it exfiltrates without writing
+    anything, and reads as an ordinary additive write. Off by default for the
+    same reason as above."""
+
     approval_clears: bool = True
     """A human approval since the last read clears the taint.
 
@@ -147,8 +168,21 @@ class TaintBroker:
                 if self.policy.approval_clears:
                     state.clear()
                 continue
-            effect = (entry.metadata or {}).get("effect_class")
+            metadata = entry.metadata or {}
+            effect = metadata.get("effect_class")
             if effect is None or EffectClass(effect) is not EffectClass.READ:
+                continue
+            # A READ is only evidence the run touched the world if it *reached*
+            # the world. Twenty of the twenty-six built-in nodes are READ and
+            # most of them are pure computation, so keying on the class alone
+            # meant filtering an in-memory list refused the next write and
+            # reported `step:control.filter` as external data it had read.
+            #
+            # Absent metadata keeps the old meaning. A journal written before
+            # this field existed cannot say, and assuming "open" preserves
+            # every refusal that run would already have seen — the direction
+            # that adds no permission.
+            if metadata.get("open_world", True) is False:
                 continue
             call = EffectCall(kind=str(entry.kind), target=entry.name)
             if not self.policy.exempts(call):
@@ -188,11 +222,32 @@ class TaintBroker:
         if (
             outcome.ok
             and call.effect is EffectClass.READ
+            # ...and it actually reached the world. A pure transform is a READ
+            # that read nothing, and tainting on it refused the next write
+            # while naming the transform as the external source.
+            and call.open_world
             and not clears
             and not self.policy.exempts(call)
         ):
             state.taint(f"{call.kind}:{call.target}")
         return outcome
+
+    def _describe(self, call: EffectCall) -> str:
+        """Why this call is being refused, in the caller's words.
+
+        The class alone is not the reason when a narrow dial is what fired —
+        being told ``gmail_send_message is write`` when the deployment
+        deliberately permits writes reads as a bug in LOOM."""
+        if call.effect is not EffectClass.READ:
+            if self.policy.block_access_control and call.access_control:
+                return "an access-control change"
+            if (
+                self.policy.block_irreversible
+                and call.open_world
+                and not call.reversible
+            ):
+                return f"{call.effect.value} and irreversible"
+        return call.effect.value
 
     # -- decisions ----------------------------------------------------------
 
@@ -214,12 +269,29 @@ class TaintBroker:
             EffectClass.WRITE: self.policy.block_writes,
             EffectClass.DESTRUCTIVE: self.policy.block_destructive,
         }.get(call.effect, False)
+        # The two narrow dials are checked *as well as* the class, not instead
+        # of it, so enabling one can only add refusals. They are the reason a
+        # deployment can switch block_writes off and still stop the send.
+        #
+        # Never applied to a READ. Every read is "irreversible" under the
+        # literal definition — nothing un-reads — and this rule is about what a
+        # run does *after* reading, so blocking the read itself would make the
+        # dial refuse the very call that taints and stop the run at step one.
+        if call.effect is not EffectClass.READ:
+            if (
+                self.policy.block_irreversible
+                and call.open_world
+                and not call.reversible
+            ):
+                blocked = True
+            if self.policy.block_access_control and call.access_control:
+                blocked = True
         if not blocked:
             return None
         return EffectResult(
             ok=False,
             error=(
-                f"{call.target} is {call.effect.value} and this run has read "
+                f"{call.target} is {self._describe(call)} and this run has read "
                 f"external data ({', '.join(state.sources)}). Ask for approval "
                 "first — ctx.wait_for_approval(...) clears the taint — or mark "
                 "the operation exempt if it cannot leak what was read."

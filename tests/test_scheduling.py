@@ -421,7 +421,7 @@ class TestMissedFires:
     def test_skipping_is_the_default_and_fires_once(self) -> None:
         """Four hours of downtime, default policy: the pending occurrence runs
         and the rest are skipped — the behaviour that shipped, now deliberate."""
-        fires, dropped, nxt = _occurrences_due(
+        fires, _dropped, nxt = _occurrences_due(
             self._record(), NINE_AM + timedelta(hours=4)
         )
 

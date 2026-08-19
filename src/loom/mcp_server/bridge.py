@@ -62,7 +62,11 @@ class RuntimeBridge:
     @property
     def runtime(self) -> Runtime:
         """The wrapped Runtime, for callers that need the full API."""
-        return self._facade.runtime
+        # `LocalFacade.runtime` is declared `Any` so the facade module need not
+        # import the engine. Naming the type here is what stops that `Any`
+        # leaking out through a property this shim advertises as a `Runtime`.
+        runtime: Runtime = self._facade.runtime
+        return runtime
 
     @property
     def facade(self) -> LocalFacade:

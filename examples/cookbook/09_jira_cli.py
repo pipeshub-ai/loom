@@ -19,6 +19,12 @@ Usage:
 
 Requires env vars (add to .env):
     ANTHROPIC_API_KEY, JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN
+
+The menu is the point of this example, so it refuses an empty stdin rather than
+guessing. `scripts/run_examples.py` reads the line below and picks a preset, so
+the gate exercises the same pipeline without a terminal.
+
+run-examples: --example 1
 """
 
 from __future__ import annotations
@@ -407,7 +413,7 @@ async def main() -> None:
     registry.register(_build_jira_toolset())
 
     model = AnthropicProvider(
-        model_name="claude-sonnet-4-6",
+        model_name="claude-sonnet-5",
         api_key=os.environ["ANTHROPIC_API_KEY"],
     )
     agent = WorkflowCodingAgent(

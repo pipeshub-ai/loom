@@ -21,6 +21,13 @@ same code works on every combination.
         WorkflowVersion(workflow="onboard", source="...", pins=Pins(toolsets={"jira": "1.2"}))
     )
     await versions.latest("onboard")
+
+**Committed and live are two different questions.** ``latest`` is the newest
+thing anybody committed; ``active`` is the one a host has said to serve.
+:class:`VersionActivation` moves that pointer, so a rollback is
+``activate("onboard", 3)`` rather than a sixth commit carrying version three's
+code — which is what people do when there is no pointer, and it destroys the
+only record of which version is actually live.
 """
 
 from __future__ import annotations
@@ -29,7 +36,7 @@ import asyncio
 import hashlib
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
@@ -42,6 +49,8 @@ __all__ = [
     "MissingVersionContent",
     "Pins",
     "StoreBackedVersionStore",
+    "UnknownVersion",
+    "VersionActivation",
     "VersionConflict",
     "VersionStore",
     "WorkflowVersion",
@@ -79,6 +88,31 @@ class VersionConflict(WorkflowError):  # noqa: N818 - names the event
             f"{workflow} is at version {actual}, not {expected} — somebody else "
             "committed since you started. Re-read the latest version and apply "
             "your change on top of it."
+        )
+
+
+class UnknownVersion(WorkflowError):  # noqa: N818 - names the absence
+    """Activation named a version that was never committed.
+
+    Its own type rather than ``KeyError`` because a rollback is something a
+    person does under pressure, from a number they read off a dashboard, and
+    ``KeyError: 3`` tells them nothing about which workflow, what exists, or
+    what to try instead. It carries all three.
+    """
+
+    def __init__(self, workflow: str, version: int, *, known: Sequence[int] = ()) -> None:
+        self.workflow = workflow
+        self.version = version
+        self.known = list(known)
+        existing = (
+            ", ".join(str(n) for n in self.known)
+            if self.known
+            else "nothing has been committed for it"
+        )
+        super().__init__(
+            f"{workflow} has no version {version} — committed: {existing}. "
+            "activate() points at code that already exists; it never creates "
+            "a version, so commit the source first."
         )
 
 
@@ -161,6 +195,13 @@ class VersionStore(Protocol):
     Four reads and one write. A host wanting versions in its own database —
     Arango, Neo4j, anything — implements these and passes it as
     ``Runtime(versions=…)``; nothing else changes.
+
+    Activation lives in :class:`VersionActivation`, a companion protocol, for
+    the reason ``IndexedScans`` is separate from ``ExecutionStore``: a
+    ``runtime_checkable`` protocol is all-or-nothing, so adding a method here
+    would make every host store that already satisfies this one stop being a
+    version store at all. Callers probe with
+    ``getattr(versions, "activate", None)``.
     """
 
     async def commit(
@@ -180,7 +221,16 @@ class VersionStore(Protocol):
 
     async def get(self, workflow: str, version: int) -> WorkflowVersion | None: ...
 
-    async def latest(self, workflow: str) -> WorkflowVersion | None: ...
+    async def latest(self, workflow: str) -> WorkflowVersion | None:
+        """The highest-numbered version ever committed. **Not** what is live.
+
+        Unchanged by activation, deliberately. ``latest`` answers "what is the
+        newest thing anybody committed" and :meth:`VersionActivation.active`
+        answers "which one is being served"; a store that answered both with
+        this method would un-roll a rollback on the next publish, silently,
+        because the next commit is always the new highest number.
+        """
+        ...
 
     async def history(
         self, workflow: str, *, limit: int = 50
@@ -204,6 +254,47 @@ class VersionStore(Protocol):
         ...
 
 
+@runtime_checkable
+class VersionActivation(Protocol):
+    """Which committed version a host is actually serving.
+
+    Separate from :class:`VersionStore` on purpose — see that class's note. A
+    version store without this is not broken; it simply has no opinion about
+    which of its versions is live, and callers that need one probe for the
+    methods.
+    """
+
+    async def activate(self, workflow: str, version: int) -> None:
+        """Point *workflow* at an already-committed *version*.
+
+        **A pointer move, not a copy.** Rolling back to version 3 activates 3;
+        it does not create a version 6 carrying 3's content. That distinction
+        is the whole reason this exists: without a pointer the only way to roll
+        back is to re-commit old source, which appends a duplicate of code that
+        already exists *and* destroys the fact of which version is live — the
+        chain now says "6 is newest" and nothing says "3 is what runs".
+
+        Idempotent, so a retried rollback is not an error. Raises
+        :class:`UnknownVersion` for a version that was never committed.
+
+        This does not touch runs already executing. A run pins
+        ``ExecutionRecord.code_hash`` when it starts and every lookup that
+        matters — ``version_of``, the sandbox's source resolution — goes
+        through that hash, never through this pointer. Activation decides what
+        the *next* run gets.
+        """
+        ...
+
+    async def active(self, workflow: str) -> WorkflowVersion | None:
+        """The version being served, or ``None`` if nobody has said.
+
+        ``None`` is a real answer, not a miss: read it as "no one has declared
+        one", and it is what a chain committed before activation existed
+        reports until someone calls :meth:`activate` once.
+        """
+        ...
+
+
 class StoreBackedVersionStore:
     """The default :class:`VersionStore`, over any ``ExecutionStore``.
 
@@ -223,6 +314,7 @@ class StoreBackedVersionStore:
     #: Cache keys. Namespaced so a store shared with the cache cannot collide.
     _INDEX = "loom:versions:index:{workflow}"
     _ENTRY = "loom:versions:entry:{workflow}:{version}"
+    _ACTIVE = "loom:versions:active:{workflow}"
 
     def __init__(self, store: Any, blobs: Any | None = None) -> None:
         self._store = store
@@ -289,15 +381,48 @@ class StoreBackedVersionStore:
             sorted({*numbers, committed.version}),
             0,
         )
+        if current is None:
+            # The *first* version activates itself, and no later one does. A
+            # workflow with exactly one version has no other candidate, and
+            # leaving the pointer unset there would make every caller write
+            # ``active() or latest()`` — the conflation the two methods exist
+            # to keep apart, reintroduced in each caller instead of here.
+            #
+            # Every subsequent commit deliberately leaves the pointer where it
+            # is. Advancing it would make a rollback last exactly until the
+            # next publish, silently, which is the failure this pointer was
+            # added to prevent; a new version not being served is visible in
+            # one read, and a rollback that quietly un-rolled itself is not.
+            # A host that wants publish-then-serve calls activate() after.
+            await self._store.set(
+                self._ACTIVE.format(workflow=committed.workflow), committed.version, 0
+            )
         return committed
+
+    async def activate(self, workflow: str, version: int) -> None:
+        # Same lock as commit, and it must be the same one: activation reads
+        # the entry to check it exists and then writes the pointer, so an
+        # activation racing the commit of that very number could otherwise
+        # read "absent", refuse, and report a version the committer has by then
+        # written. Two locks would be two answers to one question.
+        async with self._sequence_lock(workflow):
+            if await self.get(workflow, version) is None:
+                raise UnknownVersion(
+                    workflow, version, known=await self._numbers(workflow)
+                )
+            await self._store.set(self._ACTIVE.format(workflow=workflow), version, 0)
 
     @asynccontextmanager
     async def _sequence_lock(self, workflow: str) -> AsyncIterator[None]:
-        """Hold the per-workflow commit lock, or say why not.
+        """Hold the per-workflow sequence lock, or say why not.
 
         A failure to acquire raises rather than proceeding: continuing without
         the lock is exactly the race the lock exists to prevent, and a commit
         that silently loses somebody's work is the worst available outcome.
+
+        Commit and activation share it rather than taking one each, because
+        they read and write overlapping state — the number a commit is about to
+        assign is the one an activation is about to look up.
         """
         key = f"loom:versions:seq:{workflow}"
         owner = uuid.uuid4().hex
@@ -327,6 +452,10 @@ class StoreBackedVersionStore:
     async def latest(self, workflow: str) -> WorkflowVersion | None:
         numbers = await self._numbers(workflow)
         return await self.get(workflow, max(numbers)) if numbers else None
+
+    async def active(self, workflow: str) -> WorkflowVersion | None:
+        number = await self._store.get(self._ACTIVE.format(workflow=workflow))
+        return await self.get(workflow, int(number)) if number is not None else None
 
     async def history(self, workflow: str, *, limit: int = 50) -> list[WorkflowVersion]:
         found = []

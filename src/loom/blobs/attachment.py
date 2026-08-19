@@ -113,7 +113,8 @@ class Attachment(BaseModel):
                 f"attachment {self.filename!r} is stored at {self.ref} but no blob "
                 "service was given; pass blobs=runtime.blobs"
             )
-        return await blobs.load(self.ref)
+        payload: bytes = await blobs.load(self.ref)
+        return payload
 
     def text(self, encoding: str = "utf-8") -> str:
         """Decode inline content as text. Only valid before offloading."""

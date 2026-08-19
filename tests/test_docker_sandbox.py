@@ -53,7 +53,7 @@ def sandbox_image() -> Iterator[str]:
     """A trivial image good enough for every test below: a `sandbox` user and
     a stock `python3` over `python:3.12-slim`. Not the real
     `deployment/docker-sandbox/Dockerfile`, which additionally installs
-    `loomflow`/`pydantic` that no body here imports."""
+    `loomsdk`/`pydantic` that no body here imports."""
     tag = f"loom-docker-sandbox-test-{uuid.uuid4().hex[:8]}"
     dockerfile = (
         "FROM python:3.12-slim\n"
@@ -190,6 +190,14 @@ class TestWallTimeout:
     async def test_a_body_that_never_returns_is_killed_and_its_container_removed(
         self, sandbox_image: str
     ) -> None:
+        # Unique per execution. The container is named `loom-sbx-{run_id}-{nonce}`
+        # and docker's `--filter name=` matches on substring, so a fixed run id
+        # makes this assert on *every* container this test ever created —
+        # including one stranded by a suite that was killed mid-run days ago.
+        # It then fails permanently, blaming the timeout for someone else's
+        # orphan, and no amount of re-running clears it.
+        run_id = f"wall-timeout-{uuid.uuid4().hex[:8]}"
+
         sandbox = DockerSandbox(sandbox_image)
         outcome = await sandbox.run(
             body=SandboxBody(
@@ -201,7 +209,7 @@ class TestWallTimeout:
                 ),
                 entrypoint="spin",
             ),
-            run_id="wall-timeout",
+            run_id=run_id,
             input={},
             channel=_NoChannel(),
             policy=SandboxPolicy(max_wall_seconds=1.0),
@@ -211,7 +219,7 @@ class TestWallTimeout:
         assert outcome.violation == "max_wall_seconds"
 
         check = await asyncio.create_subprocess_exec(
-            "docker", "ps", "-aq", "--filter", "name=loom-sbx-wall-timeout-",
+            "docker", "ps", "-aq", "--filter", f"name=loom-sbx-{run_id}-",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         )
         stdout, _ = await check.communicate()

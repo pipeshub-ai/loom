@@ -200,7 +200,12 @@ class Node(Generic[In, Out]):
 
 #: Capability name to the ``Runtime`` attribute that satisfies it. A mapping and
 #: not a convention, so a rename of either side is a change in one place.
-_CAPABILITY_ATTRS: dict[str, str] = {"human_channel": "human"}
+_CAPABILITY_ATTRS: dict[str, str] = {
+    "human_channel": "human",
+    "connections": "connections",
+    "embeddings": "embeddings",
+    "vectors": "vectors",
+}
 
 
 # ---------------------------------------------------------------------------

@@ -55,6 +55,41 @@ class LoomClientError(Exception):
         return self.status_code in (401, 403)
 
 
+def _as_object(payload: Any, path: str) -> dict[str, Any]:
+    """Narrow a decoded JSON body to an object, or say who broke the contract.
+
+    ``response.json()`` is untyped, so handing it straight back from a method
+    declared to return a mapping asserts a shape nothing has checked. When the
+    server answers with something else — most often a reverse proxy's HTML
+    error page arriving with a 200, or a route that changed shape — the failure
+    surfaces two layers down as ``'str' object has no attribute 'get'`` inside
+    the CLI, which reads like a client bug rather than a server that answered
+    wrongly. Failing here names the path and the type that actually arrived.
+    """
+    if not isinstance(payload, dict):
+        raise LoomClientError(
+            f"{path} answered with {type(payload).__name__}, expected a JSON object",
+            status_code=502,
+        )
+    return payload
+
+
+def _as_array(payload: Any, path: str) -> list[dict[str, Any]]:
+    """The list counterpart of :func:`_as_object`.
+
+    Elements are checked too, because every caller of a list-returning method
+    here immediately indexes or ``.get()``s the rows — a list of strings passes
+    a bare ``isinstance(payload, list)`` and fails identically one frame later.
+    """
+    if not isinstance(payload, list) or not all(isinstance(row, dict) for row in payload):
+        raise LoomClientError(
+            f"{path} answered with {type(payload).__name__}, "
+            "expected a JSON array of objects",
+            status_code=502,
+        )
+    return payload
+
+
 class LoomClient:
     """Async client for the LOOM HTTP API.
 
@@ -155,6 +190,14 @@ class LoomClient:
             return None
         return response.json()
 
+    async def _object(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        """``_request`` for a route that answers with a single JSON object."""
+        return _as_object(await self._request(method, path, **kwargs), path)
+
+    async def _array(self, method: str, path: str, **kwargs: Any) -> list[dict[str, Any]]:
+        """``_request`` for a route that answers with a JSON array of objects."""
+        return _as_array(await self._request(method, path, **kwargs), path)
+
     # -- workflows -----------------------------------------------------------
 
     async def workflows(self, *, published: bool = True) -> list[dict[str, Any]]:
@@ -163,7 +206,7 @@ class LoomClient:
         ``published=False`` narrows it to what the serving process can actually
         start, rather than everything in the catalog.
         """
-        return await self._request(
+        return await self._array(
             "GET", "/workflows", params={"published": str(published).lower()}
         )
 
@@ -198,10 +241,10 @@ class LoomClient:
             body["env"] = env
         if credentials is not None:
             body["credentials"] = credentials
-        return await self._request("POST", "/runs", json=body)
+        return await self._object("POST", "/runs", json=body)
 
     async def get(self, run_id: str) -> dict[str, Any]:
-        return await self._request("GET", f"/runs/{run_id}")
+        return await self._object("GET", f"/runs/{run_id}")
 
     async def list_runs(
         self,
@@ -215,37 +258,66 @@ class LoomClient:
             params["workflow"] = workflow
         if status:
             params["status"] = status.value if isinstance(status, ExecutionStatus) else status
-        return await self._request("GET", "/runs", params=params)
+        return await self._array("GET", "/runs", params=params)
 
     async def journal(self, run_id: str) -> list[dict[str, Any]]:
         """Durable operations recorded for a run, in order."""
-        return await self._request("GET", f"/runs/{run_id}/journal")
+        return await self._array("GET", f"/runs/{run_id}/journal")
+
+    async def versions(self, workflow: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        """A workflow's committed version chain, newest first."""
+        return await self._array(
+            "GET", f"/workflows/{workflow}/versions", params={"limit": limit}
+        )
+
+    async def activate_version(self, workflow: str, version: int) -> dict[str, Any]:
+        """Make *version* the served one."""
+        return await self._object(
+            "POST", f"/workflows/{workflow}/versions/{version}/activate"
+        )
+
+    async def version_source(self, workflow: str, version: int) -> str:
+        """The source a version was committed from."""
+        payload = await self._object(
+            "GET", f"/workflows/{workflow}/versions/{version}/source"
+        )
+        return str(payload.get("source", ""))
+
+    async def trace(self, run_id: str) -> dict[str, Any]:
+        """The workflow graph with this run overlaid on it."""
+        return await self._object("GET", f"/runs/{run_id}/trace")
+
+    async def graph(self, workflow: str) -> dict[str, Any]:
+        """A workflow's structure, as React Flow nodes and edges."""
+        return await self._object("GET", f"/workflows/{workflow}/graph")
 
     async def reports(self, run_id: str, *, offset: int = 0) -> list[dict[str, Any]]:
         """Progress a run has reported, from *offset* onward."""
-        return await self._request(
+        return await self._array(
             "GET", f"/runs/{run_id}/reports", params={"offset": offset}
         )
 
     async def send_event(self, run_id: str, name: str, payload: Any = None) -> dict[str, Any]:
         """Deliver an event, resuming the run if it was parked on it."""
-        return await self._request(
+        return await self._object(
             "POST", f"/runs/{run_id}/events", json={"name": name, "payload": payload}
         )
 
-    async def approve(self, run_id: str, subject: str, *, approved: bool = True) -> Any:
+    async def approve(
+        self, run_id: str, subject: str, *, approved: bool = True
+    ) -> dict[str, Any]:
         """Resolve a pending ``ctx.wait_for_approval`` from outside Python."""
         return await self.send_event(run_id, f"approval:{subject}", {"approved": approved})
 
     async def cancel(self, run_id: str) -> dict[str, Any]:
-        return await self._request("POST", f"/runs/{run_id}/cancel")
+        return await self._object("POST", f"/runs/{run_id}/cancel")
 
     async def retry(self, run_id: str) -> dict[str, Any]:
         """Re-run a failed execution, reusing everything that already succeeded."""
-        return await self._request("POST", f"/runs/{run_id}/retry")
+        return await self._object("POST", f"/runs/{run_id}/retry")
 
     async def replay(self, run_id: str) -> dict[str, Any]:
-        return await self._request("POST", f"/runs/{run_id}/replay")
+        return await self._object("POST", f"/runs/{run_id}/replay")
 
     async def wait(
         self,
@@ -274,10 +346,10 @@ class LoomClient:
     # -- artifacts ------------------------------------------------------------
 
     async def list_artifacts(self) -> list[dict[str, Any]]:
-        return await self._request("GET", "/artifacts")
+        return await self._array("GET", "/artifacts")
 
     async def artifact_history(self, name: str) -> list[dict[str, Any]]:
-        return await self._request("GET", f"/artifacts/{name}/versions")
+        return await self._array("GET", f"/artifacts/{name}/versions")
 
     async def artifact_url(
         self, name: str, version: int | None = None, expires_in: int = 3600
@@ -285,7 +357,7 @@ class LoomClient:
         params: dict[str, Any] = {"expires_in": expires_in}
         if version is not None:
             params["version"] = version
-        return await self._request("GET", f"/artifacts/{name}/url", params=params)
+        return await self._object("GET", f"/artifacts/{name}/url", params=params)
 
     async def read_artifact(
         self, name: str, version: int | None = None
@@ -293,7 +365,7 @@ class LoomClient:
         params: dict[str, Any] = {}
         if version is not None:
             params["version"] = version
-        return await self._request("GET", f"/artifacts/{name}/content", params=params)
+        return await self._object("GET", f"/artifacts/{name}/content", params=params)
 
     async def put_artifact(
         self,
@@ -303,7 +375,7 @@ class LoomClient:
         mime: str = "application/octet-stream",
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return await self._request(
+        return await self._object(
             "POST",
             f"/artifacts/{name}",
             json={
@@ -320,7 +392,7 @@ class LoomClient:
         max_size: int | None = None,
         expires_in: int | None = None,
     ) -> dict[str, Any]:
-        return await self._request(
+        return await self._object(
             "POST",
             f"/artifacts/{name}/upload-url",
             json={"mime": mime, "max_size": max_size, "expires_in": expires_in},
@@ -333,7 +405,7 @@ class LoomClient:
         run_id: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return await self._request(
+        return await self._object(
             "POST",
             f"/artifacts/{name}/confirm",
             json={
@@ -375,7 +447,7 @@ class LoomClient:
     ) -> dict[str, Any]:
         import base64
 
-        return await self._request(
+        return await self._object(
             "PUT",
             f"/blobs/{ref}",
             params={"expires": expires, "sig": signature, "method": method},

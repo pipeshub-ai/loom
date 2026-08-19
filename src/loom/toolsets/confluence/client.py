@@ -18,6 +18,7 @@ import os
 from typing import Any
 
 from loom.connectors.credentials import current_credential_store, resolve_bearer_token
+from loom.core.exceptions import NonRetryableError, WorkflowError
 from loom.toolsets.confluence.models import (
     ConfluenceComment,
     ConfluencePage,
@@ -36,6 +37,43 @@ from loom.toolsets.pagination import (
 
 #: Confluence caps a page here whatever ``limit`` asks for.
 CONFLUENCE_PAGE_CAP = 250
+
+
+class ConfluenceError(WorkflowError):
+    """A Confluence request failed. Retryable unless a subclass says otherwise."""
+
+    def __init__(self, message: str, *, status: int = 0) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class ConfluencePermanentError(ConfluenceError, NonRetryableError):
+    """A request that fails the same way however often it is sent.
+
+    The two-level shape is load-bearing: a flat
+    ``class E(WorkflowError, NonRetryableError)`` has no consistent MRO and
+    fails at import.
+    """
+
+
+class ConfluenceAuthError(ConfluencePermanentError):
+    """Missing, malformed, expired, or revoked credentials."""
+
+
+class ConfluenceNotFound(ConfluencePermanentError):  # noqa: N818 - names a state
+    """No such page or space — or the token cannot see it.
+
+    Confluence answers 404 for content the credential lacks permission on, so
+    this means "not visible to you" as often as "absent".
+    """
+
+
+class ConfluenceRateLimited(ConfluenceError):  # noqa: N818 - names a state
+    """Quota spent. Retryable, and the caller should back off."""
+
+    def __init__(self, message: str, *, retry_after: float = 0.0, **kw: Any) -> None:
+        super().__init__(message, **kw)
+        self.retry_after = retry_after
 
 
 def _to_space(s: dict[str, Any]) -> ConfluenceSpace:
@@ -121,63 +159,49 @@ class ConfluenceClient:
     # Low-level HTTP
     # ------------------------------------------------------------------
 
-    async def _get(self, path: str, **params: Any) -> Any:
+    async def _request(
+        self, method: str, url: str, *, params: Any = None, json: Any = None
+    ) -> Any:
+        """One place where a Confluence response becomes a value or an error.
+
+        Every method used ``raise_for_status``, which discards the body — and
+        the body is where Confluence says which page, which space, and which
+        permission. It also made every 4xx look retryable, so a request for a
+        page the token cannot see was sent three times to be refused three
+        times.
+        """
         import httpx
 
-        url = f"{self._base_url}/wiki/api/v2/{path.lstrip('/')}"
         headers = await self._headers()
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                url, headers=headers, params=params
+            resp = await client.request(
+                method, url, headers=headers, params=_clean(params), json=json
             )
-            resp.raise_for_status()
-            return resp.json()
+        if resp.status_code >= 400:
+            raise _classify(resp)
+        if not resp.content:
+            return {}
+        return resp.json()
+
+    def _v2(self, path: str) -> str:
+        return f"{self._base_url}/wiki/api/v2/{path.lstrip('/')}"
+
+    async def _get(self, path: str, **params: Any) -> Any:
+        return await self._request("GET", self._v2(path), params=params)
 
     async def _get_v1(self, path: str, **params: Any) -> Any:
         """GET against the v1 REST API (for search/CQL)."""
-        import httpx
-
         url = f"{self._base_url}/wiki/rest/api/{path.lstrip('/')}"
-        headers = await self._headers()
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                url, headers=headers, params=params
-            )
-            resp.raise_for_status()
-            return resp.json()
+        return await self._request("GET", url, params=params)
 
     async def _post(self, path: str, json: dict[str, Any]) -> Any:
-        import httpx
-
-        url = f"{self._base_url}/wiki/api/v2/{path.lstrip('/')}"
-        headers = await self._headers()
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                url, headers=headers, json=json
-            )
-            resp.raise_for_status()
-            return resp.json()
+        return await self._request("POST", self._v2(path), json=json)
 
     async def _put(self, path: str, json: dict[str, Any]) -> Any:
-        import httpx
-
-        url = f"{self._base_url}/wiki/api/v2/{path.lstrip('/')}"
-        headers = await self._headers()
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.put(
-                url, headers=headers, json=json
-            )
-            resp.raise_for_status()
-            return resp.json() if resp.content else {}
+        return await self._request("PUT", self._v2(path), json=json)
 
     async def _delete(self, path: str) -> None:
-        import httpx
-
-        url = f"{self._base_url}/wiki/api/v2/{path.lstrip('/')}"
-        headers = await self._headers()
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.delete(url, headers=headers)
-            resp.raise_for_status()
+        await self._request("DELETE", self._v2(path))
 
     # ------------------------------------------------------------------
     # Pages
@@ -187,7 +211,7 @@ class ConfluenceClient:
         self,
         cql: str,
         limit: int = 20,
-    ) -> Results:
+    ) -> Results[Any]:
         """Search content using CQL (Confluence Query Language).
 
         Uses the v1 search endpoint since v2 has no CQL search — and v1 pages
@@ -339,7 +363,7 @@ class ConfluenceClient:
 
     async def get_page_comments(
         self, page_id: str, limit: int = 25
-    ) -> Results:
+    ) -> Results[Any]:
         """Fetch footer comments on a page, following every page of them."""
 
         return await page_through(
@@ -380,7 +404,7 @@ class ConfluenceClient:
     # Spaces
     # ------------------------------------------------------------------
 
-    async def list_spaces(self, limit: int = 25) -> Results:
+    async def list_spaces(self, limit: int = 25) -> Results[Any]:
         """List accessible spaces, following every page."""
 
         return await page_through(
@@ -445,6 +469,59 @@ def _flatten_page(
         created_at=raw.get("createdAt", ""),
         url=f"{base_url}/wiki{raw.get('_links', {}).get('webui', '')}",
     )
+
+
+def _clean(params: Any) -> Any:
+    """Drop unset filters — httpx would otherwise send the string ``"None"``."""
+    if not isinstance(params, dict):
+        return params
+    return {k: v for k, v in params.items() if v is not None}
+
+
+def _classify(response: Any) -> ConfluenceError:
+    """Turn a failed response into the narrowest error that fits.
+
+    Two body shapes, because this client speaks two APIs: v2 answers
+    ``{"errors": [{"title": ..., "detail": ...}]}`` and v1 answers
+    ``{"message": ...}``. Reading only one of them would leave CQL search —
+    the v1 half — reporting every failure as a bare status code.
+    """
+    status = response.status_code
+    try:
+        body = response.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    parts: list[str] = []
+    for entry in body.get("errors") or []:
+        if isinstance(entry, dict):
+            parts.append(
+                "; ".join(
+                    str(entry[k]) for k in ("title", "detail") if entry.get(k)
+                )
+            )
+    for key in ("message", "reason"):
+        if body.get(key):
+            parts.append(str(body[key]))
+
+    detail = "; ".join(p for p in parts if p) or (response.text or "").strip()[:300]
+    message = f"Confluence {status}: {detail or 'request failed'}"
+
+    if status == 429:
+        return ConfluenceRateLimited(
+            message,
+            status=status,
+            retry_after=float(response.headers.get("Retry-After", 0) or 0),
+        )
+    if status == 401:
+        return ConfluenceAuthError(message, status=status)
+    if status == 404:
+        return ConfluenceNotFound(message, status=status)
+    if 400 <= status < 500:
+        return ConfluencePermanentError(message, status=status)
+    return ConfluenceError(message, status=status)
 
 
 # Module-level singleton

@@ -12,16 +12,18 @@ import asyncio
 import contextlib
 import json
 import sys
+from collections.abc import Awaitable
 from pathlib import Path
 from typing import Any
 
 from loom.cli.output import Exit, Printer, exit_for
-from loom.cli.targets import CliBackend, Target, resolve
+from loom.cli.targets import CliBackend, LocalBackend, Target, resolve
 from loom.core.exceptions import (
     ConfigurationError,
     InputMismatch,
     RegistryError,
 )
+from loom.facade import VersionSurface
 from loom.runtime.shutdown import Interrupted
 
 #: How often ``--follow`` and ``watch`` re-read a run, in seconds.
@@ -46,7 +48,7 @@ def with_backend(args: argparse.Namespace, target: str | None = None) -> Target:
     )
 
 
-def run_async(coro: Any) -> int:
+def run_async(coro: Awaitable[int]) -> int:
     """Drive a command coroutine, turning known errors into exit codes.
 
     ``guarded`` is what makes Ctrl+C and ``docker stop`` behave the same: both
@@ -87,6 +89,28 @@ def interrupted(code: int) -> None:
         "  Any run that was in flight is recoverable: loom runs --status running",
         file=sys.stderr,
     )
+
+
+def missing_run(run_id: str, out: Printer) -> Exit:
+    """Report a run id that names nothing, having done nothing.
+
+    Every command that acts *on* a run checks this before it acts. Delivering
+    first and looking the run up afterwards reads as equivalent and is not: an
+    event addressed to a run that does not exist is still written to the store,
+    and one addressed to the empty string is written as a *broadcast* --
+    ``Runtime.send_event`` reserves a falsy target for "every run awaiting this
+    name", and the stores match a broadcast row against any run that asks. So a
+    mistyped ``loom approve '' publish`` exits 2 saying it found no such run,
+    having left an approval in the queue for the next run to reach that gate to
+    consume. A human gate satisfied by a stale broadcast is the one failure this
+    subsystem exists to prevent.
+
+    ``mcp_server/tools.py`` has always checked in this order; this is the CLI
+    catching up to it.
+    """
+    out.error(f"no run with id {run_id!r}")
+    out.hint("loom runs --status suspended")
+    return Exit.USAGE
 
 
 def close_backend(backend: CliBackend) -> None:
@@ -147,7 +171,12 @@ def parse_env(pairs: list[str] | None, env_file: str | None) -> dict[str, str]:
     return result
 
 
-def report_run(out: Printer, run: dict[str, Any], *, journal: list | None = None) -> None:
+def report_run(
+    out: Printer,
+    run: dict[str, Any],
+    *,
+    journal: list[dict[str, Any]] | None = None,
+) -> None:
     """The standard human rendering of one run."""
     out.line()
     out.status(run, prefix="  ")
@@ -226,39 +255,58 @@ async def follow(
 
 def cmd_check(args: argparse.Namespace) -> int:
     """Emit ``<flow>.graph.json`` and ``<flow>.description.md`` beside the source."""
-    from loom.graph.pipeline import check_file
+    from loom.graph.pipeline import check_module
 
     out = printer_for(args)
     source = _require_file(args.path, out)
     if source is None:
         return Exit.USAGE
 
-    report = check_file(source, write=not args.no_write)
+    reports = check_module(source, write=not args.no_write)
+    problems = [problem for report in reports for problem in report.problems]
+    changed = any(report.graph_changed for report in reports)
 
     if args.json:
+        # The top level keeps the shape a single-workflow file has always
+        # emitted, aggregated over the module; `flows` is where a file with
+        # more than one is actually readable.
         out.json(
             {
-                "flow_id": report.flow_id,
-                "nodes": report.node_count,
-                "edges": report.edge_count,
-                "changed": report.graph_changed,
-                "written": [str(p) for p in report.written],
-                "problems": report.problems,
+                "flow_id": reports[0].flow_id,
+                "nodes": sum(report.node_count for report in reports),
+                "edges": sum(report.edge_count for report in reports),
+                "changed": changed,
+                "written": [str(p) for r in reports for p in r.written],
+                "problems": problems,
+                "flows": [
+                    {
+                        "flow_id": report.flow_id,
+                        "nodes": report.node_count,
+                        "edges": report.edge_count,
+                        "changed": report.graph_changed,
+                        "written": [str(p) for p in report.written],
+                        "problems": report.problems,
+                    }
+                    for report in reports
+                ],
             }
         )
     else:
-        out.line(f"{report.flow_id}: {report.node_count} nodes, {report.edge_count} edges")
-        for path in report.written:
-            out.line(f"  wrote {path}")
-        for path in report.unchanged:
-            out.line(f"  [dim]unchanged {path}[/dim]")
-    for problem in report.problems:
+        for report in reports:
+            out.line(
+                f"{report.flow_id}: {report.node_count} nodes, {report.edge_count} edges"
+            )
+            for path in report.written:
+                out.line(f"  wrote {path}")
+            for path in report.unchanged:
+                out.line(f"  [dim]unchanged {path}[/dim]")
+    for problem in problems:
         out.error(f"warning: {problem}")
 
-    if args.fail_on_change and report.graph_changed:
+    if args.fail_on_change and changed:
         out.error("graph differs from the committed version; run 'loom check' and commit")
         return Exit.FAILED
-    return Exit.FAILED if report.problems else Exit.OK
+    return Exit.FAILED if problems else Exit.OK
 
 
 def cmd_graph(args: argparse.Namespace) -> int:
@@ -272,7 +320,7 @@ def cmd_graph(args: argparse.Namespace) -> int:
     if source is None:
         return Exit.USAGE
 
-    graph = build_graph(source)
+    graph = build_graph(source, flow_id=getattr(args, "workflow", "") or "")
     if args.format == "mermaid":
         print(to_mermaid(graph))
     elif args.format == "json":
@@ -292,7 +340,8 @@ def cmd_describe(args: argparse.Namespace) -> int:
     if source is None:
         return Exit.USAGE
 
-    narration = asyncio.run(SkeletonExplainer().narrate(build_graph(source)))
+    graph = build_graph(source, flow_id=getattr(args, "workflow", "") or "")
+    narration = asyncio.run(SkeletonExplainer().narrate(graph))
     print(narration.full_text)
     return Exit.OK
 
@@ -457,6 +506,8 @@ def cmd_approve(args: argparse.Namespace) -> int:
         out = printer_for(args)
         target = with_backend(args)
         try:
+            if not args.run_id.strip() or await target.backend.get(args.run_id) is None:
+                return missing_run(args.run_id, out)
             approved = not args.reject
             await target.backend.send_event(
                 args.run_id, f"approval:{args.subject}", {"approved": approved}
@@ -481,6 +532,8 @@ def cmd_send(args: argparse.Namespace) -> int:
         out = printer_for(args)
         target = with_backend(args)
         try:
+            if not args.run_id.strip() or await target.backend.get(args.run_id) is None:
+                return missing_run(args.run_id, out)
             await target.backend.send_event(
                 args.run_id, args.event, parse_input(args.payload)
             )
@@ -578,6 +631,59 @@ def cmd_workflows(args: argparse.Namespace) -> int:
     return run_async(body())
 
 
+def cmd_versions(args: argparse.Namespace) -> int:
+    """List a workflow's committed versions, or activate one.
+
+    Activation is a pointer move, never a commit. Without it, rolling back means
+    re-publishing old source as a *new, higher* version — which loses the fact of
+    which version is actually being served, and grows the chain with duplicates
+    of code that already exists.
+    """
+
+    async def body() -> int:
+        out = printer_for(args)
+        target = with_backend(args)
+        try:
+            backend = target.backend
+            if not isinstance(backend, VersionSurface):
+                out.error(
+                    "this backend does not expose workflow versions. "
+                    "VersionSurface is optional; a host facade need not have it."
+                )
+                return Exit.USAGE
+
+            if args.activate is not None:
+                served = await backend.activate_version(args.workflow, args.activate)
+                out.json(served)
+                out.line(
+                    f"  {args.workflow} now serving version {served['version']}"
+                )
+                return Exit.OK
+
+            chain = await backend.versions(args.workflow)
+            if not chain:
+                out.line(f"  no versions recorded for {args.workflow}")
+                return Exit.OK
+            out.json(chain)
+            out.table(
+                ["version", "active", "content hash", "created"],
+                [
+                    [
+                        str(entry.get("version", "")),
+                        "*" if entry.get("active") else "",
+                        str(entry.get("content_hash", ""))[:12],
+                        (entry.get("created_at") or "")[:19],
+                    ]
+                    for entry in chain
+                ],
+            )
+            return Exit.OK
+        finally:
+            await target.backend.close()
+
+    return run_async(body())
+
+
 def cmd_pending(args: argparse.Namespace) -> int:
     """List the runs parked on a person, and what each is being asked.
 
@@ -629,6 +735,8 @@ def cmd_respond(args: argparse.Namespace) -> int:
         out = printer_for(args)
         target = with_backend(args)
         try:
+            if not args.run_id.strip() or await target.backend.get(args.run_id) is None:
+                return missing_run(args.run_id, out)
             answer = _answer_from(args)
             run = await target.backend.respond(args.run_id, args.subject, answer)
             out.json(run)
@@ -685,7 +793,12 @@ def cmd_toolsets(args: argparse.Namespace) -> int:
     register_available_toolsets()
     catalog = get_catalog()
 
-    rows = []
+    # Both shapes are built in the one pass that still holds the manifest. A
+    # JSON row is a `dict[str, Any]` by nature, so reading the table's cells
+    # back out of it loses every type the manifest had — and a cell rendered
+    # from a value that could be anything is a cell nothing checks.
+    rows: list[dict[str, Any]] = []
+    table: list[list[str]] = []
     for toolset_id in sorted(catalog.toolset_ids):
         manifest = catalog.get(toolset_id)
         if manifest is None:
@@ -695,33 +808,32 @@ def cmd_toolsets(args: argparse.Namespace) -> int:
             f"{manifest.id} {manifest.summary} {manifest.description}".lower()
         ):
             continue
+        groups = sorted(manifest.groups)
+        summary = manifest.summary or ""
         rows.append(
             {
                 "id": manifest.id,
                 "version": manifest.version,
                 "operations": len(operations),
-                "groups": sorted(manifest.groups),
+                "groups": groups,
                 "summary": manifest.summary,
                 "auth": sorted((manifest.auth or {}).get("fields", [])),
             }
+        )
+        table.append(
+            [
+                manifest.id,
+                str(len(operations)),
+                ",".join(groups)[:28],
+                summary[:52],
+            ]
         )
 
     out.json(rows)
     if not rows:
         out.line("  no toolsets matched")
         return Exit.OK
-    out.table(
-        ["toolset", "ops", "groups", "summary"],
-        [
-            [
-                row["id"],
-                str(row["operations"]),
-                ",".join(row["groups"])[:28],
-                (row["summary"] or "")[:52],
-            ]
-            for row in rows
-        ],
-    )
+    out.table(["toolset", "ops", "groups", "summary"], table)
     return Exit.OK
 
 
@@ -737,17 +849,31 @@ def cmd_toolset(args: argparse.Namespace) -> int:
         out.error(f"unknown toolset '{args.toolset_id}' (known: {known})")
         return Exit.USAGE
 
-    operations = [
-        {
-            "id": op.id,
-            "function": op.function,
-            "effect": op.effect.value,
-            "paginated": op.pagination,
-            "resolves": op.resolves,
-            "summary": op.summary,
-        }
-        for op in manifest.all_operations()
-    ]
+    # Same reason as `cmd_toolsets`: the table is rendered from each
+    # OperationSpec's own attributes, not read back out of the JSON row, where
+    # `summary` and `paginated` have already collapsed into one union.
+    operations: list[dict[str, Any]] = []
+    table: list[list[str]] = []
+    for op in manifest.all_operations():
+        operations.append(
+            {
+                "id": op.id,
+                "function": op.function,
+                "effect": op.effect.value,
+                "paginated": op.pagination,
+                "resolves": op.resolves,
+                "summary": op.summary,
+            }
+        )
+        table.append(
+            [
+                op.id,
+                op.effect.value,
+                "yes" if op.pagination else "",
+                op.resolves or "",
+                (op.summary or "")[:44],
+            ]
+        )
     out.json(
         {
             "id": manifest.id,
@@ -767,19 +893,7 @@ def cmd_toolset(args: argparse.Namespace) -> int:
     # The one line that stops a generated import being invented.
     if manifest.import_line():
         out.line(f"  {manifest.import_line()}")
-    out.table(
-        ["operation", "effect", "pages", "resolves", "summary"],
-        [
-            [
-                op["id"],
-                op["effect"],
-                "yes" if op["paginated"] else "",
-                op["resolves"] or "",
-                (op["summary"] or "")[:44],
-            ]
-            for op in operations
-        ],
-    )
+    out.table(["operation", "effect", "pages", "resolves", "summary"], table)
     return Exit.OK
 
 
@@ -921,11 +1035,25 @@ def cmd_serve(args: argparse.Namespace) -> int:
     try:
         import uvicorn
     except ImportError:
-        out.error("serving needs the api extra: pip install 'loomflow[api]'")
+        out.error("serving needs the api extra: pip install 'loomsdk[api]'")
         return Exit.USAGE
 
     from loom.identity.config import LOOPBACK_HOSTS, IdentitySettings
     from loom.server.app import create_app
+
+    # `serve` takes the shared backend flags, but --server is the one it cannot
+    # honour: this command *is* the HTTP surface, and `create_app` needs a
+    # Runtime in this process to serve. Accepting the flag and quietly ignoring
+    # it is the worse failure — it starts a server over the local Runtime and
+    # reports success, so a caller who meant to reach another machine gets an
+    # empty workflow list and no reason for it.
+    if getattr(args, "server", None):
+        out.error(
+            "serve cannot operate against --server: it is itself the server, and "
+            "it needs a Runtime in this process. Point clients at that URL "
+            "directly, or drop --server to serve the workflows imported here."
+        )
+        return Exit.USAGE
 
     try:
         target = resolve(None, modules=getattr(args, "module", None) or None)
@@ -943,7 +1071,16 @@ def cmd_serve(args: argparse.Namespace) -> int:
         )
         return Exit.USAGE
 
-    runtime = target.backend.runtime  # type: ignore[union-attr]
+    # `resolve` with no `server=` only ever builds a LocalBackend, and only that
+    # one owns a Runtime. Narrowing on the class rather than asserting it keeps
+    # the guarantee checked where it is relied on instead of stated in a comment.
+    backend = target.backend
+    if not isinstance(backend, LocalBackend):
+        out.error("serve needs an in-process Runtime, and this target has none")
+        close_backend(backend)
+        return Exit.USAGE
+
+    runtime = backend.runtime
     registered = sorted(runtime.workflows)
     out.line(f"  serving {len(registered)} workflow(s) on http://{args.host}:{args.port}")
     for name in registered:
@@ -1066,7 +1203,7 @@ def cmd_ui(args: argparse.Namespace) -> int:
     try:
         from loom.cli.tui import run_tui
     except ImportError:
-        out.error("the TUI needs the tui extra: pip install 'loomflow[tui]'")
+        out.error("the TUI needs the tui extra: pip install 'loomsdk[tui]'")
         return Exit.USAGE
 
     try:

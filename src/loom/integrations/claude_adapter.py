@@ -136,7 +136,7 @@ class ClaudeExecutor:
 
 # -- static protocol check ---------------------------------------------------
 def _check() -> None:
-    _: AgentExecutor = ClaudeExecutor()  # type: ignore[arg-type]
+    _: AgentExecutor = ClaudeExecutor()
 
 
 # -- Direction B --------------------------------------------------------------

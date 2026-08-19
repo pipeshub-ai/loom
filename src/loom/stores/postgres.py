@@ -1,6 +1,6 @@
 """PostgreSQL store — implements ExecutionStore, CacheStore, LockProvider, TriggerStore.
 
-Requires ``asyncpg``: ``pip install loomflow[postgres]``
+Requires ``asyncpg``: ``pip install loomsdk[postgres]``
 
 Usage::
 
@@ -549,7 +549,8 @@ class PostgresStore:
                 owner,
                 time.time() + ttl_seconds,
             )
-        return result.endswith("1")
+        renewed: bool = result.endswith("1")
+        return renewed
 
     async def release(self, key: str, owner: str) -> None:
         async with self._pool.acquire() as conn:

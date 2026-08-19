@@ -69,7 +69,9 @@ async def confluence_get_page(page_id: str) -> ConfluencePage:
     return await get_default_client().get_page(page_id)
 
 
-@step(retry=Retry(max_attempts=2, initial_delay=1.0))
+# No idempotency key: a retry after a timeout the service accepted files
+# it twice, and nothing client-side can tell which happened.
+@step(retry=Retry(max_attempts=1))
 async def confluence_create_page(
     space_id: str,
     title: str,
@@ -169,7 +171,9 @@ async def confluence_get_page_comments(
     return await get_default_client().get_page_comments(page_id, limit)
 
 
-@step(retry=Retry(max_attempts=2, initial_delay=1.0))
+# No idempotency key: a retry after a timeout the service accepted files
+# it twice, and nothing client-side can tell which happened.
+@step(retry=Retry(max_attempts=1))
 async def confluence_add_comment(
     page_id: str,
     comment: str,
@@ -281,12 +285,15 @@ Usage:  result = await ctx.step(<tool_name>, arg1, arg2, ...)
 Credentials are read automatically from env vars:
   CONFLUENCE_URL, CONFLUENCE_EMAIL, CONFLUENCE_API_TOKEN
 
-All tools return typed Pydantic models. Use attribute access.
+Tools return typed Pydantic models — use attribute access. The exception is
+confluence_delete_page, which returns a confirmation string.
 
 ### Tools
 
-confluence_search_pages(cql: str, limit: int = 20) -> list[SearchResult]
-  Search content using CQL (Confluence Query Language).
+confluence_search_pages(cql: str, limit: int = 20) -> Results[SearchResult]
+  Search content using CQL (Confluence Query Language). Returns a Results
+  list — a list subclass carrying .complete (False when limit cut it off),
+  .total, and .summary(). Check .complete before reporting a count.
   SearchResult fields: {_fields(_Search)}
   Examples:
     results = await ctx.step(confluence_search_pages, \
@@ -324,16 +331,18 @@ confluence_get_page_body(page_id: str) -> PageBody
     body = await ctx.step(confluence_get_page_body, "12345")
     print(body.body)  # HTML content
 
-confluence_get_page_comments(page_id, limit=25) -> list[ConfluenceComment]
-  Fetch comments on a page.
+confluence_get_page_comments(page_id, limit=25) \
+-> Results[ConfluenceComment]
+  Fetch comments on a page. Returns a Results list (.complete, .total).
   ConfluenceComment fields: {_fields(_Comment)}
 
 confluence_add_comment(page_id: str, comment: str) -> ConfluenceComment
   Add a comment to a page.
     c = await ctx.step(confluence_add_comment, "12345", "Looks good!")
 
-confluence_list_spaces(limit: int = 25) -> list[ConfluenceSpace]
-  List all accessible spaces.
+confluence_list_spaces(limit: int = 25) -> Results[ConfluenceSpace]
+  List all accessible spaces. Returns a Results list (.complete, .total) —
+  "all" is what limit allowed, not what exists.
   ConfluenceSpace fields: {_fields(_Space)}
     spaces = await ctx.step(confluence_list_spaces)
     for s in spaces: print(s.key, s.name)

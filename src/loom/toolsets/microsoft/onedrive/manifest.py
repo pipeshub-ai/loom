@@ -63,6 +63,13 @@ ONEDRIVE_MANIFEST = ToolsetManifest(
         "*.sharepoint.com",
         "*.up.1drv.com",
     ],
+    rate_limits={
+        "model": (
+            "dynamic per-workload throttling; honour the Retry-After header "
+            "on a 429 rather than assuming a fixed rate"
+        ),
+        "source": "learn.microsoft.com/en-us/graph/throttling",
+    },
     groups={
         "drive": [
             OperationSpec(
@@ -74,6 +81,7 @@ ONEDRIVE_MANIFEST = ToolsetManifest(
                     "every write into a 507."
                 ),
                 effect=EffectClass.READ,
+                scopes=["Files.Read"],
                 idempotent=True,
                 output_schema=Drive.model_json_schema(),
             ),
@@ -88,6 +96,7 @@ ONEDRIVE_MANIFEST = ToolsetManifest(
                 ),
                 resolves="user",
                 effect=EffectClass.READ,
+                scopes=["Files.Read"],
                 idempotent=True,
                 output_schema=MicrosoftUser.model_json_schema(),
             ),
@@ -99,6 +108,7 @@ ONEDRIVE_MANIFEST = ToolsetManifest(
                 summary="List a folder's contents, by folder id or path.",
                 description="No arguments lists the drive root.",
                 effect=EffectClass.READ,
+                scopes=["Files.Read"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(DriveItem),
@@ -108,6 +118,7 @@ ONEDRIVE_MANIFEST = ToolsetManifest(
                 function="onedrive_get_item",
                 summary="Fetch one file or folder by id or path.",
                 effect=EffectClass.READ,
+                scopes=["Files.Read"],
                 idempotent=True,
                 output_schema=DriveItem.model_json_schema(),
             ),
@@ -120,6 +131,7 @@ ONEDRIVE_MANIFEST = ToolsetManifest(
                     "folder subtree."
                 ),
                 effect=EffectClass.READ,
+                scopes=["Files.Read"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(DriveItem),
@@ -129,6 +141,7 @@ ONEDRIVE_MANIFEST = ToolsetManifest(
                 function="onedrive_list_recent",
                 summary="Files this account touched recently, newest first.",
                 effect=EffectClass.READ,
+                scopes=["Files.Read"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(DriveItem),
@@ -142,6 +155,7 @@ ONEDRIVE_MANIFEST = ToolsetManifest(
                     "with the drive_id on the item, not this toolset's drive."
                 ),
                 effect=EffectClass.READ,
+                scopes=["Files.Read"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(DriveItem),
@@ -157,6 +171,7 @@ ONEDRIVE_MANIFEST = ToolsetManifest(
                     "deletion arrives as an entry with deleted=True."
                 ),
                 effect=EffectClass.READ,
+                scopes=["Files.Read"],
                 idempotent=True,
                 output_schema=DeltaPage.model_json_schema(),
             ),
@@ -166,6 +181,7 @@ ONEDRIVE_MANIFEST = ToolsetManifest(
                 summary="Download a file's bytes as a LOOM Attachment.",
                 description="Fails on a folder, which holds no bytes.",
                 effect=EffectClass.READ,
+                scopes=["Files.Read"],
                 idempotent=True,
                 output_schema={"type": "object", "title": "Attachment"},
             ),
@@ -178,6 +194,7 @@ ONEDRIVE_MANIFEST = ToolsetManifest(
                     "names onedrive_upload_large_file."
                 ),
                 effect=EffectClass.WRITE,
+                scopes=["Files.ReadWrite"],
                 output_schema=DriveItem.model_json_schema(),
             ),
             OperationSpec(
@@ -186,6 +203,7 @@ ONEDRIVE_MANIFEST = ToolsetManifest(
                 summary="Upload a large file through a resumable session.",
                 description="Fragments of 5 MiB, sent in order, resumable.",
                 effect=EffectClass.WRITE,
+                scopes=["Files.ReadWrite"],
                 output_schema=DriveItem.model_json_schema(),
             ),
             OperationSpec(
@@ -194,6 +212,7 @@ ONEDRIVE_MANIFEST = ToolsetManifest(
                 summary="Create a folder.",
                 description="Not retried; defaults to failing on a name clash.",
                 effect=EffectClass.WRITE,
+                scopes=["Files.ReadWrite"],
                 output_schema=DriveItem.model_json_schema(),
             ),
             OperationSpec(
@@ -201,6 +220,7 @@ ONEDRIVE_MANIFEST = ToolsetManifest(
                 function="onedrive_move_item",
                 summary="Move a file or folder, rename it, or both.",
                 effect=EffectClass.WRITE,
+                scopes=["Files.ReadWrite"],
                 idempotent=True,
                 output_schema=DriveItem.model_json_schema(),
             ),
@@ -213,6 +233,7 @@ ONEDRIVE_MANIFEST = ToolsetManifest(
                     "progress and, on completion, the new item's id."
                 ),
                 effect=EffectClass.WRITE,
+                scopes=["Files.ReadWrite"],
                 output_schema={"type": "string"},
             ),
             OperationSpec(
@@ -220,6 +241,7 @@ ONEDRIVE_MANIFEST = ToolsetManifest(
                 function="onedrive_delete_item",
                 summary="Move a file or folder to the recycle bin.",
                 effect=EffectClass.DESTRUCTIVE,
+                scopes=["Files.ReadWrite"],
                 idempotent=True,
                 output_schema={"type": "boolean"},
             ),
@@ -234,12 +256,14 @@ ONEDRIVE_MANIFEST = ToolsetManifest(
                     "cannot be revoked on this item."
                 ),
                 effect=EffectClass.READ,
+                scopes=["Files.Read"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(Permission),
             ),
             OperationSpec(
                 id="sharing.create_link",
+                access_control=True,
                 function="onedrive_create_share_link",
                 summary="Create a sharing link for an item.",
                 description=(
@@ -247,14 +271,17 @@ ONEDRIVE_MANIFEST = ToolsetManifest(
                     "anonymous explicitly. Not retried."
                 ),
                 effect=EffectClass.WRITE,
+                scopes=["Files.ReadWrite"],
                 output_schema=SharingLink.model_json_schema(),
             ),
             OperationSpec(
                 id="sharing.invite",
+                access_control=True,
                 function="onedrive_invite",
                 summary="Grant named people access, optionally emailing them.",
                 description="Not retried: a retry sends a second invitation.",
                 effect=EffectClass.WRITE,
+                scopes=["Files.ReadWrite"],
                 output_schema=_array(Permission),
             ),
         ],

@@ -5,7 +5,7 @@ so an assistant — Claude Code, Claude Desktop, Cursor — can list your workfl
 run them, read a run's journal, and unpark a run waiting on a human.
 
 ```bash
-pip install "loomflow[mcp]"
+pip install "loomsdk[mcp]"
 ```
 
 ## Connect it

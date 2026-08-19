@@ -61,7 +61,9 @@ class JiraSource:
         *,
         require_signature: bool = True,
     ) -> None:
-        self._secret = secret or os.getenv("JIRA_WEBHOOK_SECRET", "")
+        # See SlackSource: `a or b` with an optional `a` infers `str | None`
+        # although the getenv default makes None unreachable.
+        self._secret: str = secret or os.getenv("JIRA_WEBHOOK_SECRET") or ""
         self._require = require_signature
 
     def verify(self, headers: Mapping[str, str], body: bytes) -> None:

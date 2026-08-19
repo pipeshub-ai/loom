@@ -54,7 +54,7 @@ def _fernet_module() -> Any:
     except ImportError as exc:
         raise ImportError(
             "Encrypted credential storage needs the 'credentials' extra: "
-            "pip install 'loomflow[credentials]'"
+            "pip install 'loomsdk[credentials]'"
         ) from exc
     return fernet_module
 

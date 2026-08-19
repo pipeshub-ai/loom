@@ -1,7 +1,7 @@
 # PipesHub Workflow System — Architecture Reference
 
 This document captures the key architecture of PipesHub's workflow system
-to guide alignment between the `loomflow` pip package and PipesHub's
+to guide alignment between the `loomsdk` pip package and PipesHub's
 production deployment.
 
 ## High-Level Design (HLD)
@@ -217,7 +217,7 @@ CodeWorkflowRunner.execute()
 
 ## Alignment: pip package vs PipesHub
 
-| Concept | pip package (`loomflow`) | PipesHub |
+| Concept | pip package (`loomsdk`) | PipesHub |
 |---------|--------------------------------|----------|
 | Trigger dispatch | `TriggerDispatcher` (in-process) | `SchedulerLoop` (Redis leases) |
 | Trigger store | `InMemoryTriggerStore` / `SQLite` / `Mongo` / `Postgres` | Redis sorted sets |
@@ -233,7 +233,7 @@ CodeWorkflowRunner.execute()
 
 ## Extension points for PipesHub
 
-PipesHub should import `loomflow` as a dependency and:
+PipesHub should import `loomsdk` as a dependency and:
 
 1. Implement `ExecutionStore` with its graph DB adapter
 2. Implement `TriggerStore` with its Redis adapter

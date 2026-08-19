@@ -172,6 +172,7 @@ ZOOM_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="meetings.delete",
+                idempotent=True,
                 function="zoom_delete_meeting",
                 summary="Cancel a meeting. Not recoverable.",
                 effect=EffectClass.DESTRUCTIVE,

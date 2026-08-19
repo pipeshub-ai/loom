@@ -71,11 +71,11 @@ from loom.agents.backends.langchain import LangChainBackend
 runtime = Runtime(
     store=MemoryStore(),
     # Takes a LangChain model object, not a model name.
-    agent_backend=LangChainBackend(llm=ChatAnthropic(model="claude-sonnet-4-6")),
+    agent_backend=LangChainBackend(llm=ChatAnthropic(model="claude-sonnet-5")),
 )
 ```
 
-Install: `pip install loomflow[langchain]`
+Install: `pip install loomsdk[langchain]`
 
 Requires: `ANTHROPIC_API_KEY` (or the relevant provider key).
 
@@ -91,11 +91,11 @@ from loom.agents.backends.agno import AgnoBackend
 runtime = Runtime(
     store=MemoryStore(),
     # Takes an Agno model object.
-    agent_backend=AgnoBackend(model=Claude(id="claude-sonnet-4-6")),
+    agent_backend=AgnoBackend(model=Claude(id="claude-sonnet-5")),
 )
 ```
 
-Install: `pip install loomflow[agno]`
+Install: `pip install loomsdk[agno]`
 
 ## PydanticAI Backend
 
@@ -107,11 +107,11 @@ from loom.agents.backends.pydantic_ai import PydanticAIBackend
 runtime = Runtime(
     store=MemoryStore(),
     # Takes a Pydantic AI model, or its string form.
-    agent_backend=PydanticAIBackend(model="anthropic:claude-sonnet-4-6"),
+    agent_backend=PydanticAIBackend(model="anthropic:claude-sonnet-5"),
 )
 ```
 
-Install: `pip install loomflow[pydantic-ai]`
+Install: `pip install loomsdk[pydantic-ai]`
 
 ## Custom Backend
 

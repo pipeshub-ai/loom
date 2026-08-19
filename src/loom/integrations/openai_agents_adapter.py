@@ -72,7 +72,7 @@ class OpenAIAgentsExecutor:
 
 # -- static protocol check ---------------------------------------------------
 def _check() -> None:
-    _: AgentExecutor = OpenAIAgentsExecutor(agent=None)  # type: ignore[arg-type]
+    _: AgentExecutor = OpenAIAgentsExecutor(agent=None)
 
 
 # -- Direction B --------------------------------------------------------------

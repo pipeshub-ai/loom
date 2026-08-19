@@ -312,16 +312,40 @@ class RetentionManager:
         both the common case and the only one that is certain: refs still named
         by a surviving replay clone are kept.
         """
+        from loom.blobs.refcount import referents, release_ref
+
         held = await _refs_held_by_clones(store, run_id)
         deleted = 0
+        seen: set[str] = set()
         for entry in await store.load_journal(run_id):
             ref = _blob_ref(entry.output)
-            if ref is None or ref in held:
+            if ref is None or ref in held or ref in seen:
                 continue
+            seen.add(ref)
+
+            if dry_run:
+                # Count what a real pass would delete without touching the
+                # index — a dry run that mutated the refcount would make the
+                # *next* real pass delete more than it reported.
+                others = await referents(store, ref)
+                if others is not None and [r for r in others if r != run_id]:
+                    continue
+                deleted += 1
+                continue
+
+            sole = await release_ref(store, ref, run_id)
+            if sole is False:
+                # Another run still references it. Content addressing means
+                # this is the ordinary case for a deterministic step, not a
+                # coincidence — two runs producing identical bytes get one blob.
+                continue
+            # `None` means the ref predates the index, so ownership is unknown
+            # and the clone check above is all the evidence there is. Deleting
+            # is what shipped before; refusing would leak every pre-existing
+            # blob forever.
             deleted += 1
-            if not dry_run:
-                with suppress(Exception):
-                    await blobs.delete(ref)
+            with suppress(Exception):
+                await blobs.delete(ref)
         return deleted
 
     @staticmethod

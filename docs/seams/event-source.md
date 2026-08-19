@@ -35,6 +35,7 @@ Raise :class:`VerificationFailed` if this is not from the provider.
 - `toolsets.google.gmail.source.GmailSource`
 - `toolsets.jira.source.JiraSource`
 - `toolsets.slack.source.SlackSource`
+- `toolsets.stripe.source.StripeSource`
 
 ## Consumers
 

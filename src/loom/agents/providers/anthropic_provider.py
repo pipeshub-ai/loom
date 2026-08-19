@@ -142,6 +142,23 @@ def _cacheable_tools(tools: list[dict[str, Any]], cache: bool) -> list[dict[str,
     return marked
 
 
+def _empty_text(block: Any) -> bool:
+    """An empty text block, which cannot carry ``cache_control``.
+
+    The API rejects that combination outright — *"cache_control cannot be set
+    for empty text blocks"*, a 400 rather than a warning. An assistant turn that
+    was purely a tool call has exactly this shape, so an agent loop hits it as
+    soon as the turn it wants to cache happens to be one. That is late in a long
+    conversation, and it fails the whole request: the coding agent lost a
+    fifty-turn session to it with no partial result.
+    """
+    if isinstance(block, str):
+        return not block.strip()
+    if isinstance(block, dict) and block.get("type", "text") == "text":
+        return not str(block.get("text") or "").strip()
+    return False
+
+
 def _mark_message_prefix(messages: list[dict[str, Any]]) -> None:
     """Cache the conversation up to the last completed exchange.
 
@@ -149,16 +166,24 @@ def _mark_message_prefix(messages: list[dict[str, Any]]) -> None:
     but the newest turn is unchanged from the previous request. Marking the
     second-to-last message makes that prefix a cache read; the newest turn is
     left out because it will not be reused.
+
+    A turn with nothing to mark is skipped rather than marked anyway. Losing one
+    request's cache read costs tokens; sending the marker on an empty text block
+    costs the request.
     """
     if len(messages) < 3:
         return
     target = messages[-2]
     content = target.get("content")
     if isinstance(content, str):
+        if _empty_text(content):
+            return
         target["content"] = [
             {"type": "text", "text": content, "cache_control": _CACHE_CONTROL}
         ]
     elif isinstance(content, list) and content and isinstance(content[-1], dict):
+        if _empty_text(content[-1]):
+            return
         content[-1] = {**content[-1], "cache_control": _CACHE_CONTROL}
 
 

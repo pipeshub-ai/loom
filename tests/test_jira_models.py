@@ -39,9 +39,19 @@ class TestJiraIssue:
         expected_keys = {
             "key", "id", "summary", "status", "assignee",
             "priority", "issue_type", "project", "labels",
-            "created", "updated", "url",
+            "created", "updated", "due_date", "url", "custom_fields",
         }
         assert set(d.keys()) == expected_keys
+
+    def test_custom_fields_default_to_empty(self) -> None:
+        """Absent, not missing: a read that asked for none gets none.
+
+        Jira returns only the fields a request named, so an empty mapping
+        means "not requested" and never "this issue has no custom fields".
+        """
+        from loom.toolsets.jira.models import JiraIssue
+
+        assert JiraIssue(key="A-1").custom_fields == {}
 
     def test_round_trip(self) -> None:
         from loom.toolsets.jira.models import JiraIssue

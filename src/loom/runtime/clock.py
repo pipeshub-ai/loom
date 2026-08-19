@@ -188,7 +188,7 @@ class ManualClock:
             seconds=to_seconds(delta)
         )
         if units:
-            step += timedelta(**units)  # type: ignore[arg-type]
+            step += timedelta(**units)
         self._now += step
         self._release()
         return self._now

@@ -139,7 +139,10 @@ async def _index_lock(index: ArtifactStore, name: str) -> Any:
     """Serialize ``versions() → check digest → append()`` when the index has a lock."""
     store = getattr(index, "_store", None)
     acquire = getattr(store, "acquire", None) if store is not None else None
-    if acquire is None:
+    # `store is None` implies `acquire is None`, but they are two separate
+    # lookups so that implication is invisible; testing both is what lets the
+    # release below be checked rather than assumed.
+    if acquire is None or store is None:
         yield
         return
     key = f"artifact:lock:{name}"
@@ -227,7 +230,8 @@ class ArtifactService:
 
     async def read(self, name: str, version: int | None = None) -> bytes:
         """Fetch the content of a version."""
-        return await self._blobs.load((await self.get(name, version)).ref)
+        payload: bytes = await self._blobs.load((await self.get(name, version)).ref)
+        return payload
 
     async def history(self, name: str) -> list[ArtifactVersion]:
         """Every version of *name*, oldest first."""
@@ -255,4 +259,5 @@ class ArtifactService:
                 "Use S3, Azure, GCS, or LocalBlobBackend with base_url set."
             )
         resolved = await self.get(name, version)
-        return await self._blobs.signed_url(resolved.ref, expires_in=expires_in)
+        url: str = await self._blobs.signed_url(resolved.ref, expires_in=expires_in)
+        return url

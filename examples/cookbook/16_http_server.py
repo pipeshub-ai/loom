@@ -10,7 +10,7 @@ whole round trip in one file. In production you would serve the app with
 uvicorn and point real clients at it.
 
 Requires:
-    pip install loomflow[api]
+    pip install loomsdk[api]
 
 Run:
     python3 examples/cookbook/16_http_server.py

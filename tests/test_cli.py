@@ -338,6 +338,45 @@ class TestActions:
         )
         assert result["output"] == "abc"
 
+    def test_a_mistyped_run_id_approves_nothing(self, project: Path) -> None:
+        """The failure this ordering exists to prevent: an approval left lying around.
+
+        ``Runtime.send_event`` reserves a falsy run id for "every run awaiting
+        this name", and the stores persist that broadcast as a row any run may
+        later take. Delivering before looking the run up therefore made
+        ``loom approve '' release`` exit 2 saying it found no such run, having
+        queued an approval that the *next* run to reach that gate consumed --
+        a human decision recorded with no human, reported as a failed command.
+        """
+        done = loom(project, "approve", "", "release")
+        assert done.returncode == Exit.USAGE
+        assert "no run with id" in done.stderr
+
+        parked = start_run(project, "approver", "-i", "x")
+        assert parked["status"] == "suspended"
+
+    def test_a_mistyped_run_id_sends_nothing(self, project: Path) -> None:
+        done = loom(project, "send", "", "go", '{"token": "abc"}')
+        assert done.returncode == Exit.USAGE
+
+        parked = start_run(project, "waiter", "-i", "x")
+        assert parked["status"] == "suspended"
+
+    def test_a_mistyped_run_id_responds_to_nothing(self, project: Path) -> None:
+        """`respond` is `approve` with a typed payload, and delivers the same way."""
+        done = loom(project, "respond", "", "release", "--approve")
+        assert done.returncode == Exit.USAGE
+
+        parked = start_run(project, "approver", "-i", "x")
+        assert parked["status"] == "suspended"
+
+    def test_an_unknown_run_is_refused_before_anything_is_written(
+        self, project: Path
+    ) -> None:
+        done = loom(project, "approve", "run_does_not_exist", "release")
+        assert done.returncode == Exit.USAGE
+        assert "no run with id" in done.stderr
+
     def test_cancel_marks_a_parked_run_cancelled(self, project: Path) -> None:
         run = start_run(project, "approver", "-i", "x")
         done = loom(project, "cancel", run["run_id"], "--yes", "--json")
@@ -427,15 +466,41 @@ class TestOutputContract:
 
 
 class TestAuthoringCommands:
-    def test_check_writes_the_artifacts(self, project: Path) -> None:
+    def test_check_writes_one_artifact_pair_per_workflow(self, project: Path) -> None:
+        """`flows.py` declares five workflows, so it has five graphs.
+
+        They used to merge into one named after the first, which put every
+        other workflow's steps into it.
+        """
         done = loom(project, "check", "flows.py")
         assert done.returncode == Exit.OK
-        assert (project / "flows.graph.json").exists()
-        assert (project / "flows.description.md").exists()
 
-    def test_check_json_reports_the_graph(self, project: Path) -> None:
+        for name in ("doubler", "approver", "waiter", "echo_env", "breaker"):
+            assert (project / f"flows.{name}.graph.json").exists()
+            assert (project / f"flows.{name}.description.md").exists()
+
+    def test_check_json_reports_every_flow(self, project: Path) -> None:
         report = payload(loom(project, "check", "flows.py", "--json"))
+
         assert report["nodes"] > 0
+        assert {flow["flow_id"] for flow in report["flows"]} == {
+            "doubler",
+            "approver",
+            "waiter",
+            "echo_env",
+            "breaker",
+        }
+
+    def test_check_covers_a_workflow_that_is_not_the_first(self, project: Path) -> None:
+        """The graph of the third workflow holds the third workflow's steps."""
+        loom(project, "check", "flows.py")
+        payload_json = json.loads(
+            (project / "flows.waiter.graph.json").read_text()
+        )
+
+        assert payload_json["flow_id"] == "waiter"
+        labels = {node["label"] for node in payload_json["nodes"]}
+        assert "double" not in labels
 
     def test_graph_renders_mermaid(self, project: Path) -> None:
         done = loom(project, "graph", "flows.py")

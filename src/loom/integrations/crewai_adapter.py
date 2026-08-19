@@ -72,7 +72,7 @@ class CrewAIExecutor:
 
 # -- static protocol check ---------------------------------------------------
 def _check() -> None:
-    _: AgentExecutor = CrewAIExecutor(crew=None)  # type: ignore[arg-type]
+    _: AgentExecutor = CrewAIExecutor(crew=None)
 
 
 # -- Direction B --------------------------------------------------------------

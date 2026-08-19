@@ -191,6 +191,42 @@ class TestExampleRunner:
         assert "did not finish" in detail
 
 
+class TestAKilledExampleIsNotJudged:
+    """A process stopped from outside has said nothing about the example.
+
+    Found by a full suite that ran three times slower than usual, against a
+    machine also driving a browser: one README block came back with a truncated
+    traceback ending mid-import, which matched nothing in `is_environmental` and
+    was reported as a broken example, quoting half an import line as the
+    evidence. Re-running passed. The block was never broken — its process was
+    killed, most likely by the OOM killer, and the check could not tell that
+    from a failure.
+    """
+
+    def test_a_signal_killed_example_is_skipped(self, tmp_path: Path) -> None:
+        from docs_examples import Example, run
+
+        example = Example(
+            tmp_path / "x.md", 1,
+            "import os, signal\nos.kill(os.getpid(), signal.SIGKILL)\n",
+        )
+        outcome, detail = run(example, timeout=20)
+
+        assert outcome == "skipped", "a killed process is not a failed example"
+        assert "signal 9" in detail
+
+    def test_an_example_that_really_fails_still_fails(self, tmp_path: Path) -> None:
+        """The guard is narrow: only a *negative* return code is a signal. An
+        example that raises still exits 1, and still fails."""
+        from docs_examples import Example, run
+
+        example = Example(tmp_path / "x.md", 1, "raise ValueError('genuinely broken')\n")
+        outcome, detail = run(example, timeout=20)
+
+        assert outcome == "failed"
+        assert "genuinely broken" in detail
+
+
 class TestReadmeExamplesDemonstrate:
     """A README block that runs silently teaches nothing.
 
@@ -221,6 +257,15 @@ class TestReadmeExamplesDemonstrate:
                     )
                 except subprocess.TimeoutExpired:
                     continue
+            if done.returncode < 0:
+                # Killed by a signal, so it never reached its own exit. The
+                # OOM killer under a loaded run is the usual cause, and it
+                # truncates stderr mid-traceback -- which then matches nothing
+                # in `is_environmental` and gets reported as a broken README
+                # block, quoting half an import line as the evidence. Same
+                # category as the timeout above: the process was stopped from
+                # outside, so it has said nothing about the example.
+                continue
             if done.returncode != 0:
                 # Needs a key or an optional extra here; the CI job covers it.
                 if is_environmental(done.stderr):

@@ -1,7 +1,14 @@
-Build a multi-platform social media publisher.
+Build a multi-channel publisher.
 
 It should:
-1. Generate multiple social media post variants about a topic using AI
-2. Check for duplicates against previously published content
-3. For each unique post, publish to all configured platforms in parallel
-4. Return counts of posts generated, unique posts, and publish results
+1. Generate several genuinely different variants about a topic using AI
+2. Drop duplicates within the batch, and also anything this workflow has
+   already published in an earlier run
+3. Score the remaining variants and pick the best, keeping the reason
+4. Ask a person before anything is posted
+5. Publish the winner to every configured channel in parallel, bounded, and
+   report which landed
+6. Remember only what actually posted, so a failed publish can be retried later
+
+Return counts of variants generated, suppressed as already-said, and duplicated
+within the batch, plus the per-channel results.

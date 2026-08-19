@@ -19,7 +19,7 @@ Runs with no credentials at all — DuckDuckGo needs none. Set ``EXA_API_KEY`` o
 ``TAVILY_API_KEY`` to see the other two take over.
 
 Run:
-    pip install 'loomflow[duckduckgo]'
+    pip install 'loomsdk[duckduckgo]'
     python3 examples/cookbook/25_web_search.py
 """
 

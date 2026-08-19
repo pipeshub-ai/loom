@@ -98,6 +98,14 @@ def shape_error(schema: Any, payload: Any) -> Mismatch | None:
     wrong_type = not isinstance(payload, accepted) or (
         declared in {"integer", "number"} and isinstance(payload, bool)
     )
+    # A workflow that declares ``config: LeadConfig`` publishes an object
+    # schema, and the most obvious way to call it is with a ``LeadConfig``.
+    # Requiring a dict there refused the declared type by its own name —
+    # "takes object, but the input was LeadConfig" for the workflow that
+    # "expects config: LeadConfig". Duck-typed rather than importing pydantic,
+    # to keep this module's shallow-check promise dependency-free.
+    if wrong_type and declared == "object" and _is_model(payload):
+        wrong_type = False
     if wrong_type:
         return Mismatch(
             message=(
@@ -124,6 +132,17 @@ def shape_error(schema: Any, payload: Any) -> Mismatch | None:
             )
 
     return None
+
+
+def _is_model(payload: Any) -> bool:
+    """Whether *payload* is a Pydantic model instance.
+
+    Its required fields need no check here: constructing the model already
+    enforced them, and did it with a better error than this module could
+    reconstruct from a schema. That is the same reason the object branch below
+    only looks at the top level.
+    """
+    return hasattr(payload, "model_dump") and hasattr(type(payload), "model_fields")
 
 
 def _missing_required(schema: dict[str, Any], payload: dict[str, Any]) -> list[str]:

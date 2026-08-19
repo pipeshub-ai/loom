@@ -12,6 +12,77 @@ from types import SimpleNamespace
 import pytest
 
 
+class TestAnthropicPromptCaching:
+    """`cache_control` on an empty text block is a hard 400.
+
+    "cache_control cannot be set for empty text blocks" — and the block that is
+    empty is an assistant turn that was purely a tool call, which an agent loop
+    produces constantly. The marker lands on whichever turn happens to be second
+    from the end, so this fires deep into a long conversation and takes the
+    whole request with it: the coding agent lost a fifty-turn session to it and
+    returned no code at all.
+    """
+
+    def test_an_empty_text_block_is_not_marked(self) -> None:
+        from loom.agents.providers.anthropic_provider import _mark_message_prefix
+
+        messages = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [{"type": "text", "text": ""}]},
+            {"role": "user", "content": "again"},
+        ]
+
+        _mark_message_prefix(messages)
+
+        assert "cache_control" not in messages[1]["content"][0]
+
+    def test_an_empty_string_turn_is_not_marked(self) -> None:
+        from loom.agents.providers.anthropic_provider import _mark_message_prefix
+
+        messages = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "   "},
+            {"role": "user", "content": "again"},
+        ]
+
+        _mark_message_prefix(messages)
+
+        assert messages[1]["content"] == "   "
+
+    def test_a_tool_use_block_is_still_marked(self) -> None:
+        """Only *empty text* is refused. A tool_use block caches fine, and it is
+        the common tail of an assistant turn — skipping those would give up the
+        cache read on most of an agent loop."""
+        from loom.agents.providers.anthropic_provider import _mark_message_prefix
+
+        messages = [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "t1", "name": "x", "input": {}}],
+            },
+            {"role": "user", "content": "again"},
+        ]
+
+        _mark_message_prefix(messages)
+
+        assert messages[1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+
+    def test_a_real_turn_is_marked(self) -> None:
+        from loom.agents.providers.anthropic_provider import _mark_message_prefix
+
+        messages = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "a real answer"},
+            {"role": "user", "content": "again"},
+        ]
+
+        _mark_message_prefix(messages)
+
+        assert messages[1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+        assert messages[1]["content"][0]["text"] == "a real answer"
+
+
 class TestAnthropicSamplingControls:
     """Claude 5 rejects temperature and top_p with a hard 400.
 

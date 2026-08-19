@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar, overload
 
 from loom.core.exceptions import ConfigurationError
-from loom.core.ids import code_fingerprint
+from loom.core.ids import callable_name, code_fingerprint
 from loom.core.retry import NO_RETRY, Retry
 from loom.core.serde import resolve_annotations
 from loom.core.types import Duration
@@ -213,7 +213,7 @@ def workflow(
     def decorate(target: WorkflowFn) -> WorkflowDefinition[Any, Any, Any]:
         return WorkflowDefinition(
             fn=target,
-            name=name or getattr(target, "__name__", "anonymous_workflow"),
+            name=name or callable_name(target, "anonymous_workflow"),
             version=version,
             description=description,
             triggers=tuple(triggers),

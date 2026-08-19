@@ -62,6 +62,13 @@ OUTLOOK_CALENDAR_MANIFEST = ToolsetManifest(
     },
     tools_module="loom.toolsets.microsoft.outlook.calendar.tools",
     egress_hosts=["graph.microsoft.com", "login.microsoftonline.com"],
+    rate_limits={
+        "model": (
+            "dynamic per-workload throttling; honour the Retry-After header "
+            "on a 429 rather than assuming a fixed rate"
+        ),
+        "source": "learn.microsoft.com/en-us/graph/throttling",
+    },
     groups={
         "calendars": [
             OperationSpec(
@@ -75,6 +82,7 @@ OUTLOOK_CALENDAR_MANIFEST = ToolsetManifest(
                 ),
                 resolves="calendar",
                 effect=EffectClass.READ,
+                scopes=["Calendars.Read"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(Calendar),
@@ -92,6 +100,7 @@ OUTLOOK_CALENDAR_MANIFEST = ToolsetManifest(
                     "says, silently shifting the window."
                 ),
                 effect=EffectClass.READ,
+                scopes=["Calendars.Read"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(CalendarEvent),
@@ -105,6 +114,7 @@ OUTLOOK_CALENDAR_MANIFEST = ToolsetManifest(
                     "schedule use events.calendar_view instead."
                 ),
                 effect=EffectClass.READ,
+                scopes=["Calendars.Read"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(CalendarEvent),
@@ -114,6 +124,7 @@ OUTLOOK_CALENDAR_MANIFEST = ToolsetManifest(
                 function="outlook_get_event",
                 summary="Fetch one event.",
                 effect=EffectClass.READ,
+                scopes=["Calendars.Read"],
                 idempotent=True,
                 output_schema=CalendarEvent.model_json_schema(),
             ),
@@ -127,6 +138,7 @@ OUTLOOK_CALENDAR_MANIFEST = ToolsetManifest(
                     "retried: a retry invites everyone to a second meeting."
                 ),
                 effect=EffectClass.WRITE,
+                scopes=["Calendars.ReadWrite"],
                 output_schema=CalendarEvent.model_json_schema(),
             ),
             OperationSpec(
@@ -134,6 +146,7 @@ OUTLOOK_CALENDAR_MANIFEST = ToolsetManifest(
                 function="outlook_update_event",
                 summary="Change an event's subject, times, body, or location.",
                 effect=EffectClass.WRITE,
+                scopes=["Calendars.ReadWrite"],
                 idempotent=True,
                 output_schema=CalendarEvent.model_json_schema(),
             ),
@@ -143,6 +156,7 @@ OUTLOOK_CALENDAR_MANIFEST = ToolsetManifest(
                 summary="Accept, decline, or tentatively accept an invitation.",
                 description="Emails the organiser, so not retried.",
                 effect=EffectClass.WRITE,
+                scopes=["Calendars.ReadWrite"],
                 output_schema={"type": "boolean"},
             ),
             OperationSpec(
@@ -154,6 +168,7 @@ OUTLOOK_CALENDAR_MANIFEST = ToolsetManifest(
                     "invited: deleting leaves their invitations in place."
                 ),
                 effect=EffectClass.WRITE,
+                scopes=["Calendars.ReadWrite"],
                 output_schema={"type": "boolean"},
             ),
             OperationSpec(
@@ -162,6 +177,7 @@ OUTLOOK_CALENDAR_MANIFEST = ToolsetManifest(
                 summary="Delete an event from this calendar.",
                 description="For a meeting with attendees, cancel instead.",
                 effect=EffectClass.DESTRUCTIVE,
+                scopes=["Calendars.ReadWrite"],
                 idempotent=True,
                 output_schema={"type": "boolean"},
             ),
@@ -176,6 +192,7 @@ OUTLOOK_CALENDAR_MANIFEST = ToolsetManifest(
                     "is an answer rather than an error."
                 ),
                 effect=EffectClass.READ,
+                scopes=["Calendars.Read"],
                 idempotent=True,
                 output_schema=_array(MeetingSuggestion),
             ),
@@ -189,6 +206,7 @@ OUTLOOK_CALENDAR_MANIFEST = ToolsetManifest(
                     "schedule over somebody."
                 ),
                 effect=EffectClass.READ,
+                scopes=["Calendars.Read"],
                 idempotent=True,
                 output_schema=_array(ScheduleSlot),
             ),

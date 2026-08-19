@@ -12,7 +12,7 @@ workflow runs and none of them covers every case:
 ``GOOGLE_SERVICE_ACCOUNT_FILE`` (+ ``GOOGLE_IMPERSONATE_SUBJECT``)
     Workspace domain-wide delegation, for acting as any user in a domain.
     Signing a JWT needs a crypto library, so this one — and only this one —
-    requires ``pip install 'loomflow[google]'``.
+    requires ``pip install 'loomsdk[google]'``.
 
 Tokens are cached until shortly before they expire and refreshed under a lock,
 so a workflow that fans out ten Gmail steps mints one token, not ten.
@@ -246,11 +246,11 @@ class GoogleAuth:
     def _signed_assertion(self) -> str:
         """Build the signed JWT that buys a token for a service account."""
         try:
-            from google.auth import jwt as google_jwt  # type: ignore[import-untyped]
+            from google.auth import jwt as google_jwt
         except ImportError:
             raise GoogleAuthError(
                 "Service-account credentials need the google extra: "
-                "pip install 'loomflow[google]'. Alternatively use "
+                "pip install 'loomsdk[google]'. Alternatively use "
                 "GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET + GOOGLE_REFRESH_TOKEN, "
                 "which needs no extra."
             ) from None

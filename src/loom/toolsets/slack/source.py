@@ -72,7 +72,10 @@ class SlackSource:
         max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS,
         require_signature: bool = True,
     ) -> None:
-        self._secret = signing_secret or os.getenv("SLACK_SIGNING_SECRET", "")
+        # Annotated: `a or b` with an optional `a` infers `str | None` even though
+        # the getenv default makes None unreachable. Stating the invariant beats
+        # narrowing it again at every use.
+        self._secret: str = signing_secret or os.getenv("SLACK_SIGNING_SECRET") or ""
         self._max_age = max_age_seconds
         self._require = require_signature
 

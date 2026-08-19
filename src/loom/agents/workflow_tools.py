@@ -294,4 +294,5 @@ class WorkflowManagerAgent:
     async def chat(self, message: str) -> str:
         """Answer one question, using the tools as needed."""
         result = await self.build_agent()(message)
-        return result.text()
+        answer: str = result.text()
+        return answer

@@ -16,7 +16,7 @@ sandbox, a capability broker, a REST surface, and a React studio. LOOM has a
 library that overlaps it substantially and diverges from it in two decisive
 places.
 
-The goal is for PipesHub to `pip install loomflow` and delete its
+The goal is for PipesHub to `pip install loomsdk` and delete its
 parallel implementation. That cannot happen today, and the reason is not a long
 tail of small gaps — it is two architectural facts (§8.1). Everything else
 is work, not redesign.

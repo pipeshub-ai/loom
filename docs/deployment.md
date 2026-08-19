@@ -15,8 +15,8 @@
 ## Docker
 
 ```bash
-docker build -t loomflow .
-docker run --env-file .env loomflow
+docker build -t loomsdk .
+docker run --env-file .env loomsdk
 ```
 
 ## Docker Compose (with MongoDB)

@@ -1,6 +1,6 @@
 """Command-line entry point.
 
-Installed as both ``loom`` and ``loomflow``.
+Installed as both ``loom`` and ``loomsdk``.
 
 Commands fall into four groups: authoring a workflow, running one, acting on a
 run that already exists, and serving. Everything that touches a run works
@@ -23,10 +23,20 @@ from __future__ import annotations
 import argparse
 import signal
 import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from loom import __version__
 from loom.cli import auth_commands, commands, event_commands, mcp_setup
 from loom.cli.output import Exit
+
+if TYPE_CHECKING:
+    # argparse publishes no public name for what ``add_subparsers()`` returns,
+    # so the private one is the only way to say it. Parameterised on purpose:
+    # left bare it is implicitly ``Any``, and then every ``add_parser`` and
+    # ``add_argument`` in the group functions below goes entirely unchecked —
+    # which is most of what this module is.
+    _Subparsers = argparse._SubParsersAction[argparse.ArgumentParser]
 
 __all__ = ["main"]
 
@@ -52,6 +62,7 @@ _HANDLERS = {
     "replay": commands.cmd_replay,
     "workflows": commands.cmd_workflows,
     "publish": commands.cmd_publish,
+    "versions": commands.cmd_versions,
     "serve": commands.cmd_serve,
     "mcp": commands.cmd_mcp,
     "ui": commands.cmd_ui,
@@ -161,7 +172,7 @@ def _add_run_id(parser: argparse.ArgumentParser) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _authoring(sub: argparse._SubParsersAction) -> None:
+def _authoring(sub: _Subparsers) -> None:
     check = sub.add_parser(
         "check", help="Write <flow>.graph.json and <flow>.description.md"
     )
@@ -184,10 +195,24 @@ def _authoring(sub: argparse._SubParsersAction) -> None:
         default="mermaid",
         help="Output format (default: mermaid)",
     )
+    # `check` needs no selector: it covers every workflow in the file. These
+    # two print one graph, so a module holding several has to say which.
+    graph.add_argument(
+        "--workflow",
+        "-w",
+        default="",
+        help="Which workflow, when the file declares more than one (default: the first)",
+    )
     _add_output(graph)
 
     describe = sub.add_parser("describe", help="Print the narrated description")
     describe.add_argument("path", type=_path, help="Workflow source file")
+    describe.add_argument(
+        "--workflow",
+        "-w",
+        default="",
+        help="Which workflow, when the file declares more than one (default: the first)",
+    )
     _add_output(describe)
 
     init = sub.add_parser("init", help="Scaffold a new workflow project")
@@ -198,7 +223,7 @@ def _authoring(sub: argparse._SubParsersAction) -> None:
     _add_output(init)
 
 
-def _running(sub: argparse._SubParsersAction) -> None:
+def _running(sub: _Subparsers) -> None:
     run = sub.add_parser("run", help="Run a workflow")
     run.add_argument(
         "target", help="Workflow name, or path.py::name"
@@ -274,7 +299,7 @@ def _running(sub: argparse._SubParsersAction) -> None:
     _add_output(artifacts)
 
 
-def _acting(sub: argparse._SubParsersAction) -> None:
+def _acting(sub: _Subparsers) -> None:
     approve = sub.add_parser("approve", help="Resolve a pending human approval")
     approve.add_argument("run_id", help="Run identifier")
     approve.add_argument("subject", help="Approval subject, e.g. 'refund'")
@@ -333,10 +358,23 @@ def _acting(sub: argparse._SubParsersAction) -> None:
     _add_run_id(replay)
 
 
-def _serving(sub: argparse._SubParsersAction) -> None:
+def _serving(sub: _Subparsers) -> None:
     workflows = sub.add_parser("workflows", help="List available workflows")
     _add_backend(workflows)
     _add_output(workflows)
+
+    versions = sub.add_parser(
+        "versions", help="List a workflow's versions, or activate one"
+    )
+    versions.add_argument("workflow", help="Workflow name")
+    versions.add_argument(
+        "--activate",
+        type=int,
+        metavar="N",
+        help="Serve version N. A pointer move, not a new commit.",
+    )
+    _add_backend(versions)
+    _add_output(versions)
 
     toolsets = sub.add_parser(
         "toolsets", help="List integrations a workflow or agent can call"
@@ -460,7 +498,7 @@ def _serving(sub: argparse._SubParsersAction) -> None:
     _add_output(setup)
 
 
-def _authenticating(sub: argparse._SubParsersAction) -> None:
+def _authenticating(sub: _Subparsers) -> None:
     login = sub.add_parser(
         "login", help="Authenticate this CLI with a LOOM server (browser PKCE by default)"
     )
@@ -571,9 +609,7 @@ def _add_oauth_flags(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _path(value: str):
-    from pathlib import Path
-
+def _path(value: str) -> Path:
     return Path(value)
 
 

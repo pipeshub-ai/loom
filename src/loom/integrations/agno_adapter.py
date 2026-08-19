@@ -70,7 +70,7 @@ class AgnoExecutor:
 
 # -- static protocol check ---------------------------------------------------
 def _check() -> None:
-    _: AgentExecutor = AgnoExecutor(agent=None)  # type: ignore[arg-type]
+    _: AgentExecutor = AgnoExecutor(agent=None)
 
 
 # -- Direction B --------------------------------------------------------------

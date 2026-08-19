@@ -17,6 +17,7 @@ import ast
 import inspect
 import re
 import textwrap
+from collections.abc import Iterator
 from typing import Any
 
 from loom.graph.wgir import (
@@ -76,6 +77,7 @@ def _slug_id(text: str, *, limit: int = 48) -> str:
 # Map ctx method names to node kinds
 _CTX_CALL_MAP: dict[str, NodeKind] = {
     "step": NodeKind.EFFECT,  # resolved from step's klass later
+    "node": NodeKind.TOOL,  # refined by category in `_node_kind`
     "map": NodeKind.MAP,
     "gather": NodeKind.PARALLEL,
     "sleep": NodeKind.WAIT,
@@ -96,6 +98,42 @@ _CTX_CALL_MAP: dict[str, NodeKind] = {
     "discard_staged": NodeKind.ARTIFACT,
     "artifact_url": NodeKind.ARTIFACT,
 }
+
+#: ``ctx`` calls that are journaled, and therefore *must* appear in the graph.
+#:
+#: `_CTX_CALL_MAP` is allowed to be wider — ``artifact_url`` is drawable and not
+#: journaled — but it may never be narrower, and
+#: ``TestEveryDurableCallIsModelled`` is what says so. That test exists because
+#: ``ctx.node`` was absent from the map for the node system's whole life: a
+#: workflow calling a catalogued node projected to a graph that did not mention
+#: it, so the canvas, the narration and the committed ``graph.json`` all
+#: silently under-reported the flow.
+DURABLE_CTX_CALLS: frozenset[str] = frozenset({
+    "step", "node", "agent", "child", "gather", "map",
+    "sleep", "sleep_until", "wait_for_event", "wait_for_approval",
+    "publish", "checkpoint",
+    "put_artifact", "get_artifact", "artifact_versions",
+    "stage_artifact", "commit_staged",
+})
+
+#: A node id's category decides how it draws. ``human.approval`` parks a run and
+#: ``agent.classify`` calls a model; rendering both as a generic tool would put
+#: the two things a reader most needs to spot behind the same icon.
+_NODE_CATEGORY_KIND: dict[str, NodeKind] = {
+    "human": NodeKind.HUMAN,
+    "agent": NodeKind.AGENT,
+}
+
+
+def _node_kind(label: str) -> NodeKind:
+    """The kind a ``ctx.node("<category>.<id>")`` call draws as.
+
+    Deliberately not mapping ``control.switch`` to :attr:`NodeKind.SWITCH`: that
+    kind carries branch edges in the graph, and a node call is one statement
+    with one successor however the node behaves inside.
+    """
+    category, _, _ = label.partition(".")
+    return _NODE_CATEGORY_KIND.get(category, NodeKind.TOOL)
 
 
 # ---------------------------------------------------------------------------
@@ -202,10 +240,12 @@ class ASTExtractor(ast.NodeVisitor):
     does not have, which defeats the point of narrating a *verified* skeleton.
     """
 
-    def __init__(self, source_file: str = "") -> None:
+    def __init__(self, source_file: str = "", *, flow_id: str = "") -> None:
         self.nodes: list[WGIRNode] = []
         self.edges: list[WGIREdge] = []
         self._source_file = source_file
+        self._flow_id = flow_id
+        """Which workflow to extract, when the module declares several."""
         self._counter: dict[str, int] = {}
         self._last_node_id: str | None = None
         # Track variable → defining node id for data edges
@@ -244,9 +284,9 @@ class ASTExtractor(ast.NodeVisitor):
 
     # -- scoping -------------------------------------------------------------
 
-    def visit_Module(self, node: ast.Module) -> None:  # noqa: N802
+    def visit_Module(self, node: ast.Module) -> None:
         """Descend only into the module's workflow functions."""
-        for fn in _flow_functions(node):
+        for fn in _flow_functions(node, self._flow_id):
             # Each flow starts its own control chain rather than continuing the
             # previous one, so two workflows in a file do not appear connected.
             self._last_node_id = None
@@ -255,10 +295,10 @@ class ASTExtractor(ast.NodeVisitor):
                 self.visit(stmt)
             self._depth = 0
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self._visit_nested_def(node)
 
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: N802
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         self._visit_nested_def(node)
 
     def _visit_nested_def(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
@@ -307,7 +347,13 @@ class ASTExtractor(ast.NodeVisitor):
         self._last_node_id = node.id
         return node.id
 
-    def visit_If(self, node: ast.If) -> None:  # noqa: N802
+    def visit_If(self, node: ast.If) -> None:
+        # The test can perform durable work before it decides anything --
+        # `if await ctx.wait_for_approval("refund"):` is an approval *and* a
+        # branch. Its node is emitted first, so the chain reads in the order it
+        # runs and the human step is not swallowed by the condition it feeds.
+        self.visit(node.test)
+
         switch_id = self._alloc_id("switch")
         condition_text = _unparse(node.test)
         self._add_node(
@@ -372,14 +418,14 @@ class ASTExtractor(ast.NodeVisitor):
             self._last_node_id = true_live
             self._pending_join_ids = [tail for tail in live_tails if tail != true_live]
 
-    def visit_For(self, node: ast.For) -> None:  # noqa: N802
+    def visit_For(self, node: ast.For) -> None:
         target, iterable = _unparse(node.target), _unparse(node.iter)
         description = (
             f"Repeats for each `{target}` in `{iterable}`." if target and iterable else ""
         )
         self._visit_loop(node, label="for", description=description)
 
-    def visit_While(self, node: ast.While) -> None:  # noqa: N802
+    def visit_While(self, node: ast.While) -> None:
         condition_text = _unparse(node.test)
         description = f"Repeats while `{condition_text}`." if condition_text else ""
         self._visit_loop(node, label="while", description=description)
@@ -387,6 +433,10 @@ class ASTExtractor(ast.NodeVisitor):
     def _visit_loop(
         self, node: ast.For | ast.While, *, label: str, description: str = ""
     ) -> None:
+        # Same reason as `visit_If`: `for row in await ctx.step(fetch, x):`
+        # fetches before it iterates, and that fetch is a durable call.
+        self.visit(node.iter if isinstance(node, ast.For) else node.test)
+
         loop_id = self._alloc_id("loop")
         self._add_node(
             WGIRNode(id=loop_id, kind=NodeKind.LOOP, label=label, description=description), node
@@ -414,7 +464,13 @@ class ASTExtractor(ast.NodeVisitor):
         for stmt in node.orelse:
             self.visit(stmt)
 
-    def visit_Return(self, node: ast.Return) -> None:  # noqa: N802
+    def visit_Return(self, node: ast.Return) -> None:
+        # The returned expression can perform durable work -- `return await
+        # ctx.step(finalise, x)` is a step and a return, not just a return. Its
+        # node is emitted first, so the chain reads in the order it runs.
+        if node.value is not None:
+            self.visit(node.value)
+
         nid = self._alloc_id("return")
         value_text = _unparse(node.value) if node.value is not None else None
         description = (
@@ -428,7 +484,7 @@ class ASTExtractor(ast.NodeVisitor):
         )
         self._terminal_node_ids.add(nid)
 
-    def visit_Assign(self, node: ast.Assign) -> None:  # noqa: N802
+    def visit_Assign(self, node: ast.Assign) -> None:
         # Track which variable is assigned by which node
         self.generic_visit(node)
         # After visiting the value side, the last_node_id is the producer
@@ -437,13 +493,15 @@ class ASTExtractor(ast.NodeVisitor):
                 if isinstance(target, ast.Name):
                     self._var_defs[target.id] = self._last_node_id
 
-    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+    def visit_Call(self, node: ast.Call) -> None:
         call_name = self._resolve_call_name(node)
         if call_name and call_name.startswith("ctx."):
             method = call_name.split(".", 1)[1]
             if method in _CTX_CALL_MAP:
                 kind = _CTX_CALL_MAP[method]
                 label = self._extract_label(node, method)
+                if method == "node":
+                    kind = _node_kind(label)
                 description = self._extract_description(node, method) or ""
                 nid = self._alloc_id(_slug_id(label))
                 self._add_node(
@@ -488,6 +546,12 @@ class ASTExtractor(ast.NodeVisitor):
                 return first_arg.id
             if isinstance(first_arg, ast.Attribute):
                 return first_arg.attr
+        if method == "node" and node.args:
+            first_arg = node.args[0]
+            if isinstance(first_arg, ast.Constant) and isinstance(
+                first_arg.value, str
+            ):
+                return first_arg.value
         if method in ("child", "agent") and node.args:
             first_arg = node.args[0]
             if isinstance(first_arg, ast.Name):
@@ -556,12 +620,39 @@ def _takes_ctx(node: FunctionNode) -> bool:
     return bool(args) and args[0].arg == "ctx"
 
 
-def _flow_functions(module: ast.Module) -> list[FunctionNode]:
+def _flow_name(node: FunctionNode) -> str:
+    """What the workflow is called: ``@workflow(name=...)``, else the function's.
+
+    The registry knows this for certain, but the AST pass has to work on a file
+    that will not import -- which is the case ``loom check`` degrades to and
+    still has to name correctly.
+    """
+    for decorator in node.decorator_list:
+        if not isinstance(decorator, ast.Call):
+            continue
+        if _decorator_name(decorator) not in _FLOW_DECORATORS:
+            continue
+        for keyword in decorator.keywords:
+            named = keyword.arg == "name" and isinstance(keyword.value, ast.Constant)
+            if named and isinstance(keyword.value.value, str):  # type: ignore[attr-defined]
+                return keyword.value.value  # type: ignore[attr-defined]
+    return node.name
+
+
+def _flow_functions(module: ast.Module, flow_id: str = "") -> list[FunctionNode]:
     """The functions whose bodies make up the graph.
 
     Prefers ``@workflow``-decorated functions. Falls back to async functions
     whose first parameter is ``ctx`` so a bare body — a snippet, or a generated
     file inspected before its decorators are settled — still extracts.
+
+    *flow_id* narrows this to one workflow. A module holding two of them holds
+    two graphs, and extracting both into one produced a graph named after the
+    first that contained the second's steps as well -- which is the opposite of
+    what the committed artifact promises, since the whole point of writing it
+    down is that a step cannot be added or hidden without the diff saying so.
+    An id matching nothing here falls back to every flow, because it is then a
+    file stem standing in for a module that would not import, not a selection.
     """
     decorated = [
         node
@@ -569,12 +660,77 @@ def _flow_functions(module: ast.Module) -> list[FunctionNode]:
         if isinstance(node, FunctionNode) and _is_flow(node)
     ]
     if decorated:
-        return decorated
+        selected = [node for node in decorated if _flow_name(node) == flow_id]
+        return selected or decorated
     return [
         node
         for node in module.body
         if isinstance(node, ast.AsyncFunctionDef) and _takes_ctx(node)
     ]
+
+
+def flow_names(source: str) -> list[str]:
+    """Every workflow *source* declares, in file order.
+
+    The AST answer to a question the registry answers better. It exists for the
+    file that will not import, and for ``loom check``, which has to enumerate
+    the flows before it can check each one.
+    """
+    try:
+        tree = ast.parse(textwrap.dedent(source))
+    except SyntaxError:
+        return []
+    return [_flow_name(fn) for fn in _flow_functions(tree)]
+
+
+def _walk_flow_body(node: ast.AST) -> Iterator[ast.AST]:
+    """``ast.walk``, stopping at a function defined inside the body.
+
+    ``ast.walk`` would descend into one, and the AST pass does not —
+    ``_visit_nested_def`` returns, because a function declared in a flow body
+    is a step, not flow structure. Walking further here would count calls the
+    graph was never going to draw and report the two walkers disagreeing as a
+    hole in the graph.
+    """
+    stack: list[ast.AST] = [node]
+    while stack:
+        current = stack.pop()
+        yield current
+        for child in ast.iter_child_nodes(current):
+            if not isinstance(child, FunctionNode):
+                stack.append(child)
+
+
+def durable_ctx_calls(source: str) -> list[tuple[str, int]]:
+    """Every journaled ``ctx.*`` call in *source*'s workflow bodies.
+
+    ``(method, line)``, in file order. The counterpart to what the AST pass
+    produces: this says what the code asked for, the pass says what the graph
+    got, and a gap between them is a durable operation the graph does not show.
+
+    Scoped exactly as extraction is — flow bodies only, and not into a function
+    defined inside one, because that is a step's internals rather than flow
+    structure. Counting the two differently would report a difference that is
+    only the two walkers disagreeing.
+    """
+    try:
+        tree = ast.parse(textwrap.dedent(source))
+    except SyntaxError:
+        return []
+
+    found: list[tuple[str, int]] = []
+    for fn in _flow_functions(tree):
+        for statement in fn.body:
+            if isinstance(statement, FunctionNode):
+                continue  # a step's internals; the AST pass skips it too
+            for node in _walk_flow_body(statement):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = ASTExtractor._resolve_call_name(node) or ""
+                method = name.removeprefix("ctx.") if name.startswith("ctx.") else ""
+                if method in DURABLE_CTX_CALLS:
+                    found.append((method, getattr(node, "lineno", 0)))
+    return found
 
 
 def extract_from_source(
@@ -586,7 +742,7 @@ def extract_from_source(
     except SyntaxError:
         return ASTExtractor(source_file)
 
-    extractor = ASTExtractor(source_file)
+    extractor = ASTExtractor(source_file, flow_id=flow_id)
     extractor.visit(tree)
     return extractor
 
@@ -607,27 +763,34 @@ def merge_passes(
     """Merge registry and AST passes into a final WGIR graph.
 
     - Registry wins on identity (step id, kind, types)
-    - AST wins on source ranges
+    - AST wins on source ranges, and on *membership*
     - Unresolved AST nodes kept as-is (control flow structures)
+
+    The AST decides which nodes exist because it is the pass that knows what
+    this flow calls; the registry knows only what the module declares. Seeding
+    the graph from the registry instead put every ``@step`` in the file into
+    every flow's graph -- so a module with two workflows gave each of them the
+    other's steps, as unreachable nodes with no edges, and a helper step used by
+    nobody appeared as though the flow ran it.
+
+    Nodes come out in flow order rather than definition order, which is the
+    order the narration then reads in.
     """
-    nodes: dict[str, WGIRNode] = {}
+    known = {n.id: n for n in registry_nodes}
+    nodes: list[WGIRNode] = []
 
-    # Registry pass — authoritative on identity
-    for n in registry_nodes:
-        nodes[n.id] = n
-
-    # AST pass — adds source ranges, control flow, new nodes
     for n in ast_nodes:
-        if n.id in nodes:
-            # Merge source range from AST
-            if n.source is not None:
-                nodes[n.id].source = n.source
-        else:
-            nodes[n.id] = n
+        registered = known.get(n.id)
+        if registered is None:
+            nodes.append(n)
+            continue
+        if n.source is not None:
+            registered.source = n.source
+        nodes.append(registered)
 
     graph = WGIRGraph(
         flow_id=flow_id,
-        nodes=list(nodes.values()),
+        nodes=nodes,
         edges=ast_edges,
         source_file=source_file,
     )

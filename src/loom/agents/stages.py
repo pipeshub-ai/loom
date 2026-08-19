@@ -27,9 +27,12 @@ from loom.agents.checks import CheckContext, CheckResult
 from loom.agents.validator import CodeIssue, CodeValidator
 
 __all__ = [
+    "CataloguePreferenceStage",
     "CompileStage",
     "CritiqueStage",
     "LintStage",
+    "OutcomeStage",
+    "ProjectionStage",
     "ReplayStage",
     "SmokeStage",
     "StaticStage",
@@ -255,6 +258,280 @@ class SmokeStage:
 
 
 @dataclass
+class ProjectionStage:
+    """Does every durable call this code makes appear in the graph?
+
+    The graph is *projected* from the code rather than authored beside it, and
+    everything downstream leans on that being complete: the canvas, the run
+    trace, the narration, and the ``graph.json`` diff a reviewer reads instead
+    of the Python. A durable operation the projection misses is not a cosmetic
+    gap — it is a workflow that does something its own documentation does not
+    mention, and the diff stays clean while it happens.
+
+    Two ways that goes wrong, and this catches the second:
+
+    * A ``ctx`` method the extractor does not model at all. ``ctx.node`` was in
+      that state for the node system's whole life. A stage cannot catch it —
+      every workflow is equally wrong — so ``DURABLE_CTX_CALLS`` and a unit test
+      hold that line instead.
+    * A method the extractor *does* model, in a code shape its walker never
+      reaches. ``return await ctx.step(f, x)`` was that until recently: the
+      return statement swallowed the call, and the step showed up in the graph
+      only by accident, via a registry pass that put every step in the module
+      into every flow in it.
+
+    A warning, not an error, and non-blocking. A hole here is a defect in the
+    *extractor*, not in the generated code, so asking the model to repair it
+    invites it to rewrite correct code into a shape that happens to project —
+    the same reasoning that keeps environmental failures out of the repair loop.
+    What it buys is that the hole is reported at the moment it appears, against
+    the workflow that revealed it.
+    """
+
+    name: str = "projection"
+    cost: int = 18
+    """Pure AST, so it sits with the other static passes."""
+    blocking: bool = False
+
+    async def run(self, code: str, context: CheckContext) -> CheckResult:
+        from loom.graph.extractor import (
+            _CTX_CALL_MAP,
+            durable_ctx_calls,
+            extract_from_source,
+        )
+
+        declared = durable_ctx_calls(code)
+        if not declared:
+            return CheckResult(self.name)
+
+        drawable = set(_CTX_CALL_MAP.values())
+        projected = sum(
+            1 for node in extract_from_source(code).nodes if node.kind in drawable
+        )
+        if projected >= len(declared):
+            return CheckResult(self.name)
+
+        missing = len(declared) - projected
+        where = ", ".join(
+            sorted({f"ctx.{method} (line {line})" for method, line in declared})
+        )
+        return CheckResult(
+            self.name,
+            issues=[
+                CodeIssue(
+                    "projection",
+                    f"{missing} durable call(s) do not appear in the projected "
+                    f"graph, so the canvas and the description will not show "
+                    f"them. The code declares {where}. This is a gap in graph "
+                    f"extraction rather than in the workflow — report it "
+                    f"instead of reshaping the code around it.",
+                    "warning",
+                )
+            ],
+            detail={"declared": len(declared), "projected": projected},
+        )
+
+
+@dataclass
+class CataloguePreferenceStage:
+    """Work a catalogued node already does, written out by hand.
+
+    A node is a *shareable contract*: typed, versioned, searchable by the
+    coding agent, contract-rendered, and drawn on the canvas as itself. A step
+    that does the same job by hand is none of those — it draws as an opaque
+    effect, so the reviewer sees "call_the_api" where the node would have said
+    ``io.http_request``, and nothing tells the next author the node existed.
+
+    That gap widens as the agent gets more capable. An agent that can reach the
+    network to *look* at something will reach for the same library to *use* it,
+    and every time it does, the catalogue that makes loom legible to a visual
+    builder gets one workflow less relevant.
+
+    A warning, and only where the node is actually registered here: advice to
+    use something this environment does not have is worse than no advice. The
+    rules are deliberately few. A long list of near-misses trains people to
+    ignore the stage, and the two below are the cases where the node is a
+    straight replacement rather than a judgement call.
+    """
+
+    registry: Any = None
+    name: str = "catalogue"
+    cost: int = 19
+    blocking: bool = False
+
+    #: ``(modules that do the job by hand, the node that does it, what it is)``
+    RULES: ClassVar[tuple[tuple[frozenset[str], str, str], ...]] = (
+        (
+            frozenset({"httpx", "requests", "aiohttp", "urllib3"}),
+            "io.http_request",
+            "an HTTP request",
+        ),
+        (
+            frozenset({"pypdf", "PyPDF2", "docx", "pdfplumber"}),
+            "transform.parse_document",
+            "reading a document",
+        ),
+    )
+
+    async def run(self, code: str, context: CheckContext) -> CheckResult:
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return CheckResult(self.name, skipped=True, reason="does not parse")
+
+        catalogued = self._catalogued()
+        if catalogued is None:
+            return CheckResult(
+                self.name, skipped=True, reason="no node catalogue to compare against"
+            )
+
+        used = _called_modules(tree)
+        issues = []
+        for modules, node_id, doing in self.RULES:
+            hit = sorted(used & modules)
+            if not hit or node_id not in catalogued:
+                continue
+            issues.append(
+                CodeIssue(
+                    "catalogue",
+                    f"{doing} is done here with {hit[0]}, and '{node_id}' is "
+                    f"catalogued for it. A node is typed, versioned and drawn "
+                    f"on the canvas as itself; a hand-rolled step draws as an "
+                    f"opaque effect. Use ctx.node('{node_id}', …) unless it "
+                    f"cannot express what this needs.",
+                    "warning",
+                )
+            )
+        return CheckResult(self.name, issues=issues)
+
+    def _catalogued(self) -> set[str] | None:
+        """What this environment can actually offer, or ``None`` to stay silent.
+
+        Reads the catalogue; deliberately does not *populate* it. Both paths
+        that reach this stage have already loaded the built-ins —
+        ``WorkflowCodingAgent.__init__`` and ``build_coding_tools`` — so
+        loading here changes nothing where it matters and imports a package
+        tree where it does not. A verification stage that mutates
+        process-global state to do its job is one whose findings depend on
+        who ran first.
+        """
+        registry = self.registry
+        if registry is None:
+            try:
+                from loom.nodes.registry import get_node_catalog
+
+                registry = get_node_catalog()
+            except Exception:
+                return None
+        try:
+            catalogued = {card.id for card in registry.search("", limit=500)}
+        except Exception:
+            return None
+        return catalogued or None
+
+
+def _called_modules(tree: ast.Module) -> set[str]:
+    """Top-level module names that appear as the receiver of a call.
+
+    ``httpx.get(...)`` and ``httpx.AsyncClient(...)`` both count; a bare
+    ``import httpx`` used only for a type annotation does not, because the
+    question is what the code *does*, not what it mentions.
+    """
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        receiver = node.func
+        while isinstance(receiver, ast.Attribute):
+            receiver = receiver.value
+        if isinstance(receiver, ast.Name):
+            found.add(receiver.id)
+    return found
+
+
+@dataclass
+class OutcomeStage:
+    """Did the run produce an answer, or only finish?
+
+    ``SmokeStage`` asks whether the code ran. Until this stage, nothing asked
+    what it *returned*: the output was recorded on the smoke result and read
+    only by ``ReplayStage``, which compares two runs for **equality** and never
+    for sense. So a workflow answering "0 fields" to a spec that asked for
+    "every visible form control" passed every gate — it compiled, ran,
+    completed, and replayed identically — and the model was never told what it
+    had produced.
+
+    Two conditions coincide before this says anything, the discipline
+    ``CoverageStage`` uses and for the same reason: an empty result is very
+    often the correct one.
+
+    * The spec asked for completeness. The vocabulary is ``CoverageStage``'s
+      own, imported rather than copied, so the two cannot drift apart.
+    * And the run returned an empty collection anyway.
+
+    **An error rather than a warning**, which is the one surprising choice
+    here. A warning drives no repair, so the model would never see it, and a
+    finding nobody sees is the state this stage exists to end. What makes that
+    safe is already in the repair loop: code returned *unchanged* ends it. A
+    model that judges the empty result correct says so by leaving the file
+    alone, and the message tells it that in as many words.
+
+    Deliberately silent on a synthetic input. When the harness invented the
+    input from a type annotation, an empty result says nothing about the code —
+    the same reason ``SmokeStage`` treats that run as unverifiable rather than
+    failed.
+
+    It reads ``SmokeResult.empty_paths`` rather than parsing ``output_preview``.
+    The preview is capped at 400 characters, and the first version of this stage
+    did parse it — which passed its own tests and then skipped the real workflow
+    it was written for, whose empty ``fields`` list sat behind 1500 characters of
+    page text. The fact is computed where the output is whole.
+    """
+
+    name: str = "outcome"
+    cost: int = 55
+    """After smoke (50), which produces what this reads; before replay (60)."""
+    blocking: bool = False
+
+    async def run(self, code: str, context: CheckContext) -> CheckResult:
+        smoke = context.prior.detail("smoke") if context.prior is not None else None
+        if smoke is None or not getattr(smoke, "ok", False):
+            return CheckResult(
+                self.name, skipped=True, reason="no completed run to read"
+            )
+        if getattr(smoke, "synthetic_input", False):
+            return CheckResult(
+                self.name, skipped=True, reason="the input was invented, not supplied"
+            )
+
+        spec = (context.spec or "").lower()
+        if not any(word in spec for word in CoverageStage.WANTS_ALL):
+            return CheckResult(self.name)
+
+        empty = list(getattr(smoke, "empty_paths", ()))
+        if not empty:
+            return CheckResult(self.name)
+
+        where = ", ".join(empty[:3])
+        more = f" (and {len(empty) - 3} more)" if len(empty) > 3 else ""
+        return CheckResult(
+            self.name,
+            issues=[
+                CodeIssue(
+                    "outcome",
+                    f"the spec asks for completeness, and the run came back "
+                    f"empty at {where}{more}. Either the code looks in the "
+                    f"wrong place, or nothing was there to find. If nothing "
+                    f"was there, return the code unchanged — that is accepted "
+                    f"and ends the repair.",
+                    "error",
+                )
+            ],
+            detail=empty,
+        )
+
+
+@dataclass
 class ReplayStage:
     """Run it twice and compare — determinism, observed rather than argued.
 
@@ -341,6 +618,14 @@ class CoverageStage:
     * the spec asked for completeness — "all", "every", "the full list",
     * and the code caps a fetch without ever asking whether it got everything.
 
+    **A cap need not be written down to exist.** Every paged read has a default
+    one, so `await ctx.step(jira_search_issues, jql)` with no keyword at all is
+    capped just as firmly as `max_results=100` — and it was the one shape this
+    stage could not see, because there was no literal to find. The registry is
+    what closes it: an operation whose manifest declares `pagination` is a
+    capped fetch by construction. Read from the registry rather than listed
+    here, so a host's own toolset is as findable as a shipped one.
+
     A warning, not an error. Deciding that 100 is enough is a legitimate call;
     making it *without noticing* is the defect, and the fix is usually one line.
     """
@@ -348,6 +633,9 @@ class CoverageStage:
     name: str = "coverage"
     cost: int = 15
     blocking: bool = False
+
+    def __init__(self, registry: Any = None) -> None:
+        self._registry = registry
 
     #: Words that make completeness part of the request rather than a detail.
     WANTS_ALL: ClassVar[tuple[str, ...]] = (
@@ -366,12 +654,17 @@ class CoverageStage:
             return CheckResult(self.name)
 
         capped = _capped_calls(code)
-        if not capped:
+        # A paged read with no cap keyword is still capped — by the operation's
+        # own default. Named separately from the literal caps so the message can
+        # say which kind was found; "raise the limit" is wrong advice for a call
+        # that never passed one.
+        defaulted = self._paged_calls_without_a_cap(code)
+        if not capped and not defaulted:
             return CheckResult(self.name)
         if _reads_coverage(code, self.COVERAGE_CHECKS):
             return CheckResult(self.name)
 
-        where = ", ".join(sorted(capped))
+        where = ", ".join(sorted(capped) + sorted(defaulted))
         return CheckResult(
             self.name,
             issues=[
@@ -388,6 +681,48 @@ class CoverageStage:
             ],
         )
 
+    def _paged_calls_without_a_cap(self, code: str) -> set[str]:
+        """Paged operations called with no row cap at all.
+
+        The manifest is the only place that knows an operation pages — derived
+        there from the return type, so a toolset author writes it once. Without
+        the registry this stage had to look for a literal, and a call that
+        simply never passed one was invisible.
+        """
+        registry = self._registry
+        if registry is None or not getattr(registry, "list_toolsets", None):
+            return set()
+        try:
+            paged = {
+                op.function
+                for toolset_id in registry.list_toolsets()
+                for op in (registry.get(toolset_id).all_operations() or [])
+                if op.pagination and op.function
+            }
+        except Exception:
+            # A fake registry in a test need not answer this, and a stage that
+            # cannot look something up has found nothing — not a finding.
+            return set()
+        if not paged:
+            return set()
+
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return set()
+
+        found: set[str] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            named = _called_operation(node)
+            if named not in paged:
+                continue
+            if any(kw.arg in CAP_KEYWORDS for kw in node.keywords):
+                continue
+            found.add(f"{named}() (paged, no limit given)")
+        return found
+
 
 #: Every keyword a shipped toolset uses to cap a read. Recognising only
 #: `max_results` and `limit` left `num_results` (Exa) invisible, and a cap this
@@ -396,6 +731,24 @@ CAP_KEYWORDS: frozenset[str] = frozenset(
     {"max_results", "limit", "page_size", "per_page", "num_results", "top", "count"}
 )
 
+
+def _called_operation(node: ast.Call) -> str:
+    """The operation a call names, through ``ctx.step`` as well as directly.
+
+    ``ctx.step(jira_search_issues, jql)`` calls ``step``; the name that matters
+    is its first argument. Both forms are sanctioned by the prompt, so a check
+    that saw only one would be half a check.
+    """
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        if func.attr in ("step", "node") and node.args:
+            first = node.args[0]
+            if isinstance(first, ast.Name):
+                return first.id
+        return func.attr
+    return ""
 
 def _capped_calls(code: str) -> set[str]:
     """Calls that pass a row cap, by keyword name.
@@ -505,11 +858,29 @@ class ResolutionStage:
     misses count too: an operand one or two characters from a spec word is a
     silent spelling correction, which is a guess wearing an even better
     disguise.
+
+    **An error rather than a warning**, on ``OutcomeStage``'s reasoning: the
+    repair loop runs on ``report.errors``, so a warning here was a finding the
+    model was never shown, and the guess shipped every time. What makes that
+    safe is that code returned *unchanged* ends the repair — a model that has
+    established the word names nothing in the system says so by leaving the
+    file alone, and the message tells it that in as many words.
+
+    **What it says is the other half of the fix.** The first version said "look
+    the entity up", and the generation it was written for had already looked —
+    in two namespaces of the several a tracker has, missing an epic by that
+    name. A name lives in *some* namespace and a service has many, so the
+    message names the resolvers the registry actually declares and then says to
+    search the remaining namespaces by type. Advice that stops at "look it up"
+    is advice the model has already followed.
     """
 
     name: str = "resolution"
     cost: int = 16
     blocking: bool = False
+
+    def __init__(self, registry: Any = None) -> None:
+        self._registry = registry
 
     #: Operators that match on substance rather than identity.
     FUZZY: ClassVar[tuple[str, ...]] = ("~", "contains", "like ", "in text")
@@ -544,15 +915,51 @@ class ResolutionStage:
                         f"{literal.strip()!r} matches on {how}. A fuzzy text "
                         "search is not a resolution — it returns whatever "
                         "happens to contain the substring, and nothing when "
-                        "the wording differs. Look the entity up with "
-                        "call_read_operation and filter on the id it returns; "
-                        "if it stays ambiguous, resolve it in a ctx.agent() "
-                        "step with the candidates.",
-                        "warning",
+                        "the wording differs. Find what the word names before "
+                        f"you match on it: {self._where_to_look()} A name that "
+                        "is not a person or a field is usually a container or "
+                        "a grouping — a project, board, space, folder, epic, "
+                        "label, component, tag — and each is a different "
+                        "namespace, so one that came back empty says nothing "
+                        "about the others. Filter on the id you find. If it "
+                        "stays ambiguous, resolve it in a ctx.agent() step "
+                        "with the candidates. If you have searched every "
+                        "namespace and nothing bears that name, then it is "
+                        "subject matter rather than a thing: keep the text "
+                        "match, say so in what the workflow returns, and "
+                        "return the code unchanged — that is accepted and "
+                        "ends the repair.",
+                        "error",
                     )
                 )
                 break
         return CheckResult(self.name, issues=issues[:3])
+
+    def _where_to_look(self) -> str:
+        """The resolvers this deployment actually has, named.
+
+        Read from the registry rather than listed here, so a host's own toolset
+        is as findable as a shipped one and nothing in this module has to know
+        which toolsets exist.
+        """
+        registry = self._registry
+        if registry is None or not getattr(registry, "list_toolsets", None):
+            return "call_read_operation over the toolset's own resolvers."
+        named: list[str] = []
+        try:
+            for toolset_id in registry.list_toolsets():
+                manifest = registry.get(toolset_id)
+                for kind, op in (manifest.resolvers() or {}).items():
+                    named.append(f"{op.function or op.id} ({kind})")
+        except Exception:
+            return "call_read_operation over the toolset's own resolvers."
+        if not named:
+            return "call_read_operation over the toolset's own read operations."
+        return (
+            "the toolsets here declare "
+            + ", ".join(sorted(named))
+            + " — call them with call_read_operation."
+        )
 
 
 def _spec_terms(spec: str, common: frozenset[str]) -> set[str]:
@@ -577,6 +984,117 @@ def _closest(word: str, terms: set[str]) -> str | None:
         return None
     found = difflib.get_close_matches(word, terms, n=1, cutoff=0.8)
     return found[0] if found else None
+
+
+class IdentifierStage:
+    """Where did that identifier come from?
+
+    ``ResolutionStage`` catches a spec's *word* reaching a query. This catches
+    the failure one step later: a spec word that became an **identifier nobody
+    looked up**. Asked for "issues over 8 story points", a model that cannot
+    resolve the field writes ``customfield_10016`` — a number that is right on
+    some Jira site and wrong on this one. It compiles, it passes the smoke run
+    (fakes ignore arguments), and in production it either 400s or reads a field
+    that means something else entirely.
+
+    Baking an id in is *correct*, and that is what makes this hard: the ladder
+    in ``DEFAULT_SYSTEM_PROMPT`` explicitly says to resolve once and write the
+    id into the code with the name in a comment. A resolved id and an invented
+    one are identical in the file. So the evidence is not the code — it is
+    whether a resolver for that entity kind was actually *called* while
+    authoring, which ``CheckContext.resolved_kinds`` reports from the agent's
+    own tool calls.
+
+    Three things it deliberately does not flag: an id the spec supplied (the
+    caller knows it, and it is not a guess), an id for a kind that *was*
+    resolved, and any id belonging to a toolset that declares no
+    ``opaque_ids`` pattern — most of them. **Silence here is weak evidence**,
+    which is why this is a warning rather than a blocking error.
+    """
+
+    name: str = "identifiers"
+    cost: int = 18
+    blocking: bool = False
+
+    def __init__(self, registry: Any = None) -> None:
+        self._registry = registry
+
+    async def run(self, code: str, context: CheckContext) -> CheckResult:
+        registry = self._registry
+        if registry is None or not getattr(registry, "list_toolsets", None):
+            return CheckResult(
+                self.name, skipped=True, reason="no toolset registry to check against"
+            )
+
+        try:
+            patterns = self._patterns(registry)
+        except Exception:
+            return CheckResult(
+                self.name, skipped=True, reason="registry could not be read"
+            )
+        if not patterns:
+            return CheckResult(
+                self.name, skipped=True, reason="no toolset declares an id pattern"
+            )
+
+        spec = context.spec or ""
+        issues: list[CodeIssue] = []
+        seen: set[str] = set()
+
+        for literal in _string_literals(code):
+            for regex, kind, toolset_id, resolver in patterns:
+                for found in regex.findall(literal):
+                    if found in seen or found in spec:
+                        continue
+                    if kind in context.resolved_kinds:
+                        continue
+                    seen.add(found)
+                    issues.append(
+                        CodeIssue(
+                            "identifiers",
+                            f"{found!r} is a {toolset_id} {kind} id that the spec "
+                            "does not mention and nothing looked up. These differ "
+                            "per account, so a remembered one is wrong somewhere "
+                            "and fails silently — the wrong field, or zero rows. "
+                            f"Resolve it with {resolver} and use what it returns.",
+                            "warning",
+                        )
+                    )
+
+        return CheckResult(self.name, issues=issues)
+
+    def _patterns(self, registry: Any) -> list[tuple[Any, str, str, str]]:
+        """``(compiled, entity kind, toolset id, the resolver to call)``.
+
+        A list rather than a dict keyed by the pattern: ``re.compile`` returns
+        a *cached* object for an identical string, so two toolsets declaring
+        the same shape would collapse to one entry and the second would be
+        dropped without a word.
+
+        Built per run rather than cached: a registry is per-Runtime, and a
+        host that registers its own toolset should have its patterns honoured
+        without this module knowing it exists.
+        """
+        found: list[tuple[Any, str, str, str]] = []
+        for toolset_id in registry.list_toolsets():
+            manifest = registry.get(toolset_id)
+            declared = getattr(manifest, "opaque_ids", None) or {}
+            if not declared:
+                continue
+            resolvers = manifest.resolvers()
+            for pattern, kind in declared.items():
+                op = resolvers.get(kind)
+                # A pattern naming a kind nothing resolves has no advice to
+                # give, and an issue that cannot say what to do instead is
+                # noise.
+                if op is None:
+                    continue
+                try:
+                    compiled = re.compile(pattern)
+                except re.error:
+                    continue
+                found.append((compiled, kind, toolset_id, op.function or op.id))
+        return found
 
 
 class GrantStage:
@@ -770,6 +1288,200 @@ def _names_bound_to_reads(tree: ast.Module, markers: tuple[str, ...]) -> set[str
     return found
 
 
+class JudgementStage:
+    """Is the answer produced by a model that a rule could have produced?
+
+    From an observed generation. Asked to list overdue tickets with their due
+    dates, the agent fetched the rows in a ``@step`` — typed models carrying
+    every field it needed — and then handed them to ``ctx.agent()`` to "fetch
+    the details and produce a markdown table". The table came out right, so
+    nothing downstream complained: it compiled, ran, replayed, and answered.
+
+    What it cost is invisible in the file. A model call re-derives the answer
+    on every run, adds a request and its latency to every run, and can drop,
+    reorder or invent rows the code was already holding — the kind of wrong
+    that reads as right. The prompt has always said formatting is a ``@step``;
+    nothing checked it, and "nothing checked it" is why the rule was followed
+    about as often as it was not.
+
+    Two conditions coincide before it says anything, the discipline
+    ``CoverageStage`` and ``OutcomeStage`` use:
+
+    * The workflow's **answer** comes from a model call — not merely that one
+      exists. An agent that classifies mid-flow, or resolves an ambiguous name,
+      is judgement doing exactly its job and is left alone.
+    * And the spec asked for **no judgement at all**. The vocabulary is
+      deliberately generous, because a false positive here argues with a
+      correct design while a false negative only fails to catch one: any hint
+      that the request wants language, a decision or a classification and this
+      stage stays quiet.
+
+    An error rather than a warning, for ``OutcomeStage``'s reason — the repair
+    loop reads ``report.errors`` — and safe for the same one: unchanged code
+    ends the repair, so a model that judges the call necessary keeps it by
+    leaving the file alone.
+    """
+
+    name: str = "judgement"
+    cost: int = 19
+    """Pure AST, beside the other static passes and well before running."""
+    blocking: bool = False
+
+    #: A spec asking for any of these is asking for judgement, and a model call
+    #: is then the right implementation. Substrings, so "summarise", "summary"
+    #: and "summarize" are one entry; stems over words for the same reason.
+    WANTS_JUDGEMENT: ClassVar[tuple[str, ...]] = (
+        "summar", "draft", "rewrite", "reword", "rephrase", "compose",
+        "classif", "categor", "sentiment", "intent", "tone", "translat",
+        "judge", "assess", "evaluat", "decide", "decision", "recommend",
+        "suggest", "advis", "rank", "prioriti", "important", "urgen",
+        "relevant", "attention", "risk", "insight", "analy", "explain",
+        "interpret", "review", "triage", "critique", "opinion", "why",
+        "generate", "write ", "reply", "respond", "answer",
+    )
+
+    async def run(self, code: str, context: CheckContext) -> CheckResult:
+        spec = (context.spec or "").lower()
+        if not spec:
+            return CheckResult(
+                self.name, skipped=True, reason="no spec to read the intent from"
+            )
+        if any(word in spec for word in self.WANTS_JUDGEMENT):
+            return CheckResult(
+                self.name, reason="the spec asks for judgement; a model call fits"
+            )
+
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return CheckResult(self.name)
+
+        lines = _model_answers(tree)
+        if not lines:
+            return CheckResult(self.name)
+
+        where = ", ".join(f"line {line}" for line in lines[:3])
+        return CheckResult(
+            self.name,
+            issues=[
+                CodeIssue(
+                    "judgement",
+                    f"the workflow's answer is produced by ctx.agent() ({where}), "
+                    "and the spec asks for data rather than judgement. Turning "
+                    "rows the code already holds into a table, a list or a "
+                    "count is a rule: write it in a @step. A model call there "
+                    "re-derives the answer on every run, costs a request each "
+                    "time, and can drop or invent rows that were already in "
+                    "hand. Never ask a model to fetch a field either — the "
+                    "read returns typed models, and a field missing from one "
+                    "is asked for on the read, not from a model. Keep the "
+                    "model call only where the spec asked for judgement; if it "
+                    "did, return the code unchanged — that is accepted and "
+                    "ends the repair.",
+                    "error",
+                )
+            ],
+            detail=lines,
+        )
+
+
+def _model_answers(tree: ast.Module) -> list[int]:
+    """Lines where a workflow returns something a model produced.
+
+    Follows assignment rather than matching a shape, because the same thing is
+    written four ways — returned inline, bound then returned, ``.text()`` taken
+    off it, or interpolated into an f-string that is returned. Chasing names to
+    a fixed point covers all four and does not care which one a model wrote.
+    """
+
+    def is_agent_call(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "agent"
+        )
+
+    def is_laundered(node: ast.AST) -> bool:
+        """A durable call whose result is the code's, whatever went into it.
+
+        ``return await ctx.step(format_report, rows, verdict.text())`` is the
+        shape the prompt asks for when a task is part judgement and part rule —
+        a model decides, a step composes the answer. Walking through it would
+        report that split as the failure it is the fix for.
+        """
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("step", "node")
+        )
+
+    def carries(node: ast.AST, names: set[str]) -> bool:
+        if is_agent_call(node):
+            return True
+        if isinstance(node, ast.Name) and node.id in names:
+            return True
+        if is_laundered(node):
+            return False
+        return any(carries(child, names) for child in ast.iter_child_nodes(node))
+
+    tainted: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            targets: list[ast.expr] = []
+            if isinstance(node, ast.Assign):
+                targets = list(node.targets)
+                value = node.value
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                targets = [node.target]
+                value = node.value
+            else:
+                continue
+            if not carries(value, tainted):
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id not in tainted:
+                    tainted.add(target.id)
+                    changed = True
+
+    found: list[int] = []
+    for function in _workflow_bodies(tree):
+        for node in ast.walk(function):
+            if (
+                isinstance(node, ast.Return)
+                and node.value is not None
+                and carries(node.value, tainted)
+            ):
+                found.append(node.lineno)
+    return sorted(found)
+
+
+def _workflow_bodies(tree: ast.Module) -> list[ast.AsyncFunctionDef]:
+    """The functions the ``@workflow`` decorator marks as workflow bodies.
+
+    Only these, because a helper returning model output says nothing on its
+    own — what matters is whether that output is the *run's* answer.
+    """
+    found: list[ast.AsyncFunctionDef] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef):
+            continue
+        for decorator in node.decorator_list:
+            call = decorator.func if isinstance(decorator, ast.Call) else decorator
+            named = (
+                call.attr
+                if isinstance(call, ast.Attribute)
+                else call.id
+                if isinstance(call, ast.Name)
+                else ""
+            )
+            if named == "workflow":
+                found.append(node)
+                break
+    return found
+
+
 def default_stages(
     *, supervisor: Any = None, smoke: bool = True, registry: Any = None
 ) -> list[Any]:
@@ -782,14 +1494,18 @@ def default_stages(
         CompileStage(),
         StaticStage(),
         GrantStage(registry),
-        CoverageStage(),
+        CoverageStage(registry),
         PlacementStage(),
-        ResolutionStage(),
+        ResolutionStage(registry),
+        ProjectionStage(),
+        CataloguePreferenceStage(),
+        IdentifierStage(registry),
+        JudgementStage(),
         LintStage(),
         TypeStage(),
     ]
     if smoke:
-        stages.extend([SmokeStage(), ReplayStage()])
+        stages.extend([SmokeStage(), OutcomeStage(), ReplayStage()])
     if supervisor is not None:
         stages.append(CritiqueStage(supervisor=supervisor))
     return stages

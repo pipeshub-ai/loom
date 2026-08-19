@@ -861,7 +861,7 @@ class TestPublishFeedsTheEventLog:
         """`ctx.publish` used to only wake `wait_for_event` waiters -- it never
         reached the `EventLog`, so an `OnAppEvent` subscription on a topic a
         workflow publishes (rather than an external source) could never fire."""
-        runtime, log, dispatcher = wired
+        _runtime, log, dispatcher = wired
         await dispatcher.register(enricher)
         await dispatcher.register(notifier)
 
@@ -883,7 +883,7 @@ class TestPublishFeedsTheEventLog:
     ) -> None:
         """The published event's depth must be derived from the run that
         published it, or the cap this exists to enforce never engages."""
-        runtime, log, dispatcher = wired
+        _runtime, log, dispatcher = wired
         await dispatcher.register(enricher)
 
         await log.append(

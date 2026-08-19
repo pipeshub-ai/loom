@@ -101,6 +101,7 @@ class ApprovalNode(Node[ApprovalIn, ApprovalOut]):
 
     spec = human_spec(
         id="human.approval",
+        open_world=True,
         summary="Ask a person to approve or reject; park until they answer.",
         description=(
             "Resolved by `loom respond <run> <subject> --approve`, by "
@@ -200,6 +201,7 @@ class ChoiceNode(Node[ChoiceIn, ChoiceOut]):
 
     spec = human_spec(
         id="human.choice",
+        open_world=True,
         summary="Ask a person to pick from a list of options.",
         tags=["choice", "select", "triage", "hitl"],
         examples=[
@@ -295,6 +297,7 @@ class FormNode(Node[FormIn, FormOut]):
 
     spec = human_spec(
         id="human.form",
+        open_world=True,
         summary="Ask a person for a structured answer described by a JSON Schema.",
         description=(
             "The general case the other human.* nodes specialise. Reach for one "
@@ -373,6 +376,7 @@ class ReviewNode(Node[ReviewIn, ReviewOut]):
 
     spec = human_spec(
         id="human.review_edit",
+        open_world=True,
         summary="Show a draft for review; the person may edit it before it is used.",
         description=(
             "`edited` reports whether the returned content differs from the "
@@ -463,6 +467,7 @@ class EscalateNode(Node[EscalateIn, EscalateOut]):
 
     spec = human_spec(
         id="human.escalate",
+        open_world=True,
         summary="Ask each tier of assignees in turn until somebody answers.",
         description=(
             "Each tier is a separate request with its own subject, so an answer "

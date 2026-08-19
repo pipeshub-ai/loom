@@ -1,4 +1,4 @@
-"""Jira toolset for loomflow.
+"""Jira toolset for loomsdk.
 
 Lazy-loaded: importing this package does not require Jira credentials.
 The JiraClient reads JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN from the
@@ -11,6 +11,8 @@ from loom.toolsets.jira.manifest import JIRA_MANIFEST
 from loom.toolsets.jira.models import (
     Comment,
     CreatedIssue,
+    FieldLookup,
+    JiraField,
     JiraIssue,
     JiraProject,
     JiraProjectDetail,
@@ -22,6 +24,8 @@ __all__ = [
     "JIRA_MANIFEST",
     "Comment",
     "CreatedIssue",
+    "FieldLookup",
+    "JiraField",
     "JiraIssue",
     "JiraProject",
     "JiraProjectDetail",

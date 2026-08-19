@@ -64,6 +64,13 @@ ONENOTE_MANIFEST = ToolsetManifest(
     },
     tools_module="loom.toolsets.microsoft.onenote.tools",
     egress_hosts=["graph.microsoft.com", "login.microsoftonline.com"],
+    rate_limits={
+        "model": (
+            "dynamic per-workload throttling; honour the Retry-After header "
+            "on a 429 rather than assuming a fixed rate"
+        ),
+        "source": "learn.microsoft.com/en-us/graph/throttling",
+    },
     groups={
         "notebooks": [
             OperationSpec(
@@ -73,6 +80,7 @@ ONENOTE_MANIFEST = ToolsetManifest(
                 description="Resolve a notebook before writing into it.",
                 resolves="notebook",
                 effect=EffectClass.READ,
+                scopes=["Notes.Read"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(Notebook),
@@ -82,6 +90,7 @@ ONENOTE_MANIFEST = ToolsetManifest(
                 function="onenote_get_notebook",
                 summary="Fetch one notebook by id.",
                 effect=EffectClass.READ,
+                scopes=["Notes.Read"],
                 idempotent=True,
                 output_schema=Notebook.model_json_schema(),
             ),
@@ -99,6 +108,7 @@ ONENOTE_MANIFEST = ToolsetManifest(
                 ),
                 resolves="section",
                 effect=EffectClass.READ,
+                scopes=["Notes.Read"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(OneNoteSection),
@@ -109,6 +119,7 @@ ONENOTE_MANIFEST = ToolsetManifest(
                 summary="List section groups, the optional folder level.",
                 description="Most tenants have none, so empty is the normal case.",
                 effect=EffectClass.READ,
+                scopes=["Notes.Read"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(SectionGroup),
@@ -119,6 +130,7 @@ ONENOTE_MANIFEST = ToolsetManifest(
                 summary="Create a section in a notebook.",
                 description="Not retried: a retry leaves two sections.",
                 effect=EffectClass.WRITE,
+                scopes=["Notes.ReadWrite"],
                 output_schema=OneNoteSection.model_json_schema(),
             ),
         ],
@@ -129,6 +141,7 @@ ONENOTE_MANIFEST = ToolsetManifest(
                 summary="List pages in a section, or across all.",
                 description="Metadata only; content is fetched separately.",
                 effect=EffectClass.READ,
+                scopes=["Notes.Read"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(OneNotePage),
@@ -138,6 +151,7 @@ ONENOTE_MANIFEST = ToolsetManifest(
                 function="onenote_search_pages",
                 summary="Search page titles and content.",
                 effect=EffectClass.READ,
+                scopes=["Notes.Read"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(OneNotePage),
@@ -147,6 +161,7 @@ ONENOTE_MANIFEST = ToolsetManifest(
                 function="onenote_get_page",
                 summary="Fetch one page's metadata.",
                 effect=EffectClass.READ,
+                scopes=["Notes.Read"],
                 idempotent=True,
                 output_schema=OneNotePage.model_json_schema(),
             ),
@@ -159,6 +174,7 @@ ONENOTE_MANIFEST = ToolsetManifest(
                     "targeted edit possible later."
                 ),
                 effect=EffectClass.READ,
+                scopes=["Notes.Read"],
                 idempotent=True,
                 output_schema={"type": "string"},
             ),
@@ -172,6 +188,7 @@ ONENOTE_MANIFEST = ToolsetManifest(
                     "untitled page and reports no error. Not retried."
                 ),
                 effect=EffectClass.WRITE,
+                scopes=["Notes.ReadWrite"],
                 output_schema=OneNotePage.model_json_schema(),
             ),
             OperationSpec(
@@ -183,6 +200,7 @@ ONENOTE_MANIFEST = ToolsetManifest(
                     "onenote_get_page_content(include_ids=True)."
                 ),
                 effect=EffectClass.WRITE,
+                scopes=["Notes.ReadWrite"],
                 idempotent=True,
                 output_schema={"type": "boolean"},
             ),
@@ -191,6 +209,7 @@ ONENOTE_MANIFEST = ToolsetManifest(
                 function="onenote_delete_page",
                 summary="Delete a page.",
                 effect=EffectClass.DESTRUCTIVE,
+                scopes=["Notes.ReadWrite"],
                 idempotent=True,
                 output_schema={"type": "boolean"},
             ),

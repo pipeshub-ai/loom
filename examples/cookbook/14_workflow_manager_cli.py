@@ -231,7 +231,7 @@ async def main() -> None:
 
     # Setup runtime with sample workflows
     log("setup", "Creating runtime with sample workflows...")
-    model = AnthropicProvider(model_name="claude-sonnet-4-6")
+    model = AnthropicProvider(model_name="claude-sonnet-5")
     async with Runtime(store=MemoryStore()) as rt:
         # Register sample workflows
         dispatcher = TriggerDispatcher(rt)

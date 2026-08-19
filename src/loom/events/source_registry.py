@@ -44,6 +44,7 @@ BUILTIN_SOURCES: dict[str, str] = {
     "slack": f"{_SOURCES}.slack.source.SlackSource",
     "jira": f"{_SOURCES}.jira.source.JiraSource",
     "gmail": f"{_SOURCES}.google.gmail.source.GmailSource",
+    "stripe": f"{_SOURCES}.stripe.source.StripeSource",
 }
 
 

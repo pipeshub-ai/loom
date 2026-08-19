@@ -1,4 +1,4 @@
-"""Testing utilities for loomflow.
+"""Testing utilities for loomsdk.
 
 Mock model providers so an agent-powered workflow can be tested without a real
 LLM call, and a controllable clock so a workflow that waits can be tested

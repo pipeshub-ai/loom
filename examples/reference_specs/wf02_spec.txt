@@ -1,10 +1,15 @@
 Build an AI content generation pipeline.
 
-It should run on a schedule and:
-1. Research trending topics in a configurable niche
-2. Pick the top topic
-3. Generate platform-specific posts (LinkedIn + Twitter) and an image in parallel
-4. Publish to LinkedIn and Twitter in parallel
-5. Return a summary of what was published
+It should run weekly and:
+1. Research what is currently being discussed in a configurable niche, keeping
+   the sources behind whatever it finds
+2. Write a piece tailored to each configured channel — Slack, Teams, and a
+   Confluence page want different lengths and different shapes
+3. Have a person review the whole set before anything is published, and publish
+   what they edited rather than what they were shown
+4. Publish to every configured channel, a bounded number at a time, reporting
+   which landed and which failed
+5. Return the topic, whether it was approved, and the per-channel outcome
 
-Use AI for topic research, post generation, and image generation.
+Nothing may assert anything the sources do not support. A channel that fails
+must not stop the others.

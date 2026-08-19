@@ -75,6 +75,7 @@ class TestPricing:
             ("o3-mini", 1.10),
             ("gemini-2.5-flash", 0.30),
             ("gemini-2.5-flash-lite", 0.10),
+            ("claude-sonnet-5", 2.00),
             ("claude-sonnet-4-6", 3.00),
             ("gpt-5.6-luna", 0.20),
         ],
@@ -91,14 +92,15 @@ class TestPricing:
         model = OpenAIProvider(api_key="x").model_name
         usage = Usage(input_tokens=1_000_000, output_tokens=1_000_000)
 
-        assert estimate_cost(model, usage) == pytest.approx(2.00)  # 0.20 + 1.80
+        assert estimate_cost(model, usage) == pytest.approx(14.00)  # 2.00 + 12.00
 
     def test_sibling_models_are_not_given_lunas_price(self) -> None:
-        """sol and terra exist but their rates are unknown; guessing would make
-        estimate_cost confidently wrong, so they stay unpriced."""
+        """A sibling is priced from its own published rate or not at all —
+        inheriting luna's by prefix would make estimate_cost confidently wrong,
+        and luna is an order of magnitude cheaper than either sibling."""
         usage = Usage(input_tokens=1_000_000)
-        assert estimate_cost("gpt-5.6-sol", usage) == 0.0
-        assert estimate_cost("gpt-5.6-terra", usage) == 0.0
+        assert estimate_cost("gpt-5.6-sol", usage) == 0.0  # rate not on file
+        assert estimate_cost("gpt-5.6-terra", usage) == pytest.approx(2.00)
 
     def test_a_dated_luna_id_still_resolves(self) -> None:
         cost = estimate_cost("gpt-5.6-luna-2026-07-01", Usage(input_tokens=1_000_000))

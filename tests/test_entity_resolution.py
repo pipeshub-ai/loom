@@ -178,6 +178,27 @@ class TestThePromptStaysGeneric:
         for specific in ("jira", "Jira", "slack", "Slack", "github", "Vishwjeet"):
             assert specific not in DEFAULT_SYSTEM_PROMPT, specific
 
+    def test_no_real_account_s_data_reaches_a_model(self) -> None:
+        """Examples are placeholders, and the difference is not cosmetic.
+
+        The agent-node example carried two issue keys and a person's name from
+        the account the feature was developed against — read by every model on
+        every generation, and read as *this account's* vocabulary. A test
+        covered the prompt for names and the keys went through it, so the
+        surfaces are scanned together: what a model sees is the prompt, the
+        authoring tools' descriptions, and a toolset's own docs.
+        """
+        from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
+        from loom.agents.coding_tools import build_coding_tools
+        from loom.toolsets.jira.tools import JIRA_TOOL_DOCS
+
+        seen = [DEFAULT_SYSTEM_PROMPT, JIRA_TOOL_DOCS]
+        seen += [tool.description or "" for tool in build_coding_tools()]
+
+        for text in seen:
+            for leaked in ("Vishwjeet", "PA-1769", "PA-1844", "pipeshub"):
+                assert leaked not in text, leaked
+
 
 class TestThePromptTeachesTheLadder:
     def test_it_names_each_rung(self) -> None:
@@ -195,12 +216,25 @@ class TestThePromptTeachesTheLadder:
         """The rule: a leftover ambiguity is resolved by a model at run time,
         not by a direct tool call the generator had to guess the arguments for."""
         prompt = prompt_text()
-        assert "Ambiguous after those two lookups" in prompt
-        assert "At most two lookups per entity" in prompt, (
-            "without a stopping rule the agent searches until its budget dies"
-        )
+        assert "Two candidates, or two namespaces that both answer" in prompt
         assert "do not call the toolset operation directly for it" in prompt
         assert "ctx.agent()` step that resolves it at run time" in prompt
+
+    def test_the_budget_is_per_namespace_not_per_entity(self) -> None:
+        """The stopping rule that replaced "at most two lookups per entity".
+
+        That budget produced the generation this rule exists for: asked for
+        tickets in a named area, the agent tried two namespaces — a project
+        and a label — got nothing from either, spent its budget, and fell to
+        matching free text. An epic bore the name. Two empty namespaces is not
+        a verdict, so the budget counts *places to look* rather than attempts,
+        and the prompt says which places there are.
+        """
+        prompt = prompt_text()
+        assert "One lookup per namespace" in prompt
+        assert "an empty answer says nothing about the" in prompt
+        for namespace in ("container", "grouping", "epic", "label", "component"):
+            assert namespace in prompt, namespace
 
     def test_it_shows_the_agent_node_form(self) -> None:
         """A rule the model has to invent a shape for is a rule half given."""
@@ -214,6 +248,22 @@ class TestThePromptTeachesTheLadder:
         assert "One clear answer" in prompt
         assert "does no lookup at run time" in prompt
         assert "re-answers it, differently, on every run" in prompt
+
+    def test_a_name_nothing_bears_is_subject_matter(self) -> None:
+        """The rung the ladder was missing.
+
+        Every rung assumed the spec's word names a thing, so a word that names
+        none had nowhere to go: matching text was forbidden and filtering on
+        the raw string was forbidden, which leaves a model choosing between two
+        prohibitions. The first is right once the namespaces are exhausted —
+        and it has to say so in the output, or a scope decided by substring
+        reads as a scope that was resolved.
+        """
+        prompt = prompt_text()
+        assert "No namespace has that name" in prompt
+        assert "subject matter, not a thing" in prompt
+        assert "say so in what the" in prompt
+        assert "Never fall back to the raw string" in prompt
 
     def test_the_tool_is_offered_to_the_agent(self) -> None:
         from loom.agents.coding_tools import build_coding_tools
@@ -536,12 +586,67 @@ class TestMarkdownByDefault:
         a comprehension passed all ten stages while reporting a truncated
         fetch as a complete answer.
 
+        It moved a fifth time, from 9400 to 9500, for one widened rule. The
+        per-account sentence covered *values* — statuses, labels — and said
+        nothing about *identifiers*, so a model that could not resolve
+        ``customfield_10016`` wrote one from memory: right on some other Jira
+        site, silently wrong here, and undetectable in the finished file
+        because baking a resolved id in is what rung 2 asks for.
+        ``IdentifierStage`` exists to catch it and, as with the placement rule
+        above, nothing in the prompt said not to do it.
+
+        The space was earned first. The rule arrived as its own 330-character
+        paragraph, which on reading was the per-account sentence restated
+        against a different noun — so it was merged into that sentence
+        instead, at 120, and the sentence tightened to 107.
+
+        It moved a sixth time, from 9500 to 10300, to pay for two rules, both
+        from one generation that passed every stage. Asked for tickets in a
+        named area with a date field, the agent looked in two namespaces, found
+        nothing, and matched free text — an epic bore the name — and then had
+        ``ctx.agent()`` fetch a field its typed rows already carried and render
+        the table. So: the lookup budget is now per *namespace* rather than
+        two per entity, with the namespaces named; and a model call is
+        declared to cost a request on every run, never to render an answer,
+        never to fetch.
+
+        The search was run again first and found little left. Deleted: a
+        dangling "Not for a lookup with one answer: that re-answers it,
+        differently, on every run", orphaned by an earlier edit and a
+        restatement of the exception in "Code or judgement" three sections up —
+        merged into that paragraph, where it has a subject again. Trimmed: a
+        sentence saying a text match is the answer only once the namespaces
+        are empty, which rung 4 had already said in full; and a list of the two
+        jobs a model must not take, where the ``@step`` list already names
+        formatting.
+
+        Three candidates were not restatement. "Code written first is code
+        built around a guess" is the *reason* the RESOLVE/PLAN ordering is
+        followed rather than the ordering itself. "Filter in the query, not
+        after it" and the paging window are two different failures that read
+        alike. And the "Output format" section carries "no markdown fences",
+        which the process list does not.
+
+        It moved a third time, from 10300 to 10400, to pay for an exit from
+        DISCOVER. Step 1 said to search the toolsets and never said what to do
+        when nothing matched, so on a task no integration covers — driving a
+        browser — a traced generation spent 43 turns reading the documentation
+        of jira, gmail, slack, confluence, drive, quickbooks, sharepoint, teams
+        and tavily in turn, and produced no code at all. The rule that two
+        empty searches are a normal answer, and that the rest is plain Python
+        in a ``@step``, took that same task to two turns.
+
+        The search ran again first and found nothing left to delete: the two
+        earlier passes have already taken the restatement out. What was earned
+        instead came from the addition itself, cut from 374 characters to 165 —
+        the failure it prevents is worth a sentence, not a paragraph.
+
         The margin above the current length is about one sentence wide on
         purpose, so the next addition has to run this search too.
         """
         from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
 
-        assert len(DEFAULT_SYSTEM_PROMPT) < 9400, "the prompt is drifting long"
+        assert len(DEFAULT_SYSTEM_PROMPT) < 10400, "the prompt is drifting long"
 
 
 class TestRepeatedLookupsAreStopped:
@@ -1010,12 +1115,80 @@ class TestResolutionStage:
         )
         assert len((await self._run(many)).issues) <= 3
 
-    async def test_it_is_a_warning_and_runs_before_the_expensive_stages(self) -> None:
-        from loom.agents.stages import ResolutionStage, default_stages
+    async def test_it_is_an_error_so_the_repair_loop_is_shown_it(self) -> None:
+        """A warning drives no repair, and this one shipped every time.
+
+        The repair loop reads ``report.errors``. For as long as this was a
+        warning the model never saw it, which made the check a note to a human
+        who was not reading. Non-blocking still: the stages after it are worth
+        running on code whose scope is a guess.
+        """
+        result = await self._run(self.GUESSED)
+
+        assert [issue.severity for issue in result.issues] == ["error"]
+        from loom.agents.stages import ResolutionStage
 
         assert ResolutionStage().blocking is False
+
+    async def test_it_runs_before_the_expensive_stages(self) -> None:
+        from loom.agents.stages import default_stages
+
         names = [stage.name for stage in default_stages()]
         assert names.index("resolution") < names.index("smoke")
+
+    async def test_it_says_where_to_look_rather_than_only_that_it_should(
+        self,
+    ) -> None:
+        """The advice the first version gave had already been followed.
+
+        The generation that prompted the rewrite looked in two namespaces and
+        stopped. "Look the entity up" tells that agent nothing it did not do;
+        naming the resolvers this deployment declares, and the namespaces a
+        resolver does not cover, is what makes the finding actionable.
+        """
+        from loom.agents.checks import CheckContext
+        from loom.agents.stages import ResolutionStage
+        from loom.agents.tool_registry import ToolsetRegistry
+
+        registry = ToolsetRegistry()
+        registry.register(JIRA_MANIFEST)
+        stage = ResolutionStage(registry)
+
+        message = (await stage.run(self.GUESSED, CheckContext(spec=self.SPEC))).issues[
+            0
+        ].message
+
+        assert "jira_resolve_user (user)" in message, "the declared resolvers"
+        assert "epic" in message and "label" in message, "and the namespaces"
+        assert "return the code unchanged" in message, "and the way out"
+
+    async def test_a_registry_that_declares_no_resolver_still_advises(self) -> None:
+        """A host toolset need not declare one, and silence is not advice."""
+        from loom.agents.checks import CheckContext
+        from loom.agents.stages import ResolutionStage
+        from loom.agents.tool_registry import ToolsetRegistry
+
+        stage = ResolutionStage(ToolsetRegistry())
+        message = (await stage.run(self.GUESSED, CheckContext(spec=self.SPEC))).issues[
+            0
+        ].message
+
+        assert "call_read_operation" in message
+
+    async def test_a_text_match_the_spec_did_not_word_is_still_left_alone(
+        self,
+    ) -> None:
+        """Escalating severity must not widen what is flagged.
+
+        The whole check rests on the operand coming from the spec; an error on
+        every ``~`` would fail correct workflows against services whose only
+        query language is a text match.
+        """
+        deliberate = (
+            "async def fetch() -> list:\n"
+            "    return await jira_search_issues('text ~ \"regression\"')\n"
+        )
+        assert not (await self._run(deliberate, "show the overdue stories")).issues
 
     def test_the_prompt_names_the_disguise(self) -> None:
         assert "fuzzy text search is not a resolution" in DEFAULT_SYSTEM_PROMPT

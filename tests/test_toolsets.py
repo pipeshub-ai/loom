@@ -3,6 +3,8 @@ rate limiting, lock/drift, and certification."""
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from loom.toolsets.catalog import (
@@ -48,11 +50,13 @@ def _salesforce_manifest() -> ToolsetManifest:
         base_url="https://api.salesforce.com",
         egress_hosts=["api.salesforce.com"],
         fakes_module="loom_toolset_salesforce.fakes",
+        tools_module="loom_toolset_salesforce.tools",
         rate_limits={"default": {"rps": 10}},
         groups={
             "leads": [
                 OperationSpec(
                     id="leads.upsert",
+                    function="salesforce_upsert_lead",
                     summary="Create or update a lead",
                     effect=EffectClass.WRITE,
                     input_schema={"type": "object", "properties": {"name": {"type": "string"}}},
@@ -62,6 +66,7 @@ def _salesforce_manifest() -> ToolsetManifest:
                 ),
                 OperationSpec(
                     id="leads.search",
+                    function="salesforce_search_leads",
                     summary="Search leads by criteria",
                     effect=EffectClass.READ,
                     input_schema={"type": "object", "properties": {"query": {"type": "string"}}},
@@ -72,6 +77,7 @@ def _salesforce_manifest() -> ToolsetManifest:
             "contacts": [
                 OperationSpec(
                     id="contacts.get",
+                    function="salesforce_get_contact",
                     summary="Get a contact by ID",
                     effect=EffectClass.READ,
                     input_schema={"type": "object", "properties": {"id": {"type": "string"}}},
@@ -418,7 +424,11 @@ class TestCertification:
         result = await certify(_salesforce_manifest())
         assert isinstance(result, CertificationResult)
         assert result.certified is True
-        assert result.passed_count == 12
+        # Every check, rather than a count: the number changes whenever one is
+        # added, and a magic number here made an added check look like a
+        # regression in an unrelated file.
+        assert result.passed_count == len(result.results)
+        assert result.failed_count == 0
 
     @pytest.mark.asyncio
     async def test_empty_manifest_fails(self) -> None:
@@ -433,6 +443,7 @@ class TestCertification:
             id="test",
             version="1.0.0",
             summary="Test toolset",
+            auth={"type": "oauth2"},
             base_url="https://api.test.com",
             egress_hosts=["api.test.com"],
             fakes_module="test.fakes",
@@ -659,3 +670,313 @@ class TestAwaitingADurableCallIsTyped:
 
         assert problems, "output is Optional; mypy should say so"
         assert "no-any-return" not in " ".join(problems), "should not be Any any more"
+
+
+# ---------------------------------------------------------------------------
+# Effect classification defaults (Phase 12)
+# ---------------------------------------------------------------------------
+
+
+class TestEffectDefaultFailsSafe:
+    """``effect`` defaults to the cautious end of the scale.
+
+    READ is the one class exempt from every write and destructive control, so
+    defaulting to it meant an operation nobody classified was *granted* rather
+    than flagged."""
+
+    def test_an_unclassified_operation_is_a_write(self) -> None:
+        op = OperationSpec(id="pages.nuke", summary="permanently delete every page")
+        assert op.effect is EffectClass.WRITE
+
+    def test_the_manifest_now_agrees_with_the_broker(self) -> None:
+        """``EffectCall.effect`` has always defaulted to WRITE. The manifest
+        defaulting to READ meant the two disagreed about the same question."""
+        from loom.runtime.effects import EffectCall
+
+        assert OperationSpec(id="x.y", summary="s").effect == EffectCall(
+            kind="step", target="x.y"
+        ).effect
+
+    def test_declaration_is_distinguishable_from_the_default(self) -> None:
+        """The mechanism CERT-04 depends on."""
+        assert "effect" not in OperationSpec(id="x.y", summary="s").model_fields_set
+        assert "effect" in OperationSpec(
+            id="x.y", summary="s", effect=EffectClass.WRITE
+        ).model_fields_set
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda d: OperationSpec(**d),
+            lambda d: OperationSpec.model_validate(d),
+            lambda d: OperationSpec.model_validate_json(json.dumps(d)),
+        ],
+        ids=["constructed", "from_dict", "from_json"],
+    )
+    def test_declaration_survives_every_construction_path(self, build) -> None:
+        """A third-party manifest arrives through an entry point as data, not
+        as a Python literal. If this stopped holding, CERT-04 would read every
+        such manifest as unclassified."""
+        base = {"id": "x.y", "summary": "s"}
+        assert "effect" not in build(base).model_fields_set
+        assert "effect" in build({**base, "effect": "read"}).model_fields_set
+
+
+class TestCertificationCatchesUnclassifiedOperations:
+    """CERT-04 claimed to require an explicit classification and could not fail:
+    it tested ``if not op.effect``, and every ``EffectClass`` member is truthy."""
+
+    @pytest.mark.asyncio
+    async def test_an_undeclared_effect_now_fails_cert_04(self) -> None:
+        m = ToolsetManifest(
+            id="t",
+            version="1.0.0",
+            summary="s",
+            base_url="https://api.test.com",
+            egress_hosts=["api.test.com"],
+            fakes_module="t.fakes",
+            rate_limits={"default": {"rps": 10}},
+            groups={
+                "pages": [
+                    OperationSpec(
+                        id="pages.nuke",
+                        summary="permanently delete every page",
+                        input_schema={"type": "object"},
+                        scopes=["pages:write"],
+                    )
+                ]
+            },
+        )
+        result = await certify(m)
+        failed = {r.code for r in result.results if not r.passed}
+        assert "CERT-04" in failed
+        assert result.certified is False
+
+    @pytest.mark.asyncio
+    async def test_an_unclassified_operation_is_no_longer_scope_exempt(self) -> None:
+        """CERT-05 only demanded scopes for write/destructive. Under the READ
+        default an unclassified operation was exempt from that too, so one
+        omission disarmed both checks."""
+        m = ToolsetManifest(
+            id="t",
+            version="1.0.0",
+            summary="s",
+            auth={"type": "oauth2"},
+            base_url="https://api.test.com",
+            egress_hosts=["api.test.com"],
+            tools_module="t.tools",
+            rate_limits={"default": {"rps": 10}},
+            groups={
+                "pages": [
+                    OperationSpec(
+                        id="pages.nuke",
+                        function="t_nuke",
+                        summary="permanently delete every page",
+                        input_schema={"type": "object"},
+                    )
+                ]
+            },
+        )
+        result = await certify(m)
+        failed = {r.code for r in result.results if not r.passed}
+        assert {"CERT-04", "CERT-05"} <= failed
+
+    @pytest.mark.asyncio
+    async def test_a_declared_manifest_still_certifies(self) -> None:
+        result = await certify(_salesforce_manifest())
+        assert result.certified is True
+
+
+class TestShippedToolsetsAreClassified:
+    """The corpus guard. Every operation LOOM ships declares its own effect, so
+    none of them reaches the default — and a new one that forgets is caught
+    here rather than by whatever it is later granted."""
+
+    def test_every_shipped_operation_declares_its_effect(self) -> None:
+        import importlib
+        import pkgutil
+
+        import loom.toolsets as pkg
+
+        undeclared = []
+        for mod in pkgutil.walk_packages(pkg.__path__, pkg.__name__ + "."):
+            if not mod.name.endswith(".manifest"):
+                continue
+            try:
+                loaded = importlib.import_module(mod.name)
+            except Exception:  # pragma: no cover - optional extras
+                continue
+            for value in vars(loaded).values():
+                for manifest in value if isinstance(value, list | tuple) else [value]:
+                    if type(manifest).__name__ != "ToolsetManifest":
+                        continue
+                    undeclared += [
+                        f"{manifest.id}.{op.id}"
+                        for op in manifest.all_operations()
+                        if "effect" not in op.model_fields_set
+                    ]
+        assert not undeclared, f"operations relying on the default: {undeclared}"
+
+
+class TestFakeabilityCertification:
+    """CERT-08 used to demand a hand-written ``fakes_module`` and so failed all
+    23 shipped toolsets, none of which declares one — deliberately, because
+    ``agents/fakes.py`` generates stand-ins from ``output_schema`` so that no
+    parallel set of fakes can drift from the contract."""
+
+    def _manifest(self, **kw) -> ToolsetManifest:
+        defaults = dict(
+            id="t",
+            version="1.0.0",
+            summary="s",
+            base_url="https://api.test.com",
+            egress_hosts=["api.test.com"],
+            rate_limits={"default": {"rps": 10}},
+            tools_module="t.tools",
+            groups={
+                "g": [
+                    OperationSpec(
+                        id="g.read",
+                        summary="Read.",
+                        function="t_read",
+                        effect=EffectClass.READ,
+                        input_schema={"type": "object"},
+                        output_schema={"type": "object"},
+                    )
+                ]
+            },
+        )
+        defaults.update(kw)
+        return ToolsetManifest(**defaults)
+
+    @pytest.mark.asyncio
+    async def test_a_generated_fake_is_enough(self) -> None:
+        """No fakes_module, and that is the normal case rather than a defect."""
+        result = await certify(self._manifest())
+        cert08 = next(r for r in result.results if r.code == "CERT-08")
+        assert cert08.passed is True
+
+    @pytest.mark.asyncio
+    async def test_no_tools_module_fails(self) -> None:
+        """Without it ``install_fakes`` returns [] and the smoke sandbox runs
+        against the real service — a 401 the repair loop escapes by deleting
+        the integration."""
+        result = await certify(self._manifest(tools_module=""))
+        assert "CERT-08" in {r.code for r in result.results if not r.passed}
+
+    @pytest.mark.asyncio
+    async def test_an_operation_with_no_function_fails(self) -> None:
+        m = self._manifest(
+            groups={"g": [OperationSpec(id="g.x", summary="x", effect=EffectClass.READ)]}
+        )
+        result = await certify(m)
+        failed = {r.code for r in result.results if not r.passed}
+        assert "CERT-08" in failed
+
+    @pytest.mark.asyncio
+    async def test_every_shipped_toolset_is_fakeable(self) -> None:
+        """The check exists to protect the smoke sandbox, and the sandbox is
+        what every shipped toolset is exercised through."""
+        import importlib
+        import pkgutil
+
+        import loom.toolsets as pkg
+
+        failures = []
+        for mod in pkgutil.walk_packages(pkg.__path__, pkg.__name__ + "."):
+            if not mod.name.endswith(".manifest"):
+                continue
+            try:
+                loaded = importlib.import_module(mod.name)
+            except Exception:  # pragma: no cover - optional extras
+                continue
+            for value in vars(loaded).values():
+                for man in value if isinstance(value, list | tuple) else [value]:
+                    if type(man).__name__ != "ToolsetManifest":
+                        continue
+                    result = await certify(man)
+                    if any(
+                        r.code == "CERT-08" and not r.passed for r in result.results
+                    ):
+                        failures.append(man.id)
+        assert not failures, f"toolsets that cannot be faked: {sorted(set(failures))}"
+
+    @pytest.mark.asyncio
+    async def test_the_check_agrees_with_install_fakes(self) -> None:
+        """The premise, verified against the code it models rather than
+        restated. A manifest CERT-08 passes must actually yield fakes."""
+        from loom.agents.fakes import install_fakes, uninstall_fakes
+        from loom.toolsets.google.gmail.manifest import GMAIL_MANIFEST
+
+        result = await certify(GMAIL_MANIFEST)
+        assert next(r for r in result.results if r.code == "CERT-08").passed
+        replaced = install_fakes(GMAIL_MANIFEST)
+        try:
+            assert replaced, "CERT-08 passed but install_fakes replaced nothing"
+        finally:
+            uninstall_fakes()
+
+
+class TestEveryShippedToolsetCertifies:
+    """The gate. Certification went 0/23 → 23/23 by fixing two checks that
+    demanded things the architecture does not have, and filling the two gaps
+    that were real once those stopped masking them."""
+
+    @pytest.mark.asyncio
+    async def test_all_of_them(self) -> None:
+        import importlib
+        import pkgutil
+
+        import loom.toolsets as pkg
+
+        failures: dict[str, list[str]] = {}
+        for mod in pkgutil.walk_packages(pkg.__path__, pkg.__name__ + "."):
+            if not mod.name.endswith(".manifest"):
+                continue
+            try:
+                loaded = importlib.import_module(mod.name)
+            except Exception:  # pragma: no cover - optional extras
+                continue
+            for value in vars(loaded).values():
+                for man in value if isinstance(value, list | tuple) else [value]:
+                    if type(man).__name__ != "ToolsetManifest":
+                        continue
+                    result = await certify(man)
+                    if not result.certified:
+                        failures[man.id] = [
+                            f"{r.code}: {r.reason}"
+                            for r in result.results
+                            if not r.passed
+                        ]
+        assert not failures, f"toolsets no longer certify: {failures}"
+
+    @pytest.mark.asyncio
+    async def test_no_write_carries_a_read_only_scope(self) -> None:
+        """A scope narrower than the operation is a runtime 403 that reads as a
+        broken toolset. ``Sites.ReadWrite.All`` contains ``.read``, so this is
+        checked with the predicate rather than a substring."""
+        import importlib
+        import pkgutil
+
+        import loom.toolsets as pkg
+        from loom.toolsets.effects import scope_is_readonly
+
+        wrong = []
+        for mod in pkgutil.walk_packages(pkg.__path__, pkg.__name__ + "."):
+            if not mod.name.endswith(".manifest"):
+                continue
+            try:
+                loaded = importlib.import_module(mod.name)
+            except Exception:  # pragma: no cover - optional extras
+                continue
+            for value in vars(loaded).values():
+                for man in value if isinstance(value, list | tuple) else [value]:
+                    if type(man).__name__ != "ToolsetManifest":
+                        continue
+                    wrong += [
+                        f"{man.id}.{op.id}"
+                        for op in man.all_operations()
+                        if op.effect is not EffectClass.READ
+                        and scope_is_readonly(op.scopes)
+                    ]
+        assert not wrong, f"write/destructive ops with a read-only scope: {wrong}"

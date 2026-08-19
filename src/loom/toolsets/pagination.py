@@ -54,6 +54,7 @@ __all__ = [
     "PageNumberPaging",
     "PagingStyle",
     "Results",
+    "RowIdPaging",
     "TokenPaging",
     "collect",
     "page_through",
@@ -227,7 +228,12 @@ class Results(list[T], Generic[T]):
         rows: list[Any] = list(self)
         if args:
             try:
-                rows = TypeAdapter(list[args[0]]).validate_python(rows)
+                # `args[0]` is the row type read off the annotation at
+                # *runtime*; a type subscript is a static construct, so
+                # there is no way to write this that a checker can
+                # follow. Narrow and stated rather than a bare ignore:
+                # the dynamic part is exactly this one subscript.
+                rows = TypeAdapter(list[args[0]]).validate_python(rows)  # type: ignore[valid-type]
             except Exception:
                 # A declared type that no longer matches the journal must not
                 # destroy an in-flight run — same rule as the generic path.
@@ -311,7 +317,7 @@ async def collect(
     page_size: int,
     max_pages: int = MAX_PAGES,
     start: str | None = None,
-) -> Results:
+) -> Results[Any]:
     """Page through *fetch* until *limit* items, or the source runs out.
 
     ``fetch(cursor, size)`` gets ``None`` on the first call and whatever cursor
@@ -539,7 +545,7 @@ class HeaderPaging:
         return Page(
             items=rows,
             cursor=following,
-            total=int(total) if str(total or "").isdigit() else None,
+            total=int(str(total)) if str(total or "").isdigit() else None,
         )
 
 
@@ -674,6 +680,53 @@ class OffsetPaging:
         else:
             more = len(rows) >= size
         return Page(items=rows, cursor=str(seen) if more else None, total=total)
+
+
+@dataclass(frozen=True)
+class RowIdPaging:
+    """The next page starts *after the last row you were given*. Stripe.
+
+    The dialect every other style here does not cover: the continuation is not
+    in the envelope at all. Stripe's ``starting_after`` takes **the id of the
+    last object on the current page**, and the envelope carries only
+    ``has_more``. Reading the cursor from the rows rather than from a field is
+    the whole difference, and it is why this is a class rather than a
+    ``TokenPaging`` with an unusual ``token_field`` — there is no field.
+
+    Two consequences worth knowing. An empty page ends the walk whatever
+    ``has_more`` says, because there is no row to continue from; and the rows
+    must come back in a stable order, which is why ``starting_after`` is
+    documented against Stripe's own default sort and not something a caller
+    should reorder underneath.
+    """
+
+    items: str | None = "data"
+    start_param: str = "starting_after"
+    size_param: str = "limit"
+    id_field: str = "id"
+    more_field: str = "has_more"
+
+    def params(self, cursor: str | None, size: int) -> dict[str, Any]:
+        asked: dict[str, Any] = {self.size_param: size}
+        if cursor:
+            asked[self.start_param] = cursor
+        return asked
+
+    def read(self, response: Any, cursor: str | None, size: int) -> Page:
+        body = response or {}
+        rows = _rows(body, self.items)
+        if not rows or not body.get(self.more_field):
+            return Page(items=rows, cursor=None)
+        last = rows[-1]
+        following = (
+            last.get(self.id_field)
+            if isinstance(last, dict)
+            else getattr(last, self.id_field, None)
+        )
+        # `has_more` without an id to continue from is a page we cannot follow.
+        # Reporting the end is wrong, so the cursor stays None and `collect`
+        # reports `complete=False` rather than inventing a continuation.
+        return Page(items=rows, cursor=str(following) if following else None)
 
 
 async def page_through(

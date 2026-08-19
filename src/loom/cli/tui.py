@@ -14,8 +14,22 @@ Three panes, each answering one part of it:
 Driven by the same :class:`CliBackend` the CLI uses, so it works against an
 in-process Runtime or a remote server with no change.
 
-    pip install loomflow[tui]
+    pip install loomsdk[tui]
 """
+
+# ``textual`` arrives with the ``[tui]`` extra and is absent from the
+# type-checking environment, so ``App`` and ``@work`` resolve to ``Any`` — which
+# under ``strict`` is a subclassing error plus one per decorated method. Neither
+# is a defect here and neither has a fix in this file: annotating them would
+# mean restating textual's API from memory, and a wrong restatement is worse
+# than an unchecked one. Disabling the two codes for this module rather than
+# writing seven ``type: ignore``s is also what keeps it correct in the other
+# direction — with the extra installed, every one of those ignores would itself
+# become an error under ``warn_unused_ignores``.
+#
+# Scoped to the whole file deliberately: every construct in it is a textual
+# subclass, so there is no non-textual ``misc`` these could be hiding.
+# mypy: disable-error-code="misc, untyped-decorator"
 
 from __future__ import annotations
 

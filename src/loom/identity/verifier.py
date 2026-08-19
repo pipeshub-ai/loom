@@ -105,7 +105,7 @@ class JWKSTokenVerifier:
 
     Signature verification, key rotation, and JWKS caching (default 300s)
     are all ``PyJWT``'s ``PyJWKClient`` — needs ``pip install
-    'loomflow[identity]'``. The one thing this class owns is what
+    'loomsdk[identity]'``. The one thing this class owns is what
     the plan calls out as the piece implementers most often get wrong:
     checking the token's audience against *this* resource server (RFC 8707)
     rather than trusting that a validly-signed token was meant for it.
@@ -130,7 +130,7 @@ class JWKSTokenVerifier:
         except ImportError:
             raise ConfigurationError(
                 "verifying a JWKS-signed token needs PyJWT: "
-                "pip install 'loomflow[identity]'"
+                "pip install 'loomsdk[identity]'"
             ) from None
         self._jwt = jwt
         self._jwks_client = jwt.PyJWKClient(

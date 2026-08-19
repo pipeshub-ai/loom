@@ -61,6 +61,11 @@ _READ = Retry(max_attempts=3, initial_delay=1.0)
 #: has is indistinguishable from renaming it once.
 _IDEMPOTENT_WRITE = Retry(max_attempts=2, initial_delay=1.0)
 
+#: A permanent delete 404s on the second call, so a retry after a timeout
+#: that actually succeeded turns a completed delete into a failed run.
+#: Trashing does not have this problem — it is recoverable and repeatable.
+_PERMANENT_DELETE = Retry(max_attempts=1)
+
 #: Creating content is not idempotent and Drive offers no idempotency key: a
 #: timeout after the file was stored is indistinguishable from a failure, and a
 #: retry leaves two copies. One attempt, and a failure the workflow can decide
@@ -384,7 +389,7 @@ async def drive_restore_file(file_id: str) -> DriveFile:
     return await get_default_client().restore_file(file_id)
 
 
-@step(retry=_IDEMPOTENT_WRITE)
+@step(retry=_PERMANENT_DELETE)
 async def drive_delete_file(file_id: str) -> str:
     """Delete a file permanently, skipping the bin. Not recoverable.
 

@@ -222,6 +222,8 @@ GMAIL_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="messages.trash",
+                reversible=True,
+                undone_by="messages.untrash",
                 function="gmail_trash_message",
                 summary="Move a message to the trash.",
                 description=(
@@ -373,6 +375,7 @@ GMAIL_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="drafts.delete",
+                idempotent=True,
                 function="gmail_delete_draft",
                 summary="Discard a draft. It was never delivered.",
                 effect=EffectClass.DESTRUCTIVE,
@@ -451,6 +454,7 @@ GMAIL_MANIFEST = ToolsetManifest(
             ),
             OperationSpec(
                 id="labels.delete",
+                idempotent=True,
                 function="gmail_delete_label",
                 summary="Delete a user label. The messages survive.",
                 effect=EffectClass.DESTRUCTIVE,

@@ -194,7 +194,7 @@ async def main() -> None:
         sys.exit(1)
 
     api_key = os.environ["ANTHROPIC_API_KEY"]
-    model = AnthropicProvider(model_name="claude-sonnet-4-6", api_key=api_key)
+    model = AnthropicProvider(model_name="claude-sonnet-5", api_key=api_key)
 
     # Register Jira manifest so the ReAct agent can discover it
     register_toolset(JIRA_MANIFEST)

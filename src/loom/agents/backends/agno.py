@@ -8,16 +8,21 @@ Example::
     from agno.models.anthropic import Claude
     from loom.agents.backends.agno import AgnoBackend
 
-    backend = AgnoBackend(model=Claude(id="claude-sonnet-4-6"))
+    backend = AgnoBackend(model=Claude(id="claude-sonnet-5"))
     rt = Runtime(store=MemoryStore(), agent_backend=backend)
 """
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
+from typing import Any, TypeVar, cast
 
 from loom.agents.result import AgentResult
 from loom.core.models import Usage
+
+#: A tool wrapper, preserved through the decorator so each keeps its own
+#: signature rather than collapsing to Any.
+_Handler = TypeVar("_Handler", bound=Callable[..., Any])
 
 
 class AgnoBackend:
@@ -26,7 +31,7 @@ class AgnoBackend:
     Parameters
     ----------
     model:
-        An Agno model instance (e.g. ``Claude(id="claude-sonnet-4-6")``).
+        An Agno model instance (e.g. ``Claude(id="claude-sonnet-5")``).
     """
 
     supports_history = False
@@ -97,10 +102,21 @@ def _loom_tool_to_agno(tool: Any) -> Any:
 
     from agno.tools import tool as agno_tool
 
+    # `agno` is an optional extra and absent from the type-check environment, so
+    # `ignore_missing_imports` makes its decorator `Any` — and strict's
+    # `disallow_untyped_decorators` then reports the functions it wraps as
+    # untyped. Inline ignores would be the obvious fix and the wrong one: they
+    # would be *unused* on a machine that has agno installed, and an unused
+    # ignore is itself an error under strict. Casting the decorator to the shape
+    # it actually has is correct in both environments, and keeps each wrapper's
+    # own signature intact rather than widening it.
+    decorate = cast("Callable[..., Callable[[_Handler], _Handler]]", agno_tool)
+
     fn = tool.fn
     if asyncio.iscoroutinefunction(fn):
-        @agno_tool(name=tool.name, description=tool.description or tool.name)
+        @decorate(name=tool.name, description=tool.description or tool.name)
         async def wrapper(**kwargs: Any) -> str:
+            tool.enforce_approval(kwargs)
             # tool.render_result, not str(): `str(Results([1,2,3],
             # complete=False, total=312))` is "[1, 2, 3]" — page one rendered
             # exactly like a complete answer, with the coverage the paging layer
@@ -108,12 +124,15 @@ def _loom_tool_to_agno(tool: Any) -> Any:
             rendered: str = tool.render_result(await fn(**kwargs))
             return rendered
     else:
-        @agno_tool(name=tool.name, description=tool.description or tool.name)
-        def wrapper(**kwargs: Any) -> str:
+        @decorate(name=tool.name, description=tool.description or tool.name)
+        def sync_wrapper(**kwargs: Any) -> str:
+            tool.enforce_approval(kwargs)
             result = fn(**kwargs)
             if inspect.isawaitable(result):
                 result = asyncio.get_event_loop().run_until_complete(result)
             rendered: str = tool.render_result(result)
             return rendered
+
+        return sync_wrapper
 
     return wrapper

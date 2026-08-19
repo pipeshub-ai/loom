@@ -11,6 +11,8 @@ and a 403 that means "wait" being treated the same as a 403 that means "never".
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from loom.core.exceptions import NonRetryableError
@@ -109,7 +111,7 @@ class TestSalesforceAuth:
         ):
             monkeypatch.delenv(var, raising=False)
 
-        with pytest.raises(SalesforceAuthError, match="test.salesforce.com"):
+        with pytest.raises(SalesforceAuthError, match=re.escape("test.salesforce.com")):
             SalesforceClient()
 
     def test_a_trailing_slash_on_the_instance_is_dropped(self, monkeypatch) -> None:
@@ -502,7 +504,7 @@ class TestTheToolsetsAreVisibleFromTheCli:
         assert "objects.search" in output
 
     def test_showing_one_marks_effects_and_paging(self) -> None:
-        code, output = self._run(["toolset", "salesforce"])
+        _code, output = self._run(["toolset", "salesforce"])
 
         assert "destructive" in output, "delete is not marked destructive"
         assert "yes" in output, "the paged read is not marked"

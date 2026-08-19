@@ -57,7 +57,9 @@ def _build_web_toolset() -> tuple[object, Toolset]:
     from langchain_core.tools import tool as lc_tool
 
     log("setup", "Creating LLM + web tools")
-    llm = ChatAnthropic(model="claude-sonnet-4-6", temperature=0, max_tokens=4096)
+    # No temperature: Claude 5 rejects sampling controls outright — a hard 400,
+    # the same reason AnthropicProvider drops them for this family.
+    llm = ChatAnthropic(model="claude-sonnet-5", max_tokens=4096)
     ddg = DuckDuckGoSearchAPIWrapper(max_results=5)
     search = DuckDuckGoSearchResults(api_wrapper=ddg)
 
@@ -100,7 +102,7 @@ async def main() -> None:
 
     t0 = time.perf_counter()
     agent = WorkflowCodingAgent(
-        model=AnthropicProvider(model_name="claude-sonnet-4-6"),
+        model=AnthropicProvider(model_name="claude-sonnet-5"),
         tool_registry=registry,
     )
     result = await agent.generate(SPEC)

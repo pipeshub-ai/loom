@@ -8,6 +8,8 @@ module declares steps and workflows, and the *caller* supplies the store.
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from loom import Context, ExecutionStatus, Runtime, step, workflow
@@ -56,6 +58,35 @@ class TestStoreFactory:
         target = tmp_path / "runs.db"
         store = from_url(f"sqlite://{target}")
         assert store.path == str(target)
+
+    def test_three_slashes_is_absolute(self) -> None:
+        """Two slashes for relative, three for absolute -- pinned, because it is
+        the opposite of SQLAlchemy's convention and the source of the one URL
+        typo everybody makes."""
+        assert from_url("sqlite:///runs.db").path == "/runs.db"
+        assert from_url("sqlite:///var/lib/loom/runs.db").path == "/var/lib/loom/runs.db"
+
+    def test_an_unopenable_path_names_the_file(self, tmp_path) -> None:
+        """Not a bare sqlite3.OperationalError. It reports "unable to open
+        database file" without saying which, so a store URL typo used to end a
+        forty-frame traceback with a sentence that named nothing."""
+        store = from_url(f"sqlite://{tmp_path / 'no-such-dir' / 'runs.db'}")
+
+        with pytest.raises(ConfigurationError) as caught:
+            store._connect()
+
+        assert "no-such-dir" in str(caught.value)
+
+    def test_a_root_level_path_explains_the_slashes(self) -> None:
+        """The hint for the actual mistake. Built without touching the
+        filesystem, since whether ``/runs.db`` is writable depends on who is
+        running the tests."""
+        message = SQLiteStore("/runs.db")._unopenable(
+            sqlite3.OperationalError("unable to open database file")
+        )
+
+        assert "sqlite://name.db" in message
+        assert "filesystem root" in message
 
     def test_unknown_scheme_names_the_alternatives(self) -> None:
         with pytest.raises(ConfigurationError) as caught:

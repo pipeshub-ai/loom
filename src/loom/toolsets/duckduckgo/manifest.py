@@ -44,7 +44,7 @@ DUCKDUCKGO_MANIFEST = ToolsetManifest(
     summary="DuckDuckGo — web, news, and image search with no API key. Best-effort.",
     description=(
         "Web, news, and image search requiring no credentials, via the "
-        "third-party `ddgs` package (pip install 'loomflow[duckduckgo]').\n\n"
+        "third-party `ddgs` package (pip install 'loomsdk[duckduckgo]').\n\n"
         "NOT AN OFFICIAL API. DuckDuckGo publishes no web-search API — their "
         "only documented endpoint returns instant answers and no web results "
         "— so `ddgs` parses search result pages instead. It is rate-limited "
@@ -61,6 +61,13 @@ DUCKDUCKGO_MANIFEST = ToolsetManifest(
     auth={"type": "none", "fields": []},
     tools_module="loom.toolsets.duckduckgo.tools",
     egress_hosts=["duckduckgo.com", "html.duckduckgo.com", "lite.duckduckgo.com"],
+    rate_limits={
+        "model": (
+            "unofficial; scraped result pages with no published limit. Being "
+            "blocked surfaces as a retryable DuckDuckGoRateLimited rather "
+            "than as an empty result set"
+        ),
+    },
     groups={
         "search": [
             OperationSpec(

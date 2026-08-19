@@ -15,7 +15,7 @@ operation that works in the CLI and 404s over HTTP.
 
 Requires the ``api`` extra::
 
-    pip install loomflow[api]
+    pip install loomsdk[api]
 """
 
 from __future__ import annotations
@@ -36,7 +36,12 @@ from loom.core.exceptions import (
 from loom.core.models import ExecutionStatus
 from loom.events.ingress import WebhookIngress
 from loom.events.sources import MalformedDelivery, VerificationFailed
-from loom.facade import LocalFacade, RuntimeFacade
+from loom.facade import (
+    GraphProjection,
+    LocalFacade,
+    RuntimeFacade,
+    VersionSurface,
+)
 from loom.identity.principal import Principal
 from loom.security.rbac import AuthorizationError
 from loom.server.auth import (
@@ -364,11 +369,86 @@ def create_app(
     async def get_run(run_id: str, facade: RuntimeFacade = injected) -> RunView:
         return _view(await _require(facade, run_id))
 
+    @app.get("/workflows/{name}/versions")
+    async def get_versions(
+        name: str, limit: int = 50, facade: RuntimeFacade = injected
+    ) -> list[dict[str, Any]]:
+        """The committed chain, newest first, each marked active or not."""
+        versions = _needs_versions(facade)
+        try:
+            return await versions.versions(name, limit=limit)
+        except Exception as exc:
+            raise _fail(exc) from exc
+
+    @app.get("/workflows/{name}/versions/{version}/source")
+    async def get_version_source(
+        name: str, version: int, facade: RuntimeFacade = injected
+    ) -> dict[str, Any]:
+        versions = _needs_versions(facade)
+        try:
+            return {"workflow": name, "version": version,
+                    "source": await versions.version_source(name, version)}
+        except Exception as exc:
+            raise _fail(exc) from exc
+
+    @app.post("/workflows/{name}/versions/{version}/activate")
+    async def activate_version(
+        name: str, version: int, facade: RuntimeFacade = injected
+    ) -> dict[str, Any]:
+        """Make a version the served one.
+
+        POST because it changes what runs next, and a rollback issued twice
+        should be as harmless as issuing it once — it is a pointer move, so it
+        is naturally idempotent.
+        """
+        versions = _needs_versions(facade)
+        try:
+            return await versions.activate_version(name, version)
+        except Exception as exc:
+            raise _fail(exc) from exc
+
+    @app.get("/workflows/{name}/graph")
+    async def get_graph(name: str, facade: RuntimeFacade = injected) -> dict[str, Any]:
+        """The workflow's structure, projected from its code.
+
+        Served rather than left to the client because extraction needs the
+        *source*, which only the process that imported the workflow has.
+        """
+        if not isinstance(facade, GraphProjection):
+            raise HTTPException(
+                status_code=501,
+                detail=(
+                    "this facade does not project graphs. GraphProjection is "
+                    "optional, so a host facade need not implement it."
+                ),
+            )
+        try:
+            return await facade.graph(name)
+        except Exception as exc:
+            raise _fail(exc) from exc
+
     @app.get("/runs/{run_id}/journal")
     async def get_journal(run_id: str, facade: RuntimeFacade = injected) -> list[dict[str, Any]]:
         await _require(facade, run_id)
         try:
             return await facade.journal(run_id)
+        except Exception as exc:
+            raise _fail(exc) from exc
+
+    @app.get("/runs/{run_id}/trace")
+    async def get_trace(run_id: str, facade: RuntimeFacade = injected) -> dict[str, Any]:
+        """The workflow's graph with this run's journal overlaid on it."""
+        await _require(facade, run_id)
+        if not isinstance(facade, GraphProjection):
+            raise HTTPException(
+                status_code=501,
+                detail=(
+                    "this facade does not project graphs. GraphProjection is "
+                    "optional, so a host facade need not implement it."
+                ),
+            )
+        try:
+            return await facade.trace(run_id)
         except Exception as exc:
             raise _fail(exc) from exc
 
@@ -747,3 +827,25 @@ def _webhook_payload(body: bytes, request: Request) -> dict[str, Any]:
         "query": dict(request.query_params),
         "method": request.method,
     }
+
+
+def _needs_versions(facade: object) -> VersionSurface:
+    """The facade as a version surface, or a 501.
+
+    Returns the narrowed value rather than only raising: a guard that raises
+    inside a helper cannot narrow for its caller, so every route would have had
+    to repeat the isinstance anyway — and the version that does not narrow is
+    the version that silently reaches for a method the protocol never promised.
+
+    ``VersionSurface`` is optional, so a host facade legitimately may not
+    implement it — 501 says "not here", where a 500 would read as a bug.
+    """
+    if not isinstance(facade, VersionSurface):
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "this facade does not expose workflow versions. VersionSurface "
+                "is optional, so a host facade need not implement it."
+            ),
+        )
+    return facade

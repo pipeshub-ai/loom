@@ -16,7 +16,7 @@ found nothing, and saying so is not the same as passing.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, runtime_checkable
 
 from loom.agents.validator import CodeIssue
@@ -50,6 +50,25 @@ class CheckContext:
     timeout: float = 30.0
     spec: str = ""
     """The original request, for stages that judge intent rather than mechanics."""
+    prior: PipelineReport | None = None
+    """What the stages before this one found.
+
+    For a stage whose job is to *interpret* an earlier stage rather than to
+    inspect the code again — reading the smoke run's output instead of paying
+    to produce it a second time, and repeating whatever side effects it had.
+    Carried here rather than as a second parameter to ``run`` because that is
+    what this object is for: a stage that needs new information should not
+    change every other stage's signature.
+
+    ``None`` when a stage is run outside a pipeline, which is how the tests
+    exercise one in isolation."""
+    resolved_kinds: set[str] = field(default_factory=set)
+    """Entity kinds a resolver was actually *executed* for while authoring.
+
+    Derived from the agent's own tool calls, not from anything it reports —
+    a self-report of "I resolved that" is exactly as easy to produce when it
+    did not. :class:`~loom.agents.stages.IdentifierStage` weighs an opaque id
+    in the finished code against this."""
 
 
 @dataclass
@@ -144,7 +163,7 @@ class CheckPipeline:
     async def run(self, code: str, context: CheckContext) -> PipelineReport:
         report = PipelineReport()
         for check in self._checks:
-            result = await check.run(code, context)
+            result = await check.run(code, replace(context, prior=report))
             report.results.append(result)
             if check.blocking and result.errors:
                 # Later stages would only report consequences of this one.

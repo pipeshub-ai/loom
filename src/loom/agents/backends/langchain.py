@@ -89,9 +89,11 @@ def _loom_tool_to_langchain(tool: Any) -> Any:
     # Build an async wrapper that matches the original signature
     if asyncio.iscoroutinefunction(fn):
         async def wrapper(**kwargs: Any) -> Any:
+            tool.enforce_approval(kwargs)
             return await fn(**kwargs)
     else:
         async def wrapper(**kwargs: Any) -> Any:
+            tool.enforce_approval(kwargs)
             result = fn(**kwargs)
             if inspect.isawaitable(result):
                 return await result

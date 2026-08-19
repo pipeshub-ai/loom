@@ -16,7 +16,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -e ".[dev]"
-      - run: ruff check src tests scripts
+      - run: ruff check src tests scripts examples
 
   seam-catalog:
     # The drift alarm. A Protocol that gains a method fails here, before it
@@ -40,7 +40,15 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -e ".[dev]"
-      - run: mypy || true  # advisory for now
+      # Blocking, and through the wrapper rather than mypy directly.
+      #
+      # `mypy || true` let 42 real errors across three toolsets merge green.
+      # Worse, running mypy by hand in an `[all]` environment stops on a numpy
+      # stub with "errors prevented further checking" — four errors, none of
+      # them yours, and nothing type-checked. The wrapper asserts the
+      # "checked N source files" summary and exits 2 when that is missing, so
+      # a gate that did not run is distinguishable from one that failed.
+      - run: python scripts/typecheck.py
 
   test:
     runs-on: ubuntu-latest
@@ -155,3 +163,39 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: python scripts/docs_examples.py --timeout 240
+
+  # The same check, for the examples that live as files rather than as code
+  # blocks. `docs-examples` reads README.md and docs/**/*.md and nothing else,
+  # so everything under examples/ — the cookbook, and the ten reference
+  # workflows — was covered by no gate at all: five of the ten stopped
+  # importing when `Retry` renamed a field, while tests/test_phase8.py went on
+  # reporting 104 passing tests over them, because every one was a substring
+  # search against the file's text.
+  #
+  # Separate from `docs-examples` because the two run their subjects
+  # differently — a documented block is extracted into a temporary directory,
+  # a file on disk is run where it lives — and because either failing should
+  # name which kind broke.
+  examples:
+    runs-on: ubuntu-latest
+    needs: lint
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # Everything an example might import. Without the extras the run still
+      # passes, but by skipping rather than checking.
+      - run: pip install -e ".[dev,all]"
+
+      - name: Run every example under examples/
+        env:
+          # Optional, as above: an example needing a model is reported as
+          # skipped on a fork's pull request rather than failing the build.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python scripts/run_examples.py --timeout 400

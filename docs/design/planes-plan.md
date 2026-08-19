@@ -37,7 +37,7 @@ TriggerStore methods: delete_trigger, due_triggers, get_trigger,
 SQLiteStore missing : all six
 ```
 
-So `LOOM_STORE=sqlite:///runs.db` — the documented laptop default — persists
+So `LOOM_STORE=sqlite://runs.db` — the documented laptop default — persists
 runs durably and keeps schedules **in memory**. Restart the process and every
 cron trigger is gone, with no error and no log line. The durable store is
 right there and the schedule is not in it.

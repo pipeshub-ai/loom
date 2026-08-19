@@ -451,7 +451,7 @@ class TestEndToEnd:
     async def test_the_journal_and_the_event_log_share_one_store(
         self, path, gmail
     ) -> None:
-        """The deployment story: `pip install loomflow`, one SQLite file, and
+        """The deployment story: `pip install loomsdk`, one SQLite file, and
         both logs in it. No broker, no second migration."""
         deployment = Deployment(path, gmail)
         await deployment.register()

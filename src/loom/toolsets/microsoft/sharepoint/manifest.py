@@ -62,6 +62,13 @@ SHAREPOINT_MANIFEST = ToolsetManifest(
         "login.microsoftonline.com",
         "*.sharepoint.com",
     ],
+    rate_limits={
+        "model": (
+            "dynamic per-workload throttling; honour the Retry-After header "
+            "on a 429 rather than assuming a fixed rate"
+        ),
+        "source": "learn.microsoft.com/en-us/graph/throttling",
+    },
     groups={
         "sites": [
             OperationSpec(
@@ -75,6 +82,7 @@ SHAREPOINT_MANIFEST = ToolsetManifest(
                 ),
                 resolves="site",
                 effect=EffectClass.READ,
+                scopes=["Sites.Read.All"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(Site),
@@ -90,6 +98,7 @@ SHAREPOINT_MANIFEST = ToolsetManifest(
                 ),
                 resolves="site",
                 effect=EffectClass.READ,
+                scopes=["Sites.Read.All"],
                 idempotent=True,
                 output_schema=Site.model_json_schema(),
             ),
@@ -98,6 +107,7 @@ SHAREPOINT_MANIFEST = ToolsetManifest(
                 function="sharepoint_list_subsites",
                 summary="List the sub-sites beneath a site.",
                 effect=EffectClass.READ,
+                scopes=["Sites.Read.All"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(Site),
@@ -114,6 +124,7 @@ SHAREPOINT_MANIFEST = ToolsetManifest(
                 ),
                 resolves="drive",
                 effect=EffectClass.READ,
+                scopes=["Sites.Read.All"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(Drive),
@@ -123,6 +134,7 @@ SHAREPOINT_MANIFEST = ToolsetManifest(
                 function="sharepoint_list_drive_items",
                 summary="List a folder's contents in a document library.",
                 effect=EffectClass.READ,
+                scopes=["Sites.Read.All"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(DriveItem),
@@ -132,6 +144,7 @@ SHAREPOINT_MANIFEST = ToolsetManifest(
                 function="sharepoint_search_drive_items",
                 summary="Search a library by filename, metadata, or content.",
                 effect=EffectClass.READ,
+                scopes=["Sites.Read.All"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(DriveItem),
@@ -142,6 +155,7 @@ SHAREPOINT_MANIFEST = ToolsetManifest(
                 summary="Download a file as a LOOM Attachment.",
                 description="Fails on a folder, which holds no bytes.",
                 effect=EffectClass.READ,
+                scopes=["Sites.Read.All"],
                 idempotent=True,
                 output_schema={"type": "object", "title": "Attachment"},
             ),
@@ -151,6 +165,7 @@ SHAREPOINT_MANIFEST = ToolsetManifest(
                 summary="Upload a file into a document library.",
                 description="Not retried: no idempotency key.",
                 effect=EffectClass.WRITE,
+                scopes=["Sites.ReadWrite.All"],
                 output_schema=DriveItem.model_json_schema(),
             ),
             OperationSpec(
@@ -159,6 +174,7 @@ SHAREPOINT_MANIFEST = ToolsetManifest(
                 summary="Create a folder in a document library.",
                 description="Not retried; defaults to failing on a name clash.",
                 effect=EffectClass.WRITE,
+                scopes=["Sites.ReadWrite.All"],
                 output_schema=DriveItem.model_json_schema(),
             ),
             OperationSpec(
@@ -170,11 +186,13 @@ SHAREPOINT_MANIFEST = ToolsetManifest(
                     "path — neither would address the library root."
                 ),
                 effect=EffectClass.DESTRUCTIVE,
+                scopes=["Sites.ReadWrite.All"],
                 idempotent=True,
                 output_schema={"type": "boolean"},
             ),
             OperationSpec(
                 id="libraries.create_link",
+                access_control=True,
                 function="sharepoint_create_share_link",
                 summary="Create a sharing link for a file.",
                 description=(
@@ -182,6 +200,7 @@ SHAREPOINT_MANIFEST = ToolsetManifest(
                     "anonymous explicitly."
                 ),
                 effect=EffectClass.WRITE,
+                scopes=["Sites.ReadWrite.All"],
                 output_schema=SharingLink.model_json_schema(),
             ),
         ],
@@ -193,6 +212,7 @@ SHAREPOINT_MANIFEST = ToolsetManifest(
                 description="Resolve a list before reading or writing items.",
                 resolves="list",
                 effect=EffectClass.READ,
+                scopes=["Sites.Read.All"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(SharePointList),
@@ -202,6 +222,7 @@ SHAREPOINT_MANIFEST = ToolsetManifest(
                 function="sharepoint_get_list",
                 summary="Fetch one list by id or name.",
                 effect=EffectClass.READ,
+                scopes=["Sites.Read.All"],
                 idempotent=True,
                 output_schema=SharePointList.model_json_schema(),
             ),
@@ -218,6 +239,7 @@ SHAREPOINT_MANIFEST = ToolsetManifest(
                 ),
                 resolves="column",
                 effect=EffectClass.READ,
+                scopes=["Sites.Read.All"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(ListColumn),
@@ -231,6 +253,7 @@ SHAREPOINT_MANIFEST = ToolsetManifest(
                     "names under 'fields/', e.g. \"fields/Status eq 'Open'\"."
                 ),
                 effect=EffectClass.READ,
+                scopes=["Sites.Read.All"],
                 idempotent=True,
                 pagination=True,
                 output_schema=_array(ListItem),
@@ -240,6 +263,7 @@ SHAREPOINT_MANIFEST = ToolsetManifest(
                 function="sharepoint_get_list_item",
                 summary="Fetch one list item with its column values.",
                 effect=EffectClass.READ,
+                scopes=["Sites.Read.All"],
                 idempotent=True,
                 output_schema=ListItem.model_json_schema(),
             ),
@@ -252,6 +276,7 @@ SHAREPOINT_MANIFEST = ToolsetManifest(
                     "retry adds a second row."
                 ),
                 effect=EffectClass.WRITE,
+                scopes=["Sites.ReadWrite.All"],
                 output_schema=ListItem.model_json_schema(),
             ),
             OperationSpec(
@@ -260,6 +285,7 @@ SHAREPOINT_MANIFEST = ToolsetManifest(
                 summary="Change column values on a list item.",
                 description="Columns not named are left alone.",
                 effect=EffectClass.WRITE,
+                scopes=["Sites.ReadWrite.All"],
                 idempotent=True,
                 output_schema=ListItem.model_json_schema(),
             ),
@@ -268,6 +294,7 @@ SHAREPOINT_MANIFEST = ToolsetManifest(
                 function="sharepoint_delete_list_item",
                 summary="Delete a list item.",
                 effect=EffectClass.DESTRUCTIVE,
+                scopes=["Sites.ReadWrite.All"],
                 idempotent=True,
                 output_schema={"type": "boolean"},
             ),

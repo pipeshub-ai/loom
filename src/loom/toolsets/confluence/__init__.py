@@ -1,4 +1,4 @@
-"""Confluence toolset for loomflow.
+"""Confluence toolset for loomsdk.
 
 Lazy-loaded: importing this package does not require Confluence credentials.
 The ConfluenceClient reads CONFLUENCE_URL, CONFLUENCE_EMAIL,

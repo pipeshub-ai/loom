@@ -34,6 +34,7 @@ from loom.graph.extractor import (
     ASTExtractor,
     RegistryCollector,
     extract_from_source,
+    flow_names,
     merge_passes,
 )
 from loom.graph.wgir import WGIRGraph
@@ -67,13 +68,47 @@ def build_graph(source_file: Path, *, flow_id: str = "") -> WGIRGraph:
     """
     source = source_file.read_text(encoding="utf-8")
     steps, workflows = _load_definitions(source_file)
+    return _graph_of(source, source_file, steps, workflows, flow_id=flow_id)
 
+
+def flows_in(source_file: Path) -> list[str]:
+    """Every workflow *source_file* declares, in file order.
+
+    The registry is authoritative -- a ``@workflow(name=…)`` is settled by the
+    decorator running. The AST is the fallback for a module that will not
+    import, which is the case the rest of this pipeline degrades to as well.
+    """
+    _, workflows = _load_definitions(source_file)
+    if workflows:
+        return [flow.name for flow in workflows]
+    return flow_names(source_file.read_text(encoding="utf-8"))
+
+
+def _graph_of(
+    source: str,
+    source_file: Path,
+    steps: list[StepDefinition[Any, Any]],
+    workflows: list[WorkflowDefinition[Any, Any, Any]],
+    *,
+    flow_id: str = "",
+) -> WGIRGraph:
+    """One workflow's graph, from definitions already loaded.
+
+    Split out so ``check_module`` imports the module once and builds a graph per
+    workflow, rather than paying for the import on every flow in the file.
+    """
     registry_nodes = RegistryCollector().collect_steps(steps) if steps else []
+
+    names = [flow.name for flow in workflows] or flow_names(source)
+    resolved_id = flow_id or (names[0] if names else source_file.stem)
+
+    # The AST pass is told which flow it is extracting. Without this a module
+    # holding two workflows produced one graph, named after the first and
+    # containing the second's steps too.
     ast_pass: ASTExtractor = extract_from_source(
-        source, source_file=str(source_file)
+        source, flow_id=resolved_id, source_file=str(source_file)
     )
 
-    resolved_id = flow_id or (workflows[0].name if workflows else source_file.stem)
     return merge_passes(
         registry_nodes,
         ast_pass.nodes,
@@ -83,22 +118,87 @@ def build_graph(source_file: Path, *, flow_id: str = "") -> WGIRGraph:
     )
 
 
+def check_module(
+    source_file: Path,
+    *,
+    write: bool = True,
+    explainer: Explainer | None = None,
+) -> list[CheckReport]:
+    """Check every workflow in *source_file* -- one report, and one pair of
+    artifacts, per flow.
+
+    A module holding two workflows holds two graphs. It used to produce one,
+    named after the first and containing both bodies' nodes, which is exactly
+    what the committed artifact exists to make impossible: the diff is only
+    evidence that no step was added or hidden if each graph covers one flow.
+
+    Artifacts stay at ``<stem>.graph.json`` while a module declares a single
+    workflow -- the common case, and what is on disk today. A module declaring
+    several qualifies each by flow, and the now-stale unqualified file is
+    reported rather than deleted: ``loom check`` writes what a commit should
+    contain and does not remove what a commit contains.
+    """
+    steps, workflows = _load_definitions(source_file)
+    source = source_file.read_text(encoding="utf-8")
+    names = [flow.name for flow in workflows] or flow_names(source)
+    qualified = len(names) > 1
+
+    reports = [
+        check_file(
+            source_file,
+            write=write,
+            explainer=explainer,
+            flow_id=name,
+            qualified=qualified,
+            loaded=(steps, workflows),
+        )
+        for name in names or [""]
+    ]
+
+    stale = source_file.with_suffix(".graph.json")
+    if qualified and stale.exists():
+        reports[0].problems.append(
+            f"{stale.name} is stale: this module declares {len(names)} workflows, "
+            f"which are checked as {', '.join(f'{source_file.stem}.{n}' for n in names)}"
+        )
+    return reports
+
+
 def check_file(
     source_file: Path,
     *,
     write: bool = True,
     explainer: Explainer | None = None,
+    flow_id: str = "",
+    qualified: bool = False,
+    loaded: tuple[
+        list[StepDefinition[Any, Any]], list[WorkflowDefinition[Any, Any, Any]]
+    ]
+    | None = None,
 ) -> CheckReport:
-    """Extract, narrate, and (optionally) write the artifacts beside the source."""
-    graph = build_graph(source_file)
+    """Extract, narrate, and (optionally) write the artifacts beside the source.
+
+    One workflow: *flow_id* selects it, defaulting to the first in the file.
+    Pass *qualified* to name the artifacts after the flow as well as the file,
+    which is what :func:`check_module` does when there is more than one.
+    """
+    steps, workflows = loaded if loaded is not None else _load_definitions(source_file)
+    graph = _graph_of(
+        source_file.read_text(encoding="utf-8"),
+        source_file,
+        steps,
+        workflows,
+        flow_id=flow_id,
+    )
     report = CheckReport(
         flow_id=graph.flow_id,
         node_count=len(graph.nodes),
         edge_count=len(graph.edges),
     )
 
-    graph_path = source_file.with_suffix(".graph.json")
-    description_path = source_file.with_suffix(".description.md")
+    stem = f"{source_file.stem}.{graph.flow_id}" if qualified else source_file.stem
+    graph_path = source_file.with_name(f"{stem}.graph.json")
+    description_path = source_file.with_name(f"{stem}.description.md")
     report.graph_changed = graph_changed(graph_path, graph)
 
     narration = asyncio.run((explainer or SkeletonExplainer()).narrate(graph))

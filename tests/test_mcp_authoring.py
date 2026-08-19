@@ -352,7 +352,12 @@ class TestValidateRunsTheRealPipeline:
         found = [i for i in result["issues"] if i["category"] == "resolution"]
         assert found, result
         assert "vishwjeet" in found[0]["message"].lower()
-        assert result["valid"] is True
+        # Not valid, unlike the coverage warning above: a scope nothing looked
+        # up returns whatever contains the substring, and the model asking for
+        # the verdict is the one that can still go and resolve it. The issue
+        # says how to decline if it already has.
+        assert result["valid"] is False
+        assert "return the code unchanged" in found[0]["message"]
 
     async def test_no_spec_still_validates_and_finds_no_intent_issues(self) -> None:
         """Backwards compatible: the parameter is optional, and its absence

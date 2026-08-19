@@ -36,6 +36,9 @@ HUBSPOT_MANIFEST = ToolsetManifest(
     auth={"type": "bearer", "fields": ["HUBSPOT_ACCESS_TOKEN"]},
     tools_module="loom.toolsets.hubspot.tools",
     egress_hosts=["api.hubapi.com"],
+    rate_limits={
+        "search": "10,000 results maximum; paging past it returns a 400",
+    },
     groups={
         "objects": [
             OperationSpec(

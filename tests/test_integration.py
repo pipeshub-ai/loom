@@ -43,11 +43,13 @@ def _crm_manifest() -> ToolsetManifest:
         base_url="https://api.crm.com",
         egress_hosts=["api.crm.com"],
         fakes_module="crm.fakes",
+        tools_module="crm.tools",
         rate_limits={"default": {"rps": 10}},
         groups={
             "leads": [
                 OperationSpec(
                     id="leads.create",
+                    function="crm_create_lead",
                     summary="Create a new lead",
                     effect=EffectClass.WRITE,
                     input_schema={
@@ -63,6 +65,7 @@ def _crm_manifest() -> ToolsetManifest:
                 ),
                 OperationSpec(
                     id="leads.list",
+                    function="crm_list_leads",
                     summary="List all leads",
                     effect=EffectClass.READ,
                     input_schema={"type": "object"},

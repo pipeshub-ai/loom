@@ -79,20 +79,59 @@ async def check_typed_models(manifest: ToolsetManifest) -> None:
 
 
 async def check_effect_classification(manifest: ToolsetManifest) -> None:
-    """CERT-04: Every operation has an explicit effect classification."""
+    """CERT-04: Every operation has an explicit effect classification.
+
+    Asks whether the *author* said, not what the field currently holds.
+    ``EffectClass`` is a ``StrEnum`` and every member is truthy, so the obvious
+    ``if not op.effect`` can never fire — an operation named ``pages.nuke``
+    with no declared effect passed this check and CERT-05 with it, because an
+    unclassified operation was also exempt from the scope requirement.
+
+    ``model_fields_set`` is the real question and survives every construction
+    path a manifest arrives by, including ``model_validate_json`` for one
+    loaded from a package's entry point.
+    """
     for op in manifest.all_operations():
-        if not op.effect:
+        if "effect" not in op.model_fields_set:
             raise CertFailure(
-                f"Operation '{op.id}' missing effect classification"
+                f"Operation '{op.id}' does not declare an effect class. "
+                "Declare effect=EffectClass.READ/WRITE/DESTRUCTIVE explicitly "
+                "— the default is a fail-safe backstop, not a classification."
             )
 
 
+#: Auth models where a scope string is a real thing the provider issues.
+#:
+#: The rest are not exempt out of leniency — a scope is simply not a concept
+#: they have. An Exa or Tavily API key carries no scopes; Confluence and Jira
+#: authenticate with an email and an API token; DuckDuckGo has no credential at
+#: all. Demanding scopes there would be CERT-08's mistake again: a check that
+#: fails a correct toolset for not declaring something that does not exist,
+#: which teaches people to ignore the check rather than fix the toolset.
+SCOPED_AUTH_MODELS = frozenset({"oauth2"})
+
+
 async def check_scope_mapping(manifest: ToolsetManifest) -> None:
-    """CERT-05: Write/destructive operations declare required scopes."""
+    """CERT-05: Write/destructive operations declare required scopes.
+
+    Only for toolsets whose auth model has scopes — see
+    :data:`SCOPED_AUTH_MODELS`. Applied to the others this check failed five
+    correct toolsets for omitting a field their APIs do not define.
+
+    Reads ``op.effect``, which defaults to ``WRITE`` — so an unclassified
+    operation is held to the requirement rather than exempted from it. Under
+    the old ``READ`` default this check silently skipped exactly the operations
+    CERT-04 was also failing to catch.
+    """
+    auth_model = str((manifest.auth or {}).get("type", "")).lower()
+    if auth_model not in SCOPED_AUTH_MODELS:
+        return
     for op in manifest.all_operations():
         if op.effect.value in ("write", "destructive") and not op.scopes:
             raise CertFailure(
-                f"Operation '{op.id}' ({op.effect}) has no scopes declared"
+                f"Operation '{op.id}' ({op.effect}) has no scopes declared. "
+                f"This toolset authenticates with {auth_model}, where a scope "
+                "is what bounds what the credential may do."
             )
 
 
@@ -119,9 +158,37 @@ async def check_egress_hosts(manifest: ToolsetManifest) -> None:
 
 
 async def check_fakes_declared(manifest: ToolsetManifest) -> None:
-    """CERT-08: Fakes module is declared for testing."""
-    if not manifest.fakes_module:
-        raise CertFailure("Manifest missing fakes_module for testing")
+    """CERT-08: the toolset can actually be faked in the smoke sandbox.
+
+    Checks what :func:`loom.agents.fakes.install_fakes` needs, which is *not*
+    a hand-written ``fakes_module``. This check used to demand one and so
+    failed all 23 shipped toolsets, none of which declares one — deliberately.
+    ``agents/fakes.py`` builds a stand-in from each operation's
+    ``output_schema`` precisely so nobody maintains a parallel set of fakes
+    that can drift from the contract: "there is only one contract."
+
+    What `install_fakes` really requires is a way to reach the callables it
+    replaces. Without ``tools_module`` it returns an empty list and the sandbox
+    silently runs against the real toolset — no credentials, a 401, and a
+    repair loop whose cheapest escape is deleting the integration. Without a
+    ``function`` name an individual operation is skipped the same way.
+
+    ``fakes_module`` remains a supported override and is not required: a
+    generated stub knows the shape of an answer, not its meaning.
+    """
+    if not manifest.tools_module:
+        raise CertFailure(
+            "Manifest declares no tools_module, so no operation can be faked "
+            "— the smoke sandbox would run against the real service. Set "
+            "tools_module (and function= on each operation), or declare a "
+            "fakes_module."
+        )
+    unreachable = [op.id for op in manifest.all_operations() if not op.function]
+    if unreachable:
+        raise CertFailure(
+            f"Operations name no function, so they cannot be faked or called "
+            f"from generated code: {', '.join(sorted(unreachable)[:5])}"
+        )
 
 
 async def check_op_summaries(manifest: ToolsetManifest) -> None:
@@ -161,6 +228,31 @@ async def check_version_format(manifest: ToolsetManifest) -> None:
             )
 
 
+async def check_reversibility_declarations(manifest: ToolsetManifest) -> None:
+    """CERT-14: ``undone_by`` names an operation that exists, and agrees with
+    ``reversible``.
+
+    The one half of reversibility a machine can check. Whether the named
+    operation genuinely restores the prior state is a judgement about the
+    service — ``issues.delete`` does not undo ``issues.create`` — but an id
+    that resolves to nothing is a typo, and a typo here produces an operation
+    that reads as recoverable and is not.
+    """
+    ids = {op.id for op in manifest.all_operations()}
+    for op in manifest.all_operations():
+        if op.undone_by and op.undone_by not in ids:
+            raise CertFailure(
+                f"Operation '{op.id}' declares undone_by='{op.undone_by}', "
+                f"which is not an operation in this toolset"
+            )
+        if op.undone_by and not op.reversible:
+            raise CertFailure(
+                f"Operation '{op.id}' names an inverse but is not marked "
+                "reversible; policy reads the flag, so it would be treated as "
+                "irreversible"
+            )
+
+
 # ---------------------------------------------------------------------------
 # Check registry
 # ---------------------------------------------------------------------------
@@ -178,6 +270,7 @@ CERT_CHECKS: list[tuple[str, str, CertCheck]] = [
     ("CERT-10", "Rate limits declared", check_rate_limits),
     ("CERT-11", "Unique op IDs", check_unique_op_ids),
     ("CERT-12", "Version format valid", check_version_format),
+    ("CERT-14", "Reversibility declarations resolve", check_reversibility_declarations),
 ]
 
 

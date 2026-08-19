@@ -57,6 +57,14 @@ _READ = Retry(max_attempts=3, initial_delay=1.0)
 #: deletable — so one retry is a reasonable trade against a transient 503.
 _WRITE = Retry(max_attempts=2, initial_delay=1.0)
 
+#: Creating and commenting have no idempotency key here. If the request times
+#: out *after* the service accepted it, a retry files a second issue or posts
+#: the comment twice, and nothing on the client side can tell which happened.
+#: One attempt, and a failure that reaches the workflow — journaling already
+#: stops a *replay* from repeating it.
+_CREATE = Retry(max_attempts=1)
+
+
 
 @step(retry=_READ)
 async def calendar_list_calendars() -> Results[CalendarSummary]:
@@ -117,7 +125,7 @@ async def calendar_get_event(
     return await get_default_client().get_event(event_id, calendar_id)
 
 
-@step(retry=_WRITE)
+@step(retry=_CREATE)
 async def calendar_create_event(
     summary: str,
     start: str,
@@ -341,7 +349,7 @@ async def calendar_delete_event(
     return event_id
 
 
-@step(retry=_WRITE)
+@step(retry=_CREATE)
 async def calendar_quick_add_event(
     text: str, calendar_id: str = "primary"
 ) -> CalendarEvent:
@@ -425,7 +433,7 @@ async def calendar_find_calendar(calendar_name: str) -> CalendarSummary | None:
     return await get_default_client().find_calendar(calendar_name)
 
 
-@step(retry=_WRITE)
+@step(retry=_CREATE)
 async def calendar_create_calendar(
     summary: str, time_zone: str = "", description: str = ""
 ) -> CalendarSummary:
@@ -559,7 +567,10 @@ event.summary, event.start, event.attendees[0].email.
 
 ### Tools
 
-calendar_list_calendars() -> list[CalendarSummary]
+calendar_list_calendars() -> Results[CalendarSummary]
+  Every calendar this account can see. Returns a Results list (.complete,
+  .total, .summary()) — Google pages this, so check .complete before saying
+  "all".
   CalendarSummary fields: {fields(CalendarSummary)}
 
 calendar_list_events(calendar_id="primary", time_min="", time_max="",

@@ -215,3 +215,107 @@ class TestTheProtocolIsSatisfied:
             async def source_of(self, version): ...
 
         assert isinstance(HostVersions(), VersionStore)
+
+
+class TestActivation:
+    """Which version is *served*, across every backend and both content strategies.
+
+    Activation shipped tested against `MemoryStore` alone, which is precisely the
+    shape this file exists to prevent: the pointer is one more thing a store has
+    to persist, and "works on Memory" has never been evidence about Postgres or
+    Mongo. `latest()` and `active()` answer different questions — "the newest
+    thing committed" and "the one being served" — and a backend that conflated
+    them would make a rollback silently un-roll itself on the next publish.
+    """
+
+    async def test_the_first_commit_is_served(self, versions) -> None:
+        """A workflow with one version has no other candidate, and leaving the
+        pointer unset forces every caller to write `active() or latest()` —
+        reintroducing the conflation once per caller."""
+        await versions.commit(_version())
+
+        served = await versions.active("onboard")
+
+        assert served is not None and served.version == 1
+
+    async def test_a_later_commit_does_not_move_the_pointer(self, versions) -> None:
+        """Publishing is not deploying. The asymmetry decides it: a new version
+        not being served shows up in one read; a rollback that quietly un-rolled
+        itself does not."""
+        await versions.commit(_version())
+        await versions.commit(_version(EDITED))
+
+        served = await versions.active("onboard")
+
+        assert served is not None and served.version == 1
+        assert (await versions.latest("onboard")).version == 2
+
+    async def test_rolling_back_moves_the_pointer_without_committing(self, versions) -> None:
+        """The whole point: a rollback is a pointer move, not a re-commit.
+
+        Re-committing old source is what people do without this, and it loses
+        the fact of which version is live while inflating the chain with
+        duplicates of code that already exists.
+        """
+        await versions.commit(_version())
+        await versions.commit(_version(EDITED))
+        await versions.activate("onboard", 2)
+        await versions.activate("onboard", 1)
+
+        served = await versions.active("onboard")
+
+        assert served is not None and served.version == 1
+        assert (await versions.latest("onboard")).version == 2, "no new version"
+        assert len(await versions.history("onboard")) == 2
+
+    async def test_the_served_version_carries_its_source(self, versions) -> None:
+        """Both content strategies: a pointer that resolves to a version whose
+        content cannot be read is a pointer to nothing."""
+        await versions.commit(_version())
+        await versions.commit(_version(EDITED))
+        await versions.activate("onboard", 2)
+
+        served = await versions.active("onboard")
+
+        assert served is not None
+        assert await versions.source_of(served) == EDITED
+
+    async def test_activating_an_unknown_version_is_refused(self, versions) -> None:
+        """A rollback is done under pressure from a number read off a dashboard,
+        so the wrong number must say so rather than raise KeyError."""
+        from loom.runtime.versions import UnknownVersion
+
+        await versions.commit(_version())
+
+        with pytest.raises(UnknownVersion):
+            await versions.activate("onboard", 7)
+
+    async def test_a_refused_activation_leaves_the_pointer_alone(self, versions) -> None:
+        """Otherwise a typo takes the workflow out of service."""
+        from loom.runtime.versions import UnknownVersion
+
+        await versions.commit(_version())
+        await versions.commit(_version(EDITED))
+        await versions.activate("onboard", 2)
+
+        with pytest.raises(UnknownVersion):
+            await versions.activate("onboard", 99)
+
+        served = await versions.active("onboard")
+        assert served is not None and served.version == 2
+
+    async def test_an_unknown_workflow_serves_nothing(self, versions) -> None:
+        assert await versions.active("never_committed") is None
+
+    async def test_activation_is_per_workflow(self, versions) -> None:
+        """One pointer key per workflow, or a rollback on one moves another."""
+        await versions.commit(_version())
+        await versions.commit(WorkflowVersion(workflow="other", source=SOURCE))
+        await versions.commit(WorkflowVersion(workflow="other", source=EDITED))
+        await versions.activate("other", 2)
+
+        onboard = await versions.active("onboard")
+        other = await versions.active("other")
+
+        assert onboard is not None and onboard.version == 1
+        assert other is not None and other.version == 2

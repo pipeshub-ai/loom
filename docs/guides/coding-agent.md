@@ -61,7 +61,7 @@ from loom.agents.providers.anthropic_provider import AnthropicProvider
 
 async def main(rt):
     agent = WorkflowCodingAgent(
-        model=AnthropicProvider(model_name="claude-sonnet-4-6"),
+        model=AnthropicProvider(model_name="claude-sonnet-5"),
         tool_registry=rt.toolsets,  # auto-generates docs from manifests
     )
 

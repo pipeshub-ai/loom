@@ -190,14 +190,22 @@ class CodeValidator:
                 continue
             # google toolsets nest one deeper: ...toolsets.google.gmail.tools
             toolset = parts[3] if parts[2] == "google" and len(parts) > 3 else parts[2]
-            if toolset in self.available_toolsets or toolset in seen:
+            # Only reachable with no declared modules — every branch above
+            # continues when there are any — and the guard at the top returned
+            # when *that* coincided with no declared toolset set. So this is
+            # non-None here, by an invariant that spans two conditions and is
+            # therefore invisible to a type checker. Bound and tested rather
+            # than asserted, so the unreachable case degrades to "no opinion"
+            # instead of an assertion failure in front of a user.
+            available = self.available_toolsets
+            if available is None or toolset in available or toolset in seen:
                 continue
             seen.add(toolset)
             issues.append(
                 CodeIssue(
                     "toolset",
                     f"this environment has no {toolset!r} toolset "
-                    f"(available: {', '.join(sorted(self.available_toolsets)) or 'none'}). "
+                    f"(available: {', '.join(sorted(available)) or 'none'}). "
                     "Do not write code against an integration that is not "
                     "configured — say the task cannot be done here instead.",
                     "error",

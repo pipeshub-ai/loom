@@ -14,7 +14,7 @@ PipesHub did not exist.
 
 ## 1. What LOOM is
 
-A **library**. `pip install loomflow`, import `workflow` and `step`, run
+A **library**. `pip install loomsdk`, import `workflow` and `step`, run
 a durable workflow. Everything else — CLI, MCP server, TUI, HTTP API — is a
 convenience surface over the same object, and none of them is required.
 

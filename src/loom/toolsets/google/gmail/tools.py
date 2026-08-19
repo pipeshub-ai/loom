@@ -10,11 +10,10 @@ Credentials come from the environment on first call — see
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from pydantic import BaseModel
 
 from loom import Retry, step
+from loom.blobs.attachment import Attachment
 from loom.toolsets.google.gmail.models import (
     AttachmentRef,
     EmailMessage,
@@ -26,8 +25,12 @@ from loom.toolsets.google.gmail.models import (
 )
 from loom.toolsets.pagination import Results
 
-if TYPE_CHECKING:
-    from loom.blobs.attachment import Attachment
+# Imported at runtime, not under TYPE_CHECKING: `gmail_send_message` annotates
+# a parameter with it, and `build_parameter_schema` builds a pydantic model
+# from that signature. Under TYPE_CHECKING the name does not exist when
+# pydantic resolves the annotation, so the model could not be built at all and
+# `resolve_tools(["gmail"])` raised — an agent handed this toolset failed
+# before its first turn.
 
 __all__ = [
     "GMAIL_TOOL_DOCS",
@@ -74,6 +77,10 @@ _IDEMPOTENT_WRITE = Retry(max_attempts=2, initial_delay=1.0)
 #: failure that surfaces to the workflow, which can decide with a human in the
 #: loop. Journaling already prevents a *replay* from re-sending.
 _SEND = Retry(max_attempts=1)
+
+#: Creating a label has no idempotency key. A retry after a timeout that
+#: the service actually accepted leaves two labels with the same name.
+_CREATE = Retry(max_attempts=1)
 
 
 @step(retry=_READ)
@@ -560,7 +567,7 @@ async def gmail_find_label(label_name: str) -> GmailLabel | None:
     return await get_default_client().find_label(label_name)
 
 
-@step(retry=_IDEMPOTENT_WRITE)
+@step(retry=_CREATE)
 async def gmail_create_label(name: str) -> GmailLabel:
     """Create a user label.
 

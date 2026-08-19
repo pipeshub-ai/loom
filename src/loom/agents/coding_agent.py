@@ -1,7 +1,7 @@
 """Workflow Coding Agent — ReAct loop powered by BuiltInAgentRuntime.
 
 Takes a natural-language workflow specification and produces a ready-to-run
-Python file using the loomflow SDK (@workflow, @step, ctx.*).
+Python file using the loomsdk SDK (@workflow, @step, ctx.*).
 
 The agent operates as a proper ReAct loop:
 1. DISCOVER — calls ``search_toolsets`` to find relevant integrations
@@ -19,12 +19,13 @@ of tool-calling, message management, or structured output handling.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import textwrap
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
@@ -34,6 +35,16 @@ from loom.agents.stages import default_stages
 from loom.agents.supervisor import CodeSupervisor, SupervisorVerdict
 from loom.agents.validator import CodeIssue, CodeValidator
 
+if TYPE_CHECKING:
+    # Imported for annotation only. `object` was used here to keep the
+    # module import-light, and the cost was that every attribute reached
+    # through these — `list_toolsets`, `describe`, `prompt_block`,
+    # `model_name` — went unchecked, including the `model=` handed to
+    # `Agent`, whose parameter is not `object` at all.
+    from loom.agents.models import ModelProvider
+    from loom.agents.tool_registry import ToolsetRegistry
+    from loom.nodes.catalog import NodeCatalog
+
 logger = logging.getLogger("workflow.coding_agent")
 
 
@@ -42,13 +53,16 @@ logger = logging.getLogger("workflow.coding_agent")
 # ---------------------------------------------------------------------------
 
 DEFAULT_SYSTEM_PROMPT = textwrap.dedent("""\
-    You are an expert workflow engineer for the LOOM loomflow SDK.
+    You are an expert workflow engineer for the LOOM loomsdk SDK.
     Your job is to convert a natural-language workflow specification into a
     complete, runnable Python file.
 
     ## Your process
 
-    1. DISCOVER: search_toolsets with keywords from the spec.
+    1. DISCOVER: search_toolsets with keywords from the spec. **Two empty
+       searches mean there is no integration for this — a normal answer.**
+       Write it as plain Python in a `@step`; reading unrelated toolsets' docs
+       instead ends in no code at all.
     2. INSPECT: show_toolset for operations, get_tool_contract for the ones
        you need.
     3. DOCS: get_tool_docs for exact imports and signatures.
@@ -133,6 +147,9 @@ DEFAULT_SYSTEM_PROMPT = textwrap.dedent("""\
     Typed Pydantic models, not dicts — attribute access (`result.field`), not
     subscripting.
 
+    **The result is the data.** A field missing from it is asked for on the
+    *read* — its fields/custom-fields argument — never from a model.
+
     A search or list returns at most its `max_results`/`limit`; the toolset
     pages the API to fill it. The result is a list that also knows whether it
     saw everything, and that survives being returned from a step:
@@ -186,12 +203,18 @@ DEFAULT_SYSTEM_PROMPT = textwrap.dedent("""\
     wearing the clothes of logic.
 
     Part rule, part judgement → split it: a `@step` that fetches and narrows,
-    a `ctx.agent()` that judges what is left.
+    a `ctx.agent()` that judges what is left, a `@step` that composes.
+
+    **A model call runs on every run**, costs a request each time, and can
+    drop, reorder or invent rows the code already holds. So it never renders
+    the answer and never fetches: a return value coming out of `ctx.agent()`
+    where the spec asked only for data is this mistake.
 
     **The exception:** a lookup with one right answer — a person, a project, a
     status name — is a query, not judgement. Resolve it below, at authoring
     time. "When in doubt use the agent" is about whether a *rule* can express
-    the task, not about facts you can go and find.
+    the task, not about facts you can go and find. Handing one to an agent
+    re-answers it, differently, on every run.
 
     ## Resolve every entity before you write code
 
@@ -200,40 +223,44 @@ DEFAULT_SYSTEM_PROMPT = textwrap.dedent("""\
     which reads as "nothing to do". Nothing the spec names may reach a query as
     raw text. For each one:
 
-    1. **Look it up now** with `call_read_operation`. Search broadly, then
-       narrow. **At most two lookups per entity** — repeating a search that
-       already answered does not make it clearer; if two attempts have not
-       settled it, it is ambiguous, and rung 3 is where ambiguity goes.
+    1. **Look it up now** with `call_read_operation`. A name lives in a
+       *namespace* and a service has several — container (project, space,
+       board), grouping (epic, label, component, tag), person, state, field.
+       **One lookup per namespace**: an empty answer says nothing about the
+       next namespace, so two of them are not a verdict. Stop when one answers
+       or they run out; repeating a search that answered does not help.
     2. **One clear answer** → put the id in the code, the name beside it in a
        comment. The workflow then does no lookup at run time.
-    3. **Ambiguous after those two lookups** → do not call the toolset
-       operation directly for it. Emit a `ctx.agent()` step that resolves it at run time,
-       handing over the candidates you found and the toolsets it may use.
-       Deciding which "xyz work" someone meant is a judgement about language,
-       and a model makes it where a query cannot.
-    4. **Nothing found** → error, naming what was tried. Never fall back to the
-       raw string; it silently matches nothing.
+    3. **Two candidates, or two namespaces that both answer** → do not call
+       the toolset operation directly for it. Emit a `ctx.agent()` step that
+       resolves it at run time, handing over the candidates you found and the
+       toolsets it may use. Deciding which "xyz work" someone meant is a
+       judgement about language, and a model makes it where a query cannot.
+    4. **No namespace has that name** → it is subject matter, not a thing,
+       and matching text is then honest: keep it, and say so in what the
+       workflow returns. Never fall back to the raw string as an identifier —
+       `project = "<the word>"` silently matches nothing and reports "none".
 
     A **fuzzy text search is not a resolution**. `text ~ "..."`, `contains`,
-    `LIKE` — the spec's own words in front of a match operator is rung 4 in
-    disguise: it looks like searching and it is guessing. Nor may you quietly
-    fix a spelling: "sas" becoming "saas" is a guess about what someone meant,
-    and guesses belong in rung 3, made out loud with the candidates in view.
+    `LIKE` — the spec's own words in front of a match operator is rung 4
+    claimed without doing rung 1: it looks like searching and it is guessing.
+    Nor may you quietly fix a spelling: "sas" becoming "saas" is a guess about
+    what someone meant, and guesses belong in rung 3, made out loud with the
+    candidates in view.
 
     The agent-node form, when rung 3 applies:
 
         resolved = await ctx.agent(
-            "Which of these is 'xyz work'? PA-1769 Launch; PA-1844 V2. "
+            "Which of these is 'xyz work'? PROJ-11 Launch; PROJ-42 V2. "
             "Reply with the key alone.",
             toolsets=["<the toolset>"],
         )
         issues = await ctx.step(<search operation>, f"parent = {resolved.output}")
 
-    Enumerated values — statuses, categories, labels — are per-account
-    configuration, not constants. Read them before filtering on them.
-
-    Not for a lookup with one answer: that
-    re-answers it, differently, on every run.
+    Enumerated values and identifiers — statuses, labels,
+    `customfield_10016`, `C024BE91L` — are per-account configuration, not
+    constants. Read them before filtering: one you did not look up is right
+    on another account and silently wrong here.
 
     ## Only the toolsets listed above exist
 
@@ -440,6 +467,13 @@ class WorkflowCodingAgent:
         Turns allowed for discovery, inspection, entity resolution, writing,
         and validation. Raise it for a spec that names many entities; lower it
         to cap a run that wanders.
+    probes:
+        Optional :class:`~loom.agents.probes.registry.ProbeRegistry`. Given one,
+        the agent can *look* at the system it is writing code against — a URL's
+        real response shape, a page's real controls — instead of inferring them
+        from the spec. Left out, the ``observe_target`` tool is not offered and
+        the agent behaves exactly as it did before, which is the intended
+        degradation rather than a limitation to work around.
     tool_docs:
         Optional pre-loaded tool documentation strings.
         When provided, the agent can skip discovery and go straight
@@ -448,13 +482,13 @@ class WorkflowCodingAgent:
 
     def __init__(
         self,
-        model: object,
+        model: ModelProvider,
         *,
         max_repair_attempts: int = 2,
         max_discovery_turns: int = 20,
         tool_docs: list[str] | None = None,
-        tool_registry: object | None = None,
-        node_registry: object | None = None,
+        tool_registry: ToolsetRegistry | None = None,
+        node_registry: NodeCatalog | None = None,
         instructions: str | None = None,
         extra_instructions: str = "",
         allowed_packages: Iterable[str] | None = None,
@@ -464,6 +498,7 @@ class WorkflowCodingAgent:
         stages: list[Any] | None = None,
         executor: Any = None,
         user_interaction: Any | None = None,
+        probes: Any | None = None,
     ) -> None:
         self._model = model
         self._executor = executor
@@ -504,6 +539,7 @@ class WorkflowCodingAgent:
             load_builtin_nodes()
             node_registry = get_node_catalog()
         self._node_registry = node_registry
+        self._probes = probes
         """The node catalog the agent browses. Pass ``rt.nodes`` so it finds
         exactly the nodes the generated workflow can call; the process-global
         catalog is the default and can be a superset."""
@@ -567,6 +603,13 @@ class WorkflowCodingAgent:
             desc = self._tool_registry.describe(detail="index")
             if desc:
                 parts.append(desc)
+
+        # What can be looked at, when anything can. Named here rather than left
+        # to the tool list: a capability nothing points at is one nobody uses.
+        if self._probes is not None:
+            block = self._probes.prompt_block()
+            if block:
+                parts.append(block)
 
         # Categories and counts only. Never the node list: the block must stay
         # O(categories) so registering the five-hundredth custom node does not
@@ -689,7 +732,48 @@ class WorkflowCodingAgent:
 
         return code, verdict, rounds
 
-    def _check_context(self, spec: str) -> CheckContext:
+    def _resolved_kinds(self, tool_calls: Any) -> set[str]:
+        """Entity kinds a resolver was actually executed for while authoring.
+
+        Read from the calls the agent made, never from anything it says. The
+        model can report having resolved a field as easily as it can invent
+        the id, so a self-report would certify exactly the case it exists to
+        catch.
+
+        Only ``call_read_operation`` counts, and only against an operation the
+        manifest marks ``resolves=``. Browsing a toolset is not resolving an
+        entity.
+        """
+        registry = self._tool_registry
+        if registry is None or not tool_calls:
+            return set()
+
+        kinds: set[str] = set()
+        for call in tool_calls:
+            if getattr(call, "name", "") != "call_read_operation":
+                continue
+            arguments = getattr(call, "arguments", None) or {}
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except (TypeError, ValueError):
+                    continue
+            if not isinstance(arguments, dict):
+                continue
+            op_path = str(arguments.get("op_path", ""))
+            toolset_id, _, operation_id = op_path.partition(".")
+            if not operation_id:
+                continue
+            try:
+                manifest = registry.get(toolset_id)
+                spec_ = manifest.find_operation(operation_id) if manifest else None
+            except Exception:
+                continue
+            if spec_ is not None and spec_.resolves:
+                kinds.add(spec_.resolves)
+        return kinds
+
+    def _check_context(self, spec: str, tool_calls: Any = None) -> CheckContext:
         """Assemble what the stages need, including fakes for the toolsets."""
         toolsets: set[str] | None = None
         fakes: list[tuple[str, str]] = []
@@ -711,6 +795,7 @@ class WorkflowCodingAgent:
             toolset_modules=_toolset_modules(self._tool_registry),
             fakes=[f for f in fakes if f[1]],
             spec=spec,
+            resolved_kinds=self._resolved_kinds(tool_calls),
         )
 
     async def _repair_from(
@@ -795,7 +880,7 @@ class WorkflowCodingAgent:
             len(self._tool_docs),
         )
 
-        agent = Agent(
+        agent: Agent[Any] = Agent(
             name="workflow_coder",
             instructions=self.build_system_prompt(),
             model=self._model,
@@ -804,6 +889,7 @@ class WorkflowCodingAgent:
                 validator=self._validator,
                 node_registry=self._node_registry,
                 interaction=self._user_interaction,
+                probes=self._probes,
                 gate=self._ask_gate,
             ),
             output_type=CodingOutput,
@@ -903,7 +989,7 @@ class WorkflowCodingAgent:
         # One pipeline, cheapest stage first, stopping at the first blocking
         # failure. Repair is driven by whatever it reports, so a type error and
         # a traceback reach the model by the same path.
-        context = self._check_context(spec)
+        context = self._check_context(spec, getattr(result, "tool_calls", None))
         report = await self._pipeline.run(code, context)
         code, rounds = await self._repair_from(agent, code, report, context)
         report = await self._pipeline.run(code, context) if rounds else report
@@ -1040,6 +1126,13 @@ def _repair_prompt(report: Any, code: str, spec: str = "") -> str:
     a fresh conversation — so a round that sends only the errors asks the model
     to fix something it can neither see nor remember the purpose of, and it
     will reasonably ask what it was supposed to be building.
+
+    It carries the run's **output** for the same reason it carries the
+    traceback. The pipeline had it all along — ``smoke_run`` records
+    ``output_preview`` — and handed it only to the replay comparison, so a
+    model repairing "you returned nothing useful" could not see what it had
+    returned. Verification the agent is not told about is verification that
+    cannot correct anything.
     """
     lines = [
         "The workflow you generated did not pass verification. Return the "
@@ -1054,6 +1147,10 @@ def _repair_prompt(report: Any, code: str, spec: str = "") -> str:
     trace = getattr(smoke, "traceback", "") if smoke is not None else ""
     if trace:
         lines += ["", "## Traceback", trace]
+
+    preview = getattr(smoke, "output_preview", "") if smoke is not None else ""
+    if preview:
+        lines += ["", "## What your code returned when it ran", preview]
 
     if spec:
         lines += ["", "## What the workflow must do", spec]

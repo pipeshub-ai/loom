@@ -7,9 +7,11 @@ Tier 3 (stub):   ~250-500 tokens — typed contract for a single operation.
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
-from loom.toolsets.manifest import EffectClass, ToolsetManifest
+from loom.toolsets.manifest import EffectClass, OperationSpec, ToolsetManifest
 
 # ---------------------------------------------------------------------------
 # Tier 1 — Index Card
@@ -53,8 +55,8 @@ class OpContract(BaseModel):
     """Full typed contract for a single operation."""
 
     op_id: str
-    input_schema: dict = Field(default_factory=dict)
-    output_schema: dict = Field(default_factory=dict)
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    output_schema: dict[str, Any] = Field(default_factory=dict)
     scopes: list[str] = Field(default_factory=list)
     effect: EffectClass = EffectClass.READ
     description: str = ""
@@ -75,16 +77,24 @@ class ToolsetCatalog:
         self._by_function: dict[str, EffectClass] | None = None
         """Lazy ``@step`` function name → declared effect class. ``None`` means
         not built yet; invalidated on every registration."""
+        self._by_function_op: dict[str, OperationSpec] | None = None
+        """Lazy ``@step`` function name → its whole :class:`OperationSpec`,
+        which is what :meth:`profile_of` needs. Kept beside ``_by_function``
+        rather than replacing it because ``effect_of`` is the narrow, hot
+        lookup the broker makes per dispatch, and it should not pay for
+        building a profile."""
 
     def register(self, manifest: ToolsetManifest, /) -> None:
         """Register a toolset manifest."""
         self._manifests[manifest.id] = manifest
         self._by_function = None
+        self._by_function_op = None
 
     def unregister(self, toolset_id: str) -> None:
         """Remove a toolset from the catalog."""
         self._manifests.pop(toolset_id, None)
         self._by_function = None
+        self._by_function_op = None
 
     def effect_of(self, function: str) -> EffectClass | None:
         """Whether a ``@step`` function reads, writes, or destroys.
@@ -108,6 +118,32 @@ class ToolsetCatalog:
                 if operation.function
             }
         return self._by_function.get(function)
+
+    def profile_of(self, function: str) -> Any:
+        """Every facet of a ``@step`` function's side effect, as one value.
+
+        Added once four facets existed: a separate ``*_of`` per facet meant the
+        call site grew a line for each, and a fifth would have meant editing
+        every consumer again. Returns an
+        :class:`~loom.toolsets.effects.EffectProfile`, or ``None`` for a
+        function no manifest declares.
+
+        Manifest metadata only — no toolset is imported to answer, which is
+        what keeps Layer 1 Layer 1.
+        """
+        from loom.toolsets.effects import derive_effect_profile
+
+        if self._by_function_op is None:
+            self._by_function_op = {
+                operation.function: operation
+                for manifest in self._manifests.values()
+                for operation in manifest.all_operations()
+                if operation.function
+            }
+        operation = self._by_function_op.get(function)
+        if operation is None:
+            return None
+        return derive_effect_profile(operation)
 
     def get(self, toolset_id: str) -> ToolsetManifest | None:
         """Retrieve a manifest by id."""

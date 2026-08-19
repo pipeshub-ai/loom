@@ -115,7 +115,7 @@ def _loom_command() -> str:
         resolved = argv0.resolve()
     except OSError:
         resolved = argv0
-    if resolved.name in {"loom", "loomflow"} and resolved.is_file():
+    if resolved.name in {"loom", "loomsdk"} and resolved.is_file():
         return str(resolved)
     return shutil.which("loom") or "loom"
 

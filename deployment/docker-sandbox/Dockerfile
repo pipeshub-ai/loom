@@ -3,22 +3,22 @@ FROM python:3.12-slim
 LABEL maintainer="loom" \
       description="Reference image for loom.runtime.sandboxes.docker.DockerSandbox -- runs a generated workflow body, nothing else"
 
-# loomflow IS required: generated workflow source begins `from loom import
+# loomsdk IS required: generated workflow source begins `from loom import
 # workflow` and the child `exec()`s it verbatim. Loom in this image carries
 # no store and no credentials -- it is just the decorator/definition layer
 # (`@workflow`, `@step`, `WorkflowDefinition`) the source needs to import
 # successfully. pydantic is required for the same reason: generated code
 # routinely types its input/output with a BaseModel.
 #
-# Version-pin this to the same `loomflow` release the process constructing
+# Version-pin this to the same `loomsdk` release the process constructing
 # `DockerSandbox` runs -- a workflow compiled against a newer/older Loom
 # than the one that executes it is a correctness gap this image cannot see,
 # so keep them in lockstep via one build arg rather than letting
-# `pip install loomflow` drift to "whatever is latest today".
+# `pip install loomsdk` drift to "whatever is latest today".
 ARG LOOMFLOW_VERSION=""
 RUN pip install --no-cache-dir --no-compile \
     pydantic \
-    "loomflow${LOOMFLOW_VERSION:+==${LOOMFLOW_VERSION}}"
+    "loomsdk${LOOMFLOW_VERSION:+==${LOOMFLOW_VERSION}}"
 
 # Deliberately nothing else: no other pip packages, no network tools. The
 # image's own contents ARE the import surface a sandboxed body has -- a

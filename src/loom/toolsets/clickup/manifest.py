@@ -49,6 +49,13 @@ CLICKUP_MANIFEST = ToolsetManifest(
     },
     tools_module="loom.toolsets.clickup.tools",
     egress_hosts=["api.clickup.com"],
+    rate_limits={
+        "model": "per minute, per token, tiered by plan",
+        "free_unlimited_business": "100 requests per minute",
+        "business_plus": "1,000 requests per minute",
+        "enterprise": "10,000 requests per minute",
+        "source": "developer.clickup.com/docs/rate-limits",
+    },
     groups={
         "workspace": [
             OperationSpec(

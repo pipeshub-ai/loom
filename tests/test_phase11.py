@@ -116,7 +116,7 @@ class TestScaffolding:
             QUICKSTART_PYPROJECT,
         )
 
-        assert "loomflow" in QUICKSTART_PYPROJECT
+        assert "loomsdk" in QUICKSTART_PYPROJECT
         assert "[project]" in QUICKSTART_PYPROJECT
 
     def test_scaffold_project_returns_paths(self) -> None:

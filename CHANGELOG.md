@@ -7,9 +7,305 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — one current default per vendor
+
+`claude-sonnet-5` for Anthropic and `gpt-5.6-terra` for OpenAI, everywhere a
+model name is written down: the provider defaults, the backend defaults
+(`PydanticAIBackend`), every cookbook example, and the guides. `claude-sonnet-4-6`
+appeared in nine of those places as a hand-written argument, so a reader copying
+any example pinned it whatever the provider default said.
+
+The LangChain example loses its `temperature=0` with the model. Claude 5 rejects
+sampling controls outright — a hard 400 — which `AnthropicProvider` already
+handles in `_rejects_sampling_controls`, but `ChatAnthropic` is constructed
+directly and nothing was there to drop it.
+
+Both new defaults are **priced**, which is the part that is not cosmetic:
+`estimate_cost` returns `0.0` for a model with no rate on file, so a default
+nobody priced makes every budget unenforceable while looking like it is working.
+`claude-sonnet-5` is $2.00 / $10.00 per million — the launch introductory rate,
+which Anthropic has since made the standard price rather than raising it to
+$3/$15 — and `gpt-5.6-terra` is $2.00 / $12.00. `gpt-5.6-sol` stays unpriced;
+it is nobody's default, and its rate is still not on file.
+
+
+### Fixed — the agent had the probe and never reached for it
+
+Watched turn by turn on the task probes were built for: a Playwright workflow
+against a real booking page. With `observe_target` in its tool list and the
+target in the spec, the agent spent **43 turns and eleven minutes** reading the
+tool documentation of every integration it had — jira, gmail, slack, confluence,
+google_drive, quickbooks, sharepoint, teams, tavily, hubspot — searching the node
+catalogue for "screenshot", "attachment", "emit", and validating a throwaway
+`async def foo(x): return x` to find out whether a name was importable. It
+called the probe once, at the last turn, against an unrelated URL. It produced
+no code.
+
+Two causes, both in what the agent was told rather than what it was given:
+
+- **Discovery had no exit.** Step 1 of the prompt is "search_toolsets with
+  keywords from the spec", and nothing said what to do when nothing matches.
+  There is no browser toolset, so it kept looking. It now says that two empty
+  searches mean there is no integration for this — a normal answer — and that
+  plain Python in a `@step` is the rest of the job.
+- **Nothing pointed at the probes.** `ProbeRegistry.prompt_block()` now names
+  them and says when they apply, appended beside the node catalog's block and
+  omitted entirely when nothing can be looked at. A tool's docstring sits in the
+  tool list; that is not the same as the model knowing this task calls for it.
+
+The same task afterwards: **two turns, 26 seconds, clean.** Turn one observed
+the page, turn two wrote the file. The generated code carries the reason in a
+comment — *"Observed page has no native `<input>/<textarea>/<select>` — the
+widgets are custom (role-based)"* — and its selector covers ARIA roles. Run
+through the CLI it reports three controls, including the `div` acting as
+"Confirm and continue" that the first version of this workflow missed entirely
+while reporting zero and no error.
+
+One caveat worth recording, since it cost a run: a probe is only useful when the
+spec names something concrete to look at. A spec that says "input: a URL" and
+never gives one leaves the agent inventing a target — it observed
+`opentable.com` twice. Name the page the workflow will actually run against.
+
+
+### Fixed — two tests that failed for reasons outside the code they test
+
+**`TestWallTimeout` blamed the timeout for someone else's orphan.** The test ran
+its sandbox under a fixed `run_id`, and the container is named
+`loom-sbx-{run_id}-{nonce}`; docker's `--filter name=` matches on *substring*,
+so the assertion covered every container that test had ever created. One suite
+killed mid-run leaves a container in `Created` state that nothing reaps —
+`sweep_orphans` is scoped to the instance label on purpose, so a later process
+will not touch another replica's work — and from then on the test failed
+permanently, on a machine where the timeout path was working correctly. It now
+uses a unique run id per execution and asserts on the container it created.
+
+**A killed subprocess was reported as a broken README block.** The docs checks
+treat any non-zero return code as the example failing, and a process stopped by
+a signal has neither exited on its own nor written a complete traceback — so a
+README block whose process was killed under load came back quoting half an
+import line as the evidence, matched nothing in `is_environmental`, and failed
+the suite. Re-running passed. A negative return code is now treated the way the
+timeout beside it already was: the process was stopped from outside, so it has
+said nothing about the example. A positive non-zero code still fails, so a
+genuinely broken example is caught exactly as before.
+
+
+### Added — the coding agent can look at what it is writing code against
+
+`loom.agents.probes`, and `WorkflowCodingAgent(probes=default_probes())`. Until
+now the agent could ask what *loom* offers and nothing about the world its code
+would run in, so it wrote against whatever the spec's author remembered. The
+failure that produced this: asked to "collect every visible form control", it
+generated `querySelectorAll('input, textarea, select')` — correct for the spec —
+and got nothing back, because that page builds its controls out of `div`s. The
+run completed and reported zero fields. Told only that the result was empty, the
+model's repair was to wait longer, which is the right first guess from the code
+alone and cannot ever work.
+
+`Probe` is `supports(target)` and `observe(target, hint=…)`, returning an
+`Observation` with a summary, a structured detail, and evidence as
+`Attachment`s. `HttpProbe` (core) reports a JSON response's real field names;
+`BrowserProbe` (`[browser]`) renders the page and counts native controls **and**
+role-based widgets side by side. On the page above it now says: *0 native form
+control(s), 1 role-based widget(s) … a selector over input/textarea/select will
+find nothing here* — which is not a description of the page but the reason the
+obvious selector fails on it.
+
+Four properties worth knowing:
+
+- **Read-only is built, not promised.** A probe is handed to a model, so
+  "please do not write" is not a control. Neither probe has a code path that
+  sends anything but GET. `verify_probe` takes a `methods_seen` callback and
+  fails on anything outside GET/HEAD.
+- **Absence degrades to exactly what shipped before.** An empty registry is
+  falsy and `observe_target` is omitted rather than offered-and-useless, the
+  rule `ask_user` already follows.
+- **The probes escalate rather than compete.** `HttpProbe` wins for a URL, and
+  when handed HTML says so and names `probe='browser'`.
+- **Authoring-time only.** Nothing here is reachable from a workflow body or
+  journaled. A workflow reaches the world through `@step`, `ctx.node` and
+  toolsets; looking is not something the workflow later does.
+
+`Probe` joins the seam catalog as its eighteenth port, with a conformance kit
+alongside the ones for event sources and stores.
+
+
+### Fixed — `ctx.node` never appeared in the projected graph
+
+For the node system's whole life, a workflow calling a catalogued node produced
+a graph that did not mention it. `_CTX_CALL_MAP` — the extractor's list of which
+`ctx` calls draw — had no `node` entry, so the canvas, `loom describe`, and the
+committed `graph.json` all silently under-reported any flow built the way the
+node system is meant to be used. The graph is projected from the code precisely
+so that adding or hiding work shows up in a diff, and for node calls it did not.
+
+Nodes now draw by category: `human.*` as human, `agent.*` as agent, everything
+else as tool — because a parked run and a model call are the two things a reader
+most needs to pick out, and one generic icon for both hides them. Deliberately
+not mapping `control.switch` to `SWITCH`: that kind carries branch edges, and a
+node call is one statement with one successor however the node behaves inside.
+
+Two mechanisms keep it fixed, because the two failure modes need different ones.
+`DURABLE_CTX_CALLS` names every journaled call and a test asserts it is a subset
+of `_CTX_CALL_MAP` — a method missing from the map is wrong for every workflow
+at once, so no check over generated code could ever find it. And a new
+`projection` stage (cost 18, non-blocking) catches the other shape: a method the
+extractor does model, in code its walker never reaches, which
+`return await ctx.step(f, x)` was until recently.
+
+That stage justified itself on its first run over the shipped corpus, finding
+one more: `if await ctx.wait_for_approval("refund"):` put the approval in the
+`if` **test**, which the walker never descended into, so a cookbook workflow's
+human gate — the single most review-worthy thing in it — was missing from its
+own graph. `visit_If` and the loop visitor now descend into the test and the
+iterable, the way `visit_Return` descends into the returned expression. All 41
+shipped workflows project completely.
+
+### Added — `catalogue` stage: a step that re-implements a node
+
+A hand-rolled `httpx` call draws on the canvas as an opaque effect where
+`io.http_request` would have drawn as itself, and nothing tells the next author
+the node existed. The stage (cost 19, non-blocking) reports the two cases where
+a node is a straight replacement — HTTP, and document parsing — and only where
+that node is registered in this environment, since advice to use something that
+is not installed is worse than no advice.
+
+It reads the node catalogue without populating it. An earlier draft called
+`load_builtin_nodes()`, which was redundant on both paths that reach a stage
+and was enough to change what an unrelated suite saw: a verification stage that
+mutates process-global state makes its own findings depend on who ran first.
+
+
+### Added — the coding agent is now told what its code produced
+
+The pipeline could always say whether generated code *ran*. It could not say
+whether the code *answered*. `smoke_run` recorded the workflow's output as
+`output_preview` from the beginning and handed it to exactly one consumer —
+`ReplayStage`, which compares two runs for **equality** and never for sense — so
+a workflow returning `{"field_count": 0, "fields": []}` against a spec asking
+for "every visible form control" passed every gate: compiled, imported, ran,
+terminated `completed`, replayed identically. Green, and wrong.
+
+Two changes, and the first is the smaller one:
+
+- **`_repair_prompt` carries the run's output**, beside the traceback it always
+  carried. A model asked to fix "you returned nothing useful" could not
+  previously see what it had returned.
+- **`OutcomeStage`** (cost 55, non-blocking) turns that into a repair. Two
+  conditions coincide before it speaks, the discipline `CoverageStage` uses: the
+  spec asked for completeness — its vocabulary, imported rather than copied, so
+  the two cannot drift — **and** the run came back with an empty collection
+  anyway.
+
+It reports an *error* rather than a warning, which is the one surprising choice.
+The repair loop runs on `report.errors`, so a warning is a finding nobody ever
+sees. What makes that safe is already in the loop: **unchanged code ends it**. A
+model that judges the empty result correct says so by leaving the file alone,
+and the message says as much in those words. It is silent on a synthetic input,
+for the same reason `SmokeStage` calls that run unverifiable rather than failed.
+
+`SmokeResult` gained `empty_paths`, computed in the runner where the output is
+whole. The first implementation parsed `output_preview` instead, passed every
+test written for it, and then went silent on the exact workflow it was built for
+— whose empty `fields` list sat behind 1500 characters of page text, past the
+preview's 400-character cap. `CheckContext` gained `prior`, so a stage whose job
+is to interpret an earlier stage can read it instead of paying to re-run it and
+repeating whatever side effects it had.
+
+
+### Fixed — prompt caching could 400 a long agent loop out of existence
+
+`AnthropicProvider` marks the second-to-last message as a cache breakpoint. When
+that turn was a pure tool call its text block is empty, and the API rejects the
+combination outright: *"cache_control cannot be set for empty text blocks"*, a
+400 rather than a warning. Because the marker follows the end of the
+conversation, this fires deep into a long one and fails the whole request — the
+workflow coding agent lost a 57-message session to it and returned no code, with
+the error surfacing as an `unsupported` issue rather than anything naming the
+cause.
+
+A turn with nothing to mark is now skipped. Losing one request's cache read
+costs tokens; sending the marker on an empty text block costs the request. Only
+empty *text* is skipped — a `tool_use` block caches fine, and it is the common
+tail of an assistant turn.
+
+
+### Fixed — `loom check` merged every workflow in a file into one graph
+
+A module holding two workflows produced a single `<stem>.graph.json`, named
+after the first and containing the second's nodes as well. The committed graph
+exists so that adding or hiding a step shows up in a diff, and that only holds
+if a graph covers one flow.
+
+`loom check` now writes a pair of artifacts per workflow, qualified as
+`<stem>.<flow>.graph.json` when a module declares more than one and left at
+`<stem>.graph.json` when it declares one. `loom graph` and `loom describe` print
+a single graph, so they take `--workflow/-w`; `check` needs no selector because
+it covers all of them. The stale unqualified artifact is reported as a problem
+rather than deleted.
+
+Two extraction fixes came with it. The AST pass now decides which nodes a graph
+has — the registry pass knows what a *module* declares, not what a *flow* runs,
+so seeding from it put every `@step` in the file into every flow. And a durable
+call in a `return` is extracted as its own node: `return await ctx.step(f, x)`
+is a step and a return, and it had only been reaching the graph through the
+registry catch-all that put it in every flow in the file.
+
+### Fixed — `loom init` scaffolded a project the CLI could not address
+
+The generated `pyproject.toml` had no `[tool.loom] modules`, which is what makes
+a bare workflow name resolve. So in a project whose only content came from the
+scaffold, `loom run quickstart` failed — as did `loom approve <run> <subject>`,
+which has to import the code to resume it. Both failed with a traceback rather
+than a hint.
+
+### Fixed — an approval could be granted with nobody approving it
+
+`loom approve`, `loom respond`, and `loom send` delivered the event and looked
+the run up afterwards. Those read as equivalent and are not: `Runtime.send_event`
+reserves a falsy run id for "every run awaiting this name", and the stores keep
+that broadcast row until some run takes it. So `loom approve '' publish` exited
+2 saying it found no such run — having queued an approval that the *next* run to
+reach that gate consumed, completing a human gate with no human and no record
+that anyone had been asked.
+
+All three now resolve the run before they deliver, which is the order
+`mcp_server/tools.py` has always used. `Runtime.send_event` refuses an empty run
+id outright, so a host calling the engine directly cannot reach the broadcast
+path by accident either; `None` still means broadcast, which is what
+`ctx.publish` wakes parked runs with.
+
+### Fixed — a SQLite store URL typo ended in a traceback that named nothing
+
+`sqlite3` reports "unable to open database file" without saying which file, so
+`LOOM_STORE=sqlite:///runs.db` — three slashes, an absolute path to `/runs.db`
+at the filesystem root — surfaced as forty frames ending in a sentence about no
+particular path. `SQLiteStore` now raises `ConfigurationError` naming the file
+it could not open, and, for a root-level path, the two spellings that work.
+
+The docs said `sqlite:///runs.db` in six places and meant the relative one. This
+store takes the name in the URL's authority position: **two slashes for a path
+beside you, three for an absolute one** — the opposite of SQLAlchemy's
+convention, and left that way deliberately, since `f"sqlite://{path}"` over an
+absolute path is how every caller in this repo spells the absolute case and
+reinterpreting three slashes would silently redirect those writes.
+
+
+### Distribution renamed to `loomsdk`
+
+`pip install loomsdk`, `import loom`. The distribution was going to be
+`loomflow`, but that name on PyPI belongs to an unrelated, actively-maintained
+project (`Anurich/LoomFlow`, last release 2026-07-07) — so `pip install
+loomflow` would have installed somebody else's package. Nothing had been
+published under either name, so this costs no migration.
+
+The import package is unchanged and always was `loom`. The secondary console
+script is renamed to match the distribution: `loom` and `loomsdk` both work,
+where the second used to be `loomflow`.
+
 ### Renamed — `workflow_builder` is now `loom`
 
-The import package is `loom`; the distribution is `loomflow`.
+The import package is `loom`; the distribution is `loomsdk`.
 
 ```python
 from loom import Context, Runtime, step, workflow    # was: from workflow_builder import ...

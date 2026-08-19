@@ -39,6 +39,7 @@ from loom.toolsets.google.errors import (
 )
 from loom.toolsets.google.gmail import GMAIL_MANIFEST
 from loom.toolsets.google.meet import GOOGLE_MEET_MANIFEST
+from loom.toolsets.google.sheets.manifest import GOOGLE_SHEETS_MANIFEST
 
 #: Every Google toolset LOOM ships, for registering them in one line:
 #: ``for manifest in GOOGLE_MANIFESTS: registry.register(manifest)``.
@@ -47,6 +48,7 @@ GOOGLE_MANIFESTS = (
     GOOGLE_CALENDAR_MANIFEST,
     GOOGLE_DRIVE_MANIFEST,
     GOOGLE_MEET_MANIFEST,
+    GOOGLE_SHEETS_MANIFEST,
 )
 
 __all__ = [
@@ -55,6 +57,7 @@ __all__ = [
     "GOOGLE_DRIVE_MANIFEST",
     "GOOGLE_MANIFESTS",
     "GOOGLE_MEET_MANIFEST",
+    "GOOGLE_SHEETS_MANIFEST",
     "GoogleAPIError",
     "GoogleAuth",
     "GoogleAuthError",

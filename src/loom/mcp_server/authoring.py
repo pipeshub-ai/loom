@@ -85,10 +85,11 @@ async def get_tool_contract(op_path: str) -> str:
     if result.get("pagination"):
         result["pagination_note"] = (
             "This operation returns a Results list (a list subclass). "
-            "Check .complete (False when max_results cut it short), "
-            ".total (how many matched), and .cursor (continuation token). "
-            "Set max_results high enough or loop with the cursor. "
-            "Never silently drop results."
+            "Check .complete (False when max_results cut it short) and "
+            ".total (how many matched). No read takes a cursor argument: "
+            "the toolset pages the API internally to fill max_results, so "
+            "raise max_results or narrow the query. Never silently drop "
+            "results."
         )
     return _json(result)
 
@@ -133,7 +134,7 @@ async def call_read_operation(
     writing code that depends on them.
 
     Use this to turn a name in a spec into the id generated code actually
-    needs — which account id is "Vishwjeet", whether project "SAAS" exists —
+    needs — which account id a named person has, whether a project exists —
     rather than guessing and shipping code that runs and returns nothing.
 
     Only operations declared ``read`` may be called; a write or destructive
@@ -144,7 +145,7 @@ async def call_read_operation(
     Args:
         op_path: Fully qualified operation, e.g. ``"jira.projects.list"``.
         arguments_json: The operation's arguments, JSON-encoded object, e.g.
-            ``'{"name": "Vishwjeet"}'``. Defaults to no arguments.
+            ``'{"name": "<the name the spec used>"}'``. Defaults to no arguments.
     """
     from loom.agents.coding_tools import _call_read_operation
 

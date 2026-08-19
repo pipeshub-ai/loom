@@ -54,7 +54,7 @@ class PydanticAIExecutor:
 
 # -- static protocol check ---------------------------------------------------
 def _check() -> None:
-    _: AgentExecutor = PydanticAIExecutor(agent=None)  # type: ignore[arg-type]
+    _: AgentExecutor = PydanticAIExecutor(agent=None)
 
 
 # -- Direction B --------------------------------------------------------------

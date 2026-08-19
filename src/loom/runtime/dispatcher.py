@@ -599,7 +599,8 @@ def _next_fire_from_spec(
 ) -> datetime | None:
     """Compute next fire time from a TriggerSpec."""
     if hasattr(spec, "next_fire"):
-        return spec.next_fire(after)
+        computed: datetime | None = spec.next_fire(after)
+        return computed
     return None
 
 

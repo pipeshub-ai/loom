@@ -100,6 +100,9 @@ class NodeRegistry(NodeCatalog):
         body runs and, for a suspending node, before the run parks. A run parked
         with nobody listening is the worst outcome available in this design,
         because it is indistinguishable from patience.
+
+        ``ctx.node`` passes no runtime and calls :meth:`check_requirements`
+        itself, from inside the journaled call — see there for why.
         """
         spec = self.get(node_id)
         if spec is None:
@@ -111,10 +114,19 @@ class NodeRegistry(NodeCatalog):
             self._instances[node_id] = instance
 
         if runtime is not None:
-            missing = type(instance).missing_requirements(runtime)
-            if missing:
-                raise self._requirement_error(spec, missing)
+            self.check_requirements(instance, runtime)
         return instance
+
+    def check_requirements(self, node: Node[Any, Any], runtime: Any) -> None:
+        """Raise unless *runtime* satisfies everything *node* declared.
+
+        Separate from :meth:`resolve` because the two questions are asked at
+        different moments: what a node *is* is needed to validate a payload,
+        while what a Runtime *has* only matters if the node is about to run.
+        """
+        missing = type(node).missing_requirements(runtime)
+        if missing:
+            raise self._requirement_error(type(node).spec, missing)
 
     def _construct_from(self, node_id: str, spec: NodeSpec) -> Node[Any, Any]:
         """The class registered here, a parent's, or the one ``node_class`` names."""
@@ -227,6 +239,8 @@ _BUILTIN_NODE_MODULES = (
     "loom.nodes.human.nodes",
     "loom.nodes.control",
     "loom.nodes.transform",
+    "loom.nodes.documents",
+    "loom.nodes.knowledge",
     "loom.nodes.io",
     "loom.nodes.agentic",
 )

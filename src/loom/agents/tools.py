@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, overload
 from pydantic import ConfigDict, Field, TypeAdapter, create_model
 
 from loom.core.exceptions import ConfigurationError, ModelRetry
+from loom.core.ids import callable_name
 from loom.core.serde import encode
 
 if TYPE_CHECKING:
@@ -89,6 +90,25 @@ class Tool:
             return bool(self.needs_approval(arguments))
         except Exception:
             return True
+
+    def enforce_approval(self, arguments: dict[str, Any]) -> None:
+        """Raise if this tool needs a human for *these* arguments.
+
+        Called from every path that reaches the underlying callable — the
+        built-in agent loop, and each backend adapter, which hands
+        :attr:`fn` to a third-party framework that knows nothing about LOOM.
+        Missing one adapter would make the gate depend on which backend a
+        deployment happens to use, which is worse than not having it.
+        """
+        if not self.requires_approval(arguments):
+            return
+        from loom.runtime.effects import EffectCall, EffectDenied
+
+        raise EffectDenied(
+            f"tool '{self.name}' declares needs_approval for these arguments",
+            call=EffectCall(kind="tool", target=self.name),
+            needs="approval",
+        )
 
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Coerce model-supplied arguments, raising :class:`ModelRetry` on mismatch.
@@ -193,9 +213,18 @@ def build_parameter_schema(
     if not fields:
         return {"type": "object", "properties": {}, "additionalProperties": False}, None
 
+    # ``__module__`` is the tool's, not this one's. These modules use postponed
+    # annotations, so pydantic resolves ``list[Attachment] | None`` as a string
+    # against the namespace of the module the model claims — and by default
+    # that is *this* file, which has never heard of the tool's types. The
+    # resulting model cannot be built at all: ``gmail_send_message`` raised
+    # "GmailSendMessageArguments is not fully defined" and took
+    # ``resolve_tools(["gmail"])`` down with it, so an agent handed that
+    # toolset failed before its first turn.
     model = create_model(
         f"{getattr(fn, '__name__', 'tool').title().replace('_', '')}Arguments",
         __config__=ConfigDict(extra="forbid", arbitrary_types_allowed=True),
+        __module__=getattr(fn, "__module__", __name__),
         **fields,
     )
     schema = model.model_json_schema()
@@ -270,7 +299,7 @@ def tool(
         summary, _ = parse_docstring(target)
         return Tool(
             fn=target,
-            name=name or getattr(target, "__name__", "tool"),
+            name=name or callable_name(target, "tool"),
             description=description or summary,
             parameters=schema,
             takes_context=takes_context,

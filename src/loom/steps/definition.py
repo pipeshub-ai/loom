@@ -19,10 +19,10 @@ import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Generic, ParamSpec, TypeVar, overload
+from typing import Any, Generic, ParamSpec, TypeVar, cast, overload
 
 from loom.core.exceptions import ConfigurationError
-from loom.core.ids import code_fingerprint, stable_hash
+from loom.core.ids import callable_name, code_fingerprint, stable_hash
 from loom.core.retry import DEFAULT_RETRY, NO_RETRY, OnError, Retry
 from loom.core.serde import resolve_annotations
 from loom.core.types import Duration, to_seconds
@@ -124,15 +124,27 @@ class StepDefinition(Generic[P, R]):
         if self.wants_context and ctx is None:
             call_args = (_detached_context(self.name), *args)
 
+        # Awaitable[R] is the honest common type: a coroutine in one branch, a
+        # Future in the other. Inferred from the first assignment alone it was
+        # Coroutine, so the executor branch needed three ignores to say nothing.
+        awaited: Awaitable[R]
         if asyncio.iscoroutinefunction(self.fn):
-            coro = self.fn(*call_args, **kwargs)
+            awaited = self.fn(*call_args, **kwargs)
         else:
             loop = asyncio.get_running_loop()
-            coro = loop.run_in_executor(None, lambda: self.fn(*call_args, **kwargs))  # type: ignore[arg-type,return-value]
+            # `fn` is declared as returning Awaitable[R] because the async case
+            # is the common one, and this branch is precisely the other case —
+            # a plain callable returning R, so the executor's Future is
+            # Future[R]. The annotation cannot express "either", so the cast is
+            # what records which of the two we are in.
+            awaited = cast(
+                "Awaitable[R]",
+                loop.run_in_executor(None, lambda: self.fn(*call_args, **kwargs)),
+            )
 
         if self.timeout is None:
-            return await coro  # type: ignore[no-any-return]
-        return await asyncio.wait_for(coro, to_seconds(self.timeout))  # type: ignore[no-any-return]
+            return await awaited
+        return await asyncio.wait_for(awaited, to_seconds(self.timeout))
 
     def with_options(
         self,
@@ -144,7 +156,7 @@ class StepDefinition(Generic[P, R]):
         name: str | None = None,
     ) -> StepDefinition[P, R]:
         """Return a variant with overridden policy, leaving the original untouched."""
-        clone = StepDefinition(
+        clone: StepDefinition[P, R] = StepDefinition(
             fn=self.fn,
             name=name or self.name,
             klass=self.klass,
@@ -276,7 +288,7 @@ def step(
             raise ConfigurationError(f"{target.name} is already a step")
         return StepDefinition(
             fn=target,
-            name=name or getattr(target, "__name__", "anonymous_step"),
+            name=name or callable_name(target, "anonymous_step"),
             retry=resolved_retry,
             timeout=timeout,
             on_error=on_error,
@@ -336,7 +348,7 @@ def pure(
             raise ConfigurationError(f"{target.name} is already a step")
         return StepDefinition(
             fn=target,
-            name=name or getattr(target, "__name__", "anonymous_step"),
+            name=name or callable_name(target, "anonymous_step"),
             klass=StepClass.PURE,
             retry=NO_RETRY,
             cache=cache,
@@ -407,7 +419,7 @@ def effect(
             raise ConfigurationError(f"{target.name} is already a step")
         return StepDefinition(
             fn=target,
-            name=name or getattr(target, "__name__", "anonymous_step"),
+            name=name or callable_name(target, "anonymous_step"),
             klass=StepClass.EFFECT,
             retry=resolved_retry,
             timeout=timeout,
@@ -475,7 +487,7 @@ def node(
             raise ConfigurationError(f"{target.name} is already a step")
         return StepDefinition(
             fn=target,
-            name=name or getattr(target, "__name__", "anonymous_step"),
+            name=name or callable_name(target, "anonymous_step"),
             klass=StepClass.NODE,
             retry=resolved_retry,
             timeout=timeout,

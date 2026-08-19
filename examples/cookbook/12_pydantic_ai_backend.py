@@ -99,7 +99,7 @@ async def main() -> None:
     header("Pydantic AI Agent Backend")
 
     log("setup", "Creating PydanticAI backend")
-    backend = PydanticAIBackend(model="anthropic:claude-sonnet-4-6")
+    backend = PydanticAIBackend(model="anthropic:claude-sonnet-5")
 
     # Register custom tools as a toolset
     toolset = Toolset.from_callables(

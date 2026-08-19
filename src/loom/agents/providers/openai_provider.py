@@ -7,7 +7,7 @@ Also works against any OpenAI-compatible endpoint (Azure OpenAI, Together,
 Groq, vLLM, Ollama) via ``base_url``, since that wire format has become the
 de-facto interchange standard.
 
-    pip install loomflow[openai]
+    pip install loomsdk[openai]
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ class OpenAIProvider:
     Parameters
     ----------
     model_name:
-        Any chat-completions model ID, e.g. ``"gpt-5.6-luna"`` or ``"gpt-4.1"``.
+        Any chat-completions model ID, e.g. ``"gpt-5.6-terra"`` or ``"gpt-4.1"``.
     api_key:
         Falls back to ``OPENAI_API_KEY``.
     base_url:
@@ -83,7 +83,7 @@ class OpenAIProvider:
 
     def __init__(
         self,
-        model_name: str = "gpt-5.6-luna",
+        model_name: str = "gpt-5.6-terra",
         *,
         api_key: str | None = None,
         base_url: str | None = None,

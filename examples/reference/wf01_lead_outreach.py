@@ -1,10 +1,52 @@
-"""Workflow: Lead Enrichment & Cold Outreach."""
+"""Workflow: Lead Enrichment & Cold Outreach.
+
+Runs nightly: find companies matching a description, pull a contact out of each
+page, skip anyone already in the CRM, draft a personalised mail, **have a person
+approve it**, send, and report.
+
+What this shows, and why each part is the way it is:
+
+* **Every external call goes through a toolset.** The version this replaced
+  hand-rolled ``httpx`` against invented hostnames, which forfeited error
+  classification (a 400 and a 503 retried identically), pagination coverage,
+  effect classes — so ``TaintBroker`` and ``GrantSet`` enforced nothing — and
+  the fakes that let a workflow be smoke-tested at all.
+
+* **Nobody is cold-emailed without a person seeing it.** ``gmail_create_draft``
+  is the safe half of sending; ``human.review_edit`` parks the run while
+  somebody reads and edits it; ``gmail_send_draft`` is what finally goes out.
+  A workflow that mails fifty strangers on a cron with no gate is not a
+  reference for anything.
+
+* **Fan-out is bounded.** ``ctx.map(..., max_concurrency=4)`` rather than
+  ``ctx.gather`` over a comprehension, because the latter issues one concurrent
+  call per lead against a rate-limited API.
+
+* **Judgement is an agent, rules are steps.** Pulling a name and an email out of
+  a page is judgement, so it is ``agent.extract_structured``; deciding whether
+  a contact already exists is an exact CRM lookup, so it is a step.
+
+* **No credential is an argument.** Every toolset reads its own environment.
+  Step inputs are journaled, and a key passed as one is recorded — see
+  ``loom.core.redaction``.
+
+Credentials: ``EXA_API_KEY``, ``HUBSPOT_ACCESS_TOKEN``, ``GOOGLE_*`` (Gmail),
+``SLACK_BOT_TOKEN``.
+"""
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from loom import Context, OnError, Retry, step, workflow
+from loom.nodes.agentic import ExtractStructuredIn
+from loom.nodes.human import ReviewIn
+from loom.security.grants import GrantSet
+from loom.toolsets.exa.tools import exa_get_contents, exa_search
+from loom.toolsets.google.gmail.tools import gmail_create_draft, gmail_send_draft
+from loom.toolsets.hubspot.tools import hubspot_create_contact, hubspot_get_contact_by_email
+from loom.toolsets.slack.tools import slack_post_message
+from loom.triggers import Schedule
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -14,27 +56,33 @@ from loom import Context, OnError, Retry, step, workflow
 class LeadConfig(BaseModel):
     """Input configuration for the outreach workflow."""
 
-    source_url: str
-    max_leads: int = 50
-    sender_email: str = "outreach@example.com"
+    describe: str = Field(
+        description="What kind of company to look for. Exa searches on meaning, "
+        "so this is a description rather than keywords."
+    )
+    max_leads: int = 25
+    sender_signature: str = "— the team"
+    slack_channel: str = "#outreach"
+    reviewer: str = ""
+    """Who approves each draft. Empty means whoever is watching ``loom pending``."""
 
 
 class Lead(BaseModel):
-    """A raw lead scraped from a directory or list."""
+    """A prospect, as read off a page."""
 
-    name: str
-    email: str
-    company: str
+    name: str = ""
+    email: str = ""
+    company: str = ""
     title: str = ""
+    source_url: str = ""
 
+    @property
+    def usable(self) -> bool:
+        """Whether there is enough here to write to.
 
-class EnrichedLead(BaseModel):
-    """A lead with company context added."""
-
-    lead: Lead
-    company_size: str = ""
-    industry: str = ""
-    recent_news: str = ""
+        A lead with no email is not a lead. Dropping it here is why the
+        summary's counts add up."""
+        return bool(self.email and "@" in self.email)
 
 
 class OutreachResult(BaseModel):
@@ -42,130 +90,120 @@ class OutreachResult(BaseModel):
 
     total_leads: int
     emails_sent: int
-    errors: list[str]
+    skipped_existing: int = 0
+    rejected_by_reviewer: int = 0
+    errors: list[str] = Field(default_factory=list)
+
+
+#: What ``agent.extract_structured`` is asked to pull out of a page.
+LEAD_FIELDS = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string", "description": "Full name of a contact person"},
+        "email": {"type": "string", "description": "Their email address"},
+        "company": {"type": "string"},
+        "title": {"type": "string", "description": "Their job title"},
+    },
+}
 
 
 # ---------------------------------------------------------------------------
-# Steps
+# Steps — the deterministic half
 # ---------------------------------------------------------------------------
 
 
 @step(retry=Retry(max_attempts=3, initial_delay=1.0))
-async def scrape_leads(
-    source_url: str,
-    max_leads: int,
-) -> list[Lead]:
-    """Scrape leads from the configured source URL."""
-    import httpx
+async def find_companies(describe: str, limit: int) -> list[str]:
+    """URLs of companies matching *describe*.
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(
-            source_url,
-            params={"limit": max_leads},
-        )
-        resp.raise_for_status()
-        rows = resp.json().get("leads", [])
+    Exa is embeddings-based, so it takes a description of what you want rather
+    than keywords. It does not paginate and caps at 100 — the client refuses a
+    larger request rather than silently returning a short answer.
+    """
+    results = await exa_search(query=describe, num_results=min(limit, 100))
+    return [result.url for result in results if result.url]
 
-    return [
-        Lead(
-            name=r["name"],
-            email=r["email"],
-            company=r["company"],
-            title=r.get("title", ""),
-        )
-        for r in rows[:max_leads]
-    ]
+
+@step(retry=Retry(max_attempts=3, initial_delay=1.0))
+async def read_pages(urls: list[str]) -> list[str]:
+    """The text behind each URL, for the extractor to read.
+
+    ``.failed`` carries the URLs Exa could not fetch — it answers 200 for a
+    request in which some of them failed, and a short list with nothing saying
+    it is short is the same bug as a silent page cap.
+    """
+    contents = await exa_get_contents(urls=urls, include_text=True)
+    return [page.text for page in contents.results if page.text]
+
+
+@step(retry=Retry(max_attempts=2, initial_delay=0.5), on_error=OnError.CONTINUE, fallback=None)
+async def existing_contact(email: str) -> str:
+    """The HubSpot contact id for *email*, or ``""``.
+
+    ``on_error=CONTINUE`` with an explicit ``fallback``: a CRM lookup that
+    fails should not stop the run, and treating the failure as "not found"
+    would create a duplicate contact. ``""`` means *no answer*, and the caller
+    skips the lead rather than guessing.
+    """
+    contact = await hubspot_get_contact_by_email(email=email)
+    return contact.id if contact else ""
 
 
 @step(retry=Retry(max_attempts=2, initial_delay=0.5))
-async def enrich_lead(lead: Lead) -> EnrichedLead:
-    """Call an enrichment API to add company context."""
-    import httpx
+async def record_lead(lead: Lead) -> str:
+    """Put the lead in the CRM before anything is sent to them.
 
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
-            "https://api.enrichment.example/v1/enrich",
-            json={"company": lead.company},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-
-    return EnrichedLead(
-        lead=lead,
-        company_size=data.get("size", "unknown"),
-        industry=data.get("industry", "unknown"),
-        recent_news=data.get("news", ""),
+    Deliberately before the mail: if the send fails, a recorded contact is
+    recoverable, where a sent mail with no CRM record is a person nobody knows
+    was contacted.
+    """
+    contact = await hubspot_create_contact(
+        properties={
+            "email": lead.email,
+            "firstname": lead.name.split(" ")[0] if lead.name else "",
+            "lastname": " ".join(lead.name.split(" ")[1:]),
+            "company": lead.company,
+            "jobtitle": lead.title,
+            "hs_lead_status": "NEW",
+        }
     )
+    return contact.id
 
 
-@step(retry=Retry(max_attempts=2))
-async def generate_email(enriched: EnrichedLead) -> str:
-    """Use an LLM to draft a personalised cold email."""
-    import httpx
+@step(retry=Retry(max_attempts=2, initial_delay=1.0))
+async def draft_email(lead: Lead, subject: str, body: str) -> str:
+    """Compose the mail without sending it, and return the draft id.
 
-    prompt = (
-        f"Write a short cold email to {enriched.lead.name} "
-        f"at {enriched.lead.company} ({enriched.industry}). "
-        f"Reference: {enriched.recent_news or 'their work'}."
+    Drafting is retryable — a duplicate draft is noise a person deletes. Sending
+    is not, which is why they are two steps.
+    """
+    draft = await gmail_create_draft(to=lead.email, subject=subject, body=body)
+    return draft.id
+
+
+@step(retry=Retry(max_attempts=1))
+async def send_draft(draft_id: str) -> str:
+    """Send an approved draft.
+
+    **No retry, deliberately.** Gmail has no idempotency key, so a timeout
+    after delivery is indistinguishable from a failure and a retry mails the
+    person twice. Journaling covers replay; this covers the attempt.
+    """
+    sent = await gmail_send_draft(draft_id=draft_id)
+    return sent.id
+
+
+@step(retry=Retry(max_attempts=1))
+async def report_to_slack(channel: str, result: OutreachResult) -> None:
+    """Post the summary. Not retried — a retry posts it twice, visibly."""
+    await slack_post_message(
+        channel=channel,
+        text=(
+            f"Outreach complete: {result.emails_sent}/{result.total_leads} sent, "
+            f"{result.skipped_existing} already in the CRM, "
+            f"{result.rejected_by_reviewer} rejected, {len(result.errors)} errors"
+        ),
     )
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            "https://api.openai.example/v1/chat/completions",
-            json={
-                "model": "gpt-4o-mini",
-                "messages": [{"role": "user", "content": prompt}],
-            },
-        )
-        resp.raise_for_status()
-        body = resp.json()
-
-    return body["choices"][0]["message"]["content"]
-
-
-@step(
-    retry=Retry(max_attempts=3, initial_delay=2.0),
-    on_error=OnError.CONTINUE,
-)
-async def send_email(
-    to_email: str,
-    subject: str,
-    body: str,
-    sender: str,
-) -> bool:
-    """Send the email via a transactional mail API."""
-    import httpx
-
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
-            "https://api.mail.example/v1/send",
-            json={
-                "from": sender,
-                "to": to_email,
-                "subject": subject,
-                "html": body,
-            },
-        )
-        resp.raise_for_status()
-
-    return True
-
-
-@step
-async def log_results(result: OutreachResult) -> None:
-    """Post a summary to the team Slack channel."""
-    import httpx
-
-    async with httpx.AsyncClient(timeout=10) as client:
-        await client.post(
-            "https://hooks.slack.example/services/T00/B00/xxx",
-            json={
-                "text": (
-                    f"Outreach complete: {result.emails_sent}"
-                    f"/{result.total_leads} sent, "
-                    f"{len(result.errors)} errors"
-                ),
-            },
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -173,46 +211,95 @@ async def log_results(result: OutreachResult) -> None:
 # ---------------------------------------------------------------------------
 
 
-@workflow(name="lead_outreach", version="1")
-async def lead_outreach(
-    ctx: Context,
-    config: LeadConfig,
-) -> OutreachResult:
-    """Scrape leads, enrich, personalise, and send cold email."""
-    leads = await ctx.step(scrape_leads, config.source_url, config.max_leads)
+@workflow(
+    name="lead_outreach",
+    version="2",
+    triggers=[Schedule(cron="0 7 * * 1-5", timezone="UTC")],
+    grants=GrantSet(toolsets=["exa", "hubspot", "gmail", "slack"]),
+)
+async def lead_outreach(ctx: Context, config: LeadConfig) -> OutreachResult:
+    """Find leads, draft outreach, have a person approve it, then send."""
+    urls = await ctx.step(find_companies, config.describe, config.max_leads)
+    if not urls:
+        return OutreachResult(total_leads=0, emails_sent=0)
 
-    # Enrich all leads in parallel
-    enriched_leads: list[EnrichedLead] = await ctx.gather(
-        *[ctx.step(enrich_lead, lead) for lead in leads],
-    )
+    pages = await ctx.step(read_pages, urls)
 
-    # Generate personalised emails in parallel
-    emails: list[str] = await ctx.gather(
-        *[ctx.step(generate_email, el) for el in enriched_leads],
-    )
+    # Judgement, not a rule: there is no reliable shape to a company page, so
+    # this is an agent node rather than a regex nobody can defend.
+    leads: list[Lead] = []
+    for index, text in enumerate(pages):
+        extracted = await ctx.node(
+            "agent.extract_structured",
+            ExtractStructuredIn(text=text[:8000], fields=LEAD_FIELDS),
+        )
+        lead = Lead(
+            **{k: str(v) for k, v in extracted.values.items() if k in Lead.model_fields},
+            source_url=urls[index] if index < len(urls) else "",
+        )
+        if lead.usable:
+            leads.append(lead)
 
-    # Send emails and track results
+    # Bounded: one CRM lookup at a time per four leads, not one per lead at
+    # once. `ctx.map` is what `ctx.gather` over a comprehension should have
+    # been.
+    contact_ids = await ctx.map(existing_contact, [lead.email for lead in leads], max_concurrency=4)
+
     errors: list[str] = []
     sent = 0
-    for enriched, email_body in zip(enriched_leads, emails, strict=True):
-        subject = f"Quick note for {enriched.lead.name}"
-        ok = await ctx.step(
-            send_email,
-            enriched.lead.email,
-            subject,
-            email_body,
-            config.sender_email,
+    skipped = 0
+    rejected = 0
+
+    for lead, contact_id in zip(leads, contact_ids, strict=True):
+        if contact_id:
+            skipped += 1
+            continue
+
+        subject = f"Quick note for {lead.name or lead.company}"
+        body = await ctx.agent(
+            "Write a short, specific cold email. Reference what this company "
+            "actually does — no flattery, no invented facts. Two short "
+            f"paragraphs, then this signature: {config.sender_signature}\n\n"
+            f"Company: {lead.company}\nContact: {lead.name} ({lead.title})\n"
+            f"Source: {lead.source_url}",
+            name="write_email",
         )
-        if ok:
+
+        draft_id = await ctx.step(draft_email, lead, subject, str(body.output))
+
+        # Parks the run at no cost until somebody reads it. `loom pending`
+        # lists what is waiting; `loom approve` and the MCP tools resolve it.
+        review = await ctx.node(
+            "human.review_edit",
+            ReviewIn(
+                subject=f"outreach:{lead.email}",
+                draft=str(body.output),
+                prompt=f"About to cold-email {lead.name or lead.email} at {lead.company}.",
+                assignees=[config.reviewer] if config.reviewer else [],
+            ),
+        )
+        if not review.approved:
+            rejected += 1
+            continue
+
+        if review.edited:
+            draft_id = await ctx.step(draft_email, lead, subject, str(review.content))
+
+        await ctx.step(record_lead, lead)
+        try:
+            await ctx.step(send_draft, draft_id)
             sent += 1
-        else:
-            errors.append(f"Failed: {enriched.lead.email}")
+        except Exception as exc:
+            # Recorded, not swallowed: one failed send must not lose the other
+            # leads' results, and the summary reports it.
+            errors.append(f"{lead.email}: {exc}")
 
     result = OutreachResult(
         total_leads=len(leads),
         emails_sent=sent,
+        skipped_existing=skipped,
+        rejected_by_reviewer=rejected,
         errors=errors,
     )
-
-    await ctx.step(log_results, result)
+    await ctx.step(report_to_slack, config.slack_channel, result)
     return result

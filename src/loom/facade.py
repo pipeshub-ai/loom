@@ -24,18 +24,31 @@ from __future__ import annotations
 
 import base64
 import contextlib
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from loom.core.exceptions import ConfigurationError, RegistryError
 from loom.core.ids import new_id
 from loom.core.models import ExecutionStatus, StepStatus, TriggerKind, TriggerRecord
+from loom.core.redaction import DEFAULT_REDACT_KEYS, redact
 from loom.core.serde import decode, encode
 
+if TYPE_CHECKING:  # the seams themselves, named for the checker only —
+    # importing them at runtime would make this module depend on the
+    # engine and on the optional server extra just to be imported.
+    from loom.blobs.artifact import ArtifactVersion
+    from loom.blobs.signed_urls import UploadSession
+    from loom.nodes.catalog import NodeDetail
+    from loom.runtime.engine import Runtime
+    from loom.server.client import LoomClient
+
 __all__ = [
+    "GraphProjection",
     "LocalFacade",
     "RemoteFacade",
     "RuntimeFacade",
+    "VersionSurface",
     "describe_entry",
     "describe_record",
     "describe_result",
@@ -249,15 +262,25 @@ def _public_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
-def describe_record(record: Any) -> dict[str, Any]:
-    """Render an :class:`ExecutionRecord` as the wire shape."""
+def describe_record(
+    record: Any, redact_keys: Iterable[str] = DEFAULT_REDACT_KEYS
+) -> dict[str, Any]:
+    """Render an :class:`ExecutionRecord` as the wire shape.
+
+    A run's input and output are redacted **here** rather than in storage,
+    unlike a journal entry's recorded input. The difference is that this value
+    is replayed: the body receives it on every re-entry, so a workflow whose
+    input carries a credential needs that credential intact at rest and absent
+    from anything a person or an HTTP client is shown. Same reasoning as
+    ``_public_metadata`` just above, one field over.
+    """
 
     return {
         "run_id": record.run_id,
         "workflow": record.workflow,
         "status": record.status.value,
-        "input": decode(record.input),
-        "output": decode(record.output),
+        "input": redact(decode(record.input), redact_keys),
+        "output": redact(decode(record.output), redact_keys),
         "error": record.error.message if record.error else None,
         "created_at": record.created_at.isoformat() if record.created_at else None,
         "finished_at": record.finished_at.isoformat() if record.finished_at else None,
@@ -304,7 +327,7 @@ def describe_result(result: Any) -> dict[str, Any]:
     }
 
 
-def describe_artifact(version: Any) -> dict[str, Any]:
+def describe_artifact(version: ArtifactVersion) -> dict[str, Any]:
     """Render an :class:`ArtifactVersion` as the wire shape."""
     return version.model_dump(mode="json")
 
@@ -312,6 +335,73 @@ def describe_artifact(version: Any) -> dict[str, Any]:
 def _b64(data: bytes) -> str:
     return base64.b64encode(data).decode("ascii")
 
+
+
+@runtime_checkable
+class GraphProjection(Protocol):
+    """The graph a workflow projects, and a run overlaid on it.
+
+    **A separate protocol, not more methods on :class:`RuntimeFacade`.** That
+    one is ``runtime_checkable``, so a Protocol is all-or-nothing: adding a
+    method would make every host's existing facade stop being a
+    ``RuntimeFacade`` at all. A capability nobody had yesterday must not be able
+    to invalidate what already shipped — the same rule
+    :class:`~loom.stores.base.IndexedScans` follows.
+
+    Everything behind it was already built and correct — WGIR extraction, the
+    React Flow projection with real source spans, the journal overlay — and
+    reachable from nowhere but the CLI. A canvas and a run inspector are the two
+    things a studio is made of, and both were blocked on two methods.
+    """
+
+    async def graph(self, workflow: str) -> dict[str, Any]:
+        """The workflow's structure, as React Flow nodes and edges.
+
+        Projected from the code, never authored: the decorators declare the
+        graph and the AST pass fills in the control flow, so it cannot drift
+        from what runs. Nodes carry ``data.source`` line spans, which is what
+        lets a canvas jump from a box to the line that produced it.
+        """
+        ...
+
+    async def trace(self, run_id: str) -> dict[str, Any]:
+        """The same graph with this run's journal overlaid on it.
+
+        One call rather than "fetch the graph, fetch the journal, join them in
+        the client": the join is by node id against WGIR, and a client that
+        reimplements it will get a slightly different answer than ``loom show``.
+        """
+        ...
+
+
+@runtime_checkable
+class VersionSurface(Protocol):
+    """The version chain, and which of it is being served.
+
+    Optional and separate for the same reason as :class:`GraphProjection`:
+    ``RuntimeFacade`` is ``runtime_checkable``, so a member added there stops
+    every host's existing facade from being one.
+
+    Versions were Runtime-only — ``rt.versions`` and nothing else. Committing is
+    already reachable through ``rt.publish``; what had no surface at all was
+    *reading the chain* and *choosing which entry is live*, which is the half a
+    control plane needs. Without it, "roll back to version 3" means re-committing
+    version 3's source as version 6, which loses the fact of what is actually
+    being served and inflates the chain with duplicates of code that already
+    exists.
+    """
+
+    async def versions(self, workflow: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        """The committed chain, newest first, each marked ``active`` or not."""
+        ...
+
+    async def activate_version(self, workflow: str, version: int) -> dict[str, Any]:
+        """Make *version* the served one. A pointer move, never a commit."""
+        ...
+
+    async def version_source(self, workflow: str, version: int) -> str:
+        """The source a version was committed from."""
+        ...
 
 @dataclass
 class LocalFacade:
@@ -322,7 +412,7 @@ class LocalFacade:
     production without changing.
     """
 
-    runtime: Any
+    runtime: Runtime
     loaded: list[str] = field(default_factory=list)
     """Module specs that were imported to populate this Runtime."""
     _trigger_dispatcher: Any = field(default=None, repr=False, compare=False)
@@ -397,7 +487,11 @@ class LocalFacade:
 
     async def get(self, run_id: str) -> dict[str, Any] | None:
         record = await self.runtime.get(run_id)
-        return None if record is None else describe_record(record)
+        return (
+            None
+            if record is None
+            else describe_record(record, self.runtime.redact_keys)
+        )
 
     async def list_runs(
         self, *, workflow: str | None = None, status: str | None = None, limit: int = 50
@@ -408,11 +502,108 @@ class LocalFacade:
             status=ExecutionStatus(status) if status else None,
             limit=limit,
         )
-        return [describe_record(record) for record in records]
+        return [
+            describe_record(record, self.runtime.redact_keys) for record in records
+        ]
 
     async def journal(self, run_id: str) -> list[dict[str, Any]]:
         entries = await self.runtime.history(run_id)
         return [describe_entry(entry) for entry in entries]
+
+    # -- graph projection (GraphProjection) -----------------------------------
+
+    async def graph(self, workflow: str) -> dict[str, Any]:
+        return _react_flow(self._wgir(workflow))
+
+    async def trace(self, run_id: str) -> dict[str, Any]:
+        from loom.graph.trace import overlay_journal
+
+        record = await self.runtime.get(run_id)
+        if record is None:
+            raise RegistryError(f"no execution with id '{run_id}'")
+        graph = self._wgir(record.workflow)
+        # The store, not `history()`: that projects StepRecords for display,
+        # and the overlay joins on the raw JournalEntry paths.
+        overlay = overlay_journal(
+            graph, await self.runtime.store.load_journal(run_id), run_id=run_id
+        )
+        payload = _react_flow(graph, trace=overlay)
+        payload["run"] = {
+            "run_id": run_id,
+            "workflow": record.workflow,
+            "status": record.status.value,
+        }
+        return payload
+
+    def _wgir(self, workflow: str) -> Any:
+        """The WGIR graph for a registered workflow, read from its source file.
+
+        Extraction reads the file rather than the live object because the AST
+        pass is what supplies the control flow — branches, loops, joins — that
+        decorators alone cannot describe. A workflow this process did not import
+        has no source to read, and saying so beats returning an empty canvas
+        that looks like a workflow with no steps.
+        """
+        import inspect
+        from pathlib import Path
+
+        from loom.graph.pipeline import build_graph
+
+        definition = self.runtime.workflows.get(workflow)
+        if definition is None:
+            raise RegistryError(
+                f"workflow {workflow!r} is not registered in this process, so its "
+                "source cannot be read. Graph projection needs the code, not just "
+                "the catalogue entry."
+            )
+        source = inspect.getsourcefile(definition.fn)
+        if not source:
+            raise RegistryError(
+                f"workflow {workflow!r} has no source file on disk — defined in a "
+                "REPL or an exec'd string, so there is nothing to extract from."
+            )
+        return build_graph(Path(source), flow_id=workflow)
+
+
+    # -- versions (VersionSurface) --------------------------------------------
+
+    async def versions(self, workflow: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        chain = await self.runtime.versions.history(workflow, limit=limit)
+        live = await self._active_number(workflow)
+        return [_describe_version(v, active=v.version == live) for v in chain]
+
+    async def activate_version(self, workflow: str, version: int) -> dict[str, Any]:
+        await self.runtime.versions.activate(workflow, version)
+        served = await self.runtime.versions.active(workflow)
+        if served is None:  # pragma: no cover - activate() raises first
+            raise RegistryError(f"workflow {workflow!r} has no active version")
+        return _describe_version(served, active=True)
+
+    async def version_source(self, workflow: str, version: int) -> str:
+        for entry in await self.runtime.versions.history(workflow, limit=1000):
+            if entry.version == version:
+                source: str = await self.runtime.versions.source_of(entry)
+                return source
+        raise RegistryError(
+            f"workflow {workflow!r} has no version {version}"
+        )
+
+    async def _active_number(self, workflow: str) -> int | None:
+        """Which version is served, or ``None`` when nobody has declared one.
+
+        Deliberately not falling back to ``latest()``: that fallback is the
+        conflation the pointer exists to prevent, and it would make a rollback
+        un-roll itself on the next publish.
+        """
+        # Imported here, not at module scope: this module stays importable
+        # without the engine, which is what lets one caller serve both facades.
+        from loom.runtime.versions import VersionActivation
+
+        store = self.runtime.versions
+        if not isinstance(store, VersionActivation):
+            return None
+        served = await store.active(workflow)
+        return None if served is None else served.version
 
     async def reports(self, run_id: str, offset: int = 0) -> list[dict[str, Any]]:
         if await self.get(run_id) is None:
@@ -482,14 +673,14 @@ class LocalFacade:
 
         entries = await self.runtime.history(record.run_id)
 
-        tickets: dict[str, Any] = {}
+        tickets: dict[str, HumanTicket] = {}
         for entry in entries:
             if entry.kind == "step" and entry.name.startswith("deliver:"):
                 try:
-                    ticket = HumanTicket.model_validate(entry.output)
+                    delivered = HumanTicket.model_validate(entry.output)
                 except Exception:
                     continue
-                tickets[ticket.request.subject] = ticket
+                tickets[delivered.request.subject] = delivered
 
         #: A journalled wait that has not resolved. The engine writes SUSPENDED;
         #: the public view reports it as RUNNING or PENDING.
@@ -544,9 +735,13 @@ class LocalFacade:
         return [card.model_dump(mode="json") for card in cards]
 
     async def node(self, node_id: str) -> dict[str, Any]:
-        detail = self.runtime.nodes.show(node_id).model_dump(mode="json")
-        detail["contract"] = self.runtime.nodes.contract(node_id)
-        return detail
+        # ``Runtime.nodes`` is declared loosely on the engine so a host can pass
+        # its own catalog; naming what this method actually relies on keeps the
+        # dependency checkable from here rather than only at runtime.
+        detail: NodeDetail = self.runtime.nodes.show(node_id)
+        payload = detail.model_dump(mode="json")
+        payload["contract"] = self.runtime.nodes.contract(node_id)
+        return payload
 
     def _dispatcher(self) -> Any:
         """One dispatcher per Runtime, made on demand.
@@ -659,7 +854,7 @@ class LocalFacade:
         expires_in: int | None = None,
     ) -> dict[str, Any]:
         urls = self.runtime.require_signed_urls()
-        session = await urls.create_upload_session(
+        session: UploadSession = await urls.create_upload_session(
             name, mime=mime, max_size=max_size, expires_in=expires_in
         )
         return session.model_dump(mode="json")
@@ -787,7 +982,7 @@ _NO_REMOTE_CREDENTIALS = (
 class RemoteFacade:
     """Drives a running LOOM server through :class:`LoomClient`."""
 
-    client: Any
+    client: LoomClient
 
     async def workflows(self, *, published: bool = True) -> list[dict[str, Any]]:
         return await self.client.workflows(published=published)
@@ -839,6 +1034,21 @@ class RemoteFacade:
             {**entry, "step_id": entry.get("step_id") or entry.get("name", "")}
             for entry in await self.client.journal(run_id)
         ]
+
+    async def versions(self, workflow: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        return await self.client.versions(workflow, limit=limit)
+
+    async def activate_version(self, workflow: str, version: int) -> dict[str, Any]:
+        return await self.client.activate_version(workflow, version)
+
+    async def version_source(self, workflow: str, version: int) -> str:
+        return await self.client.version_source(workflow, version)
+
+    async def graph(self, workflow: str) -> dict[str, Any]:
+        return await self.client.graph(workflow)
+
+    async def trace(self, run_id: str) -> dict[str, Any]:
+        return await self.client.trace(run_id)
 
     async def reports(self, run_id: str, offset: int = 0) -> list[dict[str, Any]]:
         return await self.client.reports(run_id, offset=offset)
@@ -969,3 +1179,33 @@ class RemoteFacade:
 
     async def close(self) -> None:
         await self.client.close()
+
+
+def _react_flow(graph: Any, *, trace: Any = None) -> dict[str, Any]:
+    """The React Flow projection, laid out. Shared by ``graph`` and ``trace``.
+
+    One helper so the two never drift on direction or layout — a canvas and a
+    run inspector showing the same workflow with different geometry is the kind
+    of difference nobody reports and everybody notices.
+    """
+    from loom.graph.reactflow import to_react_flow
+
+    return to_react_flow(graph, trace=trace)
+
+def _describe_version(version: Any, *, active: bool) -> dict[str, Any]:
+    """One version as plain JSON. ``active`` is the question a control plane asks.
+
+    ``content_hash`` and ``code_hash`` are both carried because they answer
+    different questions: the first identifies the source a human committed, the
+    second is what a finished run records — and dropping either leaves "show me
+    this version's source" or "which version produced this run" unanswerable.
+    """
+    return {
+        "workflow": version.workflow,
+        "version": version.version,
+        "parent_version": version.parent_version,
+        "content_hash": version.content_hash,
+        "code_hash": version.code_hash,
+        "created_at": version.created_at.isoformat() if version.created_at else None,
+        "active": active,
+    }

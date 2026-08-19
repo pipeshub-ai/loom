@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from loom.core.ids import callable_name
+
 
 class GuardrailAction(StrEnum):
     ALLOW = "allow"
@@ -106,7 +108,7 @@ def guardrail(
 
     def decorate(target: GuardrailFn) -> Guardrail:
         return Guardrail(
-            fn=target, name=name or getattr(target, "__name__", "guardrail"), blocking=blocking
+            fn=target, name=name or callable_name(target, "guardrail"), blocking=blocking
         )
 
     if fn is not None:

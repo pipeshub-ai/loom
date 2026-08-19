@@ -120,7 +120,7 @@ Auth modes: `NONE`, `BASIC`, `HEADER`, `HMAC`, `BEARER`.
 
 Response modes: `ACK` (return 202 immediately), `RESULT` (hold connection for output), `STREAM` (SSE).
 
-Requires `pip install loomflow[api]` for the FastAPI server.
+Requires `pip install loomsdk[api]` for the FastAPI server.
 
 `loom.server.create_app(runtime)` serves the two URLs `Webhook.describe()`
 advertises — `/webhook{path}` and `/webhook-test{path}` — and the second exists

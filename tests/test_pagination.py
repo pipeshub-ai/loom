@@ -1028,3 +1028,190 @@ class TestFakesKeepTheCoverageWrapper:
             id: str
 
         assert _coerce([{"id": None}], list[Row]) == [{"id": None}]
+
+
+# ---------------------------------------------------------------------------
+# RowIdPaging — the continuation is in the rows, not the envelope
+# ---------------------------------------------------------------------------
+
+
+class TestRowIdPaging:
+    """Stripe's dialect: ``starting_after`` takes the last row's own id.
+
+    Distinct from every other style here because there is no cursor field to
+    read — the envelope carries only ``has_more``, and the continuation has to
+    come out of the data. A ``TokenPaging`` with an unusual ``token_field``
+    cannot express that, because there is no field.
+    """
+
+    def _style(self) -> Any:
+        from loom.toolsets.pagination import RowIdPaging
+
+        return RowIdPaging()
+
+    def test_the_first_request_asks_for_a_size_and_no_cursor(self) -> None:
+        assert self._style().params(None, 100) == {"limit": 100}
+
+    def test_the_cursor_is_the_last_rows_id(self) -> None:
+        page = self._style().read(
+            {"data": [{"id": "cus_a"}, {"id": "cus_b"}], "has_more": True}, None, 100
+        )
+        assert [row["id"] for row in page.items] == ["cus_a", "cus_b"]
+        assert page.cursor == "cus_b"
+
+    def test_the_next_request_carries_it_as_starting_after(self) -> None:
+        assert self._style().params("cus_b", 100) == {
+            "limit": 100,
+            "starting_after": "cus_b",
+        }
+
+    def test_has_more_false_ends_the_walk(self) -> None:
+        page = self._style().read({"data": [{"id": "cus_c"}], "has_more": False}, "b", 100)
+        assert page.cursor is None
+
+    def test_an_empty_page_ends_the_walk_whatever_has_more_says(self) -> None:
+        """There is no row to continue from, so there is no next request.
+
+        Trusting ``has_more`` here would send ``starting_after`` with the
+        *previous* page's last id forever — the same window, re-fetched until
+        the runaway guard trips.
+        """
+        page = self._style().read({"data": [], "has_more": True}, "cus_b", 100)
+        assert page.cursor is None
+
+    def test_a_row_with_no_id_stops_rather_than_inventing_one(self) -> None:
+        """``complete=False`` is the honest answer when the walk cannot go on."""
+        page = self._style().read({"data": [{"amount": 1}], "has_more": True}, None, 100)
+        assert page.items == [{"amount": 1}]
+        assert page.cursor is None
+
+    @pytest.mark.asyncio
+    async def test_it_walks_a_whole_list_end_to_end(self) -> None:
+        from loom.toolsets.pagination import RowIdPaging, page_through
+
+        pages = [
+            {"data": [{"id": "a"}, {"id": "b"}], "has_more": True},
+            {"data": [{"id": "c"}], "has_more": False},
+        ]
+        seen: list[dict[str, Any]] = []
+
+        async def request(params: dict[str, Any]) -> Any:
+            seen.append(params)
+            return pages[len(seen) - 1]
+
+        found = await page_through(
+            request, style=RowIdPaging(), limit=10, page_size=2
+        )
+
+        assert [row["id"] for row in found] == ["a", "b", "c"]
+        assert found.complete is True
+        assert seen == [{"limit": 2}, {"limit": 2, "starting_after": "b"}]
+
+
+class TestCoverageSeesADefaultCap:
+    """A cap need not be written down to exist.
+
+    Every paged read has a default one, so `await ctx.step(jira_search_issues,
+    jql)` with no keyword at all is capped just as firmly as `max_results=100`.
+    It was the one shape this stage could not see, because there was no literal
+    to find — and it is the *most common* shape, since not passing a limit is
+    what someone writes when they have not thought about limits.
+
+    The registry closes it: an operation whose manifest declares `pagination` is
+    a capped fetch by construction.
+    """
+
+    SPEC = "Show all the stories in project PA"
+
+    @pytest.fixture
+    def registry(self):
+        from loom.agents.tool_registry import ToolsetRegistry
+        from loom.toolsets.jira.manifest import JIRA_MANIFEST
+
+        reg = ToolsetRegistry()
+        reg.register(JIRA_MANIFEST)
+        return reg
+
+    async def _issues(self, code: str, registry=None):
+        from loom.agents.checks import CheckContext
+        from loom.agents.stages import CoverageStage
+
+        result = await CoverageStage(registry).run(code, CheckContext(spec=self.SPEC))
+        return result.issues
+
+    async def test_a_paged_read_with_no_limit_is_flagged(self, registry) -> None:
+        code = (
+            "async def f(ctx):\n"
+            "    r = await ctx.step(jira_search_issues, 'project = PA')\n"
+            "    return len(r)\n"
+        )
+        issues = await self._issues(code, registry)
+
+        assert issues
+        assert "no limit given" in issues[0].message
+
+    async def test_a_direct_call_counts_too(self, registry) -> None:
+        """`ctx.step(op, ...)` and `await op(...)` are both sanctioned forms, so
+        a check that saw only one would be half a check."""
+        code = (
+            "async def f(ctx):\n"
+            "    r = await jira_search_issues('project = PA')\n"
+            "    return len(r)\n"
+        )
+        assert await self._issues(code, registry)
+
+    async def test_reading_the_coverage_still_silences_it(self, registry) -> None:
+        """The point is noticing, not passing a keyword."""
+        code = (
+            "async def f(ctx):\n"
+            "    r = await ctx.step(jira_search_issues, 'project = PA')\n"
+            "    return r.summary()\n"
+        )
+        assert not await self._issues(code, registry)
+
+    async def test_a_non_paged_operation_is_left_alone(self, registry) -> None:
+        """Fetching one issue is not a capped fetch, and flagging it would make
+        the stage noise on every workflow that reads a single record."""
+        code = (
+            "async def f(ctx):\n"
+            "    r = await ctx.step(jira_get_issue, 'PA-1')\n"
+            "    return r\n"
+        )
+        assert not await self._issues(code, registry)
+
+    async def test_without_a_registry_it_finds_nothing(self) -> None:
+        """A check that cannot look something up has found nothing — which is
+        not the same as passing, and must not be reported as a finding either."""
+        code = (
+            "async def f(ctx):\n"
+            "    r = await ctx.step(jira_search_issues, 'project = PA')\n"
+            "    return len(r)\n"
+        )
+        assert not await self._issues(code, registry=None)
+
+    async def test_the_message_distinguishes_the_two_kinds_of_cap(self, registry) -> None:
+        """"Raise the limit" is wrong advice for a call that never passed one."""
+        no_limit = await self._issues(
+            "async def f(ctx):\n"
+            "    r = await ctx.step(jira_search_issues, 'x')\n"
+            "    return len(r)\n",
+            registry,
+        )
+        literal = await self._issues(
+            "async def f(ctx):\n"
+            "    r = await ctx.step(jira_search_issues, 'x', max_results=100)\n"
+            "    return len(r)\n",
+            registry,
+        )
+
+        assert "no limit given" in no_limit[0].message
+        assert "max_results=100" in literal[0].message
+
+    def test_the_default_pipeline_passes_the_registry(self) -> None:
+        """Wired the way `ResolutionStage` and `GrantStage` already are; without
+        it the stage is constructed blind and the blind spot returns."""
+        import inspect
+
+        from loom.agents.stages import default_stages
+
+        assert "CoverageStage(registry)" in inspect.getsource(default_stages)

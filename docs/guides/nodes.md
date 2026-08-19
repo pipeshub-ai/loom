@@ -171,7 +171,7 @@ answer, and each is worth a moment.
 |---|---|---|
 | `deterministic` | the body could answer differently on a replay | `False` means the answer is journaled rather than recomputed |
 | `suspends` | the node can park the run | the agent needs it *before* writing the call |
-| `effect` | the node writes or deletes | `resolve_tools(effects={READ})` and grants filter on it |
+| `effect` | the node writes or deletes | `resolve_tools(effects={READ})` and grants filter on it. **Defaults to `READ`, silently** — and under `TaintBroker` a READ marks the run as having read the outside world, so a node that only transforms data it was handed still taints it. Declare it. |
 | `requires` | the node needs something on the Runtime | checked at resolution, before the body runs |
 
 `deterministic` is the one people get wrong. A node that calls a model, reads a
