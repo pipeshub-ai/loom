@@ -600,18 +600,65 @@ class WorkflowState:
     _ctx: Context[Any]
 
     async def get(self, key: str, default: Any = None) -> Any:
-        found = await self._store.get(self._workflow, key)
+        found = await self._dispatch(
+            "get", key, EffectClass.READ, lambda: self._store.get(self._workflow, key)
+        )
         return default if found is None else found
 
     async def set(self, key: str, value: Any) -> None:
-        await self._store.set(self._workflow, key, value)
+        await self._dispatch(
+            "set", key, EffectClass.WRITE,
+            lambda: self._store.set(self._workflow, key, value),
+        )
 
     async def delete(self, key: str) -> None:
-        await self._store.delete(self._workflow, key)
+        await self._dispatch(
+            "delete", key, EffectClass.DESTRUCTIVE,
+            lambda: self._store.delete(self._workflow, key),
+        )
 
     async def keys(self) -> list[str]:
-        found: list[str] = await self._store.keys(self._workflow)
-        return found
+        found = await self._dispatch(
+            "keys", "", EffectClass.READ, lambda: self._store.keys(self._workflow)
+        )
+        return list(found or [])
+
+    async def _dispatch(
+        self, op: str, key: str, effect: EffectClass, perform: Any
+    ) -> Any:
+        """Through the broker, and deliberately **not** through the journal.
+
+        Every other durable operation reaches a broker through
+        :class:`DurableCall`, which journals it. State must not be journaled —
+        it is shared across runs of a workflow and mutable, so a recorded value
+        replayed later would be a lie about the present — and that is exactly
+        why it reached no broker at all: the only path to one went through the
+        journal.
+
+        The consequence was that state was invisible to every broker.
+        ``max_calls`` could not see a loop that wrote a key a million times;
+        ``TaintBroker`` could not see a run reading data another run had put
+        there; a host broker asked to log or refuse effects was never told. This
+        separates the two questions the journal had bundled together: the broker
+        decides whether a call may happen, the journal records that it did.
+        """
+        runtime = self._ctx._runtime
+        broker = getattr(runtime, "broker", None)
+        if broker is None:
+            return await perform()
+
+        from loom.runtime.effects import EffectCall
+
+        target = f"state:{self._workflow}" + (f":{key}" if key else "")
+        call = EffectCall(kind="state", target=target, effect=effect, perform=perform)
+        result = await broker.dispatch(call, self._ctx._authority)
+        if result.ok is False:
+            raise EffectDenied(
+                result.error or f"state {op} refused",
+                call=call,
+                needs=result.needs or "",
+            )
+        return result.value
 
     @property
     def _store(self) -> Any:

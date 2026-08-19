@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `loom author`, and authoring on the facade
+
+The coding agent had no surface. Everything it could do was reachable only by
+writing a Python driver, which is a large part of why its loop went so long
+without anyone pressing on it: the one component nobody could run casually was
+the one making the decisions.
+
+`RuntimeFacade.author(spec, *, packages, smoke_input, observe)` — on the port,
+so the CLI (`loom author`), the MCP server (`author_workflow`) and anything else
+built on it share one implementation, with `test_surface_parity` failing the
+build if an adapter implements less than the whole method. `cmd_author` reads
+flags and renders; it decides nothing.
+
+Local only, with the reason stated rather than a `NotImplementedError`:
+authoring runs where the code will run, reading this process's toolsets, nodes
+and probes to decide what the workflow may call, and a server's model key would
+be spending someone else's budget. `AuthorizedFacade` gates it on a new
+`workflows:author` scope — separate from `workflows:publish`, because authoring
+spends tokens and, with observation on, reaches systems the spec names.
+
+`loom.agents.providers.from_env()` now owns the key→provider mapping that
+`_backend_from_env` had inline; the Runtime and the coding agent were reading
+the same three variables from two places. No key set reports which keys to set.
+
+End to end through the CLI, against a real API:
+
+```
+$ loom author @spec.txt --output brief.py
+  wrote brief.py
+  claude-sonnet-5  1074+2956 tokens  repairs=1  ran=yes
+  looked at: observe_target, node_contract, validate_code
+  step      io.http_request fetch of endoflife.date/api/python.json
+  agent     summarize newest cycle
+$ loom run python_eol_newest_release
+  output  **Newest Python release cycle: 3.14** (latest patch: 3.14.7)
+```
+
+The plan prints as columns rather than `[step]`, because `Printer.line` renders
+through rich, which reads a bracketed word as a style tag and removes it — it
+printed a bare list of nodes until it was read. `verbatim` documents that trap;
+this is the second place to hit it.
+
+
 ### Changed — one current default per vendor
 
 `claude-sonnet-5` for Anthropic and `gpt-5.6-terra` for OpenAI, everywhere a

@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 __all__ = [
     "MAX_RESPONSE_CHARS",
     "approve_run",
+    "author_workflow",
     "cancel_run",
     "get_artifact_url",
     "get_run_journal",
@@ -313,6 +314,54 @@ async def send_event(
 
     await facade.send_event(run_id, event, payload)
     return _run_json(await facade.get(run_id) or {})
+
+
+async def author_workflow(
+    facade: RuntimeFacade,
+    spec: str,
+    packages_json: str = "[]",
+    workflow_input_json: str = "",
+    observe: bool = True,
+) -> str:
+    """Write a whole workflow from a description, using loom's own agent.
+
+    The one-shot counterpart to the authoring primitives beside it. Those hand
+    a caller the pieces — validate this code, smoke-test it, look this
+    operation up — and expect the caller to drive the loop. This runs loom's
+    loop: discovery, observation, generation, the whole verification pipeline,
+    and repair.
+
+    Errors come back as a payload rather than a raise, as everywhere else here:
+    a raise aborts the model's turn, and "no model key is configured" is
+    something to act on, not to crash over.
+    """
+    try:
+        packages = json.loads(packages_json) if packages_json else []
+    except json.JSONDecodeError as exc:
+        return _json({"error": f"packages_json is not valid JSON: {exc}"})
+    if not isinstance(packages, list):
+        return _json({"error": "packages_json must be a JSON array of names"})
+
+    workflow_input: Any = None
+    if workflow_input_json:
+        try:
+            workflow_input = json.loads(workflow_input_json)
+        except json.JSONDecodeError:
+            # A bare string is the common case and demanding '"text"' for it is
+            # hostile, exactly as `loom run -i` decided.
+            workflow_input = workflow_input_json
+
+    try:
+        result = await facade.author(
+            spec,
+            packages=[str(p) for p in packages] or None,
+            smoke_input=workflow_input,
+            observe=observe,
+        )
+    except Exception as exc:
+        return _json({"error": str(exc), "authored": False})
+
+    return _json(result)
 
 
 async def cancel_run(facade: RuntimeFacade, run_id: str) -> str:

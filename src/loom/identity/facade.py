@@ -116,6 +116,25 @@ class AuthorizedFacade:
         # trust that every caller of `start()` also owns what it returns.
         return self._redacted(result)
 
+    async def author(
+        self,
+        spec: str,
+        *,
+        packages: list[str] | None = None,
+        smoke_input: Any = None,
+        observe: bool = True,
+    ) -> dict[str, Any]:
+        """Its own scope, not folded into publishing.
+
+        Authoring spends model tokens and, with *observe*, reaches systems the
+        spec names. Someone trusted to publish a workflow that has been read is
+        not thereby trusted to do either on this server's budget.
+        """
+        self.principal.requires(Scope.WORKFLOWS_AUTHOR.value)
+        return await self.inner.author(
+            spec, packages=packages, smoke_input=smoke_input, observe=observe
+        )
+
     async def get(self, run_id: str) -> dict[str, Any] | None:
         self.principal.requires(Scope.RUNS_READ.value)
         result = await self.inner.get(run_id)

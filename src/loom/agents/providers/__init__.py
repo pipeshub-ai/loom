@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from loom.agents.providers.gemini_provider import GeminiProvider
     from loom.agents.providers.openai_provider import OpenAIProvider
 
-__all__ = ["AnthropicProvider", "GeminiProvider", "OpenAIProvider"]
+__all__ = ["AnthropicProvider", "GeminiProvider", "OpenAIProvider", "from_env"]
 
 _MODULES = {
     "AnthropicProvider": "anthropic_provider",
@@ -42,3 +42,42 @@ def __getattr__(name: str) -> Any:
     return getattr(
         import_module(f"loom.agents.providers.{module}"), name
     )
+
+
+#: Environment variable to provider, in the order they are tried. One list, so
+#: "which vendor does this process talk to" has a single answer wherever it is
+#: asked — the Runtime picking an agent backend and the coding agent picking a
+#: model were reading the same three keys from two places.
+_ENV_PROVIDERS: tuple[tuple[str, str], ...] = (
+    ("ANTHROPIC_API_KEY", "AnthropicProvider"),
+    ("OPENAI_API_KEY", "OpenAIProvider"),
+    ("GEMINI_API_KEY", "GeminiProvider"),
+)
+
+
+def from_env() -> Any | None:
+    """The first provider whose key is set and whose SDK imports, or ``None``.
+
+    ``None`` is a normal answer, not an error: a process with no model key is a
+    perfectly good Runtime, and most workflows never call a model. The caller
+    that actually needs one says so — ``loom author`` reports which keys it
+    looked for, which is more use than a stack trace from inside a vendor SDK.
+    """
+    import os
+
+    for variable, provider_name in _ENV_PROVIDERS:
+        if not os.environ.get(variable):
+            continue
+        try:
+            return globals()["__getattr__"](provider_name)()
+        except Exception:
+            # A key set for an SDK that is not installed. Try the next one
+            # rather than failing: the environment is telling us about a vendor
+            # it uses elsewhere.
+            continue
+    return None
+
+
+def env_keys() -> tuple[str, ...]:
+    """The variables :func:`from_env` reads, for an error message to name."""
+    return tuple(variable for variable, _ in _ENV_PROVIDERS)

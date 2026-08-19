@@ -242,6 +242,39 @@ class DirectBroker:
         return "<DirectBroker>"
 
 
+
+#: The resource id workflow state is granted under. Reserved rather than derived
+#: from the workflow name: a grant naming `state` means "this run may use its own
+#: key-value space", which is one decision, not one per workflow.
+STATE_RESOURCE = "state"
+
+
+def _allows_resource(held: list[str], resource: str, effect: str) -> bool:
+    """Whether *held* permits *effect* on *resource*.
+
+    Entries are ``name`` or ``name:effect``. A bare name permits every effect on
+    it; a qualified one permits that effect and, for ``write``, the ``read`` it
+    implies — a caller allowed to write state that could not read it back would
+    be a grant nobody would write on purpose.
+    """
+    # What each *held* qualifier permits, not what each effect requires. Written
+    # the other way round first, which read plausibly and inverted the whole
+    # check: `state:read` permitted writes and `state:write` refused reads.
+    permits = {
+        "read": {"read"},
+        "write": {"read", "write"},
+        "destructive": {"read", "write", "destructive"},
+    }
+    for entry in held:
+        name, _, qualifier = entry.partition(":")
+        if name != resource:
+            continue
+        if not qualifier:
+            return True
+        if effect in permits.get(qualifier, {qualifier}):
+            return True
+    return False
+
 class GuardedBroker:
     """Enforces an authority on every dispatch.
 
@@ -386,6 +419,30 @@ class GuardedBroker:
             return self._denied(
                 call, f"agent '{call.target}' is not granted",
                 needs=call.target, held=grant.agents,
+            )
+
+        if call.kind == "state":
+            # `ctx.state` is a durable, cross-run key-value space, so it is a
+            # *resource* in the sense `resources` already names — and until it
+            # dispatched here, `resources` was a dimension nothing ever read: a
+            # declaration that looked enforced and was not.
+            #
+            # `strict` alone closes it, as for every other dimension. A grant
+            # that lists resources without naming `state` refuses state, which
+            # is the "within a dimension it spoke to" rule applied consistently.
+            if not grant.resources:
+                if grant.strict:
+                    return self._denied(
+                        call, f"'{call.target}' is not granted",
+                        needs=f"{STATE_RESOURCE}:{call.effect.value}", held=[],
+                    )
+                return None
+            if _allows_resource(grant.resources, STATE_RESOURCE, call.effect.value):
+                return None
+            return self._denied(
+                call, f"'{call.target}' is not granted",
+                needs=f"{STATE_RESOURCE}:{call.effect.value}",
+                held=grant.resources,
             )
 
         if call.kind == "child":

@@ -253,6 +253,105 @@ async def follow(
 # ---------------------------------------------------------------------------
 
 
+def cmd_author(args: argparse.Namespace) -> int:
+    """Write a workflow from a description.
+
+    The coding agent's first CLI surface. It had none, so every capability it
+    grew was reachable only by writing a Python driver — which is a large part
+    of why its loop went so long without pressure on it.
+
+    Thin over ``RuntimeFacade.author``: this function reads flags and renders a
+    result, and decides nothing. The MCP server calls the same method, and
+    ``test_surface_parity`` fails the build if the two drift.
+    """
+
+    async def body() -> int:
+        out = printer_for(args)
+        spec = _spec_text(args.spec)
+        target = with_backend(args)
+        try:
+            result = await target.backend.author(
+                spec,
+                packages=args.package or None,
+                smoke_input=parse_input(args.input),
+                observe=not args.no_observe,
+            )
+        finally:
+            await target.backend.close()
+
+        out.json(result)
+
+        if args.output and result["code"]:
+            args.output.write_text(result["code"], encoding="utf-8")
+        elif result["code"] and not args.json:
+            out.verbatim(result["code"])
+
+        _report_authoring(out, result, args)
+        # Not clean is not a crash: the code is on disk and the issues say what
+        # is unresolved, which is a review, not a failure to produce anything.
+        return Exit.OK if result["code"] else Exit.FAILED
+
+    return run_async(body())
+
+
+def _spec_text(spec: str) -> str:
+    """The spec itself, or the contents of ``@file``.
+
+    A useful spec outgrows a shell argument quickly — it names entities, states
+    what completeness means, and pins the shape of a right answer.
+    """
+    if not spec.startswith("@"):
+        return spec
+    path = Path(spec[1:])
+    if not path.exists():
+        raise ConfigurationError(f"no such spec file: {path}")
+    return path.read_text(encoding="utf-8")
+
+
+def _report_authoring(
+    out: Printer, result: dict[str, Any], args: argparse.Namespace
+) -> None:
+    """What it did, on stderr-ish lines beside the code on stdout.
+
+    The plan is printed because a rule the model was asked to follow silently
+    is a rule nobody can check it followed: each node, and whether it was
+    settled by code or handed to judgement.
+    """
+    if args.json:
+        return
+
+    out.line()
+    if args.output:
+        out.line(f"  wrote {args.output}")
+
+    smoke = result.get("smoke") or {}
+    out.line(
+        f"  {result['model']}  "
+        f"{result['input_tokens']}+{result['output_tokens']} tokens  "
+        f"repairs={result['repairs']}  "
+        f"ran={'yes' if smoke.get('ok') else 'no'}"
+    )
+    if result.get("tools_used"):
+        out.line(f"  looked at: {', '.join(result['tools_used'])}")
+
+    for node in result.get("plan", []):
+        # Columns, not `[kind]`: `line` renders through rich, which reads a
+        # bracketed word as a style tag and removes it. `verbatim` says so in
+        # its own docstring, and this printed a bare list of nodes until it
+        # was read.
+        out.line(f"  {node['kind']:<9} {node['node']}")
+
+    for issue in result.get("issues", []):
+        line = f"{issue['category']}: {issue['message']}"
+        if issue["severity"] == "error":
+            out.error(f"  {line}")
+        else:
+            out.line(f"  warning: {line}")
+
+    if result["clean"]:
+        out.hint("loom check <file> && loom run <workflow>")
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     """Emit ``<flow>.graph.json`` and ``<flow>.description.md`` beside the source."""
     from loom.graph.pipeline import check_module

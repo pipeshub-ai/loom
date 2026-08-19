@@ -648,7 +648,7 @@ def authoring_server(authoring_facade):
 
 
 class TestServerRegistration:
-    async def test_all_24_tools_are_registered_when_enabled(self, authoring_server) -> None:
+    async def test_all_25_tools_are_registered_when_enabled(self, authoring_server) -> None:
         names = {t.name for t in await authoring_server.list_tools()}
         authoring_names = {
             "get_tool_contract",
@@ -657,9 +657,14 @@ class TestServerRegistration:
             "validate_workflow_code",
             "smoke_test_workflow",
             "save_workflow",
+            # The one-shot counterpart: those hand the model the pieces,
+            # this runs loom's own coding agent end to end. Behind the same
+            # flag, because "authoring off" cannot mean "except the tool
+            # that does all of it at once".
+            "author_workflow",
         }
         assert authoring_names <= names
-        assert len(names) == 24
+        assert len(names) == 25
 
     async def test_disabled_via_config_drops_to_18(self, authoring_facade) -> None:
         from loom.mcp_server import build_server
@@ -719,7 +724,7 @@ class TestServerRegistration:
             len(t.name) + len(t.description or "") + len(json.dumps(t.inputSchema))
             for t in registered
         )
-        assert total <= 18_000, f"24 tools' schemas total {total} chars"
+        assert total <= 18_000, f"25 tools' schemas total {total} chars"
 
     async def test_instructions_mention_authoring_when_enabled(self, authoring_server) -> None:
         assert "save_workflow" in (authoring_server.instructions or "")

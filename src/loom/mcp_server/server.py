@@ -231,7 +231,7 @@ def build_server(
         auth=mcp_auth.auth_settings if mcp_auth else None,
         transport_security=mcp_auth.transport_security if mcp_auth else None,
     )
-    _register_tools(server, facade, auth_enabled)
+    _register_tools(server, facade, auth_enabled, authoring.enabled)
     _register_resources(server, facade, auth_enabled)
     _register_prompts(server, facade, auth_enabled, authoring.enabled)
     if authoring.enabled:
@@ -244,7 +244,12 @@ def build_server(
 # ---------------------------------------------------------------------------
 
 
-def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: bool) -> None:
+def _register_tools(
+    server: FastMCP,
+    base_facade: RuntimeFacade,
+    auth_enabled: bool,
+    authoring_enabled: bool = True,
+) -> None:
     """Expose the actions. Signatures are the schema, so keep them typed."""
     from mcp.types import ToolAnnotations
 
@@ -533,9 +538,65 @@ def _register_tools(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: b
         )
 
 
+    if authoring_enabled:
+        # Facade-scoped, unlike the primitives in `_register_authoring_tools`:
+        # this runs loom's own agent through `RuntimeFacade.author`, so an
+        # `AuthorizedFacade` checks `workflows:author` before it spends a
+        # token. Still behind the authoring flag, because an operator who
+        # turned the authoring tools off did not mean "except the one that
+        # does all of it at once".
+
+        @tool(
+            annotations=ToolAnnotations(
+                readOnlyHint=False,
+                destructiveHint=False,
+                idempotentHint=False,
+                openWorldHint=True,
+            )
+        )
+        async def author_workflow(
+            spec: str,
+            packages_json: str = "[]",
+            workflow_input_json: str = "",
+            observe: bool = True,
+        ) -> str:
+            """Write a whole workflow from a description, using loom's agent.
+
+            The one-shot counterpart to the authoring tools beside it: those
+            hand you the pieces and you drive the loop; this runs loom's —
+            discovery, observation, generation, the verification pipeline, and
+            repair — and returns the code with what it found.
+
+            `openWorldHint` is set because it always calls a model, and with
+            *observe* on it reads systems the spec names.
+
+            Args:
+                spec: What the workflow should do. Name the systems it touches:
+                    a spec saying "a URL" without giving one leaves the agent
+                    inventing a target to look at.
+                packages_json: JSON array of third-party packages the target
+                    environment has, e.g. '["httpx"]'. Generated code importing
+                    anything else is rejected.
+                workflow_input_json: Input for the verification run. Worth
+                    giving — an invented input makes an empty result
+                    impossible to judge.
+                observe: Let the agent look at the systems the spec names
+                    before writing code against them.
+            """
+            return await tools.author_workflow(
+                _principal_facade(base_facade, auth_enabled),
+                spec,
+                packages_json,
+                workflow_input_json,
+                observe,
+            )
+
 # ---------------------------------------------------------------------------
 # Authoring tools
 # ---------------------------------------------------------------------------
+
+
+
 
 
 def _register_authoring_tools(server: FastMCP, config: AuthoringConfig) -> None:
@@ -678,6 +739,7 @@ def _register_authoring_tools(server: FastMCP, config: AuthoringConfig) -> None:
         if error is not None:
             return error
         return await authoring.save_workflow(code, path)
+
 
 
 # ---------------------------------------------------------------------------

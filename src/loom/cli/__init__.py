@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 __all__ = ["main"]
 
 _HANDLERS = {
+    "author": commands.cmd_author,
     "check": commands.cmd_check,
     "graph": commands.cmd_graph,
     "describe": commands.cmd_describe,
@@ -214,6 +215,35 @@ def _authoring(sub: _Subparsers) -> None:
         help="Which workflow, when the file declares more than one (default: the first)",
     )
     _add_output(describe)
+
+    author = sub.add_parser(
+        "author", help="Write a workflow from a description, using a model"
+    )
+    author.add_argument("spec", help="What the workflow should do, or @spec.txt")
+    author.add_argument(
+        "--output", "-o", type=_path, help="Write the code here instead of stdout"
+    )
+    author.add_argument(
+        "--package",
+        action="append",
+        metavar="NAME",
+        help="A third-party package the target environment has (repeatable). "
+        "Generated code importing anything else is rejected.",
+    )
+    author.add_argument(
+        "--input",
+        "-i",
+        help="Input for the verification run: JSON, @file.json, or a bare "
+        "string. Worth giving — an invented input makes an empty result "
+        "impossible to judge.",
+    )
+    author.add_argument(
+        "--no-observe",
+        action="store_true",
+        help="Do not let the agent look at systems the spec names before "
+        "writing code against them",
+    )
+    _add_output(author)
 
     init = sub.add_parser("init", help="Scaffold a new workflow project")
     init.add_argument("directory", type=_path, help="Directory to create files in")

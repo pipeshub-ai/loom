@@ -34,6 +34,8 @@ anything reading the exit code rather than the text.
 from __future__ import annotations
 
 import argparse
+import os
+import pathlib
 import re
 import subprocess
 import sys
@@ -121,6 +123,76 @@ def numpy_present() -> bool:
         return False
 
 
+#: Where the dedicated type-check environment is built. Beside `.venv` and
+#: covered by the same `.venv*` ignore rule.
+TYPECHECK_VENV = pathlib.Path(__file__).resolve().parent.parent / ".venv-typecheck"
+
+#: Set when this process has already delegated, so the child never recurses.
+DELEGATED = "LOOM_TYPECHECK_DELEGATED"
+
+
+def _venv_python(root: pathlib.Path) -> pathlib.Path:
+    return root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
+def provision() -> pathlib.Path | None:
+    """A `[dev]` interpreter that can actually run mypy, building one if needed.
+
+    The advice below is correct and was still friction: the environment a
+    developer has is `[all]`, because that is what the test suite needs, so
+    "type-check somewhere else" is a thing to remember every time. A gate that
+    depends on remembering is one that runs in CI and nowhere else — which is
+    how 42 real errors reached `main`.
+
+    Reused across runs, so the cost is paid once. Returns ``None`` when the
+    environment cannot be built, and the caller falls back to explaining rather
+    than pretending.
+    """
+    python = _venv_python(TYPECHECK_VENV)
+    if not python.exists():
+        print(
+            f"typecheck: building a [dev] environment at {TYPECHECK_VENV.name} "
+            "(once; mypy cannot run where numpy is installed)...",
+            file=sys.stderr,
+        )
+        made = subprocess.run(
+            [sys.executable, "-m", "venv", str(TYPECHECK_VENV)],
+            capture_output=True, text=True,
+        )
+        if made.returncode != 0:
+            print(made.stderr, file=sys.stderr)
+            return None
+
+    have_mypy = subprocess.run(
+        [str(python), "-c", "import mypy"], capture_output=True
+    )
+    if have_mypy.returncode != 0:
+        root = TYPECHECK_VENV.parent
+        installed = subprocess.run(
+            [str(python), "-m", "pip", "install", "-q", "-e", f"{root}[dev]"],
+            capture_output=True, text=True,
+        )
+        if installed.returncode != 0:
+            print(installed.stderr, file=sys.stderr)
+            return None
+
+    # A provisioned env that still carries numpy would delegate into the same
+    # trap. Better to fall back to the explanation than to loop.
+    clean = subprocess.run(
+        [str(python), "-c", "import numpy"], capture_output=True
+    )
+    return python if clean.returncode != 0 else None
+
+
+def delegate(python: pathlib.Path, argv: list[str]) -> int:
+    """Re-run this script under *python*, which can see the tree properly."""
+    environ = {**os.environ, DELEGATED: "1"}
+    return subprocess.run(
+        [str(python), str(pathlib.Path(__file__).resolve()), *argv],
+        env=environ,
+    ).returncode
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -128,8 +200,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="refuse to run at all when numpy is importable",
     )
+    parser.add_argument(
+        "--no-provision",
+        action="store_true",
+        help="never build a [dev] environment; explain and exit instead",
+    )
     known, passthrough = parser.parse_known_args(argv)
 
+    # `--strict-env` is checked *before* provisioning, and the order is the
+    # meaning: it asks to be told the environment is wrong, not to have it
+    # worked around. Provisioning first would make the flag unreachable.
     if known.strict_env and numpy_present():
         print(
             "typecheck: numpy is importable here, which means this is not a "
@@ -138,6 +218,20 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(ADVICE, file=sys.stderr)
         return 2
+
+    # Otherwise: an environment that cannot run mypy is the common case
+    # locally, because the tests need `[all]`. Build the right one once and use
+    # it rather than asking every developer to remember a second venv — a gate
+    # that depends on remembering is one that runs in CI and nowhere else,
+    # which is how 42 real errors reached main.
+    if (
+        numpy_present()
+        and not known.no_provision
+        and not os.environ.get(DELEGATED)
+    ):
+        python = provision()
+        if python is not None:
+            return delegate(python, passthrough)
 
     return run(passthrough)
 

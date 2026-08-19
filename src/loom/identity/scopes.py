@@ -41,6 +41,11 @@ class Scope(StrEnum):
     RUNS_CANCEL = "runs:cancel"
     WORKFLOWS_READ = "workflows:read"
     WORKFLOWS_PUBLISH = "workflows:publish"
+    WORKFLOWS_AUTHOR = "workflows:author"
+    """Asking a model to write a workflow. Separate from publishing because it
+    spends tokens and, when observation is on, reaches systems named in the
+    spec — neither of which is implied by being allowed to publish code someone
+    has already read."""
     SCHEDULES_WRITE = "schedules:write"
     ADMIN = "admin"
     """Every other scope this vocabulary defines, and every toolset a

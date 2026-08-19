@@ -51,6 +51,10 @@ cover/
 .env.*
 !.env.example
 .venv
+# The dedicated type-check environment scripts/typecheck.py builds when the
+# working one carries numpy. `.venv` above matches that name exactly, not a
+# suffixed one.
+.venv-typecheck
 env/
 venv/
 ENV/

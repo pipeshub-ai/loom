@@ -2193,25 +2193,16 @@ def _backend_from_env() -> Any | None:
     Runtime without an agent backend is a valid Runtime, and most workflows
     never call one.
     """
-    import os
+    from loom.agents import providers
 
-    candidates = (
-        ("ANTHROPIC_API_KEY", "AnthropicProvider"),
-        ("OPENAI_API_KEY", "OpenAIProvider"),
-        ("GEMINI_API_KEY", "GeminiProvider"),
-    )
-    for variable, provider_name in candidates:
-        if not os.environ.get(variable):
-            continue
-        try:
-            from loom.agents import providers
-            from loom.agents.backend import BuiltInBackend
-
-            provider = getattr(providers, provider_name)()
-        except Exception:
-            continue
-        return BuiltInBackend(model=provider)
-    return None
+    provider = providers.from_env()
+    if provider is None:
+        return None
+    try:
+        from loom.agents.backend import BuiltInBackend
+    except Exception:  # pragma: no cover - depends on env
+        return None
+    return BuiltInBackend(model=provider)
 
 
 _RESERVED_METADATA = frozenset({"loom.env", "loom.credential_names"})

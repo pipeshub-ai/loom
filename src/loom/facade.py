@@ -164,6 +164,36 @@ class RuntimeFacade(Protocol):
         """
         ...
 
+    async def author(
+        self,
+        spec: str,
+        *,
+        packages: list[str] | None = None,
+        smoke_input: Any = None,
+        observe: bool = True,
+    ) -> dict[str, Any]:
+        """Write a workflow from a natural-language *spec*.
+
+        On the port rather than in the CLI because the coding agent had no
+        surface at all: every capability it grew was reachable only by writing
+        a Python driver, which is why its loop went so long without pressure on
+        it. Here, one method gives the CLI, the MCP server and anything else
+        built on this port the same authoring, and ``test_surface_parity``
+        fails the build if an adapter implements less than the whole thing.
+
+        *packages* is what the target environment has installed, enforced
+        against the generated imports. *smoke_input* is what the verification
+        run passes in — worth supplying, since an invented input makes an empty
+        result unjudgeable. *observe* lets the agent look at systems the spec
+        names before writing code against them; off, it works from the spec
+        alone, as it did before probes existed.
+
+        Returns the code and everything a caller needs to decide whether to
+        keep it: remaining issues, the code-or-judgement plan, repair count,
+        and what the verification run did.
+        """
+        ...
+
     async def nodes(
         self, query: str = "", *, category: str | None = None
     ) -> list[dict[str, Any]]:
@@ -728,6 +758,75 @@ class LocalFacade:
 
     # -- nodes --------------------------------------------------------------
 
+    async def author(
+        self,
+        spec: str,
+        *,
+        packages: list[str] | None = None,
+        smoke_input: Any = None,
+        observe: bool = True,
+    ) -> dict[str, Any]:
+        from loom.agents import providers
+        from loom.agents.coding_agent import WorkflowCodingAgent
+
+        model = providers.from_env()
+        if model is None:
+            raise ConfigurationError(
+                "authoring needs a model. Set one of "
+                + ", ".join(providers.env_keys())
+                + " and install that provider's extra."
+            )
+
+        probes = None
+        if observe:
+            from loom.agents.probes import default_probes
+
+            probes = default_probes()
+
+        agent = WorkflowCodingAgent(
+            model,
+            tool_registry=self.runtime.toolsets,
+            node_registry=self.runtime.nodes,
+            probes=probes,
+            allowed_packages=set(packages) if packages else None,
+            smoke_input=smoke_input,
+        )
+        result = await agent.generate(spec)
+
+        # Flattened here rather than at each surface: the CLI renders it, the
+        # MCP server serialises it, and a shared shape is what keeps the two
+        # from drifting into different vocabularies for the same run.
+        return {
+            "code": result.code,
+            "clean": result.is_clean,
+            "repairs": result.repair_attempts,
+            "model": result.model_used,
+            "input_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens,
+            "issues": [
+                {
+                    "category": issue.category,
+                    "severity": issue.severity,
+                    "message": issue.message,
+                }
+                for issue in result.issues
+            ],
+            "plan": [
+                {"node": node.node, "kind": node.kind, "why": node.why}
+                for node in result.plan
+            ],
+            "tools_used": [name for name, _ in result.tool_calls],
+            "smoke": None
+            if result.smoke is None
+            else {
+                "ok": result.smoke.ok,
+                "phase": result.smoke.phase,
+                "status": result.smoke.status,
+                "steps_executed": result.smoke.steps_executed,
+                "error": result.smoke.error,
+            },
+        }
+
     async def nodes(
         self, query: str = "", *, category: str | None = None
     ) -> list[dict[str, Any]]:
@@ -965,6 +1064,12 @@ _NO_REMOTE_NODES = (
     "the node catalog is not exposed over HTTP yet, and a remote server's "
     "catalog is the one that matters. Drop --server to browse this process's."
 )
+_NO_REMOTE_AUTHORING = (
+    "authoring runs where the code will run, not on the server. It reads this "
+    "process's toolsets, nodes and probes to decide what the workflow may "
+    "call, and it needs a model key — a server's would be spending someone "
+    "else's budget on your behalf. Drop --server."
+)
 _NO_REMOTE_DEDUPE = (
     "dedupe_key is not carried over HTTP yet, and dropping it would let a "
     "redelivered event resume a run twice while the caller saw success. Run "
@@ -1094,6 +1199,16 @@ class RemoteFacade:
         # This one *does* work remotely: answering is an ordinary event.
         await self.client.send_event(run_id, f"approval:{subject}", answer)
         return await self.client.get(run_id) or {}
+
+    async def author(
+        self,
+        spec: str,
+        *,
+        packages: list[str] | None = None,
+        smoke_input: Any = None,
+        observe: bool = True,
+    ) -> dict[str, Any]:
+        raise ConfigurationError(_NO_REMOTE_AUTHORING)
 
     async def nodes(
         self, query: str = "", *, category: str | None = None

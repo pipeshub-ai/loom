@@ -583,3 +583,81 @@ def _no_network(monkeypatch):
     """These workflows reach nothing, but the smoke subprocess should not either
     if a future edit makes one of them try."""
     monkeypatch.setenv("LOOM_STORE", "memory://")
+
+
+# ---------------------------------------------------------------------------
+# The surface
+# ---------------------------------------------------------------------------
+
+
+class TestAuthoringHasASurface:
+    """Until this, the coding agent had none.
+
+    Every capability it grew — probes, the outcome check, the plan — was
+    reachable only by writing a Python driver, which is a large part of why its
+    loop went so long without pressure on it. `author` lives on the port, so
+    the CLI, the MCP server and anything else built on `RuntimeFacade` get the
+    same one, and `test_surface_parity` fails the build when an adapter
+    implements less than the whole thing.
+    """
+
+    def test_the_port_declares_it(self) -> None:
+        from loom.facade import RuntimeFacade
+
+        assert hasattr(RuntimeFacade, "author")
+
+    def test_every_adapter_implements_it(self) -> None:
+        from loom.facade import LocalFacade, RemoteFacade
+        from loom.identity.facade import AuthorizedFacade
+
+        for adapter in (LocalFacade, RemoteFacade, AuthorizedFacade):
+            assert hasattr(adapter, "author"), adapter.__name__
+
+    async def test_it_is_refused_remotely_with_the_reason(self) -> None:
+        """Authoring runs where the code will run. It reads *this* process's
+        toolsets, nodes and probes to decide what the workflow may call, and a
+        server's model key would be spending someone else's budget."""
+        from loom.core.exceptions import ConfigurationError
+        from loom.facade import RemoteFacade
+
+        facade = RemoteFacade.__new__(RemoteFacade)
+        with pytest.raises(ConfigurationError) as caught:
+            await facade.author("anything")
+
+        assert "--server" in str(caught.value)
+
+    async def test_no_model_key_says_which_to_set(self) -> None:
+        """Not a stack trace from inside a vendor SDK."""
+        from loom.core.exceptions import ConfigurationError
+        from loom.facade import LocalFacade
+        from loom.runtime.engine import Runtime
+        from loom.stores.memory import MemoryStore
+
+        facade = LocalFacade(Runtime(store=MemoryStore()))
+        with pytest.raises(ConfigurationError) as caught:
+            await facade.author("anything")
+
+        message = str(caught.value)
+        assert "ANTHROPIC_API_KEY" in message and "OPENAI_API_KEY" in message
+
+    def test_authoring_needs_its_own_scope(self) -> None:
+        """Not folded into publishing: authoring spends tokens and, with
+        observation on, reaches systems the spec names. Being trusted to
+        publish code someone has read implies neither."""
+        from loom.identity.scopes import Scope
+
+        assert Scope.WORKFLOWS_AUTHOR.value == "workflows:author"
+        assert Scope.WORKFLOWS_AUTHOR is not Scope.WORKFLOWS_PUBLISH
+
+    def test_one_place_knows_which_providers_the_environment_has(
+        self, monkeypatch
+    ) -> None:
+        """The Runtime picking an agent backend and the coding agent picking a
+        model were reading the same three keys from two places."""
+        from loom.agents import providers
+
+        for key in providers.env_keys():
+            monkeypatch.delenv(key, raising=False)
+
+        assert providers.from_env() is None
+        assert "ANTHROPIC_API_KEY" in providers.env_keys()

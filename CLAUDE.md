@@ -12,6 +12,7 @@ Installed as both `loom` and `loomsdk`.
 
 ```bash
 # authoring
+loom author "watch a folder and summarise new PDFs" -o flows/digest.py
 loom check flows/order.py              # write order.graph.json + order.description.md
 loom check flows/order.py --fail-on-change   # CI: fail if the committed graph is stale
 loom graph flows/order.py --format react-flow
@@ -371,6 +372,7 @@ Detailed implementation plans are in `phases/`. Each file includes HLD, LLD, int
 - **`phases/phase-10-agent-framework-integrations.md`** — Bi-directional adapters for LangGraph, CrewAI, Pydantic AI, OpenAI Agents SDK, Claude SDK, Agno, AutoGen; conformance suite
 - **`phases/phase-11-testing-dx.md`** — Property-based tests (Hypothesis), chaos tests, CI pipeline, interactive playground, quickstart scaffolding, actionable error diagnostics
 - **`phases/phase-12-effect-classification.md`** — Derived `EffectProfile`, `schema_version` gate, taint keyed on `open_world`, reversibility and access-control facets, MCP annotations projected rather than hand-written, third-party conformance kit
+- **`phases/phase-13-browser-automation.md`** — `BrowserProvider`/`BrowserSession` ports, the journal as the action cache, declared act effects feeding taint, `SessionScope.STEP` vs `DURABLE`, drift repaired for reads and refused for writes, probe snapshots as smoke fixtures
 
 ### Key Design Principles
 
@@ -1539,6 +1541,37 @@ reachable from a workflow body. A workflow reaches the world through `@step`,
 `ctx.node` and toolsets, which is what makes its graph a graph; a probe is the
 agent looking before it writes, and looking is not something the workflow later
 does.
+
+### Asking for a workflow
+
+`loom author "<what it should do>"`, or `@spec.txt` for anything longer than a
+shell argument. `-o` writes the file, `--package` states what the target
+environment has, `-i` gives the verification run a real input, `--no-observe`
+turns off looking.
+
+The coding agent had **no surface at all** before this: every capability it grew
+was reachable only by writing a Python driver, which is most of why its loop
+went so long without pressure on it.
+
+It lives on `RuntimeFacade.author`, not in the CLI, so the CLI, the MCP server
+(`author_workflow`) and anything else on that port get one implementation —
+`tests/test_surface_parity.py` fails the build when an adapter implements less
+than the whole thing. `cmd_author` reads flags and renders a result and decides
+nothing.
+
+**Local only, deliberately.** `RemoteFacade.author` refuses with the reason:
+authoring runs where the code will run, reading *this* process's toolsets, nodes
+and probes to decide what the workflow may call — and a server's model key would
+be spending someone else's budget. `AuthorizedFacade` gates it on
+`workflows:author`, its own scope rather than `workflows:publish`, because
+authoring spends tokens and reaches out, neither of which is implied by being
+trusted to publish code somebody has already read.
+
+`loom.agents.providers.from_env()` is the one place that maps `ANTHROPIC_API_KEY`
+/ `OPENAI_API_KEY` / `GEMINI_API_KEY` to a provider; the Runtime's agent backend
+and the coding agent's model were reading the same three keys from two places.
+No key set is reported as which keys to set, rather than as a stack trace from
+inside a vendor SDK.
 
 ### Verification Pipeline
 

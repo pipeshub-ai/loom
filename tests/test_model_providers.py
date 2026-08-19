@@ -656,8 +656,7 @@ class TestProvidersAreInterchangeable:
             instance.model_name = "x"
             assert isinstance(instance, ModelProvider), cls.__name__
 
-    def test_importing_the_package_needs_no_vendor_sdk(self) -> None:
-        """Lazy exports: the extras are optional, so importing must be free."""
+    def test_the_package_exports_the_three_providers_and_the_env_helper(self) -> None:
         import importlib
 
         module = importlib.import_module("loom.agents.providers")
@@ -665,7 +664,34 @@ class TestProvidersAreInterchangeable:
             "AnthropicProvider",
             "GeminiProvider",
             "OpenAIProvider",
+            "from_env",
         }
+
+    def test_importing_the_package_needs_no_vendor_sdk(self) -> None:
+        """Lazy exports: the extras are optional, so importing must be free.
+
+        Checked in a subprocess and against `sys.modules`, because that is the
+        claim. Enumerating `__all__` does not make it — a module that eagerly
+        imported `anthropic` at the top would export exactly the same names and
+        pass, which is how this test came to assert a list of strings while the
+        property it is named for went unverified.
+        """
+        import subprocess
+        import sys
+
+        # `google.genai`, never bare `google` — that is a *namespace* package
+        # shared with `google.protobuf`, which arrives through an unrelated
+        # dependency. Matching the top-level name reports a leak on every run.
+        probe = (
+            "import sys; import loom.agents.providers; "
+            "print(sorted(m for m in sys.modules "
+            "if m.startswith(('anthropic', 'openai', 'google.genai'))))"
+        )
+        leaked = subprocess.run(
+            [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        assert leaked == "[]", f"importing the package pulled in {leaked}"
 
     def test_unknown_attribute_raises_attribute_error(self) -> None:
         import loom.agents.providers as providers

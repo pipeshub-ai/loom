@@ -589,6 +589,7 @@ class TestServerRegistration:
             "validate_workflow_code",
             "smoke_test_workflow",
             "save_workflow",
+            "author_workflow",
         }
 
     async def test_every_tool_has_annotations(self, server) -> None:
@@ -804,7 +805,8 @@ class TestStdioEndToEnd:
             names = {t.name for t in (await session.list_tools()).tools}
             assert "run_workflow" in names
             assert "save_workflow" in names  # authoring tools on by default
-            assert len(names) == 24
+            assert "author_workflow" in names  # …including the one-shot one
+            assert len(names) == 25
 
     async def test_workflows_from_the_module_are_visible(self, project: Path) -> None:
         """The gap that made the original server useless: an empty registry."""
