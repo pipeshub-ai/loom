@@ -7,6 +7,182 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the durability core's notion of which call is which
+
+A durable call took its journal path from a counter shared by every branch,
+allocated when the call was *constructed*. Under `ctx.gather` — the documented
+parallel primitive — the numbering therefore depended on how long the previous
+step took, so a replay with different timings served two logically distinct call
+sites each other's recorded values. Silently: the default `VerifyMode.WARN`
+logged the mismatch and served the value anyway, and the run reported
+`completed` with different output.
+
+`ctx.gather` now gives each coroutine branch its own numbering space (`0.0`,
+`0.1`, `1.0`), allocated synchronously in argument order before any branch
+starts, through a `contextvars` override the branch's task inherits. Calls that
+were already constructed — `ctx.gather(ctx.step(a), ctx.step(b))` — keep their
+flat paths, so every journal written before this still replays.
+
+Raw `asyncio.gather`, `wait`, `as_completed`, `create_task`, `ensure_future`
+and `TaskGroup` in a workflow body are now determinism violations, reported by
+the scanner at `@workflow` time and by `CodeValidator` as a blocking error for
+generated code. Inside a `@step` they are ordinary Python and allocate no paths.
+
+**`VerifyMode.STRICT` is the default.** The argument for `WARN` was that a
+difference is not always a bug, which is true — but the *common* cause was the
+engine's own race, and warning about that meant handing one branch the other's
+answer. With branch-local numbering gone, what is left is a real divergence. An
+entry journaled before verification existed carries no fingerprint and is still
+skipped, which is what makes the new default safe to upgrade into.
+
+### Fixed — the run trace matched nothing, ever
+
+Journal paths are ordinals (`"0"`, `"3.1"`); graph node ids are slugs (`fetch`,
+`jira.create_issue`). `_match_to_node` compared the two and split on `/`, a
+separator the journal never uses, so a completed run rendered with every node
+`pending` — and the canvas overlay, `loom watch` and the time-travel scrubber
+all inherited it. The test that covered it built an entry with `path="fetch"`,
+a shape the engine has never produced.
+
+Entries are now matched by name, with lexical order as the tie-break, which
+survives the two shapes an ordinal cannot: a loop, where one node produces many
+entries, and a branch, where lexical order is not execution order.
+`RunTrace.unmatched_entries` reports what named nothing, so a stale committed
+graph is visible rather than silently empty. Control-flow nodes report
+`structural` rather than lying with `pending`. `TimeTraveler` is built on the
+same overlay instead of its own copy of the rule.
+
+### Fixed — controls that were declared and not enforced
+
+- **`GuardedBroker.max_calls`** counted completions, so it bounded nothing under
+  concurrency: every in-flight call read the count before any of them wrote it,
+  and ten concurrent calls passed a ceiling of three. The slot is reserved
+  before the await.
+- **RBAC** — `retry`, `approve`, `send_event` and `publish` mutated a run with no
+  check at all, and `Permission.GRANT_APPROVE`, `FLOW_AUTHOR` and `FLOW_DEPLOY`
+  were checked nowhere, while `test_phase5` asserted the role *table* and never a
+  call site. `@requires(...)` binds a permission to the method so it can be
+  enumerated; a registry test fails on any public mutating coroutine that
+  declares none.
+- **`SandboxPolicy`** — `network` and `allowed_imports` were accepted and
+  silently dropped, the exact failure the module's own docstring forbids. The
+  check is derived from the policy rather than a hand-kept list of two field
+  names; `network` is three-valued (`NetworkPolicy`), because two states could
+  not carry "no opinion" and "must be impossible" separately; `allowed_imports`
+  is *enforced* in the child by an `__import__` guard keyed on the calling frame.
+- **`Runtime(strict_determinism=True)`** was assigned and read at zero sites for
+  its whole life while the docs said it raised `NondeterminismError`. It now
+  raises `ConfigurationError` naming the three checks that do work.
+- **`SingletonPolicy(mode="cancel_previous")`** admitted the new run and
+  cancelled nothing. It raises rather than pretending.
+
+### Fixed — nodes are not toolsets
+
+A node call journals as a step whose target is `<category>.<id>`, which the
+broker's bridged-toolset branch read as a *toolset* called `control` — one no
+manifest declares and no grant can name. So declaring any toolset grant denied
+every `ctx.node()` call, `control.switch` included, with an error telling the
+author to grant a toolset that does not exist.
+
+`GrantSet.nodes` is its own dimension, and `EffectCall.kind` is `"node"`.
+`control`, `transform` and `guard` reach nothing and pass without an entry even
+under `strict`; `io`, `agent` and `human` need one. `artifact` and `event` are
+refused under `strict` rather than left unchecked, which is what that flag
+promises.
+
+### Fixed — cancellation, and which code a parked run resumes against
+
+`cancel()` recorded the request in an in-memory set and wrote `CANCELLED`
+straight onto the record, so a worker in another process never saw it, kept
+executing steps, and overwrote the status on its next update — and because its
+body never raised, the compensation stack never unwound. `cancel_requested` is
+now persisted and observed through the lease heartbeat, taking effect at the
+next durable boundary.
+
+`Runtime(version_policy=…)` answers what an in-flight run resumes against after
+a deploy: `LATEST` (the default, and what every release before this did),
+`PINNED` and `REFUSE`. `resolve_workflow` read the in-process registry and
+nothing else, so a run parked on a 24-hour approval resumed against whatever was
+deployed meanwhile.
+
+### Fixed — cost accounting, and parallel tool calls
+
+`Usage.input_tokens` is defined as the **total** prompt cost, and every provider
+normalises to it. `estimate_cost` used to subtract cache reads from a count
+that, for Anthropic, already excluded them: 500 real input tokens beside 20,000
+cache reads were billed as zero. Cache *writes* were never counted at all, which
+under-billed every agent loop by the whole write surcharge. Rates are per family
+(`CACHE_RATES`) rather than a flat 0.25 that was right for no vendor;
+`claude-opus-5` is priced; `is_priced()` makes an unpriced model an explicit
+question rather than a silent `0.0` that disables every dollar budget.
+
+Anthropic's converter turned each tool result into its own user turn, so a turn
+with two parallel tool calls produced two consecutive user messages. Results
+answering one assistant turn now share one.
+
+### Fixed — the smoke runner held the host's credentials
+
+`smoke_run` inherited `os.environ` in full — every API key the process held —
+while the MCP tool exposing it told the model "no real network or credentials".
+`SmokeIsolation` passes an allowlist of what an interpreter needs to start;
+`inherit_env=True` is the escape hatch. The authoring tools that *act* —
+`smoke_test_workflow`, `save_workflow`, `call_read_operation` — now require
+`workflows:author` through `AuthoringGate`; the three that read a catalogue stay
+open, which is what "not facade-scoped" was ever right about.
+
+### Added — `loom edit`, `loom pause`, `loom pin`
+
+- **`loom edit <file> "<change>"`**, and `RuntimeFacade.edit`. Generating was the
+  only entry point, so every change to a workflow meant regenerating it from a
+  spec. The result goes through all sixteen verification stages, which is what a
+  visual editor cannot do; an `EditResult` carries a unified diff *and* a node
+  delta projected from both versions. `EDIT_INSTRUCTIONS` states the rules an
+  edit has and a generation does not — smallest change, never rename a step (a
+  name is what the journal records), decline rather than guess.
+- **`loom pause` / `loom unpause`.** A run parked only when its own code said so,
+  so the only things an operator could do to a misbehaving run were cancel it or
+  watch it. A pause suspends on `resume:<run_id>` at the next durable boundary,
+  never mid-step.
+- **`loom pin <run>`** turns a run into a pytest regression file built from its
+  journal via `given(...)`. Values are redacted on the way out — a step's
+  *outputs* were never redacted into the journal — and the file says so when
+  redaction changed something.
+
+### Added — a way to measure the coding agent
+
+`loom.eval` ships a runner, a deterministic `StructuralJudge`, a dataset seeded
+from the committed reference specs, and `scripts/run_eval.py` gating on no
+regression against a baseline. The package previously held three Pydantic models
+and no instrument, while `phases/phase-7` specified a model-stratified suite.
+
+`CodingSession` and `GenerationBudget` fix the two defects that made the agent
+worse than it looks: every repair round was a *fresh conversation*, losing the
+toolset schemas and resolved entity ids discovery had paid real API calls for,
+and each invocation restarted the turn and cost counters, so nothing bounded the
+job. `WorkflowCodingAgent(max_total_tokens=…, max_cost_usd=…)` bounds it now.
+
+`search_operations` finds the operation rather than the toolset, and toolset
+scoring is length-normalised so ranking stops being a proxy for how much
+documentation a manifest carries.
+
+### Changed — flow control counters are a port
+
+`AdmissionController` held every counter in a process-local dict, so
+`Runtime(admission=…)` provided no concurrency limit, no rate limit and no
+singleton guarantee in any multi-worker deployment — the only kind that has
+these problems. `AdmissionState` is a seam:
+`InMemoryAdmissionState` (default, TTL'd so a high-cardinality partition key
+stops leaking) and `StoreBackedAdmissionState` over the `CacheStore` +
+`LockProvider` every store already implements.
+
+Event-log reads no longer walk what retention deleted — a `tail` marker bounds
+them — and `_remember_topic` takes its own lock, since the append lock is per
+topic and that key is global.
+
+`Runtime.capabilities()` reports which optional ports are wired, which nothing
+could ask before.
+
+
 ### Added — `loom author`, and authoring on the facade
 
 The coding agent had no surface. Everything it could do was reachable only by
