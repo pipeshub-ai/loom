@@ -215,6 +215,49 @@ class TestEvalHarness:
         assert stored["summary"]["cases"] == 1
         assert stored["cases"][0]["case_id"] == "a"
 
+    def test_the_gate_script_resolves_what_it_imports(
+        self, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """Its imports are inside a function, so nothing checked them until it
+        ran — and it shipped naming a symbol the registry does not export. A
+        CI gate that fails on its own import is not a gate."""
+        import importlib.util
+        from pathlib import Path
+
+        for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
+            monkeypatch.delenv(key, raising=False)
+
+        root = Path(__file__).resolve().parent.parent
+        spec = importlib.util.spec_from_file_location(
+            "run_eval", root / "scripts" / "run_eval.py"
+        )
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        assert module._build_agent("claude-sonnet-5") is None
+        assert "no API key" in capsys.readouterr().err
+
+    def test_the_gate_script_exits_two_when_it_cannot_run(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """Exit codes are the contract: 2 is "could not run", not "regressed"."""
+        import importlib.util
+        from pathlib import Path
+
+        for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
+            monkeypatch.delenv(key, raising=False)
+
+        root = Path(__file__).resolve().parent.parent
+        spec = importlib.util.spec_from_file_location(
+            "run_eval_exit", root / "scripts" / "run_eval.py"
+        )
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        assert module.main(["--baseline", str(tmp_path / "absent.json")]) == 2
+
     def test_the_structural_judge_is_deterministic(self) -> None:
         """It gates CI, so the same input must give the same number twice."""
         from loom.eval import StructuralJudge

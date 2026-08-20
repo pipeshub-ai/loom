@@ -46,7 +46,7 @@ def _build_agent(model_name: str):
     """A coding agent for *model_name*, or ``None`` with a reason on stderr."""
     from loom.agents import providers
     from loom.agents.coding_agent import WorkflowCodingAgent
-    from loom.toolsets.registry import get_registry, register_available_toolsets
+    from loom.toolsets.registry import get_catalog, register_available_toolsets
 
     provider = providers.from_env(model_name)
     if provider is None:
@@ -57,7 +57,7 @@ def _build_agent(model_name: str):
         )
         return None
     register_available_toolsets()
-    return WorkflowCodingAgent(model=provider, tool_registry=get_registry())
+    return WorkflowCodingAgent(model=provider, tool_registry=get_catalog())
 
 
 async def _run(args: argparse.Namespace) -> int:
