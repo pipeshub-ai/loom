@@ -673,6 +673,110 @@ FIXTURE = "\n".join([
 ])
 
 
+class TestAnExhaustedRunReportsWhatItSpent:
+    """A generation that burned twenty-two turns and four minutes came back
+    reading `Tokens in 0`, `Tokens out 0`, `0 tool calls`.
+
+    The accounting lives in a local inside the turn loop, and
+    `UsageLimitExceeded` unwound straight past it — so the one number that says
+    whether raising the budget is affordable was the number being discarded, at
+    exactly the moment somebody is deciding whether to raise it. And "0 tool
+    calls" reads as "it did nothing" rather than "it did a great deal and never
+    converged", which want opposite responses.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_turn_loop_attaches_what_it_spent(self) -> None:
+        from loom.agents.agent import Agent
+        from loom.agents.limits import UsageLimits
+        from loom.agents.messages import ToolCall
+        from loom.agents.runner import BuiltInAgentRuntime
+        from loom.agents.tools import tool
+        from loom.core.exceptions import UsageLimitExceeded
+        from loom.testing.mock import MockModelProvider, mock_response
+
+        @tool
+        async def look(q: str) -> str:
+            """Look something up.
+
+            Args:
+                q: anything.
+            """
+            return "nothing"
+
+        # A loop that keeps calling and never produces a final answer — the
+        # shape that exhausts a budget.
+        spinning = [
+            mock_response(
+                tool_calls=[ToolCall(id=str(i), name="look", arguments={"q": "x"})],
+                usage=Usage(input_tokens=1_000, output_tokens=50),
+            )
+            for i in range(6)
+        ]
+        agent = Agent(
+            name="a",
+            model=MockModelProvider(responses=spinning),
+            tools=[look],
+            limits=UsageLimits(max_turns=3),
+        )
+
+        with pytest.raises(UsageLimitExceeded) as caught:
+            await BuiltInAgentRuntime(agent=agent).execute("go")
+
+        assert caught.value.usage is not None
+        assert caught.value.usage.input_tokens > 0, "spend was discarded"
+        assert caught.value.tool_calls, "tool calls were discarded"
+
+    @pytest.mark.asyncio
+    async def test_the_session_charges_a_call_that_ran_out(self) -> None:
+        from loom.agents.generation import CodingSession, GenerationBudget
+        from loom.core.exceptions import UsageLimitExceeded
+
+        class _Exhausting:
+            name = "coder"
+            limits = None
+
+            async def __call__(self, prompt, *, context=None, **kw):
+                failure = UsageLimitExceeded(
+                    "out of turns", limit_name="max_turns", limit=22, actual=23
+                )
+                failure.usage = Usage(input_tokens=285_305, output_tokens=14_323)
+                failure.turns = 22
+                raise failure
+
+        budget = GenerationBudget(max_turns=30)
+        session = CodingSession(_Exhausting(), budget)
+
+        with pytest.raises(UsageLimitExceeded):
+            await session.ask("a spec")
+
+        assert budget.spent.input_tokens == 285_305
+        assert budget.spent.output_tokens == 14_323
+        assert budget.turns_used == 22
+
+    def test_a_call_that_failed_for_another_reason_charges_nothing(self) -> None:
+        """Only a failure that reports what it spent is charged. Inventing a
+        figure for one that does not would be worse than reporting zero."""
+        import asyncio
+
+        from loom.agents.generation import CodingSession, GenerationBudget
+
+        class _Broken:
+            name = "coder"
+            limits = None
+
+            async def __call__(self, prompt, *, context=None, **kw):
+                raise RuntimeError("connection reset")
+
+        budget = GenerationBudget(max_turns=30)
+        session = CodingSession(_Broken(), budget)
+
+        with pytest.raises(RuntimeError):
+            asyncio.run(session.ask("a spec"))
+
+        assert budget.spent.input_tokens == 0
+
+
 class TestResolutionFlagsQueriesNotProse:
     """Both false positives came from one real run: "List tickets that are
     passed due date in saas", against a live Jira.

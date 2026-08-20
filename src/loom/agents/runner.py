@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 from loom.agents.bounds import bound_result
 from loom.agents.executor import AgentContext, AgentSettings
 from loom.agents.guardrails import GuardrailAction
-from loom.agents.limits import DEFAULT_LIMITS
+from loom.agents.limits import DEFAULT_LIMITS, UsageLimits
 from loom.agents.memory import trim_history
 from loom.agents.messages import (
     Message,
@@ -31,6 +31,7 @@ from loom.agents.messages import (
 )
 from loom.agents.models import (
     FinishReason,
+    ModelProvider,
     ModelRequest,
     ModelSettings,
     ToolSchema,
@@ -45,6 +46,7 @@ from loom.core.exceptions import (
     GuardrailTripwire,
     ModelBehaviorError,
     ModelRetry,
+    UsageLimitExceeded,
 )
 from loom.core.models import Usage
 from loom.runtime.effects import EffectCall, EffectDenied
@@ -397,6 +399,61 @@ class BuiltInAgentRuntime:
         cumulative_usage = Usage()
         all_tool_calls: list[ToolCall] = []
         items: list[RunItem] = []
+
+        try:
+            return await self._turns(
+                model=agent.model,
+                messages=messages,
+                tool_schemas=tool_schemas,
+                effective_tools=effective_tools,
+                tool_map=tool_map,
+                output_spec=output_spec,
+                resolved_mode=resolved_mode,
+                model_settings=model_settings,
+                limits=limits,
+                context=context,
+                turns=turns,
+                cumulative_usage=cumulative_usage,
+                all_tool_calls=all_tool_calls,
+                items=items,
+            )
+        except UsageLimitExceeded as exhausted:
+            # The accounting is a local, and this exception unwinds past it.
+            # Attaching it here is what lets a caller report what the attempt
+            # cost instead of reporting zero.
+            exhausted.usage = cumulative_usage
+            exhausted.turns = len(
+                [item for item in items if item.kind is ItemKind.MESSAGE]
+            )
+            exhausted.tool_calls = list(all_tool_calls)
+            raise
+
+    async def _turns(
+        self,
+        *,
+        model: ModelProvider,
+        messages: list[Message],
+        tool_schemas: list[ToolSchema],
+        effective_tools: list[Tool],
+        tool_map: dict[str, Tool],
+        output_spec: OutputSpec,
+        resolved_mode: OutputMode,
+        model_settings: ModelSettings,
+        limits: UsageLimits,
+        context: AgentContext | None,
+        turns: _Turns | None,
+        cumulative_usage: Usage,
+        all_tool_calls: list[ToolCall],
+        items: list[RunItem],
+    ) -> AgentResult[Any]:
+        """The loop itself, so the caller above can catch what it raises.
+
+        Extracted only to give exhaustion somewhere to be caught without
+        wrapping two hundred lines in an indent. Every mutable it needs is
+        passed in rather than rebuilt, so what the caller attaches to the
+        exception is the same object this was accumulating into.
+        """
+        agent = self._agent
         turn = 0
 
         while True:
@@ -412,7 +469,7 @@ class BuiltInAgentRuntime:
                 messages=messages,
                 tools=tool_schemas if effective_tools or (resolved_mode is OutputMode.TOOL) else [],
                 settings=model_settings,
-                model=agent.model.model_name,
+                model=model.model_name,
                 output_schema=(
                     output_spec.json_schema()
                     if resolved_mode is OutputMode.NATIVE
@@ -424,12 +481,12 @@ class BuiltInAgentRuntime:
                 # rebuilt from it rather than reusing the one composed above.
                 await turns.before_model(turn, messages)
                 request = request.model_copy(update={"messages": messages})
-            response = await agent.model.complete(request)
+            response = await model.complete(request)
             if turns is not None:
                 await turns.after_model(turn, messages, response)
             cumulative_usage.add(response.usage)
             cumulative_usage.cost_usd = estimate_cost(
-                response.model or agent.model.model_name, cumulative_usage
+                response.model or model.model_name, cumulative_usage
             )
 
             items.append(RunItem(

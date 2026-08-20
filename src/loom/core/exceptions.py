@@ -276,6 +276,25 @@ class UsageLimitExceeded(AgentError):  # noqa: N818
         self.limit_name = limit_name
         self.limit = limit
         self.actual = actual
+        self.usage: Any = None
+        """What the run had already spent when it hit the ceiling.
+
+        Attached by the turn loop on the way out, because the accounting lives
+        in a local that this exception otherwise unwinds straight past. A
+        generation that burned twenty-two turns and four minutes reported zero
+        tokens and zero tool calls — so the one number that says whether
+        raising the budget is affordable was the number being discarded, at
+        exactly the moment somebody is deciding whether to raise it.
+        """
+        self.turns: int = 0
+        """How many turns had been taken."""
+        self.tool_calls: list[Any] = []
+        """What the run had called before it hit the ceiling.
+
+        Reported for the same reason as :attr:`usage`: a loop that made
+        seventeen tool calls and then exhausted its turns showed "0 total",
+        which reads as "it did nothing" rather than "it did a great deal and
+        never converged" — and those want opposite responses."""
 
 
 class GuardrailTripwire(AgentError):  # noqa: N818

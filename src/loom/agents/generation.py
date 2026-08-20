@@ -230,6 +230,18 @@ class CodingSession:
                     history=list(self._history),
                 ),
             )
+        except BaseException as failed:
+            # A call that ran out of turns still *spent* them. The turn loop
+            # attaches what it had consumed to the exception on the way out
+            # (see `UsageLimitExceeded.usage`), because the accounting is a
+            # local the exception unwinds past — and without charging it here,
+            # a generation that burned a whole budget reports zero tokens to
+            # whoever is deciding whether to raise that budget.
+            spent = getattr(failed, "usage", None)
+            if spent is not None:
+                self._budget.spent.add(_as_usage(spent))
+                self._budget.turns_used += int(getattr(failed, "turns", 0) or 0)
+            raise
         finally:
             self._agent.limits = previous_limits
 

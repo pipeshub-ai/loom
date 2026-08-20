@@ -418,6 +418,11 @@ async def main() -> None:
     )
     agent = WorkflowCodingAgent(
         model=model,
+        # 30 turns for the whole job — discovery, repair and review together.
+        # A Jira spec naming an entity costs a turn per namespace searched, and
+        # this one walks projects, fields, users, labels and components before
+        # it can honestly say a word names nothing.
+        max_discovery_turns=28,
         max_repair_attempts=2,
         tool_registry=registry,
     )
