@@ -151,11 +151,87 @@ class TestAgentItemsAreBoundedToo:
     path to an oversized entry.
     """
 
-    def test_the_item_carries_the_bounded_text_when_bounds_are_set(self) -> None:
-        import inspect
+    @pytest.mark.asyncio
+    async def test_the_item_carries_the_bounded_text_when_bounds_are_set(
+        self,
+    ) -> None:
+        """Driven through the loop rather than grepped for.
 
-        from loom.agents import runner
+        This asserted the exact source expression, so it broke on a rename that
+        changed nothing about the behaviour and would have kept passing on a
+        change that reintroduced the defect somewhere else. The property is
+        about what lands in `items`, so that is what is checked.
+        """
+        from loom.agents.agent import Agent
+        from loom.agents.bounds import ResultBounds
+        from loom.agents.messages import ToolCall
+        from loom.agents.result import ItemKind
+        from loom.agents.runner import BuiltInAgentRuntime
+        from loom.agents.tools import tool
+        from loom.testing.mock import MockModelProvider, mock_response
 
-        source = inspect.getsource(runner)
+        oversized = "x" * 5_000
 
-        assert "content=text.bounded if agent.bounds is not None else text.raw" in source
+        @tool
+        async def big() -> str:
+            """Return a lot.
+
+            Returns a long string.
+            """
+            return oversized
+
+        agent = Agent(
+            name="a",
+            model=MockModelProvider(responses=[
+                mock_response(tool_calls=[ToolCall(id="1", name="big", arguments={})]),
+                mock_response("done"),
+            ]),
+            tools=[big],
+            bounds=ResultBounds(max_bytes=512),
+        )
+
+        result = await BuiltInAgentRuntime(agent=agent).execute("go")
+
+        outputs = [i for i in result.items if i.kind is ItemKind.TOOL_OUTPUT]
+        assert outputs, "the tool call produced no output item"
+        assert len(outputs[0].content) < len(oversized), (
+            "the item kept the unbounded text, so ResultBounds capped the "
+            "model's view and nothing else"
+        )
+
+    @pytest.mark.asyncio
+    async def test_without_bounds_the_item_is_unchanged(self) -> None:
+        """The journal keeps the value whole — a replay has to reconstruct the
+        run that happened — so this must not start truncating by default."""
+        from loom.agents.agent import Agent
+        from loom.agents.messages import ToolCall
+        from loom.agents.result import ItemKind
+        from loom.agents.runner import BuiltInAgentRuntime
+        from loom.agents.tools import tool
+        from loom.testing.mock import MockModelProvider, mock_response
+
+        payload = "y" * 5_000
+
+        @tool
+        async def big_again() -> str:
+            """Return a lot.
+
+            Returns a long string.
+            """
+            return payload
+
+        agent = Agent(
+            name="a",
+            model=MockModelProvider(responses=[
+                mock_response(
+                    tool_calls=[ToolCall(id="1", name="big_again", arguments={})]
+                ),
+                mock_response("done"),
+            ]),
+            tools=[big_again],
+        )
+
+        result = await BuiltInAgentRuntime(agent=agent).execute("go")
+
+        outputs = [i for i in result.items if i.kind is ItemKind.TOOL_OUTPUT]
+        assert outputs[0].content == payload

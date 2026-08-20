@@ -561,3 +561,34 @@ class TestAuthoringToolsThatActAreGated:
 
         for tool in authoring.ACTING_TOOLS:
             assert callable(getattr(authoring, tool))
+
+    def test_the_server_applies_the_gate_to_each_acting_tool(self) -> None:
+        """The gate is only worth having if it is on the call path.
+
+        A source check rather than a protocol round trip, because the `mcp` SDK
+        is an optional extra and this must hold whether or not it is installed —
+        the security property does not depend on being able to import a vendor
+        package.
+        """
+        import inspect
+        import re
+
+        from loom.mcp_server import authoring, server
+
+        source = inspect.getsource(server._register_authoring_tools)
+        guarded = set(re.findall(r'checkpoint\.refusal\("([a-z_]+)"\)', source))
+
+        assert guarded == authoring.ACTING_TOOLS, (
+            f"gated {sorted(guarded)}, but the acting tools are "
+            f"{sorted(authoring.ACTING_TOOLS)}"
+        )
+
+    def test_the_gate_is_built_from_the_request_principal(self) -> None:
+        import inspect
+
+        from loom.mcp_server import server
+
+        built = inspect.getsource(server.build_server)
+
+        assert "AuthoringGate(" in built
+        assert "_current_principal" in built

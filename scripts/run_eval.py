@@ -26,7 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from loom.eval import (  # noqa: E402
+from loom.eval import (
     EvalRunner,
     StructuralJudge,
     compare,

@@ -70,6 +70,10 @@ SEAMS: dict[str, tuple[str, str]] = {
         "agents/probes/base.py",
         "Looking, read-only, at the system a workflow is being written against",
     ),
+    "AdmissionState": (
+        "runtime/admission_state.py",
+        "Where flow-control counters live — one process, or all of them",
+    ),
 }
 
 MARKER_BEGIN = "<!-- BEGIN GENERATED — do not edit below this line -->"

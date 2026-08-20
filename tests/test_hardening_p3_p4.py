@@ -93,6 +93,91 @@ class TestTheEditDiffIsReviewable:
         assert "+async def summarise" in diff.replace("+@step\n", "")
 
 
+class TestEditRunsTheWholePipeline:
+    """What makes this worth more than a visual editor's equivalent: the same
+    sixteen stages run on the result, so a change that breaks entity
+    resolution, silently caps a fetch, or puts the answer behind a model call
+    nobody asked for is caught before it is offered."""
+
+    @staticmethod
+    def _model(code: str, explanation: str):
+        from loom.agents.messages import ToolCall
+        from loom.testing.mock import MockModelProvider, mock_response
+
+        return MockModelProvider(responses=[
+            mock_response(tool_calls=[
+                ToolCall(
+                    id="1",
+                    name="final_output",
+                    arguments={
+                        "code": code,
+                        "explanation": explanation,
+                        "plan": [],
+                    },
+                )
+            ])
+        ])
+
+    @pytest.mark.asyncio
+    async def test_a_real_edit_is_verified_diffed_and_projected(self) -> None:
+        from loom.agents.coding_agent import WorkflowCodingAgent
+
+        agent = WorkflowCodingAgent(
+            self._model(_AFTER, "now summarises the page"),
+            smoke_test=True,
+            smoke_input="https://example.com",
+        )
+
+        result = await agent.edit(_BEFORE, "also summarise the page")
+
+        assert result.changed
+        assert result.is_clean, [i.message for i in result.issues]
+        assert result.graph_changes == ["+summarise"]
+        assert result.diff
+        assert result.smoke is not None and result.smoke.ok
+        assert result.explanation == "now summarises the page"
+
+    @pytest.mark.asyncio
+    async def test_declining_returns_the_file_untouched(self) -> None:
+        """The instructions tell the model to decline rather than guess, so
+        declining is the requested behaviour — and better than a plausible edit
+        that does the wrong thing."""
+        from loom.agents.coding_agent import WorkflowCodingAgent
+
+        agent = WorkflowCodingAgent(
+            self._model(_BEFORE, "no Salesforce toolset is registered"),
+            smoke_test=False,
+        )
+
+        result = await agent.edit(_BEFORE, "push it to Salesforce")
+
+        assert not result.changed
+        assert result.code == _BEFORE
+        assert "Salesforce" in result.explanation
+
+    @pytest.mark.asyncio
+    async def test_the_instructions_forbid_renaming_a_step(self) -> None:
+        """A name is what the journal records, so changing one strands every
+        run already in flight."""
+        from loom.agents.coding_agent import EDIT_INSTRUCTIONS
+
+        assert "Keep every step, node and workflow name" in EDIT_INSTRUCTIONS
+        assert "journal" in EDIT_INSTRUCTIONS
+
+    @pytest.mark.asyncio
+    async def test_the_instruction_is_the_spec_for_the_checks(self) -> None:
+        """The stages that need a spec — coverage, resolution, judgement —
+        weigh the change against the instruction. Passing the original spec
+        would ask them about a question nobody just asked."""
+        import inspect
+
+        from loom.agents.coding_agent import WorkflowCodingAgent
+
+        source = inspect.getsource(WorkflowCodingAgent.edit)
+
+        assert "_check_context(instruction" in source
+
+
 class TestEditIsOnThePortNotTheCli:
     """`author` was put on the port so the CLI, the MCP server and anything
     else get one implementation. An edit that lived only in the CLI would be

@@ -20,6 +20,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from loom.mcp_server import authoring, prompts, resources, tools
+from loom.mcp_server.authoring import AuthoringGate
 from loom.mcp_server.authoring_config import AuthoringConfig
 
 if TYPE_CHECKING:
@@ -72,6 +73,24 @@ def _principal_facade(base_facade: RuntimeFacade, auth_enabled: bool) -> Runtime
     token = get_access_token()
     principal = Principal.from_access_token(token) if token else ANONYMOUS
     return AuthorizedFacade(base_facade, principal)
+
+
+def _current_principal() -> Any:
+    """The principal behind the request being served, for the authoring gate.
+
+    Separate from :func:`_principal_facade` because the authoring tools are
+    deliberately *not* facade-scoped — what toolsets exist and whether code
+    compiles are server-wide facts, not per-run data. That reasoning held for
+    the three that read a catalogue and did not for the three that execute
+    caller-supplied Python, write to the filesystem, and reach third-party APIs
+    with this server's credentials. Those need to know who is asking.
+    """
+    from mcp.server.auth.middleware.auth_context import get_access_token
+
+    from loom.identity.principal import ANONYMOUS, Principal
+
+    token = get_access_token()
+    return Principal.from_access_token(token) if token else ANONYMOUS
 
 
 def _scheduler_lifespan(facade: RuntimeFacade) -> Any:
@@ -235,7 +254,13 @@ def build_server(
     _register_resources(server, facade, auth_enabled)
     _register_prompts(server, facade, auth_enabled, authoring.enabled)
     if authoring.enabled:
-        _register_authoring_tools(server, authoring)
+        _register_authoring_tools(
+            server,
+            authoring,
+            gate=AuthoringGate(
+                _current_principal if auth_enabled else None
+            ),
+        )
     return server
 
 
@@ -599,7 +624,12 @@ def _register_tools(
 
 
 
-def _register_authoring_tools(server: FastMCP, config: AuthoringConfig) -> None:
+def _register_authoring_tools(
+    server: FastMCP,
+    config: AuthoringConfig,
+    *,
+    gate: AuthoringGate | None = None,
+) -> None:
     """Expose LOOM's coding-agent toolchain so a client can author, not just
     run, workflows.
 
@@ -617,6 +647,10 @@ def _register_authoring_tools(server: FastMCP, config: AuthoringConfig) -> None:
 
     tool = _registrar(server.tool)
     _seen: dict[str, int] = {}
+    #: An unconfigured gate refuses nothing, which is the compatibility
+    #: contract every other identity check here follows: an install with no
+    #: ``LOOM_AUTH_*`` var behaves exactly as it did before.
+    checkpoint = gate or AuthoringGate()
 
     def _too_large(code: str) -> str | None:
         size = len(code.encode("utf-8"))
@@ -671,6 +705,9 @@ def _register_authoring_tools(server: FastMCP, config: AuthoringConfig) -> None:
             op_path: e.g. "jira.projects.list".
             arguments_json: The operation's arguments, JSON-encoded object.
         """
+        refused = checkpoint.refusal("call_read_operation")
+        if refused is not None:
+            return refused
         return await authoring.call_read_operation(op_path, arguments_json, seen=_seen)
 
     @tool(
@@ -714,6 +751,9 @@ def _register_authoring_tools(server: FastMCP, config: AuthoringConfig) -> None:
             workflow_input_json: Input, JSON-encoded. "null" derives one from
                 the workflow's declared type.
         """
+        refused = checkpoint.refusal("smoke_test_workflow")
+        if refused is not None:
+            return refused
         error = _too_large(code)
         if error is not None:
             return error
@@ -735,6 +775,9 @@ def _register_authoring_tools(server: FastMCP, config: AuthoringConfig) -> None:
             code: Complete Python source.
             path: Relative file path, e.g. "flows/overdue_tickets.py".
         """
+        refused = checkpoint.refusal("save_workflow")
+        if refused is not None:
+            return refused
         error = _too_large(code)
         if error is not None:
             return error
