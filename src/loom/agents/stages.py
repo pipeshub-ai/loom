@@ -914,6 +914,73 @@ COMMON_SPEC_WORDS = frozenset({
 })
 
 
+def _query_literals(code: str) -> list[str]:
+    """String constants that reach a call, directly or through one assignment.
+
+    A query is a string *passed somewhere*. Prose is a string returned to a
+    person. Scanning every literal cannot tell those apart, and the cost of not
+    trying was a check that flagged a workflow's own explanation of itself —
+    the explanation the resolution ladder had just told it to write.
+
+    One hop is deliberate. ``jql = "..."`` then ``ctx.step(search, jql)`` is how
+    a readable workflow is written, and following it costs a dict; following
+    arbitrary dataflow would need a solver, and everything past one hop is a
+    guess about intent rather than a fact about the code.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+
+    assigned: dict[str, list[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(
+            node.value, ast.Constant
+        ):
+            continue
+        if not isinstance(node.value.value, str):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                assigned.setdefault(target.id, []).append(node.value.value)
+
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for argument in [*node.args, *(kw.value for kw in node.keywords)]:
+            if isinstance(argument, ast.Constant) and isinstance(
+                argument.value, str
+            ):
+                found.append(argument.value)
+            elif isinstance(argument, ast.Name):
+                found.extend(assigned.get(argument.id, ()))
+    return found
+
+
+def _fuzzy_operands(literal: str, operators: tuple[str, ...]) -> list[str]:
+    """The words a match operator is matching *on*, in *literal*.
+
+    ``text ~ "saas"`` yields ``saas``; the field it matches against, and every
+    other clause in the query, is not an operand and is not returned. That
+    distinction is the whole of the check: the field name comes from the
+    system's schema and the operand comes from whoever wrote the spec.
+    """
+    words: list[str] = []
+    lowered = literal.lower()
+    for operator in operators:
+        start = 0
+        while (found := lowered.find(operator, start)) != -1:
+            start = found + len(operator)
+            # Everything up to the clause's end — a boolean keyword, a closing
+            # bracket, or the end of the string.
+            tail = re.split(
+                r"\b(?:and|or|order\s+by)\b|[)\]]", lowered[start:], maxsplit=1
+            )[0]
+            words.extend(_words(tail))
+    return words
+
+
 def _string_literals(code: str) -> list[str]:
     """Every string constant in the source, parsed rather than pattern-matched.
 
@@ -950,6 +1017,22 @@ class ResolutionStage:
     misses count too: an operand one or two characters from a spec word is a
     silent spelling correction, which is a guess wearing an even better
     disguise.
+
+    **Narrow in two ways the first version was not**, both found by running it:
+
+    It reads the *operand* of the match operator, not every word in the string.
+    Scanning the whole literal flagged ``due < now() AND ... text ~ "saas"`` for
+    the word ``due`` — which is in the spec ("passed **due** date") and is also
+    a JQL **field name**. The schema's own vocabulary is not an entity anybody
+    has to resolve, and a check that says otherwise is telling the model to look
+    up the word ``due``.
+
+    And it reads only literals that reach a *call*. Every literal in the file
+    was scanned, so the report sentence ``'No overdue tickets mentioning "saas"
+    were found (searched ... text ~ "saas")'`` was flagged — a human-readable
+    message, quoting the query for the reader, which is precisely what rung 4
+    instructs: "keep the text match, **say so in what the workflow returns**".
+    The check was punishing the model for following it.
 
     **An error rather than a warning**, on ``OutcomeStage``'s reasoning: the
     repair loop runs on ``report.errors``, so a warning here was a finding the
@@ -988,11 +1071,8 @@ class ResolutionStage:
             return CheckResult(self.name)
 
         issues: list[CodeIssue] = []
-        for literal in _string_literals(code):
-            lowered = literal.lower()
-            if not any(op in lowered for op in self.FUZZY):
-                continue
-            for word in _words(lowered):
+        for literal in _query_literals(code):
+            for word in _fuzzy_operands(literal, self.FUZZY):
                 match = _closest(word, terms)
                 if match is None:
                     continue

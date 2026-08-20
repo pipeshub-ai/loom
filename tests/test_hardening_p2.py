@@ -640,6 +640,153 @@ class TestTheEscapeHatchIsHonoured:
         assert declined is True
 
 
+#: The workflow one real run produced, line by line.
+#:
+#: Assembled from a list rather than a triple-quoted block so it needs no
+#: backslashes: the first version of this fixture escaped its way into
+#: source that did not parse, and source that does not parse yields *no
+#: findings* — which reads as a pass on exactly the tests that use it.
+FIXTURE = "\n".join([
+    'from loom import Context, step, workflow',
+    'from loom.toolsets.jira.tools import jira_search_issues',
+    '',
+    '',
+    '@step',
+    'async def format_overdue_report(issues) -> str:',
+    '    if not issues:',
+    '        return (',
+    '            \'No overdue tickets mentioning "saas" were found \'',
+    '            \'(searched all projects, due date in the past, text ~ "saas").\'',
+    '        )',
+    "    return 'report'",
+    '',
+    '',
+    "@workflow(name='overdue_saas_tickets')",
+    'async def overdue_saas_tickets_workflow(ctx: Context, input_data) -> str:',
+    '    jql = (',
+    '        \'due < now() AND due is not EMPTY AND text ~ "saas" \'',
+    "        'ORDER BY due ASC'",
+    '    )',
+    '    issues = await ctx.step(jira_search_issues, jql, 200)',
+    '    return await ctx.step(format_overdue_report, issues)',
+    '',
+])
+
+
+class TestResolutionFlagsQueriesNotProse:
+    """Both false positives came from one real run: "List tickets that are
+    passed due date in saas", against a live Jira.
+
+    The stage scanned *every* string literal and then flagged *any* spec word
+    inside it, so it reported two errors where there was at most one.
+    """
+
+    SPEC = "List tickets that are passed due date in saas"
+
+    CODE = FIXTURE
+
+    def test_the_fixture_is_real_python(self) -> None:
+        """Guards the guard. Everything else here asserts an absence, and an
+        unparseable fixture produces absences for free."""
+        import ast
+
+        ast.parse(self.CODE)
+
+    async def _findings(self):
+        from loom.agents.checks import CheckContext
+        from loom.agents.stages import ResolutionStage
+
+        result = await ResolutionStage().run(
+            self.CODE, CheckContext(spec=self.SPEC)
+        )
+        return result.issues
+
+    @pytest.mark.asyncio
+    async def test_the_workflows_own_explanation_is_not_a_query(self) -> None:
+        """Rung 4 says: keep the text match and *say so in what the workflow
+        returns*. The model did, quoting the JQL for the reader — and the check
+        flagged that sentence, punishing it for following the instruction."""
+        findings = await self._findings()
+
+        assert not any("No overdue tickets" in i.message for i in findings)
+
+    @pytest.mark.asyncio
+    async def test_a_field_name_is_not_an_entity_to_resolve(self) -> None:
+        """`due` is in the spec ("passed **due** date") and is also a JQL field.
+        Flagging it told the model to go and look up the word `due`."""
+        findings = await self._findings()
+
+        assert not any("'due'" in i.message for i in findings)
+
+    @pytest.mark.asyncio
+    async def test_the_real_guess_is_still_caught(self) -> None:
+        """Narrowing must not blind it: `text ~ "saas"` in a query that reaches
+        a search really is the spec's vocabulary standing in for the system's."""
+        findings = await self._findings()
+
+        assert len(findings) == 1
+        assert "'saas'" in findings[0].message
+
+    @pytest.mark.asyncio
+    async def test_the_run_ends_clean_once_the_model_stands_by_it(self) -> None:
+        """End to end, as the cookbook takes it: one finding, the model declines
+        because it checked every namespace, the finding is accepted, and the
+        code runs."""
+        from loom.agents.checks import CheckContext, CheckPipeline
+        from loom.agents.coding_agent import (
+            CodingOutput,
+            CodingResult,
+            WorkflowCodingAgent,
+            _settle_advisories,
+        )
+        from loom.agents.stages import ResolutionStage
+
+        code = self.CODE
+        pipeline = CheckPipeline([ResolutionStage()])
+        report = await pipeline.run(code, CheckContext(spec=self.SPEC))
+        assert report.errors, "the finding must be raised before it is accepted"
+
+        class _StandsBy:
+            async def ask(self, prompt: str):
+                return type("R", (), {"output": CodingOutput(code=code)})()
+
+        agent = WorkflowCodingAgent.__new__(WorkflowCodingAgent)
+        agent._max_repair = 3
+        agent._pipeline = pipeline
+        _, _, declined = await agent._repair_from(
+            _StandsBy(), code, report, CheckContext(spec=self.SPEC)
+        )
+        settled = _settle_advisories(list(report.issues), declined=declined)
+
+        assert declined is True
+        assert CodingResult(code=code, issues=settled).is_clean
+
+    def test_only_a_literal_that_reaches_a_call_is_a_query(self) -> None:
+        from loom.agents.stages import _query_literals
+
+        found = _query_literals(
+            "def f():\n"
+            "    return 'text ~ prose'\n"
+            "\n"
+            "def g():\n"
+            "    q = 'text ~ query'\n"
+            "    return search(q)\n"
+        )
+
+        assert "text ~ query" in found
+        assert "text ~ prose" not in found
+
+    def test_only_the_operand_of_the_match_operator_counts(self) -> None:
+        from loom.agents.stages import _fuzzy_operands
+
+        operands = _fuzzy_operands(
+            'due < now() AND due is not EMPTY AND text ~ "saas" ORDER BY due ASC',
+            ("~", "contains", "like ", "in text"),
+        )
+
+        assert operands == ["saas"]
+
+
 # ---------------------------------------------------------------------------
 # H2 — one token convention, and prices that exist
 # ---------------------------------------------------------------------------
