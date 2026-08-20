@@ -479,6 +479,168 @@ class TestTheJobHasOneBudget:
 
 
 # ---------------------------------------------------------------------------
+# The escape hatch three stages promise, and nothing delivered
+# ---------------------------------------------------------------------------
+
+
+_SETTLED = """from loom import Context, step, workflow
+
+
+@step
+async def render(rows: list) -> str:
+    return str(rows)
+
+
+@workflow(name="w")
+async def w(ctx: Context, i=None) -> str:
+    return await ctx.step(render, [])
+"""
+
+
+class _Declining:
+    """A model that reviewed the finding and stood by the file.
+
+    Rung 4 of the resolution ladder, and what `outcome` and `judgement` invite
+    too: returning the code unchanged is how a model says "I checked, and the
+    finding is wrong here".
+    """
+
+    def __init__(self) -> None:
+        self.asked = 0
+
+    async def ask(self, prompt: str):
+        from loom.agents.coding_agent import CodingOutput
+
+        self.asked += 1
+        return type("R", (), {"output": CodingOutput(code=_SETTLED)})()
+
+
+def _report_of(category: str, severity: str = "error"):
+    from loom.agents.checks import CheckResult, PipelineReport
+    from loom.agents.validator import CodeIssue
+
+    report = PipelineReport()
+    report.results.append(
+        CheckResult(category, issues=[CodeIssue(category, "a finding", severity)])
+    )
+    return report
+
+
+class TestTheEscapeHatchIsHonoured:
+    """Three stages raise their findings as *errors* only because
+    `report.errors` drives the repair loop, and each tells the model that
+    returning the file unchanged is the accepted answer.
+
+    The loop honoured half of that: it stopped. The finding stayed an error, so
+    `is_clean` was `False` and callers refused to run the code — a workflow that
+    had walked every rung of the resolution ladder and written down each
+    namespace it checked came back reported as broken.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stage", sorted(["outcome", "resolution", "judgement"]))
+    async def test_a_declined_finding_stops_blocking(self, stage: str) -> None:
+        from loom.agents.checks import CheckContext, CheckPipeline
+        from loom.agents.coding_agent import WorkflowCodingAgent, _settle_advisories
+
+        agent = WorkflowCodingAgent.__new__(WorkflowCodingAgent)
+        agent._max_repair = 3
+        agent._pipeline = CheckPipeline([])
+        session = _Declining()
+
+        _, _, declined = await agent._repair_from(
+            session, _SETTLED, _report_of(stage), CheckContext(spec="a spec")
+        )
+        settled = _settle_advisories(list(_report_of(stage).issues), declined=declined)
+
+        assert session.asked == 1, "asked once, then accepted"
+        assert declined is True
+        assert [i.severity for i in settled] == ["warning"]
+
+    def test_the_finding_is_kept_not_swallowed(self) -> None:
+        """Downgraded, never dropped: the reader still needs to see it."""
+        from loom.agents.coding_agent import _settle_advisories
+
+        settled = _settle_advisories(list(_report_of("resolution").issues), declined=True)
+
+        assert "a finding" in settled[0].message
+        assert "stood by the code" in settled[0].message
+
+    def test_a_real_defect_is_never_downgraded(self) -> None:
+        from loom.agents.coding_agent import _settle_advisories
+
+        settled = _settle_advisories(list(_report_of("static").issues), declined=True)
+
+        assert settled[0].severity == "error"
+
+    def test_running_out_of_turns_is_not_a_judgement(self) -> None:
+        """A repair that never declined has decided nothing, and downgrading
+        there would turn "could not fix it" into "decided it was fine"."""
+        from loom.agents.coding_agent import _settle_advisories
+
+        settled = _settle_advisories(
+            list(_report_of("resolution").issues), declined=False
+        )
+
+        assert settled[0].severity == "error"
+
+    def test_a_clean_result_becomes_runnable(self) -> None:
+        """What the caller actually gates on. The cookbook prints "Code has
+        errors - skipping execution" from exactly this."""
+        from loom.agents.coding_agent import CodingResult, _settle_advisories
+        from loom.agents.validator import CodeIssue
+
+        finding = CodeIssue("resolution", "a fuzzy text search", "error")
+
+        assert not CodingResult(code="x=1", issues=[finding]).is_clean
+        assert CodingResult(
+            code="x=1", issues=_settle_advisories([finding], declined=True)
+        ).is_clean
+
+    def test_every_advisory_stage_actually_makes_the_promise(self) -> None:
+        """The set and the messages cannot drift apart.
+
+        A stage listed here that does not offer the escape hatch would have its
+        findings silently downgraded; one that offers it without being listed
+        would go on blocking correct code.
+        """
+        import inspect
+
+        from loom.agents import stages as stage_module
+        from loom.agents.stages import ADVISORY_STAGES, ESCAPE_HATCH
+
+        offered = {
+            getattr(obj, "name", "")
+            for _, obj in inspect.getmembers(stage_module, inspect.isclass)
+            if getattr(obj, "name", "")
+            and ESCAPE_HATCH in inspect.getsource(obj)
+        }
+
+        assert offered == ADVISORY_STAGES
+
+    @pytest.mark.asyncio
+    async def test_whitespace_alone_does_not_defeat_the_hatch(self) -> None:
+        """`_extract_code` strips its result and the incoming code may not be,
+        so a byte-identical reply could read as *changed* on a trailing newline
+        — spending a repair round and losing the acceptance."""
+        from loom.agents.checks import CheckContext, CheckPipeline
+        from loom.agents.coding_agent import WorkflowCodingAgent
+
+        agent = WorkflowCodingAgent.__new__(WorkflowCodingAgent)
+        agent._max_repair = 3
+        agent._pipeline = CheckPipeline([])
+
+        _, _, declined = await agent._repair_from(
+            _Declining(),
+            _SETTLED + "\n\n",
+            _report_of("resolution"),
+            CheckContext(spec="a spec"),
+        )
+
+        assert declined is True
+
+
+# ---------------------------------------------------------------------------
 # H2 — one token convention, and prices that exist
 # ---------------------------------------------------------------------------
 

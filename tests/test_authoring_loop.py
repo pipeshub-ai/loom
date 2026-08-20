@@ -515,12 +515,22 @@ class TestTheEscapeHatch:
 
         coder = WorkflowCodingAgent.__new__(WorkflowCodingAgent)
         coder._max_repair = 3
-        code, rounds = await coder._repair_from(
+        code, rounds, declined = await coder._repair_from(
             _Session(), settled, report, context(WANTS_EVERYTHING)
         )
 
         assert code == settled, "the model's judgement stands"
         assert calls == 1, "asked once, then accepted — not three times"
+        # The other half of the bargain, and the half that was missing. Ending
+        # the loop is not accepting the finding: it stayed an error, `is_clean`
+        # was False, and callers refused to run correct code. This is the
+        # signal that says the model judged rather than gave up.
+        assert declined is True
+
+        from loom.agents.coding_agent import _settle_advisories
+
+        accepted = _settle_advisories(list(report.issues), declined=declined)
+        assert [i.severity for i in accepted] == ["warning"]
         assert rounds == 1
 
 

@@ -32,7 +32,7 @@ from pydantic import BaseModel, Field
 from loom.agents.checks import CheckContext, CheckPipeline
 from loom.agents.generation import Asking
 from loom.agents.smoke import SmokeResult, smoke_run
-from loom.agents.stages import default_stages
+from loom.agents.stages import ADVISORY_STAGES, default_stages
 from loom.agents.supervisor import CodeSupervisor, SupervisorVerdict
 from loom.agents.validator import CodeIssue, CodeValidator
 
@@ -893,14 +893,22 @@ class WorkflowCodingAgent:
 
     async def _repair_from(
         self, session: Asking, code: str, report: Any, context: CheckContext
-    ) -> tuple[str, int]:
+    ) -> tuple[str, int, bool]:
         """Feed the pipeline's errors back to the model until they clear.
 
         One loop for every kind of failure. A type error and a traceback are
         both things the model can fix, and routing them through separate paths
         is how one of them ends up with no repair at all.
+
+        Returns the code, how many rounds were spent, and whether the model
+        **declined** — returned the file unchanged, which three stages tell it
+        in as many words is the accepted way to say "I checked, and the finding
+        is wrong here". The caller needs that third value: ending the loop is
+        only half of the bargain those messages strike, and without it the
+        finding stays an error and correct code is reported as broken.
         """
         rounds = 0
+        declined = False
         while report.errors and rounds < self._max_repair:
             if _is_unrepairable(report):
                 break
@@ -921,7 +929,13 @@ class WorkflowCodingAgent:
                 if isinstance(retry.output, CodingOutput)
                 else str(retry.output or "")
             )
-            if not candidate or candidate == code:
+            # Compared stripped on both sides. `_extract_code` strips its
+            # result and the incoming code may not be, so a byte-identical
+            # reply could read as *changed* on trailing whitespace alone —
+            # which would defeat the escape hatch these findings depend on and
+            # spend a repair round doing it.
+            if not candidate or candidate.strip() == code.strip():
+                declined = True
                 break
 
             attempt = await self._pipeline.run(candidate, context)
@@ -938,7 +952,7 @@ class WorkflowCodingAgent:
 
             code, report = candidate, attempt
 
-        return code, rounds
+        return code, rounds, declined
 
     async def edit(self, source: str, instruction: str) -> EditResult:
         """Change a workflow that already exists, and verify the result.
@@ -1025,13 +1039,15 @@ class WorkflowCodingAgent:
         # nobody just asked.
         context = self._check_context(instruction, getattr(reply, "tool_calls", None))
         report = await self._pipeline.run(code, context)
-        code, rounds = await self._repair_from(session, code, report, context)
+        code, rounds, declined = await self._repair_from(
+            session, code, report, context
+        )
         if rounds:
             report = await self._pipeline.run(code, context)
 
         return EditResult(
             code=code,
-            issues=list(report.issues),
+            issues=_settle_advisories(list(report.issues), declined=declined),
             explanation=explanation,
             diff=unified_diff_of(source, code),
             changed=True,
@@ -1197,11 +1213,13 @@ class WorkflowCodingAgent:
         # a traceback reach the model by the same path.
         context = self._check_context(spec, getattr(result, "tool_calls", None))
         report = await self._pipeline.run(code, context)
-        code, rounds = await self._repair_from(session, code, report, context)
+        code, rounds, declined = await self._repair_from(
+            session, code, report, context
+        )
         report = await self._pipeline.run(code, context) if rounds else report
 
-        issues = list(report.issues)
-        errors = report.errors
+        issues = _settle_advisories(list(report.issues), declined=declined)
+        errors = [issue for issue in issues if issue.severity == "error"]
         smoke = report.detail("smoke")
 
         # A second opinion, once the code runs. Code that validates and executes
@@ -1331,6 +1349,43 @@ def _projected_labels(source: str) -> set[str]:
             graph = build_graph(path, flow_id=flow_id)
             labels.update(node.label for node in graph.nodes)
         return labels
+
+
+def _settle_advisories(issues: list[CodeIssue], *, declined: bool) -> list[CodeIssue]:
+    """Accept the findings a model was invited to decline, once it has.
+
+    Three stages — outcome, resolution, judgement — raise their findings as
+    *errors* only because ``report.errors`` is what drives the repair loop, and
+    each tells the model that returning the file unchanged is the accepted
+    answer. The loop honoured half of that: it stopped. The finding stayed an
+    error, so ``is_clean`` was ``False`` and callers refused to run the code.
+
+    A workflow that had walked every rung of the resolution ladder and written
+    down each namespace it checked came back reported as broken. This keeps the
+    other half of the bargain: the finding is preserved, at the severity it
+    always deserved, with the model's judgement recorded beside it.
+
+    Only when the model *declined*. A repair that ran out of turns, or one whose
+    every attempt regressed, has not judged anything — and downgrading there
+    would turn "could not fix it" into "decided it was fine".
+    """
+    if not declined:
+        return issues
+    settled: list[CodeIssue] = []
+    for issue in issues:
+        if issue.severity == "error" and issue.category in ADVISORY_STAGES:
+            settled.append(
+                CodeIssue(
+                    issue.category,
+                    f"{issue.message} [The model reviewed this and stood by "
+                    f"the code, which the check invites. Reported rather than "
+                    f"blocking — read it before shipping.]",
+                    "warning",
+                )
+            )
+        else:
+            settled.append(issue)
+    return settled
 
 
 def _toolset_modules(registry: Any | None) -> dict[str, str]:

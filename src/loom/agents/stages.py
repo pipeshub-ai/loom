@@ -41,6 +41,34 @@ __all__ = [
 ]
 
 
+#: Stages whose findings are errors *so the repair loop sees them*, not because
+#: they block anything.
+#:
+#: `report.errors` is what drives repair, so a finding a model should be asked
+#: about has to be an error even when it is a judgement call rather than a
+#: defect. Each of these tells the model, in as many words, that returning the
+#: code unchanged is the accepted answer — which is how a model says "I checked,
+#: and the finding is wrong here".
+#:
+#: What was missing is the other half of that bargain. The loop ended, and the
+#: finding stayed an error: `is_clean` was `False`, and a caller refused to run
+#: correct code. A workflow that had walked every rung of the resolution ladder
+#: and documented each namespace it checked was reported as broken.
+#:
+#: Named as data so `TestTheEscapeHatchIsHonoured` can assert that every stage
+#: here actually makes the promise, and that no stage makes it without being
+#: here.
+ADVISORY_STAGES: frozenset[str] = frozenset({
+    "outcome",
+    "resolution",
+    "judgement",
+})
+
+#: The phrase each advisory stage uses to offer the escape hatch. Matched rather
+#: than restated, so the set above cannot drift from the promise.
+ESCAPE_HATCH = "return the code unchanged"
+
+
 @dataclass
 class CompileStage:
     """Does it compile? Free, and everything after it assumes so."""
