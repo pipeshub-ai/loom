@@ -8,7 +8,7 @@ Defined in `loom/runtime/admission_state.py`.
 
 The counters and timestamps an admission policy decides against.
 
-Deliberately four small methods rather than one per policy. A policy is a
+Deliberately five small methods rather than one per policy. A policy is a
 rule over *numbers*; where those numbers live is a deployment decision, and
 a port shaped like the rules would have to change every time a rule does.
 
