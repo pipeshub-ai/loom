@@ -562,6 +562,33 @@ async def _call_read_operation(
         # A @step is callable directly; this is deliberately outside a Runtime,
         # since authoring is not a durable execution.
         result = await fn(**arguments)
+    except TypeError as exc:
+        # A signature mismatch, not a failure of the operation. The manifest
+        # already knows what it accepts, so answer with that rather than with
+        # the raw TypeError and a note about credentials — which is what this
+        # returned, and it left the model to spend a turn on
+        # `get_tool_contract` to learn a name that was one attribute away.
+        #
+        # Narrowed to TypeError deliberately: a TypeError raised *inside* the
+        # operation is not a signature problem, and claiming otherwise would
+        # send the model to fix the wrong thing. `accepts` is offered as
+        # information, and the original error is kept verbatim beside it.
+        return json.dumps(
+            {
+                "error": f"TypeError: {exc}",
+                "accepts": sorted(
+                    (spec.input_schema or {}).get("properties", {})
+                ),
+                "required": list((spec.input_schema or {}).get("required", [])),
+                "note": (
+                    "That looks like the wrong argument names for "
+                    f"{op_path}. The accepted ones are above — call it again "
+                    "with those. If the error came from inside the operation "
+                    "rather than from its signature, treat it as a real "
+                    "failure."
+                ),
+            }
+        )
     except Exception as exc:
         # Credentials missing at authoring time is normal and not a code
         # problem: say so plainly rather than looking like a broken operation.

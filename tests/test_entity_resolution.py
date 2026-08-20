@@ -641,12 +641,38 @@ class TestMarkdownByDefault:
         instead came from the addition itself, cut from 374 characters to 165 —
         the failure it prevents is worth a sentence, not a paragraph.
 
+        It moved a fourth time, from 10400 to 11100, to pay for a capability
+        rather than a rule: six ``browser.*`` nodes, which a workflow reaches
+        for when no API covers a service. The first draft cost 2235 characters
+        — larger than "Code or judgement" — and was cut to 681.
+
+        Two of those cuts were the search working. The opening line said to use
+        a browser only when nothing else covers the service, which is step 1's
+        DISCOVER exit said twice; it was merged into that step, where it has a
+        subject, and step 1 was wrong without it anyway — it named plain Python
+        as the only answer when no toolset matches. And the worked example went
+        entirely: ``node_contract`` renders the call from the node's own models
+        on demand, so an example here is a second copy that can drift from the
+        contract while the tool cannot.
+
+        What is left is what nothing else says: address by role and name and
+        never a selector, write targets from what ``navigate`` reported, two
+        matches raise, and — the one that is not discoverable from a tool —
+        that an approval parks the run, so a browser flow containing one has to
+        be opened durable or the session is gone when the person answers.
+
+        The search over the rest found little, which the two earlier passes
+        predicted. "Filter in the query" and the paging window were examined
+        again and remain two different failures that read alike; the demo block
+        and the workflow-function list are a template and an API surface, not
+        restatement.
+
         The margin above the current length is about one sentence wide on
         purpose, so the next addition has to run this search too.
         """
         from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
 
-        assert len(DEFAULT_SYSTEM_PROMPT) < 10400, "the prompt is drifting long"
+        assert len(DEFAULT_SYSTEM_PROMPT) < 11100, "the prompt is drifting long"
 
 
 class TestRepeatedLookupsAreStopped:
@@ -1158,7 +1184,12 @@ class TestResolutionStage:
             0
         ].message
 
-        assert "jira_resolve_user (user)" in message, "the declared resolvers"
+        # The *op path*, not the function name. The same sentence tells the
+        # model to call it with `call_read_operation`, which takes
+        # `<toolset>.<op_id>` — naming the function handed it a symbol that
+        # tool cannot accept, and cost a turn to find out.
+        assert "jira.users.resolve (user)" in message, "the declared resolvers"
+        assert "jira_resolve_user" not in message, "which call_read_operation rejects"
         assert "epic" in message and "label" in message, "and the namespaces"
         assert "return the code unchanged" in message, "and the way out"
 

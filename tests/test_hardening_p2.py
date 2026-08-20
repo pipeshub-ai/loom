@@ -673,6 +673,130 @@ FIXTURE = "\n".join([
 ])
 
 
+class TestThePromptNamesWhatTheToolsAccept:
+    """From a real run: the agent's *first* call was
+    `call_read_operation("jira.jira_list_projects")`, which does not exist.
+
+    It was not guessing. The prompt block printed a line labelled
+    `Operations:` containing **function** names, two lines below a sentence
+    explaining that an operation id looks like `messages.search`, and one line
+    above an instruction to call `get_tool_contract("jira.<op_id>")`. The model
+    used what the line labelled "Operations" said. It cost a turn on the first
+    call of every run.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _catalog(self):
+        from loom.toolsets.registry import get_catalog, register_available_toolsets
+
+        register_available_toolsets()
+        self.catalog = get_catalog()
+
+    def test_every_operation_the_prompt_names_can_be_looked_up(self) -> None:
+        """The invariant that was broken. Anything the prompt puts in front of
+        the model under "Operations" has to be a name the tools take."""
+        import re
+
+        described = self.catalog.describe(detail="index")
+        toolset = None
+        unusable: list[str] = []
+        for line in described.splitlines():
+            header = re.match(r"### (\S+)", line.strip())
+            if header:
+                toolset = header.group(1)
+            elif toolset and line.strip().startswith("Operations"):
+                names = line.split(":", 1)[1]
+                for name in (n.strip() for n in names.split(",")):
+                    manifest = self.catalog.get(toolset)
+                    if manifest is None or manifest.find_operation(name) is None:
+                        unusable.append(f"{toolset}.{name}")
+
+        assert unusable == [], (
+            "the prompt names operations the tools cannot resolve: "
+            f"{unusable[:6]}"
+        )
+
+    def test_the_jira_ids_the_run_needed_are_present(self) -> None:
+        described = self.catalog.describe(detail="index")
+
+        assert "projects.list" in described
+        assert "fields.resolve" in described
+        assert "jira.jira_list_projects" not in described
+
+    def test_the_import_line_still_carries_the_function_names(self) -> None:
+        """The two lines are complementary, not duplicates: Import is what
+        generated *code* calls, Operations is what a *tool call* names."""
+        described = self.catalog.describe(detail="index")
+
+        assert "jira_list_projects" in described, "code still needs the symbol"
+
+    def test_the_resolver_advice_names_paths_the_tool_accepts(self) -> None:
+        """`_where_to_look` named `op.function` while the same sentence said to
+        call it with `call_read_operation`, which takes `<toolset>.<op_id>`."""
+        from loom.agents.stages import ResolutionStage
+
+        advice = ResolutionStage(self.catalog)._where_to_look()
+        paths = [
+            token.strip()
+            for token in advice.split("declare", 1)[-1].split("—")[0].split(",")
+            if "." in token
+        ]
+        assert paths, "no resolvers named"
+
+        for entry in paths:
+            path = entry.split("(")[0].strip()
+            toolset_id, _, op_id = path.partition(".")
+            manifest = self.catalog.get(toolset_id)
+            assert manifest is not None, path
+            assert manifest.find_operation(op_id) is not None, path
+
+
+class TestAWrongArgumentNameIsAnsweredNotJustReported:
+    """The run's other guess: `fields.resolve` called with `name=` when the
+    contract says `field_name=`. The reply was the raw TypeError plus a note
+    about credentials, so the model spent a turn on `get_tool_contract` to
+    learn a name the manifest already had."""
+
+    @pytest.mark.asyncio
+    async def test_a_signature_mismatch_lists_what_is_accepted(self) -> None:
+        import json
+
+        from loom.agents.coding_tools import _call_read_operation
+        from loom.toolsets.registry import get_catalog, register_available_toolsets
+
+        register_available_toolsets()
+        reply = json.loads(
+            await _call_read_operation(
+                "jira.fields.resolve",
+                {"name": "due date"},
+                registry=get_catalog(),
+                seen={},
+            )
+        )
+
+        assert reply["accepts"] == ["field_name"]
+        assert reply["required"] == ["field_name"]
+        assert "credentials" not in reply["note"], (
+            "a signature mismatch is not a credentials failure"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_original_error_is_kept_verbatim(self) -> None:
+        import json
+
+        from loom.agents.coding_tools import _call_read_operation
+        from loom.toolsets.registry import get_catalog, register_available_toolsets
+
+        register_available_toolsets()
+        reply = json.loads(
+            await _call_read_operation(
+                "jira.fields.resolve", {"name": "x"}, registry=get_catalog(), seen={}
+            )
+        )
+
+        assert "unexpected keyword argument" in reply["error"]
+
+
 class TestAnExhaustedRunReportsWhatItSpent:
     """A generation that burned twenty-two turns and four minutes came back
     reading `Tokens in 0`, `Tokens out 0`, `0 tool calls`.

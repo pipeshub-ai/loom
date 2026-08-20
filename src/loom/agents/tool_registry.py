@@ -572,23 +572,37 @@ class ToolsetRegistry(ToolsetCatalog):
 
             if detail == "index":
                 # Names, not signatures. A name is what a caller needs to know
-                # the capability exists and to name it in an agent prompt; the
+                # the capability exists and to name it in a tool call; the
                 # parameters and schemas are a tool call away and are the part
                 # that would make this grow without bound.
                 #
-                # A bridge toolset (e.g. PipesHub) routes every operation
-                # through ONE shared function, so `op.function` is identical
-                # for all of them. Showing "pipeshub_tool" repeated N times
-                # tells the model nothing; fall back to `op.id` (e.g.
-                # "gmail.send_email") which names the actual capability.
-                all_ops = list(m.all_operations())
-                functions = [op.function for op in all_ops if op.function]
-                use_ids = len(set(functions)) < len(functions)
-                names = ", ".join(
-                    op.id if use_ids else (op.function or op.id)
-                    for op in all_ops
+                # **Operation ids, never function names.** This line listed
+                # `op.function`, so the block read:
+                #
+                #     Import: from loom.toolsets.jira.tools import ...,
+                #             jira_list_projects, ...
+                #     Operations: ..., jira_list_projects, ...
+                #     ... then get_tool_contract("jira.<op_id>")
+                #
+                # A model asked to name an operation did exactly what the line
+                # labelled "Operations" said and called
+                # `call_read_operation("jira.jira_list_projects")`, which is not
+                # an operation id and does not exist. It cost a turn to be told
+                # so, on the first call of the run, every run — and the block
+                # said it while also explaining, two lines above, that an
+                # operation id looks like `messages.search`.
+                #
+                # The two lines are complementary now rather than duplicates:
+                # Import gives the names generated *code* calls, Operations
+                # gives the ids a *tool call* names. That also removes the
+                # bridge-toolset special case — a bridge routes every operation
+                # through one shared function, so `op.function` was useless
+                # there and `op.id` was already the fallback.
+                lines.append(
+                    "  Operations (ids, for get_tool_contract / "
+                    "call_read_operation): "
+                    + ", ".join(op.id for op in m.all_operations())
                 )
-                lines.append(f"  Operations: {names}")
                 lines.append(
                     f'  For signatures and schemas: show_toolset("{m.id}") '
                     f'then get_tool_contract("{m.id}.<op_id>"). '
