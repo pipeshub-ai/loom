@@ -660,6 +660,35 @@ class TestCancellationIsDurable:
         assert record is not None and record.cancel_requested
 
     @pytest.mark.asyncio
+    async def test_a_park_does_not_clobber_a_request_from_elsewhere(self) -> None:
+        """The drive holds a copy of the record from before the request, so
+        writing it back would lose a cancel issued by another process — for up
+        to a third of the lease TTL, until the heartbeat observed it."""
+
+        @workflow(name="p1_no_clobber")
+        async def flow(ctx: Context, _inp: object = None) -> str:
+            await ctx.wait_for_event("never")
+            return "done"
+
+        store = MemoryStore()
+        worker = Runtime(store=store, node_id="worker", max_inline_wait=0)
+        worker.register(flow)
+        result = await worker.run(flow, None)
+
+        # Another process asks for it, and the record already says so.
+        operator = Runtime(store=store, node_id="operator")
+        operator.register(flow)
+        await operator.cancel(result.run_id)
+
+        # The worker parks again without ever having heartbeat.
+        record = await store.get_execution(result.run_id)
+        assert record is not None
+        await worker._stamp_requests(record)
+
+        assert record.cancel_requested is True
+        assert worker.is_cancellation_requested(result.run_id)
+
+    @pytest.mark.asyncio
     async def test_an_unleased_run_still_goes_terminal_immediately(self) -> None:
         """Nothing is driving a suspended run, so there is no body to raise
         inside and cancelling it means writing the status — the behaviour every
@@ -695,7 +724,10 @@ class TestCancellationIsDurable:
         @workflow(name="p1_boundary")
         async def flow(ctx: Context, _inp: object = None) -> str:
             await ctx.step(note, "first")
-            ctx._runtime._cancelled.add(ctx.run_id)  # a cancel landing mid-body
+            # A cancel landing while the body is running, through the public
+            # path — which persists the request and leaves the terminal write
+            # to this driver, because only it can unwind compensations.
+            await ctx._runtime.cancel(ctx.run_id)
             await ctx.step(note, "second")
             return "unreachable"
 
@@ -721,7 +753,7 @@ class TestCancellationIsDurable:
         async def flow(ctx: Context, _inp: object = None) -> str:
             await ctx.step(book, "seat")
             await ctx.compensate(rollback, "seat")
-            ctx._runtime._cancelled.add(ctx.run_id)
+            await ctx._runtime.cancel(ctx.run_id)
             await ctx.step(book, "hotel")
             return "unreachable"
 

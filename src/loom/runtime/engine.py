@@ -1595,7 +1595,7 @@ class Runtime:
             record.awaiting_event = None
             record.lease_owner = self.node_id
             record.lease_expires_at = self.clock.now() + timedelta(seconds=self.lease_ttl)
-            self._stamp_requests(record)
+            await self._stamp_requests(record)
             try:
                 await self.store.update_execution(
                     record,
@@ -1990,18 +1990,37 @@ class Runtime:
         steps.update(self._sandbox_steps_extra)
         return steps
 
-    def _stamp_requests(self, record: ExecutionRecord) -> None:
-        """Copy pause/cancel intent onto the record before the drive writes it.
+    async def _stamp_requests(self, record: ExecutionRecord) -> None:
+        """Reconcile pause/cancel intent with the store before the drive writes.
 
         Without this the two are lost. ``pause()`` and ``cancel()`` load their
         own copy of the record, set a flag and save it — while the drive holds a
-        copy from before, and overwrites the flag on its next update. The intent
-        lives in this process's sets from the moment it is observed (either
-        directly or via the lease heartbeat), so stamping it here is what makes
-        the persisted record agree with what the process is actually doing.
+        copy from before and overwrites the flag on its next update.
+
+        **The store is the source of truth, not this process's sets.** Reading
+        them alone would still lose a request issued elsewhere in the window
+        before the next lease heartbeat observes it — up to a third of the lease
+        TTL, during which a park would write the stale ``False`` back. It would
+        also strand a run whose ``unpause`` landed in another process, because
+        this one would re-park it from a set nothing had cleared.
+
+        One extra read, taken only where the drive is about to write anyway: at
+        re-entry and at a park, neither of which is a hot path.
         """
+        latest = await self.store.get_execution(record.run_id)
+        if latest is not None:
+            self._track(self._paused, record.run_id, latest.pause_requested)
+            self._track(self._cancelled, record.run_id, latest.cancel_requested)
         record.pause_requested = record.run_id in self._paused
         record.cancel_requested = record.run_id in self._cancelled
+
+    @staticmethod
+    def _track(known: set[str], run_id: str, requested: bool) -> None:
+        """Mirror one persisted flag into this process's view of it."""
+        if requested:
+            known.add(run_id)
+        else:
+            known.discard(run_id)
 
     async def _park(self, record: ExecutionRecord, suspension: Suspend, journal: Journal) -> bool:
         """Persist a suspension. Returns True if we should immediately re-enter the body."""
@@ -2009,7 +2028,7 @@ class Runtime:
         record.wake_at = suspension.wake_at
         record.awaiting_event = suspension.awaiting_event
         record.usage = journal.total_usage()
-        self._stamp_requests(record)
+        await self._stamp_requests(record)
         await self.store.update_execution(record)
         logger.debug("run %s suspended: %s", record.run_id, suspension.reason)
 
