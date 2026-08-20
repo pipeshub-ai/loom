@@ -1,0 +1,27 @@
+{
+  "slug": "eventbrite-checkout",
+  "source": "https://www.eventbrite.com/d/online/free--events/",
+  "labelled_by": "claude",
+  "labelled_from": "eventbrite-checkout.png",
+  "flow": "browse and filter events: category, format, language, currency",
+  "note": "The widest variety of native control types in the corpus — radios, checkboxes and links in one filter sidebar — plus a cookie banner, which is the single most common thing standing between an automation and the page it wants.",
+  "controls": [
+    {"purpose": "accept cookies",        "role": "button",   "name": "Accept all",  "visible_label": true, "required_for_flow": true},
+    {"purpose": "reject cookies",        "role": "button",   "name": "Reject all",  "visible_label": true, "required_for_flow": false},
+    {"purpose": "business category",     "role": "link",     "name": "Business",    "visible_label": true, "required_for_flow": false},
+    {"purpose": "food and drink category","role": "link",    "name": "Food & Drink","visible_label": true, "required_for_flow": false},
+    {"purpose": "health category",       "role": "link",     "name": "Health",      "visible_label": true, "required_for_flow": false},
+    {"purpose": "music category",        "role": "link",     "name": "Music",       "visible_label": true, "required_for_flow": false},
+    {"purpose": "class format filter",   "role": "radio",    "name": "Class",       "visible_label": true, "required_for_flow": true},
+    {"purpose": "conference format filter","role": "radio",  "name": "Conference",  "visible_label": true, "required_for_flow": false},
+    {"purpose": "festival format filter","role": "radio",    "name": "Festival",    "visible_label": true, "required_for_flow": false},
+    {"purpose": "english language filter","role": "checkbox","name": "English",     "visible_label": true, "required_for_flow": true},
+    {"purpose": "german language filter","role": "checkbox", "name": "German",      "visible_label": true, "required_for_flow": false},
+    {"purpose": "euro currency filter",  "role": "radio",    "name": "Euro",        "visible_label": true, "required_for_flow": false},
+    {"purpose": "us dollar currency filter","role": "radio", "name": "U.S. Dollar", "visible_label": true, "required_for_flow": false},
+    {"purpose": "restrict to online events","role": "checkbox","name": "Search for online events", "visible_label": true, "required_for_flow": true},
+    {"purpose": "clear applied filters", "role": "button",   "name": "Clear All",   "visible_label": true, "required_for_flow": false},
+    {"purpose": "log in",                "role": "link",     "name": "Log In",      "visible_label": true, "required_for_flow": false},
+    {"purpose": "sign up",               "role": "link",     "name": "Sign Up",     "visible_label": true, "required_for_flow": false}
+  ]
+}

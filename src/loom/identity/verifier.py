@@ -11,7 +11,7 @@ all three classes below implement.
 ``mcp.server.auth.provider.AccessToken`` but not that class — the MCP SDK's
 own consumers (``BearerAuthBackend``, ``AuthenticatedUser``) never do an
 ``isinstance`` check, only attribute access, so a structurally-matching
-value works for ``FastMCP(token_verifier=...)`` without this module (or its
+value works for ``MCPServer(token_verifier=...)`` without this module (or its
 callers) importing ``mcp`` at all. That is what lets ``server/auth.py``
 (the plain HTTP surface, needing only the ``identity`` extra) share these
 verifiers with ``mcp_server/auth.py`` — one implementation of "check a

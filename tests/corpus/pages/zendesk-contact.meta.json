@@ -1,0 +1,21 @@
+{
+  "slug": "zendesk-contact",
+  "source": "https://www.zendesk.com/contact/",
+  "final_url": "https://www.zendesk.com/in/contact/#georedirect",
+  "title": "Contact us | Zendesk India",
+  "vendor": "zendesk",
+  "category": "support",
+  "captured": "2026-08-19",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "bytes": 470070,
+  "counts": {
+    "marked_hidden": 2072,
+    "dropped_nodes": 180,
+    "native_controls": 20,
+    "role_widgets": 16,
+    "buttons": 4
+  }
+}

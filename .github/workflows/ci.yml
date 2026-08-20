@@ -39,7 +39,13 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -e ".[dev]"
+      # `[dev,mcp]`, not `[dev]`: `mcp.*` is in `ignore_missing_imports`, so
+      # without the extra installed mypy checks ~900 lines of `mcp_server/`
+      # against `Any` and reports success — the same shape of hole as the numpy
+      # trap below. Installing it found two real errors the moment it was
+      # switched on. `mcp` pulls no numpy, so the reason for `[dev]` over
+      # `[all]` is untouched.
+      - run: pip install -e ".[dev,mcp]"
       # Blocking, and through the wrapper rather than mypy directly.
       #
       # `mypy || true` let 42 real errors across three toolsets merge green.
@@ -64,6 +70,40 @@ jobs:
           cache: pip
       - run: pip install -e ".[dev]"
       - run: pytest --tb=short -q --cov=loom --cov-report=term-missing
+
+  # The browser tier. Separate from `test` because it needs a real Chromium,
+  # and `test` installs `[dev]` — under which every browser test that drives a
+  # page calls `importorskip("playwright")` and disappears. Silently: the suite
+  # goes green having run neither `verify_browser_session` against the shipped
+  # provider nor the tier-0 corpus, which are the two things that say the
+  # browser layer works at all.
+  #
+  # `-rs` for the same reason the store matrix has it: a skip here must read
+  # differently from a pass.
+  browser:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev,browser]"
+      # `--with-deps` installs the shared libraries headless Chromium needs on
+      # a bare runner. Without them the browser launches and immediately dies,
+      # which surfaces as a ProbeError about the *page* rather than the box.
+      - run: playwright install --with-deps chromium
+      - run: >
+          pytest -q -rs --tb=short
+          tests/test_browser_local.py
+          tests/test_browser_corpus.py
+          tests/test_probes.py
+      # The corpus rate is a design gate, not a metric nobody reads: below the
+      # floor, phase 13's "Playwright and nothing else" conclusion no longer
+      # follows. Printed so a change in it is visible in the log rather than
+      # only in a failure.
+      - run: pytest -q -s tests/test_browser_corpus.py -k clears_the_design_floor
 
   # The store parity matrix. Separate from `test` because it needs real servers:
   # Mongo and Postgres claim the same four protocols as Memory and SQLite, and

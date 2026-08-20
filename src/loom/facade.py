@@ -500,6 +500,20 @@ class LocalFacade:
     loaded: list[str] = field(default_factory=list)
     """Module specs that were imported to populate this Runtime."""
     _trigger_dispatcher: Any = field(default=None, repr=False, compare=False)
+    user_interaction: Any = None
+    """How the coding agent asks the person who wrote the spec a question.
+
+    A :class:`~loom.agents.interaction.UserInteraction`. ``None`` — the default
+    — omits the ``ask_user`` tool entirely rather than offering one that always
+    answers "not configured", the rule ``observe_target`` already follows.
+
+    On the **local** adapter rather than on ``author()``, for two reasons that
+    agree. It is an object and not a payload, so it could not cross
+    ``RemoteFacade`` even if the port carried it — and ``RemoteFacade.author``
+    already refuses, because authoring runs where the code will run. And a
+    library that reads stdin because it was imported is the ambient behaviour
+    ``Runtime`` avoids everywhere else: the CLI opts in, a server does not.
+    """
     async def workflows(self, *, published: bool = True) -> list[dict[str, Any]]:
         available = {
             definition.name: {
@@ -848,6 +862,10 @@ class LocalFacade:
                 for node in result.plan
             ],
             "tools_used": [name for name, _ in result.tool_calls],
+            # The answers are inputs to this build, so they travel with its
+            # output: `loom author --answers` replays them, and the same spec
+            # and the same answers reproduce the same file.
+            "questions": [asked.model_dump(mode="json") for asked in result.questions],
             "smoke": None
             if result.smoke is None
             else {
@@ -879,6 +897,7 @@ class LocalFacade:
             "explanation": result.explanation,
             "diff": result.diff,
             "graph_changes": result.graph_changes,
+            "questions": [asked.model_dump(mode="json") for asked in result.questions],
             "repairs": result.repair_attempts,
             "model": result.model_used,
             "input_tokens": result.input_tokens,
@@ -968,6 +987,7 @@ class LocalFacade:
             probes=probes,
             allowed_packages=set(packages) if packages else None,
             smoke_input=smoke_input,
+            user_interaction=self.user_interaction,
         )
 
 

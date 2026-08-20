@@ -175,10 +175,12 @@ class TestBuildCodingTools:
 
     def test_ask_user_is_included_only_when_interaction_is_set(self) -> None:
         from loom.agents.coding_tools import build_coding_tools
-        from loom.agents.interaction import CallbackUserInteraction, UserResponse
+        from loom.agents.interaction import Answer, CallbackUserInteraction
 
         tools = build_coding_tools(
-            interaction=CallbackUserInteraction(lambda q: UserResponse(answer="x"))
+            interaction=CallbackUserInteraction(
+                lambda q: Answer(action="accept", other="x")
+            )
         )
         assert "ask_user" in {t.name for t in tools}
         assert len(tools) == len(build_coding_tools()) + 1

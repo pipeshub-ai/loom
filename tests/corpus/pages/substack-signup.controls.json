@@ -1,0 +1,16 @@
+{
+  "slug": "substack-signup",
+  "source": "https://substack.com/signup",
+  "labelled_by": "claude",
+  "labelled_from": "substack-signup.png",
+  "flow": "create an account: enter an email, accept the terms, continue",
+  "note": "The minimal case, included as the easy end of the range: one field, one checkbox, one button. A corpus of only hard pages understates tier 0 as surely as a corpus of only easy ones overstates it.",
+  "controls": [
+    {"purpose": "email field",       "role": "textbox",  "name": "Your email", "visible_label": true, "required_for_flow": true},
+    {"purpose": "accept the terms",  "role": "checkbox", "name": "By creating an account, I agree Substack's Terms of Use, and acknowledge its Information Collection Notice and Privacy Policy.", "visible_label": true, "required_for_flow": true},
+    {"purpose": "submit the signup", "role": "button",   "name": "Continue",   "visible_label": true, "required_for_flow": true},
+    {"purpose": "go to sign in",     "role": "link",     "name": "Sign in",    "visible_label": true, "required_for_flow": false},
+    {"purpose": "terms of use link", "role": "link",     "name": "Terms of Use", "visible_label": true, "required_for_flow": false},
+    {"purpose": "privacy policy link", "role": "link",   "name": "Privacy Policy", "visible_label": true, "required_for_flow": false}
+  ]
+}

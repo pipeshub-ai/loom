@@ -1,0 +1,21 @@
+{
+  "slug": "resy-venue",
+  "source": "https://resy.com/cities/ny",
+  "final_url": "https://resy.com/cities/new-york-ny/search?date=2026-08-19&seats=2",
+  "title": "Discover New York Restaurants to Love on Resy",
+  "vendor": "resy",
+  "category": "booking",
+  "captured": "2026-08-19",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "bytes": 253696,
+  "counts": {
+    "marked_hidden": 277,
+    "dropped_nodes": 61,
+    "native_controls": 3,
+    "role_widgets": 50,
+    "buttons": 121
+  }
+}

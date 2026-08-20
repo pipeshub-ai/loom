@@ -67,10 +67,10 @@ tool call, and five prompts cover authoring, debugging, and review.
 
 ## Authoring new workflows
 
-Six more tools, on by default, let the *client's own model* write and verify
-new workflow code using LOOM's toolchain — no server-side API key, no second
-LLM. The client drives the loop; LOOM supplies the verification it cannot do
-itself.
+Seven more tools, on by default. Six of them let the *client's own model* write
+and verify new workflow code using LOOM's toolchain — no server-side API key, no
+second LLM. The client drives the loop; LOOM supplies the verification it cannot
+do itself.
 
 | Tool | Does |
 |------|------|
@@ -80,6 +80,17 @@ itself.
 | `validate_workflow_code` | Compile + AST checks (structure, determinism, imports) — no execution |
 | `smoke_test_workflow` | Run generated code once in a subprocess sandbox, every toolset faked |
 | `save_workflow` | Write the finished code to a `.py` file |
+
+`author_workflow` is the seventh, and the odd one out: it runs **LOOM's own**
+coding agent end to end — discovery, observation, generation, the whole
+verification pipeline, and repair — and hands back the finished code. So unlike
+the six above it does need a model key in the serving process, and it spends
+that budget rather than the client's. Reach for the six when the client's model
+should do the thinking and LOOM should check it; reach for this one when you
+want the answer.
+
+It sits behind the same `--no-authoring` flag, because an operator who turned
+authoring off did not mean "except the tool that does all of it at once".
 
 The loop the `create_workflow` prompt walks a client through:
 
@@ -110,7 +121,7 @@ credentials — not something to "fix" by deleting the integration.
 extension.
 
 Turn it off with `--no-authoring` or `LOOM_MCP_AUTHORING=0`, to serve only
-the sixteen run-management tools:
+the eighteen run-management tools:
 
 ```bash
 loom mcp --module flows.py --no-authoring

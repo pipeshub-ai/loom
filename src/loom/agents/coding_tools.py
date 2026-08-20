@@ -718,6 +718,7 @@ def build_coding_tools(
     probes: Any | None = None,
     budget: int = 5,
     gate: Any | None = None,
+    asked: list[Any] | None = None,
 ) -> list[Tool]:
     """Return the ReAct tools for the workflow coding agent.
 
@@ -749,6 +750,11 @@ def build_coding_tools(
     budget:
         Maximum ``ask_user`` calls per generation. Ignored when *gate* is
         passed (the gate carries its own budget).
+    asked:
+        List that accumulates every ``AskedQuestion`` the agent puts to a
+        person. Passed in rather than returned so the caller owns it and can
+        report it on ``CodingResult`` — the answers are inputs to a build, and
+        a build whose inputs are not recorded cannot be reproduced.
     gate:
         Optional :class:`~loom.agents.interaction.AskUserGate`
         the caller can flip off during repair. Created internally when
@@ -848,6 +854,7 @@ def build_coding_tools(
             make_ask_user_tool(
                 interaction,
                 gate=gate or AskUserGate(budget=budget),
+                record=asked,
             )
         )
     return tools

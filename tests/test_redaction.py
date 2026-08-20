@@ -330,3 +330,71 @@ class TestTheResidual:
         runtime = Runtime(store=MemoryStore())
         result = await runtime.run(flow)
         assert SECRET in await journal_text(runtime, result.run_id)
+
+
+class TestABrowserSessionIsACredential:
+    """E5. A ``storage_state`` is an authenticated session in a JSON blob.
+
+    Worth exactly as much to anyone reading a trace as the password that
+    produced it — and it travels as an ordinary field, so nothing about its
+    shape stops it reaching a journal the way ``ctx.step(call, api_key)`` once
+    did.
+
+    The blob *reference* is deliberately left alone. ``storage_ref`` names
+    where the jar is kept, not what is in it, and it is the half a person
+    reading a trace actually needs — the same reason ``io.http_request`` takes
+    a ``connection`` id rather than a ``credential``.
+    """
+
+    @pytest.mark.parametrize(
+        "name",
+        ["storage_state", "saved_storage_state", "initial_storage_state",
+         "cookie", "cookies", "session_cookie"],
+    )
+    def test_it_reads_as_a_credential(self, name: str) -> None:
+        assert is_secret_name(name)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            # Single-word entries must be the *last* word, so a banner is not a
+            # cookie jar — "a denylist that redacts ordinary data is one people
+            # switch off".
+            "cookie_banner_text",
+            "cookie_policy_url",
+            # The reference, not the contents. This one is load-bearing: redact
+            # it and a trace stops being able to say which session a run used.
+            "storage_ref",
+            # Neither half of the multi-word entry is a secret alone.
+            "state",
+            "storage",
+        ],
+    )
+    def test_ordinary_names_are_left_alone(self, name: str) -> None:
+        assert not is_secret_name(name)
+
+    async def test_a_cookie_jar_passed_to_a_step_never_lands(self) -> None:
+        """The path this exists for: a keyword argument into a journaled call.
+
+        Step inputs are recorded for a person reading a trace and never
+        replayed, which is exactly what made them the shortest route from a
+        live session to durable storage.
+        """
+        jar = '{"cookies":[{"name":"sid","value":"SUPERSECRETSESSION"}]}'
+
+        @step
+        async def resume(url: str, storage_state: str) -> str:
+            return f"{url}:{len(storage_state)}"
+
+        @workflow(name="carries_a_jar")
+        async def flow(ctx: Context, _input: object = None) -> str:
+            return await ctx.step(
+                resume, "https://x.test", storage_state=jar)
+
+        runtime = Runtime(store=MemoryStore())
+        result = await runtime.run(flow)
+
+        assert result.status.value == "completed", result.error
+        recorded = await journal_text(runtime, result.run_id)
+        assert "SUPERSECRETSESSION" not in recorded
+        assert REDACTED in recorded

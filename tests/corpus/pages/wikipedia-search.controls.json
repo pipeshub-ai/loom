@@ -1,0 +1,25 @@
+{
+  "slug": "wikipedia-search",
+  "source": "https://en.wikipedia.org/wiki/Main_Page",
+  "labelled_by": "claude",
+  "labelled_from": "wikipedia-search.png",
+  "flow": "search the encyclopedia; change appearance settings",
+  "note": "Included deliberately as the control. Wikipedia is among the most accessibility-conscious sites on the web, so a low score here would indict the instrument rather than the premise. 'Standard' is labelled knowing it appears twice — under Text and under Width — because a real duplicate is exactly the ambiguity tier 0 must refuse rather than guess through.",
+  "controls": [
+    {"purpose": "search field",        "role": "searchbox", "name": "Search Wikipedia", "visible_label": true, "required_for_flow": true},
+    {"purpose": "run the search",      "role": "button",    "name": "Search",           "visible_label": true, "required_for_flow": true},
+    {"purpose": "create an account",   "role": "link",      "name": "Create account",   "visible_label": true, "required_for_flow": false},
+    {"purpose": "log in",              "role": "link",      "name": "Log in",           "visible_label": true, "required_for_flow": false},
+    {"purpose": "donate",              "role": "link",      "name": "Donate",           "visible_label": true, "required_for_flow": false},
+    {"purpose": "small text size",     "role": "radio",     "name": "Small",            "visible_label": true, "required_for_flow": false},
+    {"purpose": "large text size",     "role": "radio",     "name": "Large",            "visible_label": true, "required_for_flow": false},
+    {"purpose": "light colour scheme", "role": "radio",     "name": "Light",            "visible_label": true, "required_for_flow": false},
+    {"purpose": "dark colour scheme",  "role": "radio",     "name": "Dark",             "visible_label": true, "required_for_flow": false},
+    {"purpose": "wide layout",         "role": "radio",     "name": "Wide",             "visible_label": true, "required_for_flow": false},
+    {"purpose": "standard (appears under both Text and Width)", "role": "radio", "name": "Standard", "visible_label": true, "required_for_flow": false},
+    {"purpose": "go to the talk page", "role": "link",      "name": "Talk",             "visible_label": true, "required_for_flow": false},
+    {"purpose": "hide the appearance panel", "role": "button", "name": "hide",          "visible_label": true, "required_for_flow": false},
+    {"purpose": "open the language list", "role": "button", "name": "349 languages",    "visible_label": true, "required_for_flow": false},
+    {"purpose": "open the main menu",  "role": "button",    "name": null,               "visible_label": false, "required_for_flow": false}
+  ]
+}

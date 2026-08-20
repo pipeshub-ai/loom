@@ -1,0 +1,25 @@
+{
+  "slug": "resy-venue",
+  "source": "https://resy.com/cities/ny",
+  "labelled_by": "claude",
+  "labelled_from": "resy-venue.png",
+  "flow": "find a restaurant: set party size, date and filters, then pick a time slot",
+  "note": "A listing page, where the same control legitimately repeats — 'Notify' appears beside every fully-booked venue. It is labelled anyway, and expected to come back ambiguous: that is the structural limit of role+name on a list, and hiding it by labelling only unique controls would flatter the score.",
+  "controls": [
+    {"purpose": "restaurant search",     "role": "searchbox", "name": "Search restaurants, cuisines, etc.", "visible_label": true, "required_for_flow": true},
+    {"purpose": "log in",                "role": "button",    "name": "Log in",       "visible_label": true, "required_for_flow": true},
+    {"purpose": "date filter",           "role": "button",    "name": "Today",        "visible_label": true, "required_for_flow": true},
+    {"purpose": "time-of-day filter",    "role": "button",    "name": "All Day",      "visible_label": true, "required_for_flow": true},
+    {"purpose": "cuisine filter",        "role": "button",    "name": "Cuisines",     "visible_label": true, "required_for_flow": false},
+    {"purpose": "seating filter",        "role": "button",    "name": "Seating",      "visible_label": true, "required_for_flow": false},
+    {"purpose": "curated lists filter",  "role": "button",    "name": "Lists",        "visible_label": true, "required_for_flow": false},
+    {"purpose": "resy credit filter",    "role": "button",    "name": "Resy Credit",  "visible_label": true, "required_for_flow": false},
+    {"purpose": "top rated collection",  "role": "link",      "name": "Top Rated",    "visible_label": true, "required_for_flow": false},
+    {"purpose": "book tonight collection", "role": "link",    "name": "Book Tonight", "visible_label": true, "required_for_flow": false},
+    {"purpose": "events collection",     "role": "link",      "name": "Events",       "visible_label": true, "required_for_flow": false},
+    {"purpose": "join a waitlist (repeats per venue)", "role": "button", "name": "Notify", "visible_label": true, "required_for_flow": false},
+    {"purpose": "go to results page 2", "role": "link",      "name": "2",            "visible_label": true, "required_for_flow": false},
+    {"purpose": "change city",           "role": "button",    "name": "New York",     "visible_label": true, "required_for_flow": true},
+    {"purpose": "favourite a venue",     "role": "button",    "name": null,           "visible_label": false, "required_for_flow": false}
+  ]
+}

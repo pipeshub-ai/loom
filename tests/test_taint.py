@@ -594,3 +594,147 @@ class TestAgentToolCallsCarryTheFacets:
         )
         assert update.ok is True, "the agent may still update a record"
         assert send.ok is False and send.needs == "approval"
+
+
+class TestAskingAPersonIsNeverRefused:
+    """The rule must not block its own exit.
+
+    ``approval_clears`` is described as "the escape hatch that keeps the rule
+    usable: the answer to 'this workflow legitimately needs to write after
+    reading' is a person saying so, not turning the check off". Every
+    ``human.*`` node is ``WRITE`` and ``open_world`` — both accurate, it leaves
+    the process and records an answer — so a tainted run could not reach the
+    person whose approval was the only thing that would clear it. A deadlock,
+    not a policy.
+
+    Found by the phase 13 acid test, and it had two halves: the node call and
+    the ``deliver:`` call inside it. Exempting only the outer one left the
+    deadlock exactly where it was, which is why both are asserted here.
+    """
+
+    @staticmethod
+    def _channel():
+        from loom.nodes.human.channel import DeliveryReceipt
+
+        class Recording:
+            name = "recording"
+
+            def __init__(self) -> None:
+                self.delivered: list[Any] = []
+
+            async def deliver(self, request: Any) -> Any:
+                self.delivered.append(request)
+                return DeliveryReceipt(channel=self.name, delivered=True)
+
+            async def withdraw(self, request_id: str, reference: str = "") -> None:
+                return None
+
+        return Recording()
+
+    @staticmethod
+    def _reader():
+        """A node that reads the world and succeeds.
+
+        Defined here rather than borrowed so this test needs no network and no
+        other subsystem: what it requires is simply an ``open_world`` READ that
+        completes, which is what taints a run.
+        """
+        from pydantic import BaseModel
+
+        from loom.nodes.base import Node
+        from loom.nodes.spec import NodeCategory, NodeSpec
+
+        class In(BaseModel):
+            pass
+
+        class Out(BaseModel):
+            text: str = ""
+
+        class ReadTheWorld(Node[In, Out]):
+            spec = NodeSpec(
+                id="custom.read_the_world",
+                category=NodeCategory.IO,
+                summary="Read something external.",
+                effect=EffectClass.READ,
+                open_world=True,
+                deterministic=False,
+            )
+            Input, Output = In, Out
+
+            async def run(self, ctx: Any, payload: In) -> Out:
+                return Out(text="something nobody reviewed")
+
+        return ReadTheWorld
+
+    async def test_a_tainted_run_can_still_ask(self) -> None:
+        channel = self._channel()
+
+        runtime = Runtime(store=MemoryStore(), human=channel,
+                          broker=TaintBroker(DirectBroker(), TaintPolicy()))
+        runtime.nodes.register_node(self._reader())
+
+        @workflow(name="taint_then_ask")
+        async def flow(ctx: Any, _input: Any) -> str:
+            await ctx.node("custom.read_the_world", {})
+            await ctx.node("human.approval", {"subject": "proceed"})
+            return "asked"
+
+        result = await runtime.run(flow, None)
+
+        assert result.status is ExecutionStatus.SUSPENDED, (
+            f"the approval was refused instead of parking: "
+            f"{result.error and result.error.message}")
+        assert channel.delivered, "nobody was actually asked"
+
+    async def test_and_the_write_after_it_is_still_refused(self) -> None:
+        """Exempting the ask must not exempt the acting.
+
+        The whole rule would be pointless if letting a run *ask* also let it
+        write before anyone answered.
+        """
+        runtime = Runtime(store=MemoryStore(), human=self._channel(),
+                          broker=TaintBroker(DirectBroker(), TaintPolicy()))
+        runtime.nodes.register_node(self._reader())
+
+        @workflow(name="taint_then_write")
+        async def flow(ctx: Any, _input: Any) -> str:
+            await ctx.node("custom.read_the_world", {})
+            await ctx.node("io.http_request",
+                           {"url": "http://127.0.0.1:9/x", "method": "POST"})
+            return "wrote"
+
+        result = await runtime.run(flow, None)
+        assert result.status is ExecutionStatus.FAILED
+        assert result.error and "read external data" in result.error.message
+
+    async def test_both_the_node_and_its_delivery_are_exempt(self) -> None:
+        """The half that was missed the first time.
+
+        A node's ``ctx.call`` inherits the node's classification, so exempting
+        the node without its own work leaves the refusal one level down — and
+        the symptom is identical.
+        """
+        seen: list[tuple[str, bool]] = []
+
+        class Spy:
+            def __init__(self, inner: Any) -> None:
+                self._inner = inner
+
+            async def dispatch(self, call: EffectCall,
+                               authority: Authority) -> EffectResult:
+                if call.target.startswith("human."):
+                    seen.append((call.target, call.asks_human))
+                return await self._inner.dispatch(call, authority)
+
+        @workflow(name="ask_twice_dispatched")
+        async def flow(ctx: Any, _input: Any) -> str:
+            await ctx.node("human.approval", {"subject": "proceed"})
+            return "asked"
+
+        runtime = Runtime(store=MemoryStore(), human=self._channel(),
+                          broker=Spy(DirectBroker()))
+        await runtime.run(flow, None)
+
+        assert len(seen) >= 2, "expected the node call and its delivery"
+        assert all(flag for _, flag in seen), (
+            f"a human call reached the broker without asks_human: {seen}")

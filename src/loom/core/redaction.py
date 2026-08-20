@@ -86,12 +86,21 @@ DEFAULT_REDACT_KEYS: frozenset[str] = frozenset(
         "authorization",
         "bearer",
         "client_secret",
+        "cookie",
+        "cookies",
         "credential",
         "credentials",
         "passwd",
         "password",
         "private_key",
         "refresh_token",
+        # A browser's `storage_state` is a live cookie jar — an authenticated
+        # session in a JSON blob, and worth exactly as much to anyone who reads
+        # a trace as the password that produced it. Multi-word, so it matches
+        # wherever it appears (`initial_storage_state`, `saved_storage_state`);
+        # `cookie`/`cookies` above are single-word and so must be the last word,
+        # which catches `session_cookie` and leaves `cookie_banner_text` alone.
+        "storage_state",
         "secret",
         "secret_key",
         "signing_secret",

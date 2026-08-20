@@ -1,0 +1,233 @@
+{
+  "airbnb-search": {
+    "ok": false,
+    "reason": "only 2 interactive control(s) \u2014 a links page or a shell, not a form worth measuring against",
+    "url": "https://www.airbnb.com/",
+    "vendor": "airbnb"
+  },
+  "booking-com-search": {
+    "ok": false,
+    "reason": "281 role widgets across a 749 KiB page; could not be labelled reliably from one screenshot, and an unreliable label corrupts the measurement more than a missing page does. Recorded as a known exclusion, not a pass \u2014 see README, 'Limits'.",
+    "url": "https://www.booking.com/",
+    "vendor": "booking.com"
+  },
+  "cal-com-booking": {
+    "ok": false,
+    "reason": "under-rendered: 44% of visible controls unnamed after 3 settle attempts; raw i18n keys ($Switch to monthly view) still present",
+    "url": "https://cal.com/rick/get-rick-rolled",
+    "vendor": "cal.com"
+  },
+  "calendly-booking": {
+    "ok": false,
+    "reason": "title says '404 | Calendly' \u2014 not the page that was asked for",
+    "url": "https://calendly.com/acme-demo/30min",
+    "vendor": "calendly"
+  },
+  "eventbrite-checkout": {
+    "bytes": 353834,
+    "captured": "2026-08-19",
+    "category": "booking",
+    "counts": {
+      "buttons": 61,
+      "dropped_nodes": 260,
+      "marked_hidden": 750,
+      "native_controls": 23,
+      "role_widgets": 54
+    },
+    "ok": true,
+    "url": "https://www.eventbrite.com/d/online/free--events/",
+    "vendor": "eventbrite"
+  },
+  "fastmail-signup": {
+    "bytes": 17041,
+    "captured": "2026-08-19",
+    "category": "signup",
+    "counts": {
+      "buttons": 2,
+      "dropped_nodes": 69,
+      "marked_hidden": 31,
+      "native_controls": 4,
+      "role_widgets": 8
+    },
+    "ok": true,
+    "url": "https://www.fastmail.com/signup/",
+    "vendor": "fastmail"
+  },
+  "gitlab-signup": {
+    "bytes": 56425,
+    "captured": "2026-08-19",
+    "category": "signup",
+    "counts": {
+      "buttons": 5,
+      "dropped_nodes": 63,
+      "marked_hidden": 296,
+      "native_controls": 7,
+      "role_widgets": 4
+    },
+    "ok": true,
+    "url": "https://gitlab.com/users/sign_up",
+    "vendor": "gitlab"
+  },
+  "gov-uk-contact": {
+    "ok": false,
+    "reason": "links directory of services, not a transactional form",
+    "url": "https://www.gov.uk/contact",
+    "vendor": "gov.uk"
+  },
+  "heroku-signup": {
+    "bytes": 367134,
+    "captured": "2026-08-19",
+    "category": "signup",
+    "counts": {
+      "buttons": 0,
+      "dropped_nodes": 33,
+      "marked_hidden": 1277,
+      "native_controls": 6,
+      "role_widgets": 2
+    },
+    "ok": true,
+    "url": "https://signup.heroku.com/",
+    "vendor": "heroku"
+  },
+  "hubspot-contact": {
+    "bytes": 636393,
+    "captured": "2026-08-19",
+    "category": "support",
+    "counts": {
+      "buttons": 17,
+      "dropped_nodes": 269,
+      "marked_hidden": 2316,
+      "native_controls": 1,
+      "role_widgets": 7
+    },
+    "ok": true,
+    "url": "https://www.hubspot.com/company/contact",
+    "vendor": "hubspot"
+  },
+  "kayak-search": {
+    "bytes": 451497,
+    "captured": "2026-08-19",
+    "category": "search",
+    "counts": {
+      "buttons": 36,
+      "dropped_nodes": 437,
+      "marked_hidden": 2122,
+      "native_controls": 3,
+      "role_widgets": 138
+    },
+    "ok": true,
+    "url": "https://www.kayak.com/flights",
+    "vendor": "kayak"
+  },
+  "mozilla-contact": {
+    "ok": false,
+    "reason": "only 2 interactive control(s) \u2014 a links page or a shell, not a form worth measuring against",
+    "url": "https://www.mozilla.org/en-US/contact/",
+    "vendor": "mozilla"
+  },
+  "opentable-search": {
+    "ok": false,
+    "reason": "Error: Page.goto: net::ERR_HTTP2_PROTOCOL_ERROR at https://www.opentable.com/\nCall log:\n  - navigating to \"https://www.opentable.com/\", waiting until \"domcontentloaded\"\n",
+    "url": "https://www.opentable.com/",
+    "vendor": "opentable"
+  },
+  "paypal-checkout-demo": {
+    "ok": false,
+    "reason": "demo portal landing page; no checkout form present",
+    "url": "https://demo.paypal.com/",
+    "vendor": "paypal"
+  },
+  "protonmail-signup": {
+    "bytes": 622725,
+    "captured": "2026-08-19",
+    "category": "signup",
+    "counts": {
+      "buttons": 17,
+      "dropped_nodes": 86,
+      "marked_hidden": 1864,
+      "native_controls": 4,
+      "role_widgets": 76
+    },
+    "ok": true,
+    "url": "https://account.proton.me/signup",
+    "vendor": "proton"
+  },
+  "resy-venue": {
+    "bytes": 253696,
+    "captured": "2026-08-19",
+    "category": "booking",
+    "counts": {
+      "buttons": 121,
+      "dropped_nodes": 61,
+      "marked_hidden": 277,
+      "native_controls": 3,
+      "role_widgets": 50
+    },
+    "ok": true,
+    "url": "https://resy.com/cities/ny",
+    "vendor": "resy"
+  },
+  "shopify-demo-cart": {
+    "ok": false,
+    "reason": "title says 'Checkout Demo \u2013 Opening Soon' \u2014 not the page that was asked for",
+    "url": "https://checkout-demo.myshopify.com/",
+    "vendor": "shopify"
+  },
+  "substack-signup": {
+    "bytes": 11819,
+    "captured": "2026-08-19",
+    "category": "signup",
+    "counts": {
+      "buttons": 2,
+      "dropped_nodes": 145,
+      "marked_hidden": 122,
+      "native_controls": 2,
+      "role_widgets": 3
+    },
+    "ok": true,
+    "url": "https://substack.com/signup",
+    "vendor": "substack"
+  },
+  "tablecheck-reserve": {
+    "ok": false,
+    "reason": "SPA shell \u2014 the reserve form never rendered (0 native controls)",
+    "url": "https://www.tablecheck.com/en/pizza-4ps-in-indiranagar/reserve",
+    "vendor": "tablecheck"
+  },
+  "wikipedia-search": {
+    "bytes": 328655,
+    "captured": "2026-08-19",
+    "category": "search",
+    "counts": {
+      "buttons": 2,
+      "dropped_nodes": 50,
+      "marked_hidden": 1417,
+      "native_controls": 12,
+      "role_widgets": 10
+    },
+    "ok": true,
+    "url": "https://en.wikipedia.org/wiki/Main_Page",
+    "vendor": "wikimedia"
+  },
+  "woocommerce-checkout": {
+    "ok": false,
+    "reason": "cart was empty, so the checkout form was not shown",
+    "url": "https://woocommerce.com/checkout/",
+    "vendor": "woocommerce"
+  },
+  "zendesk-contact": {
+    "bytes": 470070,
+    "captured": "2026-08-19",
+    "category": "support",
+    "counts": {
+      "buttons": 4,
+      "dropped_nodes": 180,
+      "marked_hidden": 2072,
+      "native_controls": 20,
+      "role_widgets": 16
+    },
+    "ok": true,
+    "url": "https://www.zendesk.com/contact/",
+    "vendor": "zendesk"
+  }
+}

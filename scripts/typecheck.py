@@ -63,10 +63,10 @@ version is the point — but the optional integration SDKs pull numpy in, and
 numpy's stubs use PEP 695 `type` statements, which are a *syntax* error below
 3.12. mypy cannot parse them and gives up on everything.
 
-Type-check in a `[dev]` environment, which pulls none of them:
+Type-check in a `[dev,mcp]` environment, which pulls none of them:
 
     python -m venv .venv-typecheck
-    .venv-typecheck/bin/pip install -e ".[dev]"
+    .venv-typecheck/bin/pip install -e ".[dev,mcp]"
     .venv-typecheck/bin/python scripts/typecheck.py
 
 The full test suite still needs `[all]`. That is a separate environment, on
@@ -136,7 +136,12 @@ def _venv_python(root: pathlib.Path) -> pathlib.Path:
 
 
 def provision() -> pathlib.Path | None:
-    """A `[dev]` interpreter that can actually run mypy, building one if needed.
+    """A `[dev,mcp]` interpreter that can actually run mypy, building one if needed.
+
+    The `mcp` extra is in there because `mcp.*` is declared
+    `ignore_missing_imports`: without it installed, every annotation in
+    `mcp_server/` resolves to `Any` and mypy reports success over code it did
+    not check. It pulls no numpy, so it does not reintroduce the trap below.
 
     The advice below is correct and was still friction: the environment a
     developer has is `[all]`, because that is what the test suite needs, so
@@ -169,7 +174,7 @@ def provision() -> pathlib.Path | None:
     if have_mypy.returncode != 0:
         root = TYPECHECK_VENV.parent
         installed = subprocess.run(
-            [str(python), "-m", "pip", "install", "-q", "-e", f"{root}[dev]"],
+            [str(python), "-m", "pip", "install", "-q", "-e", f"{root}[dev,mcp]"],
             capture_output=True, text=True,
         )
         if installed.returncode != 0:

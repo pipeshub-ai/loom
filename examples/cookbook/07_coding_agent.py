@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils import header, log, require_env
 
 from loom.agents.coding_agent import WorkflowCodingAgent
+from loom.agents.interaction import CLIUserInteraction
 from loom.agents.providers.anthropic_provider import AnthropicProvider
 
 SPEC = """\
@@ -53,6 +54,10 @@ async def main() -> None:
         # anything else are rejected at validation time rather than failing on
         # someone else's machine.
         allowed_packages={"httpx"},
+        # A person is at the keyboard, so the agent may ask them when the spec
+        # leaves a decision open. A non-TTY stdin answers 'skipped', so a piped
+        # run keeps the behaviour it had before.
+        user_interaction=CLIUserInteraction(),
     )
 
     header("Workflow Coding Agent")

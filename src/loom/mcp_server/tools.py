@@ -316,12 +316,35 @@ async def send_event(
     return _run_json(await facade.get(run_id) or {})
 
 
+def _can_ask(facade: RuntimeFacade, interaction: Any) -> RuntimeFacade:
+    """*facade*, able to put a question to the user through the MCP client.
+
+    A **per-call copy**, never a mutation: ``base_facade`` is bound once when
+    the server is built and is shared by every concurrent request, so setting
+    an interaction on it would hand one client's question to another client's
+    session.
+
+    Silently a no-op when the client declared no ``elicitation`` capability, or
+    when the facade has nowhere to put one — the tool is still offered, because
+    ``author_workflow`` does much more than ask, and the agent simply never
+    sees ``ask_user``.
+    """
+    import dataclasses
+
+    if interaction is None or not getattr(interaction, "available", lambda: False)():
+        return facade
+    if not dataclasses.is_dataclass(facade) or not hasattr(facade, "user_interaction"):
+        return facade
+    return dataclasses.replace(facade, user_interaction=interaction)
+
+
 async def author_workflow(
     facade: RuntimeFacade,
     spec: str,
     packages_json: str = "[]",
     workflow_input_json: str = "",
     observe: bool = True,
+    interaction: Any = None,
 ) -> str:
     """Write a whole workflow from a description, using loom's own agent.
 
@@ -341,6 +364,8 @@ async def author_workflow(
         return _json({"error": f"packages_json is not valid JSON: {exc}"})
     if not isinstance(packages, list):
         return _json({"error": "packages_json must be a JSON array of names"})
+
+    facade = _can_ask(facade, interaction)
 
     workflow_input: Any = None
     if workflow_input_json:

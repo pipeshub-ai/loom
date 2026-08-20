@@ -1,0 +1,21 @@
+{
+  "slug": "protonmail-signup",
+  "source": "https://account.proton.me/signup",
+  "final_url": "https://account.proton.me/signup",
+  "title": "Create a Proton Account | Take back your privacy",
+  "vendor": "proton",
+  "category": "signup",
+  "captured": "2026-08-19",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "bytes": 622725,
+  "counts": {
+    "marked_hidden": 1864,
+    "dropped_nodes": 86,
+    "native_controls": 4,
+    "role_widgets": 76,
+    "buttons": 17
+  }
+}

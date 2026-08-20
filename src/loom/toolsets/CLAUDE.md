@@ -581,6 +581,35 @@ custom fields a project requires, and it is deprecated and observed to drop
 fields it should return. A create that omits a mandatory field is refused by
 name, which is a worse error message and a true one.
 
+**A container is addressed by key, never by the word anybody says, and until
+recently only two of them could be resolved.** The toolset declared resolvers
+for `field` and `user` and for nothing else, so a request naming an *epic* —
+"tickets past due in the saas epic" — had no lookup to call and the coding
+agent wrote `issuetype = Epic AND summary ~ "saas"` inline. That is correct
+Jira and the right shape; `ResolutionStage` flagged it anyway as a fuzzy match,
+and since its escape hatch is "nothing bears that name" — false, an epic did —
+the finding had no passing state. Three repair rounds and eight minutes went
+into rewriting correct code into other spellings of itself.
+
+`jira_resolve_epic` (`resolves="epic"`) and `jira_resolve_project`
+(`resolves="project"`) close it, and the *declaration* is half the value: it is
+what `_where_to_look()` reads to tell the agent what to call, and what
+`ResolutionStage._namespaces()` reads to recognise a query scoped by one. A
+resolver that exists and is not declared is one nothing can find.
+
+**An epic is the awkward container: it *is* an issue.** There is no endpoint
+listing epics, so `resolve_epic` is a JQL search scoped to `issuetype = Epic` —
+the scope is what makes it a resolution rather than the site-wide text match it
+superficially resembles. Pass `project` when known; epic names repeat across
+projects far more than project names repeat. Names reaching JQL go through
+`_jql_literal`, because an epic called `Q3 "stretch" goals` otherwise ends the
+string early and the remainder parses as JQL.
+
+All five lookups share `models.Lookup` — `query`/`exact`/`note` with a typed
+`matches`. The count is load-bearing, not bookkeeping: "nothing bears this
+name" and "several things do" call for opposite responses and a raw filter
+collapses both into zero rows.
+
 **`jira_resolve_user`'s parameter is `name`, which `ctx.step` claims for
 itself** — it is on the known-offenders list in
 `tests/test_manifest_imports.py` and is unreachable by keyword. `jira_resolve_field`

@@ -25,12 +25,14 @@ from loom.core.exceptions import NonRetryableError, WorkflowError
 from loom.toolsets.jira.models import (
     Comment,
     CreatedIssue,
+    EpicLookup,
     FieldLookup,
     JiraField,
     JiraIssue,
     JiraProject,
     JiraProjectDetail,
     JiraUser,
+    ProjectLookup,
     ProjectMetadata,
     Transition,
     UserLookup,
@@ -733,10 +735,178 @@ class JiraClient:
             ),
         )
 
+    async def resolve_project(
+        self, name: str, cutoff: float = 0.6
+    ) -> ProjectLookup:
+        """Resolve a project's spoken name to the key JQL needs.
+
+        The project equivalent of :meth:`resolve_user`. A project has two
+        identifiers a person might say — the key (``ACME``) and the name
+        (``Acme Platform``) — and JQL's ``project =`` accepts either, so an exact
+        hit on one is authoritative and needs no guessing.
+
+        What it protects against is the other case: ``project = "acme"``
+        matches no project, and Jira answers a filter on a nonexistent project
+        with zero issues rather than an error. That is indistinguishable from a
+        project with nothing in it.
+        """
+        import difflib
+
+        wanted = name.strip()
+        folded = wanted.lower()
+        projects = await self.list_projects()
+
+        exact = [
+            p for p in projects
+            if p.key.lower() == folded or p.name.lower() == folded
+        ]
+        if exact:
+            return ProjectLookup(query=wanted, matches=exact, exact=True)
+
+        contains = [p for p in projects if folded in p.name.lower()]
+        if len(contains) == 1:
+            return ProjectLookup(
+                query=wanted,
+                matches=contains,
+                note=(
+                    f"{wanted!r} is not a project key or full name; "
+                    f"{contains[0].name!r} ({contains[0].key}) is the only one "
+                    "containing it."
+                ),
+            )
+        if len(contains) > 1:
+            return ProjectLookup(
+                query=wanted,
+                matches=contains,
+                note=(
+                    f"{len(contains)} projects contain {wanted!r}: "
+                    f"{', '.join(f'{p.name} ({p.key})' for p in contains)}. "
+                    "Pick one before filtering; do not assume the first."
+                ),
+            )
+
+        scored = sorted(
+            (
+                (
+                    difflib.SequenceMatcher(
+                        None, folded, p.name.lower()
+                    ).ratio(),
+                    p,
+                )
+                for p in projects
+            ),
+            key=lambda pair: -pair[0],
+        )
+        close = [p for score, p in scored if score >= cutoff]
+        if not close:
+            return ProjectLookup(
+                query=wanted,
+                matches=[p for _, p in scored[:3]],
+                note=(
+                    f"No project is named {wanted!r}. The closest are "
+                    f"{[p.name for _, p in scored[:3]]} — none close enough to "
+                    "assume. It may name something else: an epic, a board, or "
+                    "a label."
+                ),
+            )
+        return ProjectLookup(
+            query=wanted,
+            matches=close,
+            note=(
+                f"No exact match for {wanted!r}; {close[0].name!r} "
+                f"({close[0].key}) is the closest. Confirm before relying on it."
+            ),
+        )
+
+    async def resolve_epic(
+        self, name: str, project: str = "", max_results: int = 20
+    ) -> EpicLookup:
+        """Resolve an epic's name to its issue key.
+
+        The one container with no endpoint of its own: an epic **is** an issue,
+        so there is nothing to list and the only lookup is a JQL search scoped
+        to the epic issue type. That is what this is — ``issuetype = Epic AND
+        summary ~ <name>`` — and scoping it is what makes it a resolution
+        rather than the free-text guess it superficially resembles. Without
+        that scope the same query searches every issue on the site and returns
+        whatever mentions the word.
+
+        Pass ``project`` when the epic's project is already known: epic names
+        repeat across projects far more than project names repeat, so the
+        scope is usually what makes the answer single.
+        """
+        wanted = name.strip()
+        clauses = ["issuetype = Epic", f"summary ~ {_jql_literal(wanted)}"]
+        if project.strip():
+            clauses.insert(0, f"project = {_jql_literal(project.strip())}")
+        found = await self.search_issues(
+            " AND ".join(clauses) + " ORDER BY updated DESC",
+            max_results=max_results,
+        )
+
+        rows = list(found)
+        exact = [i for i in rows if (i.summary or "").lower() == wanted.lower()]
+        if len(exact) == 1:
+            return EpicLookup(query=wanted, matches=exact, exact=True)
+        if len(exact) > 1:
+            return EpicLookup(
+                query=wanted,
+                matches=exact,
+                exact=True,
+                note=(
+                    f"{len(exact)} epics are named exactly {wanted!r} "
+                    f"({', '.join(i.key for i in exact)}). Pick one — Jira does "
+                    "not require epic names to be unique."
+                ),
+            )
+        if not rows:
+            return EpicLookup(
+                query=wanted,
+                note=(
+                    f"No epic's summary matches {wanted!r}"
+                    + (f" in project {project!r}" if project.strip() else "")
+                    + ". It may name a different kind of container — a project, "
+                    "a board, a label, a component — or it may be subject "
+                    "matter rather than a thing."
+                ),
+            )
+        if len(rows) == 1:
+            return EpicLookup(
+                query=wanted,
+                matches=rows,
+                note=(
+                    f"One epic mentions {wanted!r}: {rows[0].key} "
+                    f"({rows[0].summary!r}). Its name is not exactly the word "
+                    "asked for — confirm it is the one meant."
+                ),
+            )
+        return EpicLookup(
+            query=wanted,
+            matches=rows,
+            note=(
+                f"{len(rows)} epics mention {wanted!r}: "
+                + ", ".join(f"{i.key} ({i.summary})" for i in rows[:5])
+                + ". None is named exactly that, so this is ambiguous — choose "
+                "between them rather than taking the first."
+            ),
+        )
+
 
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+
+def _jql_literal(value: str) -> str:
+    """*value* as a quoted JQL string.
+
+    JQL takes backslash escapes inside double quotes, so a name carrying either
+    character has to be escaped rather than interpolated. Unescaped, a quote
+    ends the string early and the remainder is parsed as JQL — which fails
+    loudly on most inputs and, on the wrong one, silently changes the query.
+    """
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 def _flatten_adf(node: Any) -> str:

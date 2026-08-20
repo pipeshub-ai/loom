@@ -1,0 +1,21 @@
+{
+  "slug": "substack-signup",
+  "source": "https://substack.com/signup",
+  "final_url": "https://substack.com/onboarding?flow=creator_signup",
+  "title": "",
+  "vendor": "substack",
+  "category": "signup",
+  "captured": "2026-08-19",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "bytes": 11819,
+  "counts": {
+    "marked_hidden": 122,
+    "dropped_nodes": 145,
+    "native_controls": 2,
+    "role_widgets": 3,
+    "buttons": 2
+  }
+}

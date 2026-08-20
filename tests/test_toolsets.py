@@ -642,6 +642,17 @@ class TestAwaitingADurableCallIsTyped:
     HEAD = "from loom import Context, workflow\n\n\n"
 
     async def _types(self, body: str) -> list[str]:
+        """Mypy's findings, or a skip when it could not look.
+
+        ``TypeStage`` reports itself skipped when mypy stopped before reaching
+        the file — an environment whose dependencies mypy cannot parse, which
+        this repo hits whenever numpy is installed alongside a 3.11 target.
+        Asserting on an empty result there would test the environment rather
+        than the claim: "a check that cannot run has found nothing, and saying
+        so is not the same as passing".
+        """
+        import pytest as _pytest
+
         from loom.agents.checks import CheckContext
         from loom.agents.stages import TypeStage
 
@@ -653,6 +664,8 @@ class TestAwaitingADurableCallIsTyped:
             f"    {body}\n"
         )
         result = await TypeStage().run(code, CheckContext())
+        if result.skipped:
+            _pytest.skip(result.reason)
         return [issue.message for issue in result.issues]
 
     async def test_returning_the_text_is_clean(self) -> None:

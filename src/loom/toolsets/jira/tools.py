@@ -27,12 +27,14 @@ from loom import Retry, step
 from loom.toolsets.jira.models import (
     Comment,
     CreatedIssue,
+    EpicLookup,
     FieldLookup,
     JiraField,
     JiraIssue,
     JiraProject,
     JiraProjectDetail,
     JiraUser,
+    ProjectLookup,
     ProjectMetadata,
     Transition,
     UserLookup,
@@ -317,6 +319,58 @@ async def jira_resolve_user(name: str) -> UserLookup:
 
 
 @step(retry=Retry(max_attempts=3, initial_delay=1.0))
+async def jira_resolve_project(project_name: str) -> ProjectLookup:
+    """Resolve a project's spoken name to the key JQL needs.
+
+    A project has two identifiers a person might say — the key (``PA``) and the
+    name (``Acme Platform``) — and ``project =`` accepts either, so call this
+    before filtering on whichever one the request used. Jira answers a filter
+    on a project that does not exist with zero issues and no error, which reads
+    as an empty project rather than a bad filter.
+
+    Args:
+        project_name: A project key, a project name, or part of one.
+
+    Returns:
+        ProjectLookup with matches, exact, and note. More than one match means
+        ambiguous, not "take the first".
+    """
+    from loom.toolsets.jira.client import get_default_client
+
+    return await get_default_client().resolve_project(project_name)
+
+
+@step(retry=Retry(max_attempts=3, initial_delay=1.0))
+async def jira_resolve_epic(epic_name: str, project: str = "") -> EpicLookup:
+    """Resolve an epic's name to its issue key.
+
+    Use this whenever a request names an epic — "the billing epic", "the search
+    epic". An epic is addressed in JQL by its issue key (``ACME-42``), never by
+    the word anybody says, and the two are joined by nothing.
+
+    An epic is the awkward container: it *is* an issue, so there is no endpoint
+    listing epics and no way to look one up except a JQL search scoped to the
+    epic issue type. That is what this does. Doing it inline instead — matching
+    ``summary ~ "saas"`` across every issue — searches the whole site and
+    returns whatever mentions the word.
+
+    Args:
+        epic_name: The epic's name as a person said it.
+        project: Project key to search within, when it is known. Epic names
+            repeat across projects, so this is usually what makes the answer
+            single. Resolve it first with jira_resolve_project.
+
+    Returns:
+        EpicLookup with matches, exact, and note. Filter on
+        ``matches[0].key`` only when exactly one matched; hand several to a
+        ctx.agent() step to choose between.
+    """
+    from loom.toolsets.jira.client import get_default_client
+
+    return await get_default_client().resolve_epic(epic_name, project)
+
+
+@step(retry=Retry(max_attempts=3, initial_delay=1.0))
 async def jira_list_fields(
     query: str = "", max_results: int = 200
 ) -> Results[JiraField]:
@@ -514,6 +568,9 @@ Three things that make a JQL query return nothing rather than fail:
     exist, so an empty result can be told apart from a wrong guess.
   - People are addressed by accountId. Resolve a name with
     jira_search_users first.
+  - Containers are addressed by key, never by the word anybody says. "the
+    billing epic" is ACME-42 and "Acme Platform" is ACME. Resolve with
+    jira_resolve_epic / jira_resolve_project before filtering — see below.
   - Custom fields have two names and neither is the one on screen. Resolve
     with jira_resolve_field before using one anywhere — see below.
 
@@ -640,6 +697,31 @@ jira_list_projects() -> list[JiraProject]
   JiraProject fields: {_fields(_JiraProject)}
     projects = await ctx.step(jira_list_projects)
     for p in projects: print(p.key, p.name)
+
+jira_resolve_project(project_name: str) -> ProjectLookup
+  Resolve a project's spoken name to its key. "project = Acme Platform"
+  matches no project, and Jira answers with zero issues and no error — which
+  reads as an empty project rather than a bad filter.
+    found = await ctx.step(jira_resolve_project, "Acme Platform")
+    if len(found.matches) == 1:
+        key = found.matches[0].key          # "ACME"
+
+jira_resolve_epic(epic_name: str, project: str = "") -> EpicLookup
+  Resolve an epic's name to its issue key. Call this for any request naming
+  an epic. An epic IS an issue, so there is no endpoint listing epics and no
+  lookup but this one — writing 'summary ~ "billing"' inline instead
+  searches every issue on the site and returns whatever mentions the word.
+    found = await ctx.step(jira_resolve_epic, "billing", "ACME")
+    if len(found.matches) == 1:
+        epic = found.matches[0].key         # "ACME-42"
+    elif found.matches:
+        # Several. Ambiguous — choose, do not take the first.
+        epic = await ctx.agent(f"Which epic is 'billing'? {{found.note}}")
+  Then filter on the key, never on the name:
+    issues = await ctx.step(
+        jira_search_issues,
+        f'parentEpic = {{epic}} AND duedate < now()',
+    )
 
 jira_resolve_user(name: str) -> UserLookup
   Find a person by name, tolerating a misspelling. Prefer this when the

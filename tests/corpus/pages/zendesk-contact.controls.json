@@ -1,0 +1,20 @@
+{
+  "slug": "zendesk-contact",
+  "source": "https://www.zendesk.com/contact/",
+  "labelled_by": "claude",
+  "labelled_from": "zendesk-contact.png",
+  "flow": "contact sales: fill name, work email, message, country, then send",
+  "note": "A 'Contact Sales' chat panel is open bottom-right and repeats First name / Last name / Work Email. Whether that duplicates the accessible names is exactly what the measurement should report, so it is deliberately not worked around here.",
+  "controls": [
+    {"purpose": "first name field",    "role": "textbox",  "name": "First name",   "visible_label": true, "required_for_flow": true},
+    {"purpose": "last name field",     "role": "textbox",  "name": "Last name",    "visible_label": true, "required_for_flow": true},
+    {"purpose": "work email field",    "role": "textbox",  "name": "Work Email",   "visible_label": true, "required_for_flow": true},
+    {"purpose": "message body",        "role": "textbox",  "name": "Message",      "visible_label": true, "required_for_flow": true},
+    {"purpose": "country selector",    "role": "combobox", "name": "Country",      "visible_label": true, "required_for_flow": true},
+    {"purpose": "submit the form",     "role": "button",   "name": "Send message", "visible_label": true, "required_for_flow": true},
+    {"purpose": "open the sales chat", "role": "button",   "name": "Contact Sales","visible_label": true, "required_for_flow": false},
+    {"purpose": "privacy notice link", "role": "link",     "name": "Zendesk Privacy Notice", "visible_label": true, "required_for_flow": false},
+    {"purpose": "start a free trial",  "role": "link",     "name": "Try it for free", "visible_label": true, "required_for_flow": false},
+    {"purpose": "go to pricing",       "role": "link",     "name": "Pricing",      "visible_label": true, "required_for_flow": false}
+  ]
+}

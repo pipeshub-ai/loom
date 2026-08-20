@@ -1,0 +1,21 @@
+{
+  "slug": "fastmail-signup",
+  "source": "https://www.fastmail.com/signup/",
+  "final_url": "https://app.fastmail.com/signup/",
+  "title": "Fastmail",
+  "vendor": "fastmail",
+  "category": "signup",
+  "captured": "2026-08-19",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "bytes": 17041,
+  "counts": {
+    "marked_hidden": 31,
+    "dropped_nodes": 69,
+    "native_controls": 4,
+    "role_widgets": 8,
+    "buttons": 2
+  }
+}

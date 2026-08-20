@@ -59,6 +59,7 @@ class NodeCategory(StrEnum):
     CONTROL = "control"
     TRANSFORM = "transform"
     IO = "io"
+    BROWSER = "browser"
     AGENT = "agent"
     CUSTOM = "custom"
 
@@ -72,6 +73,7 @@ CATEGORY_BLURBS: dict[NodeCategory, str] = {
     NodeCategory.CONTROL: "flow shaping — branch, switch, filter, dedupe, batch",
     NodeCategory.TRANSFORM: "pure data work — map_fields, template, extract, redact",
     NodeCategory.IO: "typed external effects — http, webhook_wait, emit",
+    NodeCategory.BROWSER: "drive a web page — navigate, snapshot, act, extract",
     NodeCategory.AGENT: "judgement — classify, extract_structured, summarize, judge",
     NodeCategory.CUSTOM: "registered by this project",
 }

@@ -3,7 +3,7 @@
 **Unit** — each capability function against a real ``LocalFacade``, with no
 ``mcp`` import anywhere. This is the layer that would catch a logic bug.
 
-**Integration** — a real ``FastMCP`` instance driven in process: does it
+**Integration** — a real ``MCPServer`` instance driven in process: does it
 register everything, are the schemas derived from the signatures, does calling a
 tool reach the facade.
 
@@ -386,7 +386,7 @@ class TestSchemaBudget:
     async def test_total_tool_schema_size_stays_under_budget(self, server) -> None:
         registered = await server.list_tools()
         total = sum(
-            len(t.name) + len(t.description or "") + len(json.dumps(t.inputSchema))
+            len(t.name) + len(t.description or "") + len(json.dumps(t.input_schema))
             for t in registered
         )
         assert total <= self.MAX_TOTAL_SCHEMA_CHARS, (
@@ -445,7 +445,7 @@ class TestPromptsUnit:
 
 
 # ---------------------------------------------------------------------------
-# Integration — a real FastMCP instance
+# Integration — a real MCPServer instance
 # ---------------------------------------------------------------------------
 
 
@@ -482,7 +482,7 @@ class TestScheduler:
         facade = LocalFacade(runtime)
         server = build_server(facade)
 
-        async with server._mcp_server.lifespan(server._mcp_server):
+        async with server._lowlevel_server.lifespan(server._lowlevel_server):
             started = parsed(await tools.run_workflow(facade, "napper", "0.5"))
             assert started["status"] == "suspended"
 
@@ -513,12 +513,34 @@ class TestScheduler:
 
 
 class TestServerRegistration:
-    async def test_bind_address_reaches_fastmcp(self, facade: LocalFacade) -> None:
-        """The networked transports are unusable if these do not land."""
+    async def test_bind_address_reaches_the_transport(self, facade: LocalFacade) -> None:
+        """The networked transports are unusable if these do not land.
+
+        They were constructor arguments until mcp 2.0 moved them to the run
+        call, so this asserts against `loom_transport` rather than the SDK's
+        `settings`. The guarantee is unchanged and worth keeping pinned: what
+        makes a dropped bind address dangerous is that nothing fails — the
+        server starts, listens somewhere else, and the client simply never
+        connects.
+        """
         from loom.mcp_server import build_server
 
         built = build_server(facade, host="0.0.0.0", port=8931)
-        assert (built.settings.host, built.settings.port) == ("0.0.0.0", 8931)
+
+        assert (built.loom_transport.host, built.loom_transport.port) == ("0.0.0.0", 8931)
+        assert built.loom_transport.run_kwargs() == {"host": "0.0.0.0", "port": 8931}
+
+    async def test_transport_security_is_omitted_rather_than_none(
+        self, facade: LocalFacade
+    ) -> None:
+        """Passing `transport_security=None` explicitly is not the same as not
+        passing it: the SDK derives its own default for a loopback bind, and an
+        explicit `None` would tell it there is none to apply."""
+        from loom.mcp_server import build_server
+
+        built = build_server(facade)
+
+        assert "transport_security" not in built.loom_transport.run_kwargs()
 
     def test_the_cli_passes_host_and_port_through(self) -> None:
         from loom.cli import build_parser
@@ -556,9 +578,9 @@ class TestServerRegistration:
             "get_tool_docs",
             "validate_workflow_code",
         ):
-            assert by_name[name].annotations.readOnlyHint is True, name
+            assert by_name[name].annotations.read_only_hint is True, name
         for name in ("run_workflow", "cancel_run", "save_workflow"):
-            assert by_name[name].annotations.readOnlyHint is False, name
+            assert by_name[name].annotations.read_only_hint is False, name
 
     async def test_all_tools_are_registered(self, server) -> None:
         names = {tool.name for tool in await server.list_tools()}
@@ -593,8 +615,11 @@ class TestServerRegistration:
         }
 
     async def test_every_tool_has_annotations(self, server) -> None:
-        """FastMCP 1.26+ hints — readOnly/destructive/idempotent/openWorld —
-        that let a client reason about risk before calling a tool."""
+        """The SDK's hints — read_only / destructive / idempotent /
+        open_world — that let a client reason about risk before calling a
+        tool. Spelled camelCase through mcp 1.x; 2.0 made the field names
+        snake_case and kept the old spellings as construction-time aliases,
+        so writing them still works and *reading* one does not."""
         for tool in await server.list_tools():
             assert tool.annotations is not None, tool.name
 
@@ -607,7 +632,7 @@ class TestServerRegistration:
         """Hand-written schemas drift from the code; derived ones cannot."""
         by_name = {tool.name: tool for tool in await server.list_tools()}
 
-        run = by_name["run_workflow"].inputSchema
+        run = by_name["run_workflow"].input_schema
         assert set(run["properties"]) == {
             "workflow",
             "input_json",
@@ -615,12 +640,12 @@ class TestServerRegistration:
         }
         assert run["required"] == ["workflow"]
 
-        approve = by_name["approve_run"].inputSchema
+        approve = by_name["approve_run"].input_schema
         assert approve["properties"]["approved"]["type"] == "boolean"
 
     async def test_resources_and_templates(self, server) -> None:
         direct = {str(r.uri) for r in await server.list_resources()}
-        templates = {t.uriTemplate for t in await server.list_resource_templates()}
+        templates = {t.uri_template for t in await server.list_resource_templates()}
 
         assert direct == {"loom://workflows"}
         assert templates == {
@@ -729,8 +754,14 @@ class TestServerCalls:
 
 
 def _text_of(result) -> str:
-    """The text payload of a tool result, across SDK return shapes."""
-    blocks = result[0] if isinstance(result, tuple) else result
+    """The text payload of a tool result, across SDK return shapes.
+
+    mcp 2.0 wraps what 1.x returned bare: ``call_tool`` hands back a
+    ``CallToolResult`` carrying ``.content`` (and ``.structured_content``)
+    rather than the content sequence itself.
+    """
+    blocks = getattr(result, "content", result)
+    blocks = blocks[0] if isinstance(blocks, tuple) else blocks
     if isinstance(blocks, list | tuple):
         return blocks[0].text
     return str(blocks)
@@ -800,7 +831,7 @@ class TestStdioEndToEnd:
             ClientSession(read, write) as session,
         ):
             init = await session.initialize()
-            assert init.serverInfo.name == "loom"
+            assert init.server_info.name == "loom"
 
             names = {t.name for t in (await session.list_tools()).tools}
             assert "run_workflow" in names

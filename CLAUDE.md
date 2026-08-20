@@ -78,7 +78,7 @@ cleanup path that cannot itself be interrupted is a hang with extra steps.
 
 `guarded()` covers a command's event loop and `terminate_on()` the windows
 outside one — argument parsing, and the commands that never open a loop. The
-servers keep their own handling: uvicorn and FastMCP install their own handlers,
+servers keep their own handling: uvicorn and `MCPServer` install their own handlers,
 and `serve`/`mcp` exit `0` on either signal, because a server asked to stop and
 which stopped has succeeded. Nothing is installed by importing the module — a
 library that seizes the process's signal handlers is one you cannot embed.
@@ -137,7 +137,7 @@ the graph by accident, via the registry catch-all that put it in every flow.
 
 `loom mcp` (`[mcp]` extra) serves the same Runtime to Claude Code, Claude
 Desktop, and Cursor over the Model Context Protocol, built on the official SDK's
-`FastMCP`. `--transport` picks `stdio` (default), `http`, or `sse`. Under stdio,
+`MCPServer`. `--transport` picks `stdio` (default), `http`, or `sse`. Under stdio,
 **stdout is the protocol channel** — anything printed there corrupts the session,
 so status goes to stderr.
 
@@ -145,6 +145,30 @@ so status goes to stderr.
 loom setup claude          # or cursor, codex, all — writes the client's MCP config
 claude mcp add loom -- loom mcp --module flows.py   # the same thing by hand
 ```
+
+**The SDK is mcp 2.x — `mcp>=2.0,<3`.** 2.0
+removed `mcp.server.fastmcp` outright — `FastMCP` became `MCPServer` in
+`mcp.server.mcpserver` — so no release satisfies both shapes and there is
+nothing to be compatible across. The ceiling is closed on purpose: an open one
+is what let 2.0 land as a silent breaking change, and `phases/phase-9-mcp-server.md`
+had prescribed `<3.0` before it did. `host`, `port` and `transport_security` moved
+with it, from the constructor to the run call, which is the more honest place:
+where a server binds is a property of serving it, not of the tool registry.
+`build_server` still accepts them, records them on the built server as
+`TransportOptions`, and `serve` hands them to `run` — dropping the parameters
+would let `loom mcp --host` parse cleanly and bind somewhere else.
+
+The old `mcp>=1.2` was wrong at both ends and silently: 2.0 is current, so a
+fresh install resolved to a version LOOM could not import, and nothing below
+1.14 ever worked either — mcp's own tool registration calls `issubclass()` on a
+union annotation and registers nothing. Neither end is findable by probing
+imports; every symbol LOOM uses resolves back to 1.12.3.
+
+**`mcp` is in the type-check environment** (`[dev,mcp]`), because `mcp.*` is
+declared `ignore_missing_imports` — so without the extra installed, mypy checks
+the ~900 lines of `mcp_server/` against `Any` and reports success. Switching it
+on found two real errors immediately. It pulls no numpy, so the reason the gate
+runs on `[dev]` and not `[all]` is untouched.
 
 **One port, two clients.** `loom/facade.py` defines `RuntimeFacade`,
 the protocol the CLI and the MCP server both depend on, with `LocalFacade`
@@ -400,7 +424,7 @@ Detailed implementation plans are in `phases/`. Each file includes HLD, LLD, int
 - **`phases/phase-10-agent-framework-integrations.md`** — Bi-directional adapters for LangGraph, CrewAI, Pydantic AI, OpenAI Agents SDK, Claude SDK, Agno, AutoGen; conformance suite
 - **`phases/phase-11-testing-dx.md`** — Property-based tests (Hypothesis), chaos tests, CI pipeline, interactive playground, quickstart scaffolding, actionable error diagnostics
 - **`phases/phase-12-effect-classification.md`** — Derived `EffectProfile`, `schema_version` gate, taint keyed on `open_world`, reversibility and access-control facets, MCP annotations projected rather than hand-written, third-party conformance kit
-- **`phases/phase-13-browser-automation.md`** — `BrowserProvider`/`BrowserSession` ports, the journal as the action cache, declared act effects feeding taint, `SessionScope.STEP` vs `DURABLE`, drift repaired for reads and refused for writes, probe snapshots as smoke fixtures
+- **`phases/phase-13-browser-automation.md`** — `BrowserProvider`/`BrowserSession` ports over Playwright only (AGPL and `==`-pinned libraries audited out), three-tier element resolution with no model in tier 0, the journal as the action cache, declared act effects feeding taint, `SessionScope.STEP` vs `DURABLE`, probe snapshots as smoke fixtures
 
 ### Key Design Principles
 
@@ -495,7 +519,7 @@ own calls journal beneath the node's path via `ctx.nested()`, and a node that
 parks raises `Suspend` exactly as `ctx.wait_for_approval` does. Deleting
 `loom/nodes/` could not change how an existing workflow replays.
 
-Seven categories, and the split between `control`/`transform` and `agent` is the
+Eight categories, and the split between `control`/`transform` and `agent` is the
 "code or judgement" rule made structural: `control.switch` is a rule you can
 write today, `agent.classify` is judgement.
 
@@ -506,6 +530,7 @@ write today, `agent.classify` is judgement.
 | `control` | switch, filter, dedupe, batch, throttle |
 | `transform` | map_fields, template, extract, join, redact |
 | `io` | http_request, wait_for_webhook |
+| `browser` | navigate, snapshot, observe, act, extract |
 | `agent` | classify, extract_structured, summarize, judge |
 | `custom` | whatever you register |
 
@@ -1273,6 +1298,12 @@ ordinary data is one people switch off.
 `Runtime(redact_keys=…)` widens it; an empty set records inputs verbatim, as
 every version before this did.
 
+**A browser's `storage_state` is on the list**, because it is an authenticated
+session in a JSON blob and travels as an ordinary field. `storage_ref` is not —
+it names where the jar is kept rather than what is in it, which is the half a
+person reading a trace actually needs, the same split `io.http_request` makes
+between `connection` and `credential`.
+
 **A run's own input is redacted at the display boundary, not at rest** —
 `describe_record`, beside `_public_metadata` — because that value *is* replayed:
 the body receives it on every re-entry, so redacting it in storage would change
@@ -1352,6 +1383,166 @@ the caller — who does not know which providers need it — is not asked to.
 `MockEmbeddings` is deterministic and **not a model**: it hashes, so "cat" and
 "kitten" are as far apart as "cat" and "tax law". A test asserting semantic
 similarity would pass or fail on hash luck; assert on exact text.
+
+### Driving a web page
+
+`Runtime(browser=LocalBrowserProvider())`, then `ctx.node("browser.navigate")`,
+`browser.act`, `browser.snapshot`, `browser.extract`. **LOOM ships no browser
+infrastructure** — two Protocols in `loom/browser/`, one reference provider over
+Playwright, a fake for offline tests, and `verify_browser_session` so a host
+proves its own Browserbase or Kernel adapter. Same position `loom/knowledge/`
+takes about vector databases, for the same reason.
+
+The audit that decided the shape is in `phases/phase-13-browser-automation.md`
+§2.2, and two of its findings are worth carrying: **Skyvern and `workflow-use`
+are AGPL-3.0** (and `workflow-use` is AGPL while `browser-use` itself is MIT, so
+the org's licence is not a guide), and **`browser-use` pins ~40 packages with
+`==`** including `pydantic==2.12.5` against LOOM's `pydantic>=2.0`. Excellent
+adapter, unusable dependency. `tests/test_dependency_licences.py` is that audit
+as a gate, because the reasoning is worthless the first time somebody adds a
+convenient dependency without repeating it. `[browser]` is the extra
+`BrowserProbe` already needed, so this phase added no dependency; `[stealth]` is
+`patchright`, opt-in.
+
+**A control is addressed by role and accessible name, never by a selector.**
+`Target(role="button", name="Confirm")`. A CSS path is an escape hatch tried
+last: it is right on the render it was read from and silently wrong later,
+failing by matching nothing rather than by erroring.
+
+**Two matches raise.** `AmbiguousTarget`, and refusing is the feature — picking
+one is how an automation clicks the wrong control and reports success. A caller
+who knows a page repeats a control says so with `Target.ordinal`.
+
+**The journal is the action cache.** Stagehand and Skyvern each build a bespoke
+one; `DurableCall._resolve` serves a completed entry before the broker, so a
+replayed browser flow resolves nothing and clicks nothing. That is a test, not
+an implementation.
+
+**Resolution is a dial, and tier 0 has no model in it.** `get_by_role(role,
+name)` exact, then substring, then the same name under any role, then
+`get_by_placeholder`, then `get_by_label`. The last two are the corpus's finding
+rather than a guess: the dominant real failure is not a control the tree fails
+to name, it is one the tree names *differently from the text on screen*, because
+`aria-label` overrides `placeholder` — substack shows "Your email" and is named
+"Email", kayak shows "To?" and is named "Destination location". Tier 1 (a model
+over the tree) and tier 2 (a specialist provider) arrive in 13.2.
+
+`tests/corpus/` measures that claim: 10 frozen real pages, 114 hand-labelled
+controls, **76%**, deterministic, offline. Labels are written from the
+*screenshot* and never from the DOM — deriving them from the tree would measure
+the tree against itself. Wikipedia is in there as a control fixture with a known
+expected score, and it earned its place immediately: it scored 47% on the first
+run, which is not a believable statement about Wikipedia, and the defect was the
+capture treating `opacity: 0` as hidden. `<input class=visually-hidden>` beside
+a styled `<label>` is how every design system builds a custom radio, so that one
+mistake was suppressing those controls on every page at once.
+
+**The effect of an act is declared, never inferred.** `ctx.node("browser.act",
+{..., "effect": "write"})`. `click "Next"` and `click "Confirm booking"` are the
+same shape, and a keyword list over the target name is the guess
+`DEFAULT_SYSTEM_PROMPT` names as the tell for a rule nobody should write. WRITE
+is the default and is a **fail-safe backstop, not a classification** — the
+position `OperationSpec.effect` takes. That one field is what makes `TaintBroker`
+work on browser flows with no browser-specific line in `runtime/`: navigating is
+an open-world READ, so it taints, and a WRITE act after it is refused without a
+person.
+
+**Two shipped bugs that fix found**, both worth knowing because they were the
+same shape — a control that reads as enforcing something and enforced nothing.
+`_effect_arguments` returned `{}` for a Pydantic model, so `effect_by` was dead
+for **every** node and `io.http_request(method="DELETE")` reached the broker as
+WRITE rather than DESTRUCTIVE. And an inline `ctx.call` carried no
+classification, so a node's own I/O was an unclassified WRITE — a `GET` node
+dispatched READ at the node and WRITE at its inner call. `call` now inherits the
+enclosing node's resolved class and target; `step` does not, because it names a
+function that may carry its own from a manifest.
+
+**Drift: repair a read, refuse a write.** Every browser agent in this space
+self-heals a broken selector and carries on. That is right for navigation and
+dangerous for a submit — a plan that silently changed under an effectful action
+is how one confirms the wrong reservation. `DriftPolicy.AUTO` keys on the effect
+already declared, so the safe behaviour is what a caller gets by not thinking
+about it. `browser.act` re-aims from `intent` only for a READ; a WRITE raises
+`SelectorDrift`.
+
+**`browser.observe` turns "the confirm button" into a target without clicking
+it.** Tier 0 first — an exact accessible-name match costs no model call at all —
+and only an ambiguous or empty result reaches tier 1, where a model picks from
+the page's own controls and so cannot invent a target. `ObserveOut.tier` records
+which answered, so "did tier 0 suffice" is read off the journal.
+
+**`scope="durable"` is what lets a run park on a person mid-flow.** Under
+`SessionScope.STEP` the browser dies when the body exits — so an approval, which
+parks the run, ends the session, and the taint rule's own escape hatch becomes
+unreachable. A durable session is **released at body exit, never closed**: a run
+parked two hours must still have its browser when the person answers. Its
+lifetime is the provider's (every hosted vendor expires sessions on a TTL), and
+`browser.close` ends one deliberately. Refused outright by a provider whose
+`supports()` omits `reattach` — never downgraded.
+
+**The session is a value the workflow carries, not Runtime state.**
+`browser.navigate` returns a `SessionRef`; pass it to later `browser.*` calls.
+On re-entry it is served **from the journal** like any other recorded value, so
+a resumed run learns which browser it had with no side table in the engine — and
+code that acts on a session it did not navigate reads as wrong, because it is.
+`HumanRequest.live_view_url` carries the takeover link, threaded explicitly from
+`page.session.live_view_url` so a human node stays independent of whether a
+browser exists at all.
+
+**A deadlock this found in the shipped taint rule.** Every `human.*` node is
+`WRITE` and `open_world` — both accurate — so a tainted run could not reach the
+person whose approval is *the only thing that clears the taint*. The rule
+blocked its own exit. `EffectCall.asks_human` now carries it, derived from
+`requires=["human_channel"]` rather than a name match. It had two halves and
+fixing one looked identical to fixing neither: the node call and the `deliver:`
+call inside it, which inherits the node's classification.
+
+**A session lives exactly as long as one execution of the body** — opened by the
+first `navigate`, closed by the engine however the body exits, including on
+failure. After a crash the journal serves the earlier calls and the next live
+one finds no browser: that is **refused**, not guessed. A fresh browser is not
+where the flow left off, and re-running the recorded navigations would repeat
+effects silently. `SessionLost` names both ways out — put the flow in one
+`ctx.step`, or use a provider whose `supports()` includes `reattach`.
+`SessionScope.DURABLE` against a provider that cannot honour it raises at open,
+the rule `ExecutionSandbox.enforces` already sets.
+
+### Authoring a browser workflow
+
+`docs/guides/browser-automation.md` is the walkthrough; every snippet on it
+compiles and resolves in CI. The coding agent gets a browser block in
+`DEFAULT_SYSTEM_PROMPT` — check for an API first, address by role and name,
+`ordinal` when a page repeats a control, declare the effect, `scope="durable"`
+whenever a wait sits mid-flow.
+
+Two stages check what the prompt failed to prevent, and both are asserted **in
+both directions**. The second is the one that matters: a stage firing on correct
+code is worse than no stage, because the repair loop acts on `report.errors` and
+will rewrite working code to silence it — the reasoning the redaction denylist
+already follows. `SelectorStage` is pinned against ordinary strings (`"Party
+size"`, `"#urgent #billing"`, `"name > 5"`) as well as real selectors, and the
+whitespace descendant combinator is keyed on a `.class` sigil because `#a #b` is
+two hashtags.
+
+`BrowserEffectStage` reports an `act` with no declared effect as a **warning**
+(the code is correct, merely unclassified) and a declared write with no approval
+anywhere in the file as an **error** — under the default policy that run cannot
+reach the write at all, so it is code that will not do what it says. Error
+rather than warning for the reason `OutcomeStage` already uses: the repair loop
+reads `report.errors`, and unchanged code ends the repair, so a model that
+judges the finding wrong says so by leaving the file alone.
+
+**`BrowserProbe`'s census carries role and accessible name** in the same shape
+`PageSnapshot.tree` uses, so an authoring observation is directly usable as a
+smoke fixture — the page the agent looked at is the page its code is tested
+against, with no parallel fixture set to drift. Its summary reports `15/18
+addressable by name`, and says so explicitly when nothing is: that sentence
+decides whether a role-and-name target can drive the page at all.
+
+**Smoke installs `FakeBrowserProvider(permissive=True)`**, for the reason
+`AutoRespondChannel` exists — without it a generated browser workflow can only
+reach a connection error, and the cheapest repair for an error a model cannot
+fix is to delete the browser work.
 
 ### Reading a document
 
@@ -1555,6 +1746,37 @@ guess about what someone meant. `ResolutionStage` catches both by flagging a
 match operator whose operand came from the spec; an exact comparison is left
 alone, because `status = "In Progress"` is a plausible resolved value.
 
+**But a match that names its namespace is a search, not a guess**, and reading
+only the operand made the two identical. `summary ~ "saas"` and `issuetype =
+Epic AND summary ~ "saas"` differ by the clause the check discarded — and the
+second is the ladder *followed*, because for an entity whose service exposes no
+other lookup it is the only lookup there is: a Jira epic is an issue, so there
+is no epic endpoint to call instead. That left the finding with **no passing
+state**. Its escape hatch is "nothing bears that name", which is false when
+something does, so every repair round rewrote correct code into another
+spelling of itself — three rounds and eight minutes, on an error the model
+could not act on.
+
+`FuzzyMatch` now carries the query's other clauses as `scope`, and severity
+keys on it: unscoped stays an **error**, namespace-scoped drops to a
+**warning**, which does not reach `report.errors` and so ends the repair. The
+warning is still worth printing, because a name search can match two rows and
+taking the first is the same guess one step later.
+
+**Which words name a namespace is read from `manifest.resolvers()`, never a
+list in the agent layer** — the position `opaque_ids` already takes. A toolset
+declaring `resolves="board"` teaches the check about boards with no change to
+`stages.py`, and `status = Open AND text ~ "saas"` stays an error because
+`status` is a field nobody declares a resolver for. With no registry the
+vocabulary is empty and every match is unscoped, which is exactly the behaviour
+that shipped before — the fallback errors, so it must be reached only by there
+being no registry at all.
+
+The other half was the toolset's: Jira declared resolvers for `field` and
+`user` and for none of the *containers* the message told the model to go
+search. Advice pointing at a resolver that does not exist is advice with no
+move behind it. See `src/loom/toolsets/CLAUDE.md`.
+
 **Nor is a remembered identifier**, which is the same failure one step later:
 `customfield_10016` or `C024BE91L` differs per account, so one nobody looked up
 is right somewhere else and silently wrong here. Baking an id in is *correct* —
@@ -1665,6 +1887,79 @@ be spending someone else's budget. `AuthorizedFacade` gates it on
 `workflows:author`, its own scope rather than `workflows:publish`, because
 authoring spends tokens and reaches out, neither of which is implied by being
 trusted to publish code somebody has already read.
+
+**The agent can ask you a question.** `ask_user` (`loom/agents/interaction.py`,
+designed in `phases/phase-14-asking-the-user.md`) is offered when the surface
+composes a `UserInteraction` **and something can actually answer** — a
+capability, not a timeout, because a tool that is offered and cannot be
+answered blocks until it gives up while a tool that is never offered costs
+nothing. Absence omits it entirely rather than offering one that answers "not
+configured", the rule `observe_target` follows. `AskUserGate` caps the budget
+in *questions* (so batching cannot buy more) and switches asking off before
+repair and smoke, so CI cannot deadlock.
+
+Three transports, one protocol. `CLIUserInteraction` reads stdin and writes
+**stderr** — load-bearing, since under `loom mcp --transport stdio` stdout is
+the protocol channel — and reports itself unavailable on a non-TTY.
+`ElicitationUserInteraction` is how a *server* asks: never by reading stdin,
+but through the client over MCP `elicitation/create`, gated on the client
+having declared the capability. `RecordedUserInteraction` replays an answer
+file. A per-call `dataclasses.replace` gives the MCP tool its own facade, since
+`base_facade` is shared by every concurrent request and mutating it would hand
+one client's question to another client's session.
+
+**One call carries up to four questions.** Asking one per turn costs a round
+trip each and pulls the person back to the terminal once per ambiguity. A
+question is a `select` where the choices are known, its preferred option is
+marked `recommended` and rendered first, and an off-list answer is accepted
+unless `allow_other=False` — a closed list is a claim about the answer space,
+and the agent built its list from a lookup that may have missed.
+
+**Three outcomes, not two, and they are MCP's own enum** rather than a local
+one mapped at the boundary. `accept` is an answer. `decline` is *you decide* —
+it carries the recommendation, so pressing Enter is a usable answer rather than
+an abandoned question. `cancel` is *nobody was there*, and falls back to
+`ctx.agent()` so the decision moves to run time. Collapsing the last two is
+what made a five-minute silence look like a considered "proceed".
+
+**The answers are recorded, and that is the part nobody else does.**
+`CodingResult.questions` carries every question and its answer, `loom author
+--save-answers` writes them and `--answers` replays them, keyed by a content
+hash of the question *and its choices* — so a question whose options moved is
+asked again rather than answered from a stale record. Without this a workflow
+authored with human answers could not be regenerated: the answers are inputs to
+a build, and an unrecorded build input is the one thing this repository refuses
+everywhere else. It is also why the recording shipped *with* the asking rather
+than after it — this phase makes the agent more likely to ask, so shipping one
+without the other would have made CI worse. `--no-ask` is the explicit
+non-interactive switch.
+
+It sits on `LocalFacade` and not on `RuntimeFacade.author`, unlike everything
+else the port carries: an interaction is an object rather than a payload, so it
+could not cross `RemoteFacade` — which already refuses to author at all, for
+the reason above it.
+
+**What it changes is rung 3 of the resolution ladder**, and only when it is
+wired. Two candidates from a lookup covers two different situations that the
+ladder used to answer the same way. A name the *spec* supplied — "the saas
+epic", two epics returned — has one answer that does not vary between runs, so
+it is a question for the person who wrote the spec and the answer is baked in
+as rung 2 does. A value that *arrives as workflow input* cannot be answered at
+authoring time by anyone, and that is what `ctx.agent()` is for. Emitting an
+agent node for the first kind puts a model call into every run to re-answer a
+question a person could settle once — the argument the prompt already makes
+about lookups, applied to the ambiguity a lookup reports. Observed: the agent
+asked *"Which epic did you mean by 'saas epic'?"* as a `select`, wrote
+`epic_key = "PA-1769"` with the alternative recorded in a comment, and emitted
+no `ctx.agent()` at all.
+
+`tests/test_ask_user_wiring.py` is the gate, and the defect it was written for
+is the reason it tests seams rather than units: `interaction.py` shipped
+complete and fully unit-tested, and **no caller passed it in** — so
+`CLIUserInteraction` was unreachable and `ask_user` was a tool no model was
+ever offered. A capability nobody wires is indistinguishable from one nobody
+wrote, and a module's own tests cannot tell the difference, because they
+construct the thing themselves.
 
 `loom.agents.providers.from_env()` is the one place that maps `ANTHROPIC_API_KEY`
 / `OPENAI_API_KEY` / `GEMINI_API_KEY` to a provider; the Runtime's agent backend
@@ -1777,9 +2072,11 @@ the stages. They run cheapest-first and stop at the first blocking error:
 | `projection` | 18 | no | a durable call the graph does not draw |
 | `catalogue` | 19 | no | a step re-implementing a catalogued node |
 | `identifiers` | 18 | no | an opaque vendor id nothing looked up |
+| `selectors` | 18 | no | a CSS/XPath address in a browser workflow |
+| `browser-effect` | 19 | no | an undeclared act, or a browser write nobody approved — **errors** |
 | `judgement` | 19 | no | the answer comes out of a model the spec did not ask for — **errors** |
 | `lint` | 20 | no | ruff `F,E9` only; skips when absent |
-| `types` | 30 | no | mypy; warnings, not errors |
+| `types` | 30 | no | mypy; warnings, not errors. Errors from *other* files are not this file's defect, and mypy stopping early is a **skip**, not a pass |
 | `smoke` | 50 | yes | runs it against fakes, faked clock |
 | `outcome` | 55 | no | the run finished — did it *answer*? |
 | `replay` | 60 | no | runs twice, compares — determinism observed |
@@ -1805,6 +2102,33 @@ declares rather than repeating "look it up" at an agent that had; and
 when the spec asked for no judgement at all. It follows the value through
 assignment but stops at `ctx.step`/`ctx.node`, so the prescribed split — a
 model decides, a step composes — is not reported as the failure it fixes.
+
+**That boundary reads both ways, and only one direction was implemented.** A
+value coming *out* of a durable call is the code's whatever went in; a value
+going *in* is a decision the code **acted on** rather than the answer it
+produced. Without the second, rung 3 of the resolution ladder was reported as
+this stage's own failure: an ambiguous epic resolved by `ctx.agent()` and then
+used to *fetch* is a model deciding and a step answering, and it fired anyway
+because the resolved key was also echoed in the heading above the table —
+labelling the answer, not producing it. Two stages then disagreed about the
+same correct code, with `ResolutionStage` instructing precisely what this one
+refused, and the repair loop had no move satisfying both. De-tainting is per
+*name*, not per workflow: a body that acts on one model decision and returns
+another is still the defect in the half it returns.
+
+**Consumption follows the same bindings taint does**, and the first version
+did not — it read only the names appearing directly in a durable call's
+arguments. So `ctx.step(search, f"parentEpic = {key} …")` consumed `key` while
+`jql = f"parentEpic = {key} …"` followed by `ctx.step(search, jql)` consumed
+only `jql`, leaving `key` tainted and the heading that echoes it flagged. Those
+are the same code, a model writes both, and the same request therefore passed
+or deadlocked depending on which spelling came back. `_assignment` is now one
+reader shared by both walks, for that reason: they read the same code for
+opposite purposes, and a shape one understands and the other does not is a
+disagreement that surfaces as a verdict rather than as an error. The
+`TestWhatItDoesNotSee` cases pin what neither walk binds — tuple unpacking, a
+loop variable, `+=`, `list.append` — all **misses** rather than disagreements,
+which is what the shared reader buys.
 
 Adding a stage is registration, not surgery — `WorkflowCodingAgent(stages=[...])`
 replaces the arrangement. A stage whose tool is missing reports itself

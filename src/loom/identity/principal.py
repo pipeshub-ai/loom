@@ -34,7 +34,8 @@ class _VerifiedToken(Protocol):
 
     # `subject` and `claims` are deliberately *not* required. The MCP SDK's own
     # `AccessToken` has neither — it models a token issued to a client rather
-    # than to a person — and a host may configure FastMCP with an SDK-native
+    # than to a person — and a host may configure the MCP server with an
+    # SDK-native
     # verifier instead of one of ours. Requiring them here would make this
     # protocol describe only the tokens we happen to mint, which is the one
     # thing a structural type covering a foreign object must not do.
@@ -120,7 +121,7 @@ class Principal:
         """
         # `getattr`, not `token.subject`: the MCP SDK's own `AccessToken` has
         # no `subject` field at all — it models a token issued to a *client*,
-        # not to a person. A host that configures FastMCP with an SDK-native
+        # not to a person. A host that configures the MCP server with an SDK-native
         # verifier instead of one of ours therefore hands us an object that
         # satisfies everything here except this attribute, and reading it
         # directly raises `AttributeError` from inside a request handler.

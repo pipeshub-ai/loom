@@ -13,7 +13,8 @@ The layering is deliberate:
     Pure functions over a :class:`RuntimeFacade`. No ``mcp`` import, so they are
     testable without a protocol.
 ``server``
-    The only module that imports ``mcp``. Binds those functions to FastMCP.
+    The only module that imports ``mcp``. Binds those functions to
+    ``MCPServer`` (the SDK's high-level API, called ``FastMCP`` before 2.0).
 ``bridge``
     Deprecated. The old ``RuntimeBridge``, now a shim over the shared facade.
 """
@@ -23,7 +24,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
 
     from loom.facade import RuntimeFacade
     from loom.identity.config import IdentitySettings
@@ -54,8 +55,8 @@ def build_server(
     identity: IdentitySettings | None = None,
     transport: str = "stdio",
     authoring: AuthoringConfig | None = None,
-) -> FastMCP:
-    """Bind a :class:`RuntimeFacade` to a FastMCP server.
+) -> MCPServer:
+    """Bind a :class:`RuntimeFacade` to an MCP server.
 
     ``identity`` defaults to reading ``LOOM_AUTH_*`` env vars; pass one
     explicitly to test auth without touching the environment. Unset, an
@@ -64,8 +65,8 @@ def build_server(
     never over ``stdio`` — see ``mcp_server/server.py::build_server`` for why.
 
     ``authoring`` defaults to ``AuthoringConfig.from_env()`` — pass
-    ``AuthoringConfig(enabled=False)`` to serve only the sixteen
-    run-management tools, with none of the six code-authoring ones.
+    ``AuthoringConfig(enabled=False)`` to serve only the eighteen
+    run-management tools, with none of the seven code-authoring ones.
     """
     _require_mcp()
     from loom.mcp_server.server import build_server as _build
@@ -109,7 +110,7 @@ def serve(
     runs the timer loop while the server is up, so ``ctx.sleep()`` resumes.
 
     ``authoring`` defaults to ``AuthoringConfig.from_env()``; pass
-    ``AuthoringConfig(enabled=False)`` to drop the six code-authoring tools.
+    ``AuthoringConfig(enabled=False)`` to drop the seven code-authoring tools.
 
     Refuses to bind a non-loopback host over a networked transport with no
     identity configured — that combination would serve every workflow this
@@ -137,12 +138,24 @@ def serve(
         transport=transport,
         authoring=authoring,
     )
+    # Where to bind is a run-call argument from mcp 2.0 on, not a constructor
+    # one; `build_server` resolved it (including the transport security that
+    # comes with an identity config) and left it here. Falling back to this
+    # function's own `host`/`port` rather than requiring the attribute: those
+    # are the same two values, and a server object from somewhere else — a
+    # test double, a host that built its own — should still bind rather than
+    # raise an AttributeError about an implementation detail.
+    from loom.mcp_server.server import TransportOptions
+
+    carried = getattr(server, "loom_transport", None)
+    options = (carried or TransportOptions(host=host, port=port)).run_kwargs()
+
     if transport == "stdio":
-        server.run("stdio")
+        server.run("stdio")          # opens no socket, so it takes none of it
     elif transport in ("http", "streamable-http"):
-        server.run("streamable-http")
+        server.run("streamable-http", **options)
     elif transport == "sse":
-        server.run("sse")
+        server.run("sse", **options)
     else:
         raise ValueError(
             f"unsupported transport {transport!r}; use stdio, http, or sse"

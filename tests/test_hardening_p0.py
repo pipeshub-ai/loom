@@ -10,7 +10,6 @@ untested. So these drive the enforcement point.
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 
 import pytest
 
@@ -391,38 +390,40 @@ class TestTypeStageAttributesFindingsCorrectly:
     of a fourteen-line workflow, and fed it to the repair loop."""
 
     def test_an_aborted_run_is_skipped_not_passed(self) -> None:
-        from loom.agents.stages import _mypy_result
+        from loom.agents.stages import TypeStage
 
-        result = _mypy_result(
-            "types",
-            Path("/tmp/x/generated.py"),
+        result = TypeStage()._read(
             "/site/numpy/__init__.pyi:737: error: Type statement is only "
             "supported in Python 3.12 and greater  [syntax]\n"
             "Found 1 error in 1 file (errors prevented further checking)\n",
+            "generated.py",
         )
 
         assert result.skipped
         assert not result.issues
 
     def test_a_foreign_file_is_not_a_finding_about_this_code(self) -> None:
-        from loom.agents.stages import _mypy_result
+        from loom.agents.stages import TypeStage
 
-        result = _mypy_result(
-            "types",
-            Path("/tmp/x/generated.py"),
+        result = TypeStage()._read(
             "/site/numpy/__init__.pyi:737: error: bad stub  [syntax]\n",
+            "generated.py",
         )
 
         assert result.issues == []
-        assert not result.skipped
+        # Reported *skipped*, not clean. If every diagnostic was about another
+        # file, mypy said nothing about this one — and the pipeline's rule is
+        # that a check which could not run has found nothing. Reporting clean
+        # there would certify code nothing looked at.
+        assert result.skipped
+        assert "other files" in result.reason
 
     def test_a_finding_about_this_file_is_reported(self) -> None:
-        from loom.agents.stages import _mypy_result
+        from loom.agents.stages import TypeStage
 
-        result = _mypy_result(
-            "types",
-            Path("/tmp/x/generated.py"),
-            '/tmp/x/generated.py:12: error: Argument 1 has incompatible type "str"\n',
+        result = TypeStage()._read(
+            'generated.py:12: error: Argument 1 has incompatible type "str"\n',
+            "generated.py",
         )
 
         assert len(result.issues) == 1

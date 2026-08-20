@@ -265,6 +265,19 @@ class TaintBroker:
     def _refusal(self, call: EffectCall, state: TaintState) -> EffectResult | None:
         if not state.tainted or self.policy.exempts(call):
             return None
+        if call.asks_human:
+            # Never refused, and not as a convenience. `approval_clears` is
+            # "the escape hatch that keeps the rule usable: the answer to 'this
+            # workflow legitimately needs to write after reading' is a person
+            # saying so, not turning the check off" — and every `human.*` node
+            # is WRITE and open_world, both accurately. So a tainted run could
+            # not ask the person whose answer was the only thing that would
+            # clear it: the rule blocked its own exit.
+            #
+            # Asking is also not the risk this guards. Exfiltration is acting
+            # on unreviewed data; an approval request exists precisely to put
+            # that data in front of somebody *before* anything acts on it.
+            return None
         blocked = {
             EffectClass.WRITE: self.policy.block_writes,
             EffectClass.DESTRUCTIVE: self.policy.block_destructive,

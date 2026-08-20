@@ -26,7 +26,7 @@ from loom.security.grants import GrantSet
 class TestFromAccessToken:
     """What a `Principal` is derived from, including tokens we did not shape.
 
-    A host may configure FastMCP with an SDK-native verifier rather than one of
+    A host may configure the MCP server with an SDK-native verifier rather than one of
     ours, and the MCP SDK's own ``AccessToken`` has **no subject field**: it
     models a token issued to a *client*, not to a person. Reading the attribute
     directly raised ``AttributeError`` from inside a request handler, which is

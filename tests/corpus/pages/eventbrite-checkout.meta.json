@@ -1,0 +1,21 @@
+{
+  "slug": "eventbrite-checkout",
+  "source": "https://www.eventbrite.com/d/online/free--events/",
+  "final_url": "https://www.eventbrite.com/d/online/free--events/",
+  "title": "Free Online Events | Eventbrite",
+  "vendor": "eventbrite",
+  "category": "booking",
+  "captured": "2026-08-19",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "bytes": 353834,
+  "counts": {
+    "marked_hidden": 750,
+    "dropped_nodes": 260,
+    "native_controls": 23,
+    "role_widgets": 54,
+    "buttons": 61
+  }
+}

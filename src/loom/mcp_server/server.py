@@ -2,14 +2,19 @@
 
 The only module in the package that imports ``mcp``. Its single job is binding
 the capability functions in :mod:`.tools`, :mod:`.resources`, and
-:mod:`.prompts` to a :class:`FastMCP` instance — no business logic, so the
+:mod:`.prompts` to a :class:`MCPServer` instance — no business logic, so the
 capabilities stay testable without a protocol and this stays testable without a
 Runtime.
 
-FastMCP is the high-level API of the official SDK. It derives each tool's JSON
-schema from the function signature and docstring, which is why the signatures
-below are typed and documented rather than accompanied by hand-written schemas
-that would drift from them.
+``MCPServer`` is the high-level API of the official SDK. It derives each tool's
+JSON schema from the function signature and docstring, which is why the
+signatures below are typed and documented rather than accompanied by
+hand-written schemas that would drift from them.
+
+It was called ``FastMCP`` and lived in ``mcp.server.fastmcp`` through 1.x. The
+2.0 release did not rename it in place — it removed that module outright — so
+there is no version of the SDK that answers to both, and this module is the
+only place in LOOM that has to know.
 
     pip install loomsdk[mcp]
 """
@@ -17,6 +22,7 @@ that would drift from them.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from loom.mcp_server import authoring, prompts, resources, tools
@@ -24,25 +30,55 @@ from loom.mcp_server.authoring import AuthoringGate
 from loom.mcp_server.authoring_config import AuthoringConfig
 
 if TYPE_CHECKING:
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import Context, MCPServer
 
     from loom.facade import RuntimeFacade
     from loom.identity.config import IdentitySettings
 
-__all__ = ["build_server", "create_server"]
+__all__ = ["TransportOptions", "build_server", "create_server"]
 
 _Handler = TypeVar("_Handler", bound=Callable[..., Any])
 
 
+@dataclass(frozen=True)
+class TransportOptions:
+    """Where a networked transport binds, and how it is secured.
+
+    Carried on the built server as ``server.loom_transport`` so :func:`serve`
+    can hand it to ``MCPServer.run``. Frozen, because it describes a decision
+    already made: the refusal to bind a non-loopback host without identity
+    happens in :func:`serve` *before* the server is built, and a mutable copy
+    here would be a second place that decision could be un-made.
+    """
+
+    host: str
+    port: int
+    transport_security: Any | None = None
+
+    def run_kwargs(self) -> dict[str, Any]:
+        """What ``run("sse")`` and ``run("streamable-http")`` accept.
+
+        ``stdio`` takes none of it and is passed none of it — it opens no
+        socket, which is exactly why it is exempt from the auth requirement.
+        ``transport_security`` is omitted rather than passed as ``None`` so the
+        SDK applies its own default (it derives one for loopback binds) instead
+        of being told there is none.
+        """
+        options: dict[str, Any] = {"host": self.host, "port": self.port}
+        if self.transport_security is not None:
+            options["transport_security"] = self.transport_security
+        return options
+
+
 def _registrar(register: Any) -> Callable[..., Callable[[_Handler], _Handler]]:
-    """One of FastMCP's registration decorators, with the handler's type kept.
+    """One of ``MCPServer``'s registration decorators, with the handler's type kept.
 
     ``mcp`` is an optional extra, and the type-check environment installs
     ``[dev]`` only — so there ``server.tool(...)`` is an expression of type
     ``Any``, and ``disallow_untyped_decorators`` erases the signature of every
     handler it wraps. Thirty-odd tools then report as untyped in exactly the
     environment that could not have checked them anyway. An inline
-    ``type: ignore`` is the wrong shape for that: FastMCP ships ``py.typed``,
+    ``type: ignore`` is the wrong shape for that: ``mcp`` ships ``py.typed``,
     so wherever the extra *is* installed the ignore is unused and strict mode
     fails on that instead. Restating the decorator's shape once is the only
     form that is right in both.
@@ -115,7 +151,7 @@ def _scheduler_lifespan(facade: RuntimeFacade) -> Any:
     from loom.connectors.refresh import service_for
 
     @contextlib.asynccontextmanager
-    async def lifespan(_server: FastMCP) -> AsyncIterator[None]:
+    async def lifespan(_server: MCPServer) -> AsyncIterator[None]:
         await runtime.start_scheduler()
         credentials = service_for(runtime)
         if credentials is not None:
@@ -182,8 +218,8 @@ def build_server(
     identity: IdentitySettings | None = None,
     transport: str = "stdio",
     authoring: AuthoringConfig | None = None,
-) -> FastMCP:
-    """Bind a facade to a FastMCP server.
+) -> MCPServer:
+    """Bind a facade to an MCP server.
 
     Takes the facade rather than building one, so the caller decides whether
     this serves an in-process Runtime or a remote one — and so tests can pass a
@@ -191,7 +227,7 @@ def build_server(
 
     ``host`` and ``port`` are only consulted by the networked transports; stdio
     ignores them. They are settable here rather than at ``run()`` because that
-    is where FastMCP reads them from.
+    is where the SDK reads them from.
 
     ``scheduler`` runs the Runtime's timer loop for as long as the server is up.
     Without it a run that calls ``ctx.sleep()`` parks and never wakes, because
@@ -217,19 +253,30 @@ def build_server(
     since stdio was never reachable by anyone but the process that spawned
     it in the first place.
 
-    ``authoring`` defaults to ``AuthoringConfig.from_env()`` — six extra
-    tools (``get_tool_contract``, ``get_tool_docs``, ``call_read_operation``,
+    ``authoring`` defaults to ``AuthoringConfig.from_env()`` — seven extra
+    tools on top of the eighteen run-management ones above. Six of them
+    (``get_tool_contract``, ``get_tool_docs``, ``call_read_operation``,
     ``validate_workflow_code``, ``smoke_test_workflow``, ``save_workflow``)
-    that let a client generate and verify new workflow code using LOOM's own
-    toolchain, on top of the sixteen run-management tools above. Pass
-    ``AuthoringConfig(enabled=False)`` (or set ``LOOM_MCP_AUTHORING=0``) for a
-    server that exposes only the run-management surface.
+    let a *client's* model generate and verify new workflow code using LOOM's
+    toolchain, with no model key in this process. The seventh,
+    ``author_workflow``, runs LOOM's own coding agent end to end and therefore
+    does need one. Pass ``AuthoringConfig(enabled=False)`` (or set
+    ``LOOM_MCP_AUTHORING=0``) for a server that exposes only the
+    run-management surface.
     """
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import Context, MCPServer
 
     from loom.identity.config import IdentitySettings
     from loom.mcp_server.auth import build_mcp_auth
     from loom.toolsets.registry import register_available_toolsets
+
+    # `author_workflow` declares `ctx: Context` so the SDK injects the request
+    # context, which is what lets it elicit. Annotations here are strings
+    # (`from __future__ import annotations`), and the SDK resolves them against
+    # the *module* globals — so a name bound only in this function's scope does
+    # not resolve. Published here rather than imported at module level because
+    # `mcp` is an optional extra and importing this module must not require it.
+    globals().setdefault("Context", Context)
 
     register_available_toolsets()
 
@@ -240,14 +287,31 @@ def build_server(
 
     instructions = INSTRUCTIONS + AUTHORING_INSTRUCTIONS if authoring.enabled else INSTRUCTIONS
 
-    server = FastMCP(
+    server = MCPServer(
         name,
         instructions=instructions,
+        lifespan=_scheduler_lifespan(facade) if scheduler else None,
+        # `VerifiedToken` is shaped like the SDK's `AccessToken` and is
+        # deliberately not that class, so `loom.identity` imports no `mcp` at
+        # all (see identity/verifier.py). The SDK only reads attributes off it
+        # and never isinstance-checks it, so the two are interchangeable in
+        # fact but nominally distinct — and this is the one module that imports
+        # both, so this is where that has to be said. `cast` and not
+        # `type: ignore`, for the reason `_registrar` above spells out: the
+        # extra is optional, and an ignore is itself an error where `mcp` is
+        # absent and mypy cannot see a conflict to ignore.
+        token_verifier=cast("Any", mcp_auth.token_verifier) if mcp_auth else None,
+        auth=mcp_auth.auth_settings if mcp_auth else None,
+    )
+    # `host`, `port` and `transport_security` were constructor arguments in
+    # 1.x and are run-call arguments in 2.0 — the more honest place, since
+    # where a server binds is a property of *serving* it, not of the tool
+    # registry. They are recorded rather than dropped: `build_server` is public
+    # API and `loom mcp --host` passes through it, so a signature that accepted
+    # them and bound somewhere else would be the worst of the three options.
+    cast("Any", server).loom_transport = TransportOptions(
         host=host,
         port=port,
-        lifespan=_scheduler_lifespan(facade) if scheduler else None,
-        token_verifier=mcp_auth.token_verifier if mcp_auth else None,
-        auth=mcp_auth.auth_settings if mcp_auth else None,
         transport_security=mcp_auth.transport_security if mcp_auth else None,
     )
     _register_tools(server, facade, auth_enabled, authoring.enabled)
@@ -270,7 +334,7 @@ def build_server(
 
 
 def _register_tools(
-    server: FastMCP,
+    server: MCPServer,
     base_facade: RuntimeFacade,
     auth_enabled: bool,
     authoring_enabled: bool = True,
@@ -580,6 +644,7 @@ def _register_tools(
             )
         )
         async def author_workflow(
+            ctx: Context,
             spec: str,
             packages_json: str = "[]",
             workflow_input_json: str = "",
@@ -608,12 +673,20 @@ def _register_tools(
                 observe: Let the agent look at the systems the spec names
                     before writing code against them.
             """
+            # A server never reads stdin — under stdio that descriptor *is*
+            # the protocol channel — so it asks through the client, which is
+            # what `elicitation/create` is for. Capability-gated inside
+            # `_can_ask`: a client that declared none simply gets an agent with
+            # no `ask_user` tool.
+            from loom.agents.interaction import ElicitationUserInteraction
+
             return await tools.author_workflow(
                 _principal_facade(base_facade, auth_enabled),
                 spec,
                 packages_json,
                 workflow_input_json,
                 observe,
+                interaction=ElicitationUserInteraction(ctx),
             )
 
 # ---------------------------------------------------------------------------
@@ -625,7 +698,7 @@ def _register_tools(
 
 
 def _register_authoring_tools(
-    server: FastMCP,
+    server: MCPServer,
     config: AuthoringConfig,
     *,
     gate: AuthoringGate | None = None,
@@ -790,7 +863,7 @@ def _register_authoring_tools(
 # ---------------------------------------------------------------------------
 
 
-def _register_resources(server: FastMCP, base_facade: RuntimeFacade, auth_enabled: bool) -> None:
+def _register_resources(server: MCPServer, base_facade: RuntimeFacade, auth_enabled: bool) -> None:
     """Expose the read-only documents a client can pull into context."""
 
     resource = _registrar(server.resource)
@@ -824,7 +897,7 @@ def _register_resources(server: FastMCP, base_facade: RuntimeFacade, auth_enable
 
 
 def _register_prompts(
-    server: FastMCP,
+    server: MCPServer,
     base_facade: RuntimeFacade,
     auth_enabled: bool,
     authoring_enabled: bool = False,

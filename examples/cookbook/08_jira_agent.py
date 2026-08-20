@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils import require_env
 
 from loom.agents.coding_agent import WorkflowCodingAgent
+from loom.agents.interaction import CLIUserInteraction
 from loom.agents.providers.anthropic_provider import AnthropicProvider
 from loom.toolsets.jira import JIRA_MANIFEST
 from loom.toolsets.jira.tools import JIRA_TOOL_DOCS
@@ -204,6 +205,7 @@ async def main() -> None:
         model=model,
         max_repair_attempts=2,
         tool_docs=[JIRA_TOOL_DOCS],
+        user_interaction=CLIUserInteraction(),
     )
 
     read_only = "--read-only" in sys.argv

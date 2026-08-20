@@ -108,7 +108,7 @@ class TestItRefusesEvidenceItDoesNotHave:
         mypy_says(GAVE_UP, 1)
         typecheck.run([])
         printed = capsys.readouterr().err
-        assert "[dev]" in printed
+        assert "[dev,mcp]" in printed
         assert "numpy" in printed
 
 
@@ -155,7 +155,12 @@ class TestCiUsesIt:
         )
 
     def test_it_installs_the_dev_extra_not_all(self) -> None:
-        """`[all]` pulls numpy, which is the trap the wrapper reports."""
+        """`[all]` pulls numpy, which is the trap the wrapper reports.
+
+        `[dev,mcp]` is the environment: `mcp` carries no numpy, and without it
+        `mcp.*` falls to `ignore_missing_imports` and the whole MCP surface is
+        checked against `Any`.
+        """
         import yaml
 
         workflow = yaml.safe_load(
@@ -167,4 +172,9 @@ class TestCiUsesIt:
             for step in workflow["jobs"]["typecheck"]["steps"]
             if "pip install" in step.get("run", "")
         ]
-        assert installs and all('".[dev]"' in c for c in installs), installs
+        assert installs, "the typecheck job installs nothing"
+        assert all('"[all]"' not in c and '".[all]"' not in c for c in installs), installs
+        assert all('".[dev' in c for c in installs), installs
+        assert all('mcp' in c for c in installs), (
+            "without the mcp extra, mypy checks mcp_server/ against Any", installs
+        )

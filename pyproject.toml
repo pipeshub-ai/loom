@@ -67,11 +67,19 @@ credentials = ["keyring>=25", "cryptography>=43"]
 # it by installing the core package.
 duckduckgo = ["ddgs>=9.0"]
 
-# Authoring-time observation. The coding agent uses this to *look* at a page
-# before writing a selector against it; generated workflows never import it.
+# Driving a page — both halves. `BrowserProbe` uses this to *look* at a page at
+# authoring time, and `LocalBrowserProvider` to act on one at run time; they
+# share the single driver deliberately, so phase 13 added no new dependency.
 # Needs `playwright install chromium` after pip, since the browser is not a
 # Python package.
 browser = ["playwright>=1.40"]
+
+# Anti-detection, opt-in and separate. `patchright` is an Apache-2.0 drop-in
+# fork of Playwright; `LocalBrowserProvider(engine="patchright")` swaps it in.
+# Not folded into [browser] because evasion is a posture a host adopts
+# deliberately — LOOM ships none of its own and treats bot detection as the
+# provider's problem.
+stealth = ["patchright>=1.40"]
 
 # Reading a PDF or a Word document — `transform.parse_document`. Optional
 # because plain text, Markdown, CSV and JSON need nothing, and a workflow that
@@ -108,8 +116,28 @@ api = [
 # Nicer CLI output. Without it every command still works, in plain text.
 cli = ["rich>=13.0"]
 
-# MCP server (`loom mcp`) — the official SDK's high-level FastMCP API.
-mcp = ["mcp>=1.2"]
+# MCP server (`loom mcp`) — the official SDK's high-level `MCPServer` API.
+#
+# Floor measured against the suite, not guessed. mcp 2.0 removed
+# `mcp.server.fastmcp` outright — `FastMCP` became `MCPServer` in
+# `mcp.server.mcpserver`, and `host`/`port`/`transport_security` moved from the
+# constructor to the run call. There is no release that answers to both shapes,
+# so LOOM speaks 2.x and only 2.x.
+#
+# `<3` is the lesson of the bump that produced this line, not caution for its
+# own sake. An open upper bound is what let 2.0 reach `pip install loomsdk[mcp]`
+# as a silent breaking change, and phases/phase-9-mcp-server.md predicted
+# exactly that and prescribed exactly this ("Pin `mcp>=2.0,<3.0`"). Every 2.x
+# release is still taken; 3.0 will be a port, and a port should be a decision
+# somebody makes rather than something a fresh install discovers.
+#
+# The previous `>=1.2` was wrong at both ends and quietly so. 2.0 is the
+# current stable release, so it resolved to a version LOOM could not import;
+# and nothing older than 1.14 ever worked either — 1.13.1 fails 12 of the MCP
+# tests with 31 errors, because mcp's own tool registration calls `issubclass()`
+# on a union annotation. A symbol probe finds neither: every import LOOM makes
+# resolves as far back as 1.12.3, which then registers no tools at all.
+mcp = ["mcp>=2.0,<3"]
 
 # Terminal UI (`loom ui`)
 tui = ["loomsdk[cli]", "textual>=0.80"]
@@ -145,7 +173,7 @@ dev = [
 
 # Install everything
 all = [
-    "loomsdk[mongo,postgres,s3,azure,gcs,google,identity,credentials,anthropic,openai,gemini,langchain,duckduckgo,browser,documents,api,cli,tui,mcp,testing]"
+    "loomsdk[mongo,postgres,s3,azure,gcs,google,identity,credentials,anthropic,openai,gemini,langchain,duckduckgo,browser,stealth,documents,api,cli,tui,mcp,testing]"
 ]
 
 [project.urls]

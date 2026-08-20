@@ -1,0 +1,21 @@
+{
+  "slug": "gitlab-signup",
+  "source": "https://gitlab.com/users/sign_up",
+  "final_url": "https://gitlab.com/users/sign_up",
+  "title": "Sign up \u00b7 GitLab",
+  "vendor": "gitlab",
+  "category": "signup",
+  "captured": "2026-08-19",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "bytes": 56425,
+  "counts": {
+    "marked_hidden": 296,
+    "dropped_nodes": 63,
+    "native_controls": 7,
+    "role_widgets": 4,
+    "buttons": 5
+  }
+}

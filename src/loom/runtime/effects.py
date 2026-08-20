@@ -97,6 +97,16 @@ class EffectCall:
     to assume is."""
     access_control: bool = False
     """Whether this changes who can reach data rather than the data itself."""
+    asks_human: bool = False
+    """Whether this call is the run *asking a person*, rather than acting.
+
+    Set from a node declaring ``requires=["human_channel"]`` — a structural
+    marker rather than a name match, so a project's own approval node is
+    covered too. Read by ``TaintBroker``, which must never refuse one: the
+    escape hatch that makes the taint rule usable is a human saying yes, and a
+    rule that blocks the only way to ask is a deadlock rather than a policy.
+    """
+
     open_world: bool = True
     """Whether this reaches outside the deployment's trust boundary.
 

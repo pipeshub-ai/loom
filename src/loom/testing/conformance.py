@@ -30,6 +30,7 @@ from typing import Any
 from loom.events.models import EventRecord, RetentionPolicy
 
 __all__ = [
+    "verify_browser_session",
     "verify_checkpoints",
     "verify_effect_profile",
     "verify_event_log",
@@ -786,4 +787,182 @@ async def verify_probe(
                 f"{probe.id} used {sorted(used - {'GET', 'HEAD'})}. Looking must "
                 "not change anything: authoring runs against systems the author "
                 "has not agreed to let a model write to."
+            )
+
+
+async def verify_browser_session(
+    provider: Any, *, url: str, known: Any = None, repeated: Any = None
+) -> None:
+    """Assert that *provider* is a conforming ``BrowserProvider``.
+
+    *url* is a page the provider can open — **point it at a fixture you
+    control**, never a third party's site, so a red test means the adapter
+    broke rather than someone else's server did. That is the rule
+    :func:`verify_probe` already states, and it matters more here: this suite
+    performs actions.
+
+    *known* is a ``Target`` that page carries exactly once. *repeated* is one it
+    carries more than once; pass it and the ambiguity rule is checked too, which
+    is the single most valuable thing in this kit.
+
+    What it checks is deliberately the part an author would not think to test —
+    each case below is a way an adapter can look correct and lose a run:
+
+    **``supports()`` is honest.** A provider claiming ``reattach`` must actually
+    reattach. Claiming it and opening a *fresh* session is the worst failure
+    available here, because it looks like success: a run parked two hours on a
+    person resumes against a blank browser and drives the wrong page.
+
+    **Ambiguity refuses.** Several matches must raise, never silently take the
+    first. An automation that picks a match is one that eventually clicks the
+    wrong button and reports success.
+
+    **A closed session stays closed.** One that keeps answering holds cookies
+    past the point the caller believes it released them.
+
+    **Visibility follows Playwright's rule** — a non-empty box and no
+    ``visibility: hidden``, and *not* opacity. ``<input class=visually-hidden>``
+    beside a styled label is how every design system builds a custom radio; an
+    adapter that filters those out reports the page as having no controls.
+
+    What it does not check: what your provider *reports* about a page. That is
+    your test, and it is the part you will remember to write.
+    """
+    from loom.browser.base import (
+        ActionMethod,
+        ActionPlan,
+        BrowserPolicy,
+        SessionScope,
+        Target,
+    )
+    from loom.browser.errors import AmbiguousTarget, SessionLost
+
+    if not isinstance(getattr(provider, "id", None), str) or not provider.id:
+        raise AssertionError("a provider needs a non-empty string id")
+
+    capabilities = provider.supports()
+    if not isinstance(capabilities, frozenset):
+        raise AssertionError(
+            f"{provider.id}.supports() must return a frozenset, got "
+            f"{type(capabilities).__name__}"
+        )
+
+    session = await provider.open(BrowserPolicy(scope=SessionScope.STEP))
+    try:
+        handle = session.handle
+        if not getattr(handle, "session_id", ""):
+            raise AssertionError(
+                f"{provider.id} opened a session with no id. The id is what a "
+                "journal records and what reattach is asked for later."
+            )
+        if handle.reattachable and "reattach" not in capabilities:
+            raise AssertionError(
+                f"{provider.id} marks a handle reattachable while supports() "
+                "does not list 'reattach'. A host reads supports() to decide "
+                "whether a durable scope is safe."
+            )
+
+        page = await session.navigate(url)
+        if not page.url:
+            raise AssertionError(f"{provider.id}.navigate returned no url")
+
+        again = await session.snapshot()
+        if again.url != page.url:
+            raise AssertionError(
+                f"{provider.id}.snapshot moved the page: navigate reported "
+                f"{page.url!r}, snapshot {again.url!r}. Reading must not navigate."
+            )
+
+        # Checked before the caller's own targets, and the order matters: a
+        # locator that matches everything makes every later assertion pass for
+        # the wrong reason. "Does locate ever return zero?" is the cheapest
+        # question here and the one that invalidates the rest.
+        missing = await session.locate(
+            Target(role="button", name="\u2205 no such control \u2205"))
+        if missing != 0:
+            raise AssertionError(
+                f"{provider.id}.locate reported {missing} matches for a control "
+                "that cannot exist. A locator that matches anything resolves "
+                "nothing — every target will 'succeed', against whatever "
+                "happened to be first."
+            )
+
+        if known is not None:
+            found = await session.locate(known)
+            if found != 1:
+                raise AssertionError(
+                    f"{provider.id}.locate found {found} matches for a target "
+                    f"the caller says is unique ({known.describe()}). Check the "
+                    "visibility rule: opacity is NOT hidden."
+                )
+
+        if repeated is not None:
+            found = await session.locate(repeated)
+            if found < 2:
+                raise AssertionError(
+                    f"locate found {found} matches for {repeated.describe()}, "
+                    "which the caller says repeats. Pass a target that really "
+                    "appears more than once."
+                )
+            try:
+                await session.perform(
+                    ActionPlan(method=ActionMethod.CLICK, target=repeated))
+            except AmbiguousTarget:
+                pass
+            else:
+                raise AssertionError(
+                    f"{provider.id} performed an action on an ambiguous target "
+                    f"({repeated.describe()}, {found} matches) instead of "
+                    "raising AmbiguousTarget. Picking a match is how an "
+                    "automation clicks the wrong control and reports success."
+                )
+
+    finally:
+        await session.close()
+
+    for probe in ("snapshot", "storage_state"):
+        try:
+            await getattr(session, probe)()
+        except SessionLost:
+            continue
+        except Exception as exc:
+            raise AssertionError(
+                f"{provider.id}: {probe}() on a closed session raised "
+                f"{type(exc).__name__}, expected SessionLost so a caller can "
+                "tell 'this session is gone' from 'this page misbehaved'."
+            ) from exc
+        raise AssertionError(
+            f"{provider.id}: {probe}() still worked after close(). A closed "
+            "session that answers keeps credentials alive past the point the "
+            "caller believes it released them."
+        )
+
+    await session.close()  # idempotent; a teardown that raises twice is a trap
+
+    if "reattach" in capabilities:
+        resumed = await provider.reattach(handle)
+        if resumed.handle.session_id != handle.session_id:
+            raise AssertionError(
+                f"{provider.id}.reattach returned session "
+                f"{resumed.handle.session_id!r} for handle "
+                f"{handle.session_id!r} — a *different* session. This is the "
+                "failure that looks like success: the run continues against a "
+                "browser that never saw its earlier steps."
+            )
+        await resumed.close()
+    else:
+        try:
+            await provider.reattach(handle)
+        except SessionLost:
+            pass
+        except Exception as exc:
+            raise AssertionError(
+                f"{provider.id} does not support reattach, so reattach() must "
+                f"raise SessionLost; it raised {type(exc).__name__}."
+            ) from exc
+        else:
+            raise AssertionError(
+                f"{provider.id}.reattach succeeded while supports() omits "
+                "'reattach'. Either honour it or refuse — quietly opening a "
+                "fresh session loses the run's state while appearing to work."
             )

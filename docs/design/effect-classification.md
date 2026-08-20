@@ -240,7 +240,7 @@ The spec is also explicit that these are **hints**: *"Clients should never make
 tool use decisions based on ToolAnnotations received from untrusted servers."*
 That settles the trust question below.
 
-`loom mcp` already sets `ToolAnnotations` on **all 24 of its tools**, by hand,
+`loom mcp` already sets `ToolAnnotations` on **all 25 of its tools**, by hand,
 and they are good — `cancel_run` is `destructiveHint=True`, and `retry_run` is
 `openWorldHint=True` where `replay_run` is `False`, which is a genuinely subtle
 distinction to have got right.

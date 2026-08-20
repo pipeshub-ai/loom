@@ -1,0 +1,24 @@
+{
+  "slug": "kayak-search",
+  "source": "https://www.kayak.com/flights",
+  "labelled_by": "claude",
+  "labelled_from": "kayak-search.png",
+  "flow": "search flights: origin, destination, dates, travellers, search",
+  "note": "The hardest page in the corpus by construction — a custom widget search bar where several controls show a current *value* ('Bengaluru (BLR)', '1 adult, Economy') rather than a label. A value is not a name, so the origin field is recorded unlabelled while the traveller control, whose text reads as its own description, is not.",
+  "controls": [
+    {"purpose": "destination field",       "role": "textbox", "name": "To?",              "visible_label": true, "required_for_flow": true},
+    {"purpose": "departure date",          "role": "textbox", "name": "Departure",        "visible_label": true, "required_for_flow": true},
+    {"purpose": "return date",             "role": "textbox", "name": "Return",           "visible_label": true, "required_for_flow": true},
+    {"purpose": "run the search",          "role": "button",  "name": "Search",           "visible_label": true, "required_for_flow": true},
+    {"purpose": "trip type selector",      "role": "button",  "name": "Round-trip",       "visible_label": true, "required_for_flow": true},
+    {"purpose": "bag count selector",      "role": "button",  "name": "0 bags",           "visible_label": true, "required_for_flow": false},
+    {"purpose": "travellers and cabin",    "role": "button",  "name": "1 adult, Economy", "visible_label": true, "required_for_flow": true},
+    {"purpose": "flights vertical",        "role": "link",    "name": "Flights",          "visible_label": true, "required_for_flow": false},
+    {"purpose": "stays vertical",          "role": "link",    "name": "Stays",            "visible_label": true, "required_for_flow": false},
+    {"purpose": "cars vertical",           "role": "link",    "name": "Cars",             "visible_label": true, "required_for_flow": false},
+    {"purpose": "open the AI assistant",   "role": "link",    "name": "Ask AI",           "visible_label": true, "required_for_flow": false},
+    {"purpose": "expand a FAQ entry",      "role": "button",  "name": "How can I get cheap flights?", "visible_label": true, "required_for_flow": false},
+    {"purpose": "origin field",            "role": "textbox", "name": null,               "visible_label": false, "required_for_flow": true},
+    {"purpose": "swap origin and destination", "role": "button", "name": null,            "visible_label": false, "required_for_flow": false}
+  ]
+}

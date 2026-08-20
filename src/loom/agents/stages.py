@@ -27,6 +27,7 @@ from loom.agents.checks import CheckContext, CheckResult
 from loom.agents.validator import CodeIssue, CodeValidator
 
 __all__ = [
+    "BrowserEffectStage",
     "CataloguePreferenceStage",
     "CompileStage",
     "CritiqueStage",
@@ -34,6 +35,7 @@ __all__ = [
     "OutcomeStage",
     "ProjectionStage",
     "ReplayStage",
+    "SelectorStage",
     "SmokeStage",
     "StaticStage",
     "TypeStage",
@@ -231,64 +233,53 @@ class TypeStage:
             except (OSError, subprocess.TimeoutExpired) as exc:
                 return CheckResult(self.name, skipped=True, reason=f"mypy failed: {exc}")
 
-        return _mypy_result(self.name, path, completed.stdout)
+        return self._read(completed.stdout, path.name)
 
+    def _read(self, output: str, filename: str) -> CheckResult:
+        """Only what mypy said about *this* file, and only if it finished.
 
+        Two failures this prevents, both of them the environmental-failure trap
+        in a new costume — the one that "fed 401s into the repair loop until a
+        workflow came back gutted".
 
-#: What mypy prints when it stopped before type-checking anything — a stub it
-#: could not parse, a plugin that failed to load. The distinction matters more
-#: than it looks: the errors that accompany it are about somebody else's files,
-#: and attributing them to the generated code sends the repair loop after a
-#: defect that is not there. ``scripts/typecheck.py`` exists to catch exactly
-#: this for LOOM's own sources; the stage that checks *generated* sources never
-#: had the same defence, so an environment with numpy installed reported
-#: "737: error: Type statement is only supported in Python 3.12 and greater"
-#: against a fourteen-line workflow.
-_MYPY_ABORTED = "errors prevented further checking"
+        **An error from another file is not a defect in the generated code.**
+        The previous version kept every ``: error:`` line and split the filename
+        off, so a complaint about a *dependency's* stubs arrived as a complaint
+        about the model's workflow, with the evidence of its origin removed. In
+        this repo that is not hypothetical: numpy's stubs use PEP 695 ``type``
+        statements, which are a syntax error below 3.12, so any environment
+        with numpy installed handed the repair loop
+        ``737: error: Type statement is only supported in Python 3.12`` as
+        something to fix in a file that has no line 737.
 
+        **And mypy stopping early means nothing was checked.** "errors
+        prevented further checking" is the same signal ``scripts/typecheck.py``
+        exits 2 for, and for the same reason: a gate that did not run must be
+        distinguishable from one that passed. Reporting clean there would
+        certify code nothing looked at.
+        """
+        prefix = f"{filename}:"
+        issues: list[CodeIssue] = []
+        foreign = 0
+        for line in output.splitlines():
+            if ": error:" not in line:
+                continue
+            head, _, rest = line.partition(":")
+            if head.endswith(prefix.rstrip(":")):
+                issues.append(CodeIssue("types", rest.strip(), "warning"))
+            else:
+                foreign += 1
 
-def _mypy_result(stage: str, target: Path, stdout: str) -> CheckResult:
-    """Turn mypy's stdout into findings *about the generated file only*.
-
-    Two rules, and the second is the one that was missing. Lines are attributed
-    by filename, so a diagnostic raised inside a dependency's stubs is not
-    reported as a defect in code the model wrote. And when mypy says it stopped
-    early, the stage reports itself **skipped** rather than passing or failing —
-    the pipeline's own rule that a check which could not run has found nothing.
-    """
-    if _MYPY_ABORTED in stdout:
-        return CheckResult(
-            stage,
-            skipped=True,
-            reason=(
-                "mypy stopped before checking anything (it could not parse "
-                "something in this environment), so it found nothing about "
-                "this code either way"
-            ),
-        )
-    issues = [
-        CodeIssue("types", line.split(":", 1)[-1].strip(), "warning")
-        for line in stdout.splitlines()
-        if ": error:" in line and _names_file(line, target)
-    ]
-    return CheckResult(stage, issues=issues)
-
-
-def _names_file(line: str, target: Path) -> bool:
-    """Whether a mypy diagnostic is about *target*.
-
-    Compared on the path mypy printed rather than on a prefix: it echoes back
-    whatever form it was given (absolute here, since the file lives in a
-    temporary directory), so a `startswith(basename)` test matches nothing and
-    a bare `in` test would match a dependency that happens to contain the name.
-    """
-    reported = line.split(":", 1)[0]
-    if not reported:
-        return False
-    try:
-        return Path(reported).name == target.name
-    except (OSError, ValueError):  # pragma: no cover - defensive
-        return False
+        if "errors prevented further checking" in output:
+            return CheckResult(
+                self.name, skipped=True,
+                reason="mypy stopped before checking this file — its "
+                       "environment has a dependency it cannot parse")
+        if foreign and not issues:
+            return CheckResult(
+                self.name, skipped=True,
+                reason=f"mypy reported {foreign} error(s), all in other files")
+        return CheckResult(self.name, issues=issues)
 
 
 @dataclass
@@ -958,27 +949,81 @@ def _query_literals(code: str) -> list[str]:
     return found
 
 
-def _fuzzy_operands(literal: str, operators: tuple[str, ...]) -> list[str]:
+#: Where one clause of a query ends and the next begins. Shared by the operand
+#: and the scope, so the two can never disagree about the boundary.
+_CLAUSE_END = r"\b(?:and|or|order\s+by)\b|[)\]]"
+
+
+@dataclass(frozen=True, slots=True)
+class FuzzyMatch:
+    """A match operator's operand, and what the rest of its query says."""
+
+    word: str
+    """The thing being matched on — the half that came from the spec."""
+
+    scope: frozenset[str]
+    """Every word in the query's *other* clauses, field names and values alike.
+
+    Not operands, and never reported as such: evidence about which namespace
+    the operand is being matched *within*. Both sides are kept because either
+    can carry the namespace — ``project = PA`` names it on the left,
+    ``issuetype = Epic`` on the right — and which one does is a property of the
+    query language rather than of this check.
+    """
+
+
+def _fuzzy_operands(
+    literal: str, operators: tuple[str, ...]
+) -> list[FuzzyMatch]:
     """The words a match operator is matching *on*, in *literal*.
 
     ``text ~ "saas"`` yields ``saas``; the field it matches against, and every
     other clause in the query, is not an operand and is not returned. That
     distinction is the whole of the check: the field name comes from the
     system's schema and the operand comes from whoever wrote the spec.
+
+    The other clauses come back as ``scope`` rather than being discarded,
+    because dropping them made two different pieces of code identical here.
+    ``summary ~ "saas"`` is a guess; ``issuetype = Epic AND summary ~ "saas"``
+    is a search of one namespace by name, which is what resolution *is* for an
+    entity whose service exposes no other lookup — a Jira epic is an issue, so
+    there is no epic endpoint to call instead. Reading only the operand flagged
+    both, and the second has no repair: the ladder's own advice produces it,
+    and its escape hatch ("nothing bears that name") is false when something
+    does. Whether a scope word names a real namespace is decided by the caller,
+    against the resolvers the registry declares — nothing here knows the name
+    of any namespace, or of any service.
     """
-    words: list[str] = []
     lowered = literal.lower()
+
+    # Each operand's span, so the scope can be the query with all of them
+    # removed. Taking "everything but this clause" per operator instead would
+    # let one fuzzy operand land in another's scope — `summary ~ "project x"
+    # AND text ~ "saas"` would read as scoped to a project, by a word that is
+    # itself an unresolved guess.
+    spans: list[tuple[int, int]] = []
     for operator in operators:
         start = 0
         while (found := lowered.find(operator, start)) != -1:
             start = found + len(operator)
-            # Everything up to the clause's end — a boolean keyword, a closing
-            # bracket, or the end of the string.
-            tail = re.split(
-                r"\b(?:and|or|order\s+by)\b|[)\]]", lowered[start:], maxsplit=1
-            )[0]
-            words.extend(_words(tail))
-    return words
+            # The clause ends at a boolean keyword, a closing bracket, or the
+            # end of the string; what follows belongs to the next clause.
+            end = start + len(re.split(_CLAUSE_END, lowered[start:], maxsplit=1)[0])
+            spans.append((start, end))
+
+    if not spans:
+        return []
+
+    kept = list(lowered)
+    for start, end in spans:
+        kept[start:end] = " " * (end - start)
+    scope = frozenset(_words("".join(kept)))
+
+    return [
+        FuzzyMatch(word, scope)
+        for start, end in spans
+        for word in _words(lowered[start:end])
+    ]
 
 
 def _string_literals(code: str) -> list[str]:
@@ -1070,9 +1115,11 @@ class ResolutionStage:
         if not terms:
             return CheckResult(self.name)
 
+        namespaces = self._namespaces()
         issues: list[CodeIssue] = []
         for literal in _query_literals(code):
-            for word in _fuzzy_operands(literal, self.FUZZY):
+            for found in _fuzzy_operands(literal, self.FUZZY):
+                word = found.word
                 match = _closest(word, terms)
                 if match is None:
                     continue
@@ -1081,6 +1128,10 @@ class ResolutionStage:
                     if word == match
                     else f"{match!r} from the spec, respelled"
                 )
+                scoped = sorted(found.scope & namespaces)
+                if scoped:
+                    issues.append(self._scoped(literal, how, scoped))
+                    break
                 issues.append(
                     CodeIssue(
                         "resolution",
@@ -1107,6 +1158,64 @@ class ResolutionStage:
                 break
         return CheckResult(self.name, issues=issues[:3])
 
+    def _namespaces(self) -> frozenset[str]:
+        """The entity kinds this deployment declares a resolver for.
+
+        The vocabulary is read from the manifests rather than listed here, for
+        the reason ``opaque_ids`` exists: which namespaces a service has is the
+        service's own statement, and a list of them in the agent layer is a
+        list of vendors in the agent layer. A toolset that declares
+        ``resolves="board"`` teaches this check about boards with no change
+        here.
+
+        Empty without a registry, which makes every match unscoped and so
+        restores exactly the behaviour that shipped before scope was read at
+        all. Failing that way round matters: the check errors, and an error the
+        model cannot act on is the loop this method exists to end.
+        """
+        registry = self._registry
+        if registry is None or not getattr(registry, "list_toolsets", None):
+            return frozenset()
+        kinds: set[str] = set()
+        try:
+            for toolset_id in registry.list_toolsets():
+                kinds.update(registry.get(toolset_id).resolvers() or {})
+        except Exception:
+            return frozenset()
+        return frozenset(kinds)
+
+    def _scoped(self, literal: str, how: str, scoped: list[str]) -> CodeIssue:
+        """A match that names the namespace it is searching.
+
+        A **warning**, where an unscoped match is an error, and the gap between
+        the two is the point. The repair loop runs on ``report.errors``, so an
+        error has to be actionable; this code has already done what the ladder
+        asks — it picked a namespace and searched it by name — and for an
+        entity whose service exposes no separate lookup there is nothing
+        further to call. Erroring here asks for a resolver that does not exist,
+        which no repair can produce and no escape hatch covers.
+
+        What is left worth saying is the ambiguity, which is real: a name
+        search can return two rows, and taking the first is the guess this
+        stage exists to catch, one step later.
+        """
+        return CodeIssue(
+            "resolution",
+            f"{literal.strip()!r} matches on {how}, scoped to "
+            + ", ".join(repr(kind) for kind in scoped)
+            + ". That is a namespace search rather than a blind text match, "
+            "and for an entity whose service exposes no other lookup it is "
+            "the resolution — nothing further to call. What it does not "
+            "settle is ambiguity: a name search can match more than one row, "
+            "and taking the first is the same guess one step later. Read the "
+            "result's own count before you use it — if exactly one matches, "
+            "filter on its id; if several do, hand the candidates to a "
+            "ctx.agent() step and let it choose; if none do, return that as "
+            "the answer rather than an empty list. No change is needed if the "
+            "code already does this.",
+            "warning",
+        )
+
     def _where_to_look(self) -> str:
         """The resolvers this deployment actually has, named.
 
@@ -1122,7 +1231,13 @@ class ResolutionStage:
             for toolset_id in registry.list_toolsets():
                 manifest = registry.get(toolset_id)
                 for kind, op in (manifest.resolvers() or {}).items():
-                    named.append(f"{op.function or op.id} ({kind})")
+                    # The *op path*, because the next clause says to call it
+                    # with `call_read_operation`, and that takes
+                    # `<toolset>.<op_id>`. Naming `op.function` here handed the
+                    # model a symbol that tool cannot accept — the same
+                    # mismatch the registry's own "Operations:" line had, and
+                    # it cost a turn each time to be told so.
+                    named.append(f"{toolset_id}.{op.id} ({kind})")
         except Exception:
             return "call_read_operation over the toolset's own resolvers."
         if not named:
@@ -1587,35 +1702,84 @@ def _model_answers(tree: ast.Module) -> list[int]:
             and node.func.attr in ("step", "node")
         )
 
-    def carries(node: ast.AST, names: set[str]) -> bool:
+    def carries(node: ast.AST, names: set[str], acted: frozenset[str]) -> bool:
+        if isinstance(node, ast.Name):
+            return node.id in names and node.id not in acted
         if is_agent_call(node):
-            return True
-        if isinstance(node, ast.Name) and node.id in names:
             return True
         if is_laundered(node):
             return False
-        return any(carries(child, names) for child in ast.iter_child_nodes(node))
+        return any(
+            carries(child, names, acted) for child in ast.iter_child_nodes(node)
+        )
 
-    tainted: set[str] = set()
-    changed = True
-    while changed:
-        changed = False
+    def spread(acted: frozenset[str]) -> set[str]:
+        tainted: set[str] = set()
+        changed = True
+        while changed:
+            changed = False
+            for node in ast.walk(tree):
+                targets, value = _assignment(node)
+                if not targets or not carries(value, tainted, acted):
+                    continue
+                for target in targets:
+                    if target not in tainted and target not in acted:
+                        tainted.add(target)
+                        changed = True
+        return tainted
+
+    def acted_upon(tainted: set[str]) -> frozenset[str]:
+        """Model-derived names a durable call *consumed*.
+
+        The dual of ``is_laundered``, and the same boundary read the other way.
+        That says a value coming **out** of a durable call is the code's,
+        whatever went in; this says a value going **in** is a decision the code
+        acted on rather than the answer it produced.
+
+        Without it, the ladder's own rung 3 was reported as this failure. An
+        ambiguous name resolved by ``ctx.agent()`` and then used to *fetch* —
+        ``ctx.step(search, f"parentEpic = {key} ...")`` — is a model deciding
+        and a step answering, which is the split this stage exists to protect.
+        It fired anyway, because the resolved key was also echoed in the
+        heading above the table: labelling the answer, not producing it. Two
+        stages then disagreed about the same correct code, with the resolution
+        check instructing exactly what this one refused.
+        """
+        consumed: set[str] = set()
+        sources: dict[str, set[str]] = {}
         for node in ast.walk(tree):
-            targets: list[ast.expr] = []
-            if isinstance(node, ast.Assign):
-                targets = list(node.targets)
-                value = node.value
-            elif isinstance(node, ast.AnnAssign) and node.value is not None:
-                targets = [node.target]
-                value = node.value
-            else:
+            if is_laundered(node):
+                assert isinstance(node, ast.Call)
+                for argument in [*node.args, *(kw.value for kw in node.keywords)]:
+                    for inner in ast.walk(argument):
+                        if isinstance(inner, ast.Name) and inner.id in tainted:
+                            consumed.add(inner.id)
                 continue
-            if not carries(value, tainted):
-                continue
+            targets, value = _assignment(node)
             for target in targets:
-                if isinstance(target, ast.Name) and target.id not in tainted:
-                    tainted.add(target.id)
-                    changed = True
+                for inner in ast.walk(value):
+                    if isinstance(inner, ast.Name) and inner.id in tainted:
+                        sources.setdefault(target, set()).add(inner.id)
+
+        # Consumption has to follow the same bindings taint does, or the
+        # verdict turns on whether the query was interpolated inside the call
+        # or bound to a name one line above it. Those are the same code, they
+        # are both what a model writes, and they disagreed — a check flaky on
+        # formatting is one nobody can act on.
+        acted: set[str] = set()
+        frontier = list(consumed)
+        while frontier:
+            name = frontier.pop()
+            if name in acted:
+                continue
+            acted.add(name)
+            frontier.extend(sources.get(name, ()))
+        return frozenset(acted)
+
+    tainted = spread(frozenset())
+    acted = acted_upon(tainted)
+    if acted:
+        tainted = spread(acted)
 
     found: list[int] = []
     for function in _workflow_bodies(tree):
@@ -1623,10 +1787,30 @@ def _model_answers(tree: ast.Module) -> list[int]:
             if (
                 isinstance(node, ast.Return)
                 and node.value is not None
-                and carries(node.value, tainted)
+                and carries(node.value, tainted, acted)
             ):
                 found.append(node.lineno)
     return sorted(found)
+
+
+def _assignment(node: ast.AST) -> tuple[list[str], ast.expr]:
+    """The names *node* binds and the expression it binds them to.
+
+    One reader for the shapes an assignment comes in, because the taint walk
+    and the consumption walk have to agree about what a binding is. They read
+    the same code for opposite purposes, and a shape one understands and the
+    other does not is a disagreement that shows up as a verdict, not as an
+    error.
+    """
+    if isinstance(node, ast.Assign):
+        value = node.value
+        targets = node.targets
+    elif isinstance(node, ast.AnnAssign) and node.value is not None:
+        value = node.value
+        targets = [node.target]
+    else:
+        return [], ast.Constant(value=None)
+    return [t.id for t in targets if isinstance(t, ast.Name)], value
 
 
 def _workflow_bodies(tree: ast.Module) -> list[ast.AsyncFunctionDef]:
@@ -1672,6 +1856,8 @@ def default_stages(
         ProjectionStage(),
         CataloguePreferenceStage(),
         IdentifierStage(registry),
+        SelectorStage(),
+        BrowserEffectStage(),
         JudgementStage(),
         LintStage(),
         TypeStage(),
@@ -1681,3 +1867,232 @@ def default_stages(
     if supervisor is not None:
         stages.append(CritiqueStage(supervisor=supervisor))
     return stages
+
+
+#: A CSS or XPath selector, recognised structurally rather than by vibe.
+#:
+#: Each pattern is something ordinary English does not contain. That matters in
+#: one direction more than the other: a stage that fires on prose is one people
+#: switch off, which is the reasoning the redaction denylist already follows —
+#: "a denylist that redacts ordinary data is one people switch off".
+#:
+#: A CSS *token* is a tag, class, id or attribute box, and they chain:
+#: `div.card`, `button#submit[disabled]`. An earlier version required the
+#: combinator to follow a bare tag, so `div.card > button.primary` — the single
+#: most ordinary selector there is — went unreported.
+_CSS_TOKEN = r"(?:[a-zA-Z][\w-]*|[.#][\w-]+|\[[^\]]+\])(?:[.#][\w-]+|\[[^\]]+\])*"
+
+_SELECTOR_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"^\s*\(?//[a-zA-Z*@\[]", "an XPath expression"),
+    (r"/@?[a-zA-Z-]+\[@[a-zA-Z-]+\s*=", "an XPath attribute predicate"),
+    (r"\[@[a-zA-Z-]+\s*=", "an XPath attribute predicate"),
+    (rf"{_CSS_TOKEN}\s*[>+~]\s*{_CSS_TOKEN}", "a CSS selector chain"),
+    (r"\[(?:data|aria)-[a-zA-Z-]+\s*[~^$*|]?=", "a CSS attribute selector"),
+    (r":nth-(?:child|of-type|last-child)\(", "a CSS positional selector"),
+    (r"^[.#][a-zA-Z_][\w-]*(?:[.#][\w-]+)+$", "a CSS class or id chain"),
+    # Descendant combinator — whitespace — which is the one CSS operator that
+    # ordinary prose also uses. A `.class` sigil on one side is the tell: `#a #b`
+    # is two hashtags and stays silent, `#main .row` is a selector.
+    (r"(?:^|\s)[.#][\w-]+\s+\.[\w-]+", "a CSS descendant selector"),
+    (r"(?:^|\s)\.[\w-]+\s+[.#][\w-]+", "a CSS descendant selector"),
+)
+
+
+class SelectorStage:
+    """A selector written into a browser workflow, instead of a name.
+
+    The direct analogue of :class:`IdentifierStage`, one subsystem over. That
+    one catches an identifier nobody looked up; this catches an **address
+    nobody can check**.
+
+    A CSS path or XPath read off a page during authoring is right on the render
+    it was read from and silently wrong afterwards — and it fails the way this
+    whole area keeps failing: by matching *nothing*, so the workflow runs,
+    completes, and reports that there was nothing to do. ``tests/corpus``
+    measured the alternative at 76% with no model call at all, which is what
+    makes "use the accessible name" advice rather than aspiration.
+
+    ``Target.css`` exists and is legitimate — some controls genuinely carry no
+    accessible name. So this is a **warning**, and it says what to reach for
+    first rather than forbidding the escape hatch: a selector in `css=` beside
+    a role and name is a fallback, and a selector *as* the address is a guess.
+
+    Deliberately not flagged: a selector in a comment or a docstring (only
+    string constants are read), and any file that never touches ``browser.*``
+    — a CSS string in a workflow that renders an email is not this mistake.
+    """
+
+    name: str = "selectors"
+    cost: int = 18
+    blocking: bool = False
+
+    async def run(self, code: str, context: CheckContext) -> CheckResult:
+        if "browser." not in code:
+            return CheckResult(
+                self.name, skipped=True,
+                reason="no browser.* call in this workflow")
+
+        compiled = [(re.compile(pattern), what)
+                    for pattern, what in _SELECTOR_PATTERNS]
+        spec = context.spec or ""
+        issues: list[CodeIssue] = []
+        seen: set[str] = set()
+
+        for literal in _string_literals(code):
+            if len(literal) < 4 or literal in seen or literal in spec:
+                continue
+            for regex, what in compiled:
+                if regex.search(literal):
+                    seen.add(literal)
+                    issues.append(
+                        CodeIssue(
+                            "selectors",
+                            f"{literal!r} looks like {what}. A selector read off "
+                            "a page while authoring is right on that render and "
+                            "silently wrong later — it matches nothing, so the "
+                            "workflow completes and reports an empty result. "
+                            "Address the control the way a person reads it: "
+                            "Target(role=..., name=...), which resolves through "
+                            "the accessible name, then placeholder, then label. "
+                            "Keep a selector only as css= beside those.",
+                            "warning",
+                        )
+                    )
+                    break
+
+        return CheckResult(self.name, issues=issues)
+
+
+class BrowserEffectStage:
+    """What a browser action says it does to the world.
+
+    ``browser.act`` takes a declared ``effect``, and the declaration is what
+    makes ``TaintBroker`` able to refuse a submit on a run that has read a
+    page. It cannot be inferred: ``click "Next"`` and ``click "Confirm
+    booking"`` are the same shape, and a keyword list over the target name is
+    exactly the guess ``DEFAULT_SYSTEM_PROMPT`` names as the tell for a rule
+    nobody should write.
+
+    So this does not guess either. It reports two things a reader can check:
+
+    **An act with no ``effect`` at all.** The default is WRITE, which is a
+    fail-safe backstop rather than a classification — safe, but it means every
+    unmarked action is refused on a tainted run, and a workflow full of them is
+    one nobody can deploy under the rule. Reported as a *warning*: the code is
+    correct, it is merely unclassified.
+
+    **A declared write with no approval anywhere in the file.** Under the
+    default policy that run cannot reach the write at all, so this is code that
+    will not do what it says. An **error**, because the repair loop reads
+    ``report.errors`` and a warning here is a finding nobody sees — and it is
+    safe to escalate for the reason the loop already relies on: unchanged code
+    ends the repair, so a model that judges the finding wrong says so by
+    leaving the file alone.
+
+    It reads the call's own keywords, so a payload built elsewhere and passed
+    by name is invisible to it. That is the same limit ``ctx.arguments`` has,
+    and the same answer: silence is weak evidence.
+    """
+
+    name: str = "browser-effect"
+    cost: int = 19
+    blocking: bool = False
+
+    async def run(self, code: str, context: CheckContext) -> CheckResult:
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return CheckResult(self.name, skipped=True, reason="does not parse")
+
+        acts = [node for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and _is_node_call(node, "browser.act")]
+        if not acts:
+            return CheckResult(
+                self.name, skipped=True, reason="no browser.act call")
+
+        issues: list[CodeIssue] = []
+        undeclared = 0
+        writes = 0
+        for call in acts:
+            declared = _payload_value(call, "effect")
+            if declared is None:
+                undeclared += 1
+            elif declared in {"write", "destructive"}:
+                writes += 1
+
+        if undeclared:
+            issues.append(
+                CodeIssue(
+                    "browser-effect",
+                    f"{undeclared} browser.act call(s) declare no `effect`. It "
+                    "defaults to WRITE, which is a fail-safe backstop and not a "
+                    "classification — so every one of them is refused on a run "
+                    "that has read a page. Say what each action does: filling a "
+                    "field and moving between steps are 'read'; submitting, "
+                    "sending or confirming is 'write'; cancelling or deleting "
+                    "is 'destructive'.",
+                    "warning",
+                )
+            )
+
+        if writes and not _asks_a_person(tree):
+            issues.append(
+                CodeIssue(
+                    "browser-effect",
+                    f"this workflow performs {writes} declared browser write(s) "
+                    "after reading a page, and never asks a person. Under the "
+                    "default taint policy the write is refused and the workflow "
+                    "cannot complete — reading a page is what taints the run, "
+                    "and only an approval clears it. Add "
+                    "ctx.node('human.approval', ...) before the write, and open "
+                    "the flow with scope='durable' so the browser survives the "
+                    "wait. If the write genuinely needs no review, leave this "
+                    "alone and say so.",
+                    "error",
+                )
+            )
+
+        return CheckResult(self.name, issues=issues)
+
+
+def _is_node_call(node: ast.Call, node_id: str) -> bool:
+    """``ctx.node("<node_id>", ...)``, however ctx is named."""
+    func = node.func
+    if not (isinstance(func, ast.Attribute) and func.attr == "node"):
+        return False
+    first = node.args[0] if node.args else None
+    return isinstance(first, ast.Constant) and first.value == node_id
+
+
+def _payload_value(call: ast.Call, key: str) -> str | None:
+    """A string value for *key* in the call's payload dict, if it is a literal.
+
+    ``None`` covers three different situations on purpose — no payload dict, no
+    such key, and a value that is not a literal — because a stage that cannot
+    read the value should report the same thing in all three: it does not know.
+    """
+    payload = call.args[1] if len(call.args) > 1 else None
+    if not isinstance(payload, ast.Dict):
+        return None
+    for name, value in zip(payload.keys, payload.values, strict=False):
+        if (isinstance(name, ast.Constant) and name.value == key
+                and isinstance(value, ast.Constant)
+                and isinstance(value.value, str)):
+            return value.value
+    return None
+
+
+def _asks_a_person(tree: ast.AST) -> bool:
+    """Whether the file asks anybody anything, by any of the routes there are."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Attribute) and func.attr == "wait_for_approval":
+                return True
+            first = node.args[0] if node.args else None
+            if (isinstance(func, ast.Attribute) and func.attr == "node"
+                    and isinstance(first, ast.Constant)
+                    and isinstance(first.value, str)
+                    and first.value.startswith("human.")):
+                return True
+    return False

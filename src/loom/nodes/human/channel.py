@@ -62,6 +62,19 @@ class HumanRequest(BaseModel):
     business — LOOM records the responder the channel reports and claims nothing
     more about it than that."""
 
+    live_view_url: str = ""
+    """Where a person can watch — or take over — the browser this run is
+    holding, when it is holding one.
+
+    Typed rather than left in :attr:`context` because a channel builds its UI
+    from the request's shape, and a takeover link it has to discover by
+    guessing a dict key is one no channel will offer. Empty whenever the run
+    has no durable browser, which is the common case.
+
+    This is the whole reason ``SessionScope.DURABLE`` exists: a run parked on a
+    2FA prompt costs nothing while it waits, but the *browser* has to still be
+    there when the person finishes."""
+
     expires_at: datetime | None = None
     created_at: datetime | None = None
 

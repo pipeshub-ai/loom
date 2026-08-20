@@ -199,6 +199,59 @@ class TestConcreteStages:
         assert result.issues
         assert all(i.severity == "warning" for i in result.issues)
 
+    def test_an_error_in_another_file_is_not_this_file_s_defect(self) -> None:
+        """The environmental-failure trap, in mypy's costume.
+
+        ``TypeStage`` used to keep every ``: error:`` line mypy printed and
+        split the filename off — so a complaint about a *dependency's* stubs
+        arrived as a complaint about the generated workflow, with the evidence
+        of its origin removed. It is not hypothetical: numpy's stubs use PEP
+        695 ``type`` statements, a syntax error below 3.12, so any environment
+        with numpy installed handed the repair loop
+        ``737: error: Type statement is only supported in Python 3.12`` to fix
+        in a file that has no line 737.
+
+        Driven through the predicate with mypy's own output, because the defect
+        was in reading that output and the environment cannot be relied on to
+        reproduce it.
+        """
+        output = (
+            "/x/site-packages/numpy/__init__.pyi:737: error: Type statement is "
+            "only supported in Python 3.12 and greater  [syntax]\n"
+        )
+        result = TypeStage()._read(output, "generated.py")
+
+        assert result.issues == [], "another file's error was blamed on this one"
+        assert result.skipped, "a check that found only foreign errors has not run"
+        assert "other files" in result.reason
+
+    def test_this_file_s_errors_are_still_reported(self) -> None:
+        """The other direction — the filter must not swallow real findings."""
+        output = (
+            "/tmp/abc/generated.py:12: error: Missing positional argument  [call-arg]\n"
+            "/x/site-packages/numpy/__init__.pyi:737: error: Type statement  [syntax]\n"
+        )
+        result = TypeStage()._read(output, "generated.py")
+
+        assert not result.skipped
+        assert [i.message for i in result.issues] == [
+            "12: error: Missing positional argument  [call-arg]"]
+
+    def test_mypy_stopping_early_is_a_skip_not_a_pass(self) -> None:
+        """"The gate did not run" must be distinguishable from "it passed".
+
+        The same distinction ``scripts/typecheck.py`` exits 2 for, and for the
+        same reason: reporting clean here certifies code nothing looked at.
+        """
+        output = (
+            "/x/numpy/__init__.pyi:737: error: Type statement  [syntax]\n"
+            "Found 1 error in 1 file (errors prevented further checking)\n"
+        )
+        result = TypeStage()._read(output, "generated.py")
+
+        assert result.skipped
+        assert "stopped before checking" in result.reason
+
     async def test_a_missing_tool_skips_rather_than_fails(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

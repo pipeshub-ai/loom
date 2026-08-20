@@ -43,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils import require_env
 
 from loom.agents.coding_agent import WorkflowCodingAgent
+from loom.agents.interaction import CLIUserInteraction
 from loom.agents.providers.anthropic_provider import AnthropicProvider
 from loom.agents.tool_registry import Toolset, ToolsetRegistry
 
@@ -425,6 +426,10 @@ async def main() -> None:
         max_discovery_turns=28,
         max_repair_attempts=2,
         tool_registry=registry,
+        # "the saas epic" resolves to two epics on a real instance. That is a
+        # question for whoever typed the query, not a guess and not a model
+        # call in every run — so the agent may ask it here.
+        user_interaction=CLIUserInteraction(),
     )
 
     await run_query(agent, query, label, show_tools=args.debug)

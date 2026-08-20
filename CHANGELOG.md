@@ -182,6 +182,172 @@ topic and that key is global.
 `Runtime.capabilities()` reports which optional ports are wired, which nothing
 could ask before.
 
+### Added — driving a web page
+
+`Runtime(browser=LocalBrowserProvider())`, and six `browser.*` nodes: navigate,
+snapshot, observe, act, extract, close. Two Protocols in `loom/browser/`, one
+reference provider over Playwright, a fake for offline tests, and
+`loom.testing.conformance.verify_browser_session` so a host proves its own
+Browserbase or Kernel adapter. The position `loom/knowledge/` takes about vector
+databases, for the same reason.
+
+**No new dependency.** `[browser]` is the extra `BrowserProbe` already needed;
+`[stealth]` adds Apache-2.0 `patchright`, opt-in. Skyvern and `workflow-use` are
+AGPL-3.0 and were ruled out; `browser-use` is MIT and pins ~40 packages with
+`==` including `pydantic==2.12.5`, so it is welcome as a host adapter through
+the `loom_browser_provider` entry point and unusable as a dependency.
+`tests/test_dependency_licences.py` enforces that as a gate.
+
+**Controls are addressed by accessible role and name**, never a selector. Two
+matches raise rather than resolving — picking one is how an automation clicks
+the wrong button and reports success. `tests/corpus` measures the claim against
+10 frozen real pages and 114 hand-labelled controls: **76%**, offline and
+deterministic.
+
+**An act declares its effect**, so `TaintBroker` refuses a submit on a run that
+has read a page, with no browser-specific code in `runtime/`. Drift repairs a
+read and refuses a write. `SessionScope.DURABLE` lets a run park on a person
+mid-flow and reattach afterwards, with `HumanRequest.live_view_url` carrying the
+takeover link.
+
+### Added — the coding agent can write browser workflows
+
+A browser block in `DEFAULT_SYSTEM_PROMPT`, two verification stages, and
+`docs/guides/browser-automation.md` whose every snippet compiles and resolves in
+CI. `SelectorStage` reports a CSS or XPath address written into a browser
+workflow; `BrowserEffectStage` reports an act with no declared effect, and a
+declared write that nothing in the file asks a person about.
+
+Both are asserted in **both** directions. A stage that fires on correct code is
+worse than no stage, because the repair loop acts on `report.errors` and will
+rewrite working code to silence it — so `SelectorStage` is pinned against
+ordinary strings as well as real selectors, and the whitespace descendant
+combinator is keyed on a `.class` sigil since `#a #b` is two hashtags.
+
+`BrowserProbe`'s census now carries role and accessible name in the same shape
+`PageSnapshot.tree` uses, so an authoring observation is directly usable as a
+smoke fixture. Its summary reports how many controls are addressable by name,
+which is the sentence that decides whether the approach works on that page.
+
+The smoke sandbox installs `FakeBrowserProvider(permissive=True)`, for the
+reason `AutoRespondChannel` exists: otherwise a generated browser workflow can
+only reach a connection error, and the cheapest repair for an error a model
+cannot fix is to delete the browser work.
+
+The prompt block cost 2235 characters and shipped at 681. `DEFAULT_SYSTEM_PROMPT`
+is held to a budget whose margin is one sentence wide precisely so an addition
+has to justify itself, and it caught this one. The opening line duplicated step
+1's DISCOVER exit and was merged into it — where step 1 was wrong without it,
+naming plain Python as the only answer when no toolset matches — and the worked
+example was deleted outright, because `node_contract` renders the call from the
+node's own models and a copy in the prompt is a second source that can drift.
+
+### Added — a browser session is treated as the credential it is
+
+`DEFAULT_REDACT_KEYS` gains `storage_state`, `cookie` and `cookies`. A
+`storage_state` is an authenticated session in a JSON blob, worth as much to
+anyone reading a trace as the password that produced it, and it travels as an
+ordinary field — so nothing about its shape stopped it reaching a journal.
+
+The existing whole-word rule needed no special case: `storage_state` is
+multi-word and matches wherever it appears, while single-word `cookie` must be
+the last word, catching `session_cookie` and leaving `cookie_banner_text`
+alone. `storage_ref` is deliberately *not* redacted — it names where the jar is
+kept rather than what is in it, and is the half a person reading a trace needs.
+
+### Fixed — two defects the typecheck gate caught that the suite could not
+
+`browser.close` had lost its `return` to a bulk edit and would have returned
+`None` where its contract declares `CloseOut`; `BrowserEffectStage` passed an
+`ast.AST` to a function requiring an `ast.Call`. Neither was visible to the
+tests. `python scripts/typecheck.py` is clean across 413 source files.
+
+### Fixed — mypy's findings about other files were blamed on generated code
+
+`TypeStage` kept every `: error:` line mypy printed and split the filename off,
+so a complaint about a *dependency's* stubs arrived as a complaint about the
+generated workflow with the evidence of its origin removed. Not hypothetical:
+numpy's stubs use PEP 695 `type` statements — a syntax error below 3.12 — so any
+environment with numpy installed handed the repair loop `737: error: Type
+statement is only supported in Python 3.12` to fix in a file that has no line
+737. The environmental-failure trap that "fed 401s into the repair loop until a
+workflow came back gutted", in a new costume.
+
+Errors are now attributed to the file they came from, and mypy stopping early
+("errors prevented further checking") reports the stage **skipped** rather than
+clean — the same distinction `scripts/typecheck.py` exits 2 for, because a gate
+that did not run must be distinguishable from one that passed.
+
+Two tests were asserting the environment rather than the claim, and both are
+now honest about it: `test_toolsets` skips when mypy could not look, and the
+MCP pipeline test no longer demands `ok` from every stage — clean code means
+nothing *failed*, not that every check ran.
+
+### Fixed — three ways a policy could not see what it was deciding about
+
+All found while wiring the above, all outside the browser package, and all the
+same shape: a control that reads as enforcing something and enforced nothing.
+
+- **`effect_by` was dead for every node.** `_effect_arguments` returned `{}` for
+  anything that was not a `dict`, and `ctx.node` passes the validated Pydantic
+  model — so `io.http_request(method="DELETE")` reached the broker classified
+  WRITE, and a deployment on `block_writes=False, block_destructive=True`
+  permitted exactly the calls it was configured to refuse. Hooks and guardrails
+  deciding on values saw an empty mapping for nodes too.
+- **A node's own I/O was unclassified.** An inline `ctx.call` carried no effect
+  metadata, so `io.http_request(method="GET")` dispatched the node as READ and
+  its inner `http:GET` as WRITE — the node's classification defeated one level
+  down by itself. `call` now inherits the enclosing node's resolved class and
+  target; `step` does not, because it names a function that may carry its own
+  from a manifest.
+- **The taint rule blocked its own exit.** Every `human.*` node is WRITE and
+  open_world, both accurate, so a tainted run could not reach the person whose
+  approval is the only thing that clears the taint. `EffectCall.asks_human` now
+  carries it, derived from `requires=["human_channel"]` rather than a name
+  match.
+
+### Changed — the MCP server speaks mcp 2.x
+
+`FastMCP` is gone. The 2.0 SDK did not rename it in place, it removed
+`mcp.server.fastmcp` outright, so `loom mcp` is now built on `MCPServer` from
+`mcp.server.mcpserver` and the extra declares `mcp>=2.0,<3`.
+
+The previous `mcp>=1.2` was wrong at both ends, and quietly. 2.0 is the current
+stable release, so `pip install loomsdk[mcp]` already resolved to a version
+where the server could not import at all; and nothing older than 1.14 ever
+worked either — 1.13.1 fails 12 of the MCP tests with 31 errors, because mcp's
+own tool registration calls `issubclass()` on a union annotation. Neither bound
+is discoverable by probing imports: every symbol LOOM uses resolves as far back
+as 1.12.3, which then registers no tools.
+
+Both bounds are measured against the suite rather than argued, and the ceiling
+is now closed. An open upper bound is precisely what let 2.0 arrive as a silent
+breaking change — `phases/phase-9-mcp-server.md` predicted it and prescribed
+`mcp>=2.0,<3.0`. Every 2.x release is still taken; 3.0 becomes a decision
+somebody makes rather than something a fresh install discovers.
+
+What moved, beyond the name: `host`, `port` and `transport_security` are
+run-call arguments now instead of constructor ones — where a server binds is a
+property of serving it, not of the tool registry. `build_server` still takes
+them and records them as `TransportOptions` on the built server; `serve` hands
+them to `run`. Accepting them and binding elsewhere would have been the one
+genuinely dangerous option, because nothing fails: the server starts, listens
+somewhere else, and the client simply never connects.
+
+`ToolAnnotations` and `Tool` fields are snake_case (`read_only_hint`,
+`input_schema`); `call_tool` returns a `CallToolResult` rather than the content
+sequence; `McpError` is `MCPError`.
+
+### Fixed — the type gate was checking the MCP surface against `Any`
+
+`mcp.*` is declared `ignore_missing_imports`, and the type-check environment
+installed `[dev]`, which does not include the extra. Every annotation in
+`mcp_server/` therefore resolved to `Any` and mypy reported success over ~900
+lines it had not checked — the same shape of hole as the numpy trap the wrapper
+exists to report. The environment is now `[dev,mcp]`, in CI and in
+`scripts/typecheck.py`'s provisioning alike; it found two real errors on the
+first run. `mcp` pulls no numpy, so the reason for `[dev]` over `[all]` is
+unaffected.
 
 ### Added — `loom author`, and authoring on the facade
 

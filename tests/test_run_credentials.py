@@ -8,7 +8,7 @@ import pytest
 
 from loom import Context, Runtime, step, workflow
 from loom.agents.agent import Agent
-from loom.agents.interaction import CallbackUserInteraction, UserQuestion, UserResponse
+from loom.agents.interaction import Answer, CallbackUserInteraction, Question
 from loom.agents.messages import ToolCall
 from loom.connectors.credentials import (
     MemoryCredentialStore,
@@ -147,9 +147,9 @@ class TestInWorkflowAskIsJournaled:
     async def test_replay_does_not_re_ask(self) -> None:
         asked: list[str] = []
 
-        def cb(question: UserQuestion) -> UserResponse:
+        def cb(question: Question) -> Answer:
             asked.append(question.question)
-            return UserResponse(answer="blue")
+            return Answer(action="accept", other="blue")
 
         agent = Agent(
             name="colourist",
@@ -159,7 +159,11 @@ class TestInWorkflowAskIsJournaled:
                         tool_calls=[
                             ToolCall(
                                 name="ask_user",
-                                arguments={"question": "favourite colour?"},
+                                arguments={
+                                    "questions": [
+                                        {"question": "favourite colour?"}
+                                    ]
+                                },
                             )
                         ]
                     ),

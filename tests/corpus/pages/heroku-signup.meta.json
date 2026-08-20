@@ -1,0 +1,21 @@
+{
+  "slug": "heroku-signup",
+  "source": "https://signup.heroku.com/",
+  "final_url": "https://signup.heroku.com/",
+  "title": "Sign up | Heroku",
+  "vendor": "heroku",
+  "category": "signup",
+  "captured": "2026-08-19",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "bytes": 367134,
+  "counts": {
+    "marked_hidden": 1277,
+    "dropped_nodes": 33,
+    "native_controls": 6,
+    "role_widgets": 2,
+    "buttons": 0
+  }
+}

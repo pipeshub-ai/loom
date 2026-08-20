@@ -53,6 +53,8 @@ OFFLINE = [
     # and writes it would have made and returns, touching no network.
     "27_meeting_prep.py",
     "28_hooks.py",
+    "30_browser_automation.py",
+    "31_browser_approval.py",
 ]
 
 #: Needs the network but no credentials. Exercised for structure, not executed:

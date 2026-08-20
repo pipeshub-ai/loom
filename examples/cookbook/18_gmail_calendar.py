@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils import box, header, log, print_coding_result, require_any_env
 
 from loom.agents.coding_agent import WorkflowCodingAgent
+from loom.agents.interaction import CLIUserInteraction
 from loom.agents.tool_registry import ToolsetRegistry
 from loom.toolsets.google import GMAIL_MANIFEST, GOOGLE_CALENDAR_MANIFEST
 
@@ -219,6 +220,7 @@ async def main() -> int:
             max_repair_attempts=4,
             smoke_test=True,
             smoke_input=smoke_input,
+            user_interaction=CLIUserInteraction(),
         )
 
     specs = SPECS if WRITE else [s for s in SPECS if not s.writes]

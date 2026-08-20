@@ -9,12 +9,14 @@ from __future__ import annotations
 from loom.toolsets.jira.models import (
     Comment,
     CreatedIssue,
+    EpicLookup,
     FieldLookup,
     JiraField,
     JiraIssue,
     JiraProject,
     JiraProjectDetail,
     JiraUser,
+    ProjectLookup,
     ProjectMetadata,
     Transition,
     UserLookup,
@@ -91,6 +93,39 @@ JIRA_MANIFEST = ToolsetManifest(
                 },
                 output_schema=_issue_list_schema,
                 pagination=True,
+                idempotent=True,
+            ),
+            OperationSpec(
+                id="issues.resolve_epic",
+                function="jira_resolve_epic",
+                resolves="epic",
+                summary="Find an epic by the name a person calls it.",
+                description=(
+                    "Call this whenever a request names an epic — 'the "
+                    "billing epic'. JQL addresses an epic by issue key, "
+                    "never by that name, and nothing joins the two. An epic "
+                    "is an issue, so there is no endpoint listing epics and "
+                    "this scoped search is the only lookup; matching "
+                    "summary ~ inline instead searches every issue on the "
+                    "site. Pass project when it is known — epic names repeat "
+                    "across projects. Check the match count before filtering."
+                ),
+                effect=EffectClass.READ,
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "epic_name": {"type": "string"},
+                        "project": {
+                            "type": "string",
+                            "description": (
+                                "Project key to search within. Resolve it "
+                                "first with projects.resolve."
+                            ),
+                        },
+                    },
+                    "required": ["epic_name"],
+                },
+                output_schema=EpicLookup.model_json_schema(),
                 idempotent=True,
             ),
             OperationSpec(
@@ -278,6 +313,28 @@ JIRA_MANIFEST = ToolsetManifest(
             ),
         ],
         "projects": [
+            OperationSpec(
+                id="projects.resolve",
+                function="jira_resolve_project",
+                resolves="project",
+                summary="Find a project by key or by the name people call it.",
+                description=(
+                    "A project is the namespace nearly every other query is "
+                    "scoped by, and its key is never the words anybody says — "
+                    "'Acme Platform' is ACME. JQL's project = accepts either, so "
+                    "an exact hit needs no guessing; what this prevents is "
+                    "the other case, where a filter on a project that does "
+                    "not exist returns zero issues and no error."
+                ),
+                effect=EffectClass.READ,
+                input_schema={
+                    "type": "object",
+                    "properties": {"project_name": {"type": "string"}},
+                    "required": ["project_name"],
+                },
+                output_schema=ProjectLookup.model_json_schema(),
+                idempotent=True,
+            ),
             OperationSpec(
                 id="projects.list",
                 function="jira_list_projects",

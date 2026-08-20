@@ -205,6 +205,8 @@ _CAPABILITY_ATTRS: dict[str, str] = {
     "connections": "connections",
     "embeddings": "embeddings",
     "vectors": "vectors",
+    "browser": "browser",
+    "browser_sessions": "browser_sessions",
 }
 
 

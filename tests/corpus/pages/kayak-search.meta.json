@@ -1,0 +1,21 @@
+{
+  "slug": "kayak-search",
+  "source": "https://www.kayak.com/flights",
+  "final_url": "https://www.kayak.com/flights",
+  "title": "Cheap Flights, Airline Tickets & Airfare Deals | KAYAK",
+  "vendor": "kayak",
+  "category": "search",
+  "captured": "2026-08-19",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "bytes": 451497,
+  "counts": {
+    "marked_hidden": 2122,
+    "dropped_nodes": 437,
+    "native_controls": 3,
+    "role_widgets": 138,
+    "buttons": 36
+  }
+}

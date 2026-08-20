@@ -95,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ``terminate_on`` is a fallback, not a claim on the process: a server started
     below installs its own handlers and gets them back on the way out. uvicorn
-    and FastMCP both do, and both already shut down cleanly.
+    and the MCP server both do, and both already shut down cleanly.
     """
     from loom.runtime.shutdown import Interrupted, terminate_on
 
@@ -242,6 +242,28 @@ def _authoring(sub: _Subparsers) -> None:
         "impossible to judge.",
     )
     author.add_argument(
+        "--answers",
+        type=_path,
+        metavar="FILE",
+        help="Replay answers recorded by an earlier run (see --save-answers). "
+        "A question that is not in the file is still asked; one whose choices "
+        "have changed is asked again rather than answered from a stale record.",
+    )
+    author.add_argument(
+        "--save-answers",
+        type=_path,
+        metavar="FILE",
+        help="Write the questions and answers here. The same spec and the same "
+        "answers reproduce the same file, which is what makes an authoring run "
+        "that asked anything repeatable in CI.",
+    )
+    author.add_argument(
+        "--no-ask",
+        action="store_true",
+        help="Never ask. An ambiguity is resolved at run time by ctx.agent() "
+        "instead, exactly as it is when nobody is at the terminal.",
+    )
+    author.add_argument(
         "--no-observe",
         action="store_true",
         help="Do not let the agent look at systems the spec names before "
@@ -279,6 +301,28 @@ def _authoring(sub: _Subparsers) -> None:
         "--input",
         "-i",
         help="Input for the verification run: JSON, @file.json, or a bare string",
+    )
+    edit.add_argument(
+        "--answers",
+        type=_path,
+        metavar="FILE",
+        help="Replay answers recorded by an earlier run (see --save-answers). "
+        "A question that is not in the file is still asked; one whose choices "
+        "have changed is asked again rather than answered from a stale record.",
+    )
+    edit.add_argument(
+        "--save-answers",
+        type=_path,
+        metavar="FILE",
+        help="Write the questions and answers here. The same spec and the same "
+        "answers reproduce the same file, which is what makes an authoring run "
+        "that asked anything repeatable in CI.",
+    )
+    edit.add_argument(
+        "--no-ask",
+        action="store_true",
+        help="Never ask. An ambiguity is resolved at run time by ctx.agent() "
+        "instead, exactly as it is when nobody is at the terminal.",
     )
     edit.add_argument(
         "--no-observe",

@@ -1,0 +1,20 @@
+{
+  "slug": "fastmail-signup",
+  "source": "https://www.fastmail.com/signup/",
+  "labelled_by": "claude",
+  "labelled_from": "fastmail-signup.png",
+  "flow": "create a trial account: name, desired address, password, data region",
+  "note": "The domain dropdown shows 'fastmail.com' as its current value but carries no label text — a value is not a name, so it is recorded as unlabelled rather than guessed at.",
+  "controls": [
+    {"purpose": "display name field",     "role": "textbox", "name": "Your name",  "visible_label": true, "required_for_flow": true},
+    {"purpose": "desired email local part", "role": "textbox", "name": "Choose your email address", "visible_label": true, "required_for_flow": true},
+    {"purpose": "password field",         "role": "textbox", "name": "Password",   "visible_label": true, "required_for_flow": true},
+    {"purpose": "US data residency",      "role": "radio",   "name": "US",         "visible_label": true, "required_for_flow": true},
+    {"purpose": "EU data residency",      "role": "radio",   "name": "EU",         "visible_label": true, "required_for_flow": false},
+    {"purpose": "use my own domain",      "role": "switch",  "name": "Use your own domain", "visible_label": true, "required_for_flow": false},
+    {"purpose": "terms of service link",  "role": "link",    "name": "terms of service", "visible_label": true, "required_for_flow": false},
+    {"purpose": "go to log in",           "role": "link",    "name": "Log in",     "visible_label": true, "required_for_flow": false},
+    {"purpose": "go to support",          "role": "link",    "name": "Support",    "visible_label": true, "required_for_flow": false},
+    {"purpose": "choose the mail domain", "role": "combobox","name": null,         "visible_label": false, "required_for_flow": true}
+  ]
+}

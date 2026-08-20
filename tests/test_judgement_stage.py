@@ -151,6 +151,172 @@ class TestWhatItMustNotFlag:
         assert not (await check("def (")).issues
 
 
+class TestAModelDecisionActedOnIsNotTheAnswer:
+    """The dual of the laundering rule, and the false positive without it.
+
+    ``is_laundered`` says a value coming *out* of a durable call is the code's,
+    whatever model input went in. The missing half was the value going *in*: a
+    name an ambiguous-resolution agent chose, handed to ``ctx.step`` to fetch
+    with, is a model deciding and a step answering — the split this stage
+    exists to protect.
+
+    It fired anyway when the resolved key was also echoed above the table, and
+    that mattered more than a stray warning would: ``ResolutionStage``
+    *instructs* this shape ("if it stays ambiguous, resolve it in a ctx.agent()
+    step with the candidates"), so two checks disagreed about the same correct
+    code and the repair loop had no move that satisfied both.
+    """
+
+    LADDER = (
+        '    found = await ctx.step(resolve_epic, "saas")\n'
+        '    picked = await ctx.agent(f"which epic? {found.note}")\n'
+        "    key = picked.text().strip()\n"
+        '    rows = await ctx.step(search, f"parentEpic = {key}")\n'
+        '    return f"# {key}\\n" + "\\n".join(r.summary for r in rows)\n'
+    )
+
+    async def test_a_resolution_the_code_fetched_with_is_left_alone(self) -> None:
+        assert not (await check(workflow(self.LADDER))).issues
+
+    async def test_echoing_the_resolved_value_in_the_answer_is_still_fine(
+        self,
+    ) -> None:
+        """Labelling a table with what was resolved is not producing it."""
+        code = workflow(
+            '    picked = await ctx.agent("which epic?")\n'
+            "    key = picked.text()\n"
+            '    rows = await ctx.step(search, key)\n'
+            "    lines = [f\"# {key}\"]\n"
+            "    for row in rows:\n"
+            '        lines.append(row.summary)\n'
+            '    return "\\n".join(lines)\n'
+        )
+
+        assert not (await check(code)).issues
+
+    async def test_binding_the_query_first_reads_the_same_as_inlining_it(
+        self,
+    ) -> None:
+        """The verdict must not turn on where the model put a newline.
+
+        Consumption follows the same bindings taint does, or one intermediate
+        name hides it: ``ctx.step(search, f"... {key}")`` consumes ``key``
+        while ``jql = f"... {key}"; ctx.step(search, jql)`` consumes only
+        ``jql``. Those are the same code and a model writes both — and they
+        disagreed, so the same request passed or deadlocked depending on which
+        spelling came back. A check flaky on formatting is one nobody can act
+        on, and this asserts the equivalence rather than either shape, because
+        pinning one shape is how they drifted apart.
+        """
+        inlined = workflow(
+            '    picked = await ctx.agent("which epic?")\n'
+            "    key = picked.text().strip()\n"
+            '    rows = await ctx.step(search, f"parentEpic = {key}")\n'
+            '    return f"# {key}\\n" + "\\n".join(r.summary for r in rows)\n'
+        )
+        bound = workflow(
+            '    picked = await ctx.agent("which epic?")\n'
+            "    key = picked.text().strip()\n"
+            '    jql = f"parentEpic = {key} AND duedate < now()"\n'
+            "    rows = await ctx.step(search, jql)\n"
+            '    return f"# {key}\\n" + "\\n".join(r.summary for r in rows)\n'
+        )
+
+        assert not (await check(inlined)).issues
+        assert not (await check(bound)).issues
+
+    async def test_a_model_answer_no_durable_call_consumed_is_still_flagged(
+        self,
+    ) -> None:
+        """The defect the stage was written for, unchanged.
+
+        Nothing acted on this value — it went straight to the caller — so the
+        de-tainting rule never applies and the finding survives.
+        """
+        code = workflow(
+            "    rows = await ctx.step(fetch)\n"
+            '    table = await ctx.agent("format these as markdown", rows)\n'
+            "    return table\n"
+        )
+
+        assert (await check(code)).issues
+
+    async def test_consuming_a_different_value_does_not_launder_the_answer(
+        self,
+    ) -> None:
+        """De-tainting is per name, not per workflow.
+
+        A body that both acts on one model decision and returns another is the
+        defect in the half that is returned, and a rule keyed on the workflow
+        rather than the value would miss it.
+        """
+        code = workflow(
+            '    picked = await ctx.agent("which epic?")\n'
+            "    key = picked.text()\n"
+            "    rows = await ctx.step(search, key)\n"
+            '    table = await ctx.agent("format these", rows)\n'
+            "    return table\n"
+        )
+
+        assert (await check(code)).issues
+
+
+class TestWhatItDoesNotSee:
+    """The binding shapes the walk misses, asserted rather than assumed.
+
+    All four are **false negatives** — a defect that goes unreported — and
+    none can deadlock the repair loop, because a shape neither half of the
+    analysis binds is a shape both halves ignore. That symmetry is the
+    property worth keeping: taint and consumption read the same
+    ``_assignment``, so a hole is a miss in both directions rather than a
+    disagreement, and a disagreement is what makes a stage flag correct code
+    it offers no way to fix.
+
+    Closing them means tracking *values* rather than names. Two results of one
+    model call, one of them acted on, are the same name-level subtree and
+    different values — so a name-level fix that reported the second would have
+    to keep the first, and reporting both is how the false positives come
+    back. Left open deliberately, and pinned here so the gap is visible.
+    """
+
+    async def _clean(self, body: str) -> bool:
+        return not (await check(workflow(body))).issues
+
+    async def test_a_tuple_unpacked_model_value_is_missed(self) -> None:
+        assert await self._clean(
+            '    p = await ctx.agent("x")\n'
+            '    head, tail = p.text().split("|")\n'
+            "    return head\n"
+        )
+
+    async def test_a_loop_variable_over_model_output_is_missed(self) -> None:
+        assert await self._clean(
+            '    p = await ctx.agent("x")\n'
+            "    out = []\n"
+            "    for row in p.rows:\n"
+            "        out.append(row)\n"
+            '    return "".join(out)\n'
+        )
+
+    async def test_an_augmented_assignment_is_missed(self) -> None:
+        assert await self._clean(
+            '    p = await ctx.agent("x")\n'
+            '    report = ""\n'
+            "    report += p.text()\n"
+            "    return report\n"
+        )
+
+    async def test_a_value_appended_into_a_list_is_missed(self) -> None:
+        """A mutation is not a binding, and modelling it means modelling
+        aliasing — a different analysis, not a wider one."""
+        assert await self._clean(
+            '    p = await ctx.agent("x")\n'
+            "    out = []\n"
+            "    out.append(p.text())\n"
+            '    return "".join(out)\n'
+        )
+
+
 class TestWhereItSits:
     def test_it_is_non_blocking_and_static(self) -> None:
         """Nothing after it depends on the answer, and it costs an AST walk."""

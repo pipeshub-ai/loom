@@ -1,4 +1,4 @@
-"""Turns :class:`IdentitySettings` into what ``FastMCP`` needs to be a resource server.
+"""Turns :class:`IdentitySettings` into what ``MCPServer`` needs to be a resource server.
 
 Deliberately thin, and deliberately the *second* module (after
 ``mcp_server/server.py``) allowed to import ``mcp`` — it only reaches for
@@ -27,9 +27,16 @@ __all__ = ["McpAuth", "build_mcp_auth"]
 
 @dataclass(frozen=True)
 class McpAuth:
-    """Everything :func:`~loom.mcp_server.server.build_server`
-    passes straight through to ``FastMCP(...)``, computed once at startup so
-    no per-request check has to re-derive it."""
+    """Everything :func:`~loom.mcp_server.server.build_server` hands to the
+    SDK unchanged, computed once at startup so no per-request check has to
+    re-derive it.
+
+    The three do not all arrive at the same place: ``token_verifier`` and
+    ``auth_settings`` are constructor arguments to ``MCPServer``, while
+    ``transport_security`` is a *run-call* argument from mcp 2.0 on and
+    travels via :class:`~loom.mcp_server.server.TransportOptions`. Grouping
+    them here anyway is deliberate — they are one decision (is this server
+    authenticated?) and deriving them in two places is how they drift."""
 
     token_verifier: TokenVerifier
     auth_settings: AuthSettings
@@ -40,9 +47,9 @@ def build_mcp_auth(settings: IdentitySettings) -> McpAuth | None:
     """``None`` when *settings* configures no verifier.
 
     That is the compatibility contract: `loom mcp` with no ``LOOM_AUTH_*``
-    env vars set passes ``None`` through to ``FastMCP`` for ``token_verifier``,
-    ``auth``, and ``transport_security`` alike, which is exactly how it
-    behaved before this module existed.
+    env vars set passes ``None`` through for ``token_verifier``, ``auth``, and
+    ``transport_security`` alike, which is exactly how it behaved before this
+    module existed.
     """
     from loom.identity.verifier import build_verifier
 

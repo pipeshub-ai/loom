@@ -103,7 +103,29 @@ def _effect_arguments(recorded: Any) -> dict[str, Any]:
     if isinstance(recorded, dict) and "kwargs" in recorded:
         named = recorded.get("kwargs")
         return dict(named) if isinstance(named, dict) else {}
-    return dict(recorded) if isinstance(recorded, dict) else {}
+    if isinstance(recorded, dict):
+        return dict(recorded)
+
+    # A node's payload is a Pydantic model, and returning ``{}`` for one made
+    # ``effect_by`` **dead for every node call**: ``io.http_request`` with
+    # ``method="DELETE"`` reached the broker classified WRITE rather than
+    # DESTRUCTIVE, so a deployment running the narrow taint dial
+    # (``block_writes=False, block_destructive=True``) permitted exactly the
+    # calls it was configured to refuse. Every hook and guardrail deciding on
+    # values saw an empty mapping too.
+    #
+    # ``model_dump`` rather than ``dict(model)``: it is faster, and it renders
+    # nested models as plain data, which ``EffectCall.describe()`` needs to put
+    # on the wire for a remote broker.
+    dump = getattr(recorded, "model_dump", None)
+    if callable(dump):
+        try:
+            return dict(dump())
+        except Exception:
+            # Presentation must never fail a call — the rule this function has
+            # always followed.
+            return {}
+    return {}
 
 
 class DurableCall(Generic[T]):
@@ -391,6 +413,7 @@ class DurableCall(Generic[T]):
         async def perform() -> Any:
             return await self._attempt_loop(entry, span)
 
+        arguments = _effect_arguments(self._input)
         return EffectCall(
             # A node journals as a step — nodes add packaging, not a second
             # durability mechanism — but it is not a step to a *policy*, which
@@ -400,13 +423,14 @@ class DurableCall(Generic[T]):
             kind=self._metadata.get("effect_kind")
             or _EFFECT_KINDS.get(self.kind, self.kind.value),
             target=self._metadata.get("effect_target") or self.name,
-            arguments=_effect_arguments(self._input),
+            arguments=arguments,
             effect=resolve_effect(
                 self._metadata.get("effect_class") or EffectClass.WRITE,
                 self._metadata.get("effect_by") or {},
-                _effect_arguments(self._input),
+                arguments,
             ),
             open_world=self._metadata.get("open_world", True),
+            asks_human=self._metadata.get("asks_human", False),
             reversible=self._metadata.get("reversible", False),
             access_control=self._metadata.get("access_control", False),
             run_id=self._ctx.run_id,
@@ -809,6 +833,11 @@ class Context(Generic[DepsT]):
         that swaps the clock does so before the run starts and cannot change it
         underneath a run already in flight."""
         self._credentials = credentials
+        self._inherited_effect: dict[str, Any] | None = None
+        """The enclosing operation's effect class, for `call` to adopt.
+
+        Set by `nested(effect=…)` and never by a caller — a workflow body's own
+        top-level calls have no enclosing operation to inherit from."""
         """The :class:`~loom.connectors.credentials.CredentialStore`
         bound for this run — per-run tokens layered over the Runtime's store.
         ``None`` preserves the pre-existing env-var fallback in toolsets."""
@@ -859,11 +888,17 @@ class Context(Generic[DepsT]):
             return override[1]
         return self._root_scope
 
-    def nested(self, path: str) -> Context[DepsT]:
+    def nested(
+        self, path: str, *, effect: dict[str, Any] | None = None
+    ) -> Context[DepsT]:
         """A view of this context whose durable calls nest beneath ``path``.
 
         Composite operations (an agent loop, a pattern helper) use this so their internal
         model and tool calls get their own numbering space.
+
+        *effect* is the enclosing operation's own classification, inherited by
+        :meth:`call` — see there for why. Absent, the parent's is carried
+        forward, so nesting twice does not lose it.
         """
         clone = Context(
             runtime=self._runtime,
@@ -876,6 +911,8 @@ class Context(Generic[DepsT]):
             credentials=self._credentials,
             env=self.env,
         )
+        clone._inherited_effect = (
+            effect if effect is not None else self._inherited_effect)
         return clone
 
     # -- identity ---------------------------------------------------------------------
@@ -1045,6 +1082,19 @@ class Context(Generic[DepsT]):
             timeout=timeout,
             on_error=on_error,
             fallback=fallback,
+            # An inline closure has no classification of its own, so without
+            # this it reached the broker as an unclassified WRITE — and since a
+            # node performs its I/O through `call`, **every node's own work was
+            # a write regardless of what the node declared**.
+            # `io.http_request(method="GET")` dispatched `io.http_request` as
+            # READ and its inner `http:GET` as WRITE, so under TaintBroker a
+            # plain GET was refused after any earlier read. The node's careful
+            # classification was defeated one level down by itself.
+            #
+            # Only `call` inherits. `step` names a function that may carry its
+            # own class from a toolset manifest, and overriding that would be
+            # worse than the bug.
+            metadata=dict(self._inherited_effect) if self._inherited_effect else None,
         )
 
     # -- deterministic reads of non-deterministic sources -----------------------------
@@ -1814,11 +1864,30 @@ class Context(Generic[DepsT]):
         applied_guards = list(guards) if guards is not None else list(spec.guards)
         label = name or f"node:{node_id}"
 
+        # Resolved once, here, and handed to the node body's nested context so
+        # its own `ctx.call`s carry the same class this call was weighed
+        # against. Resolving eagerly rather than letting the inner call re-run
+        # the table: the inner call has no arguments, so `effect_by` would fall
+        # back to the declared class and a `method="GET"` node would still
+        # perform a WRITE internally.
+        inherited_effect = {
+            "effect_class": resolve_effect(
+                spec.effect, spec.effect_by, _effect_arguments(validated)),
+            "open_world": spec.open_world,
+            "effect_target": node_id,
+            # Inherited too, and forgetting it was a live deadlock: the outer
+            # `human.approval` call was exempt from the taint rule while the
+            # `deliver:` call inside it was not, so a tainted run still could
+            # not reach the person whose answer was the only thing that would
+            # clear it. A node's own work is the node.
+            "asks_human": "human_channel" in spec.requires,
+        }
+
         async def perform(attempt: int, step_ctx: StepContext) -> Any:
             # Before the body, and before a suspending node parks — but only
             # for a call that is actually going to run. See the docstring.
             registry.check_requirements(node, self._runtime)
-            scoped = self.nested(step_ctx.path)
+            scoped = self.nested(step_ctx.path, effect=inherited_effect)
             node_ctx = NodeContext(scoped)
             checked = validated
             if applied_guards:
@@ -1861,6 +1930,7 @@ class Context(Generic[DepsT]):
                 "effect_by": spec.effect_by,
                 "open_world": spec.open_world,
                 "effect_target": node_id,
+                "asks_human": "human_channel" in spec.requires,
                 # Journaled so a node upgraded between a run and its replay is
                 # caught rather than decoding an old payload into a new model.
                 "contract": spec.contract_hash,

@@ -253,6 +253,45 @@ async def follow(
 # ---------------------------------------------------------------------------
 
 
+def _asking(args: argparse.Namespace, target: Target) -> None:
+    """Apply ``--no-ask`` / ``--answers`` to the backend before it authors.
+
+    Set on the backend rather than passed through ``author()``, because an
+    interaction is an object and not a payload: it could not cross
+    ``RemoteFacade``, which refuses to author anyway. What crosses the port is
+    the *record*, which is JSON.
+    """
+    backend = target.backend
+    if not hasattr(backend, "user_interaction"):
+        return
+    if getattr(args, "no_ask", False):
+        backend.user_interaction = None
+        return
+    answers = getattr(args, "answers", None)
+    if answers is not None:
+        from loom.agents.interaction import RecordedUserInteraction
+
+        # The recording answers what it knows and the terminal answers the
+        # rest, so a spec that grew a new ambiguity asks about that one alone
+        # rather than re-asking everything or refusing to build.
+        backend.user_interaction = RecordedUserInteraction.from_file(
+            answers, fallback=backend.user_interaction
+        )
+
+
+def _save_answers(args: argparse.Namespace, result: dict[str, object]) -> None:
+    """Write the questions and answers, when asked for and when there were any.
+
+    An empty file is not written: it reads as "this run asked nothing" only if
+    you know the flag was passed, and as "the flag did not work" otherwise.
+    """
+    path = getattr(args, "save_answers", None)
+    asked = result.get("questions") or []
+    if path is None or not asked:
+        return
+    path.write_text(json.dumps(asked, indent=2) + "\n", encoding="utf-8")
+
+
 def cmd_author(args: argparse.Namespace) -> int:
     """Write a workflow from a description.
 
@@ -269,6 +308,7 @@ def cmd_author(args: argparse.Namespace) -> int:
         out = printer_for(args)
         spec = _spec_text(args.spec)
         target = with_backend(args)
+        _asking(args, target)
         try:
             result = await target.backend.author(
                 spec,
@@ -280,6 +320,7 @@ def cmd_author(args: argparse.Namespace) -> int:
             await target.backend.close()
 
         out.json(result)
+        _save_answers(args, result)
 
         if args.output and result["code"]:
             args.output.write_text(result["code"], encoding="utf-8")
@@ -394,6 +435,7 @@ def cmd_edit(args: argparse.Namespace) -> int:
             return Exit.USAGE
 
         target = with_backend(args)
+        _asking(args, target)
         try:
             result = await target.backend.edit(
                 source,
@@ -406,6 +448,7 @@ def cmd_edit(args: argparse.Namespace) -> int:
             await target.backend.close()
 
         out.json(result)
+        _save_answers(args, result)
 
         if not result["changed"]:
             if not args.json:

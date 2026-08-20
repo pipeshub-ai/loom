@@ -34,6 +34,7 @@ from loom.agents.generation import Asking
 from loom.agents.smoke import SmokeResult, smoke_run
 from loom.agents.stages import ADVISORY_STAGES, default_stages
 from loom.agents.supervisor import CodeSupervisor, SupervisorVerdict
+from loom.agents.tidy import tidy
 from loom.agents.validator import CodeIssue, CodeValidator
 
 if TYPE_CHECKING:
@@ -62,7 +63,8 @@ DEFAULT_SYSTEM_PROMPT = textwrap.dedent("""\
 
     1. DISCOVER: search_toolsets for keywords; search_operations when you know
        the task, not the operation. **Both empty means no integration — a
-       normal answer.** Write it as plain Python in a `@step`.
+       normal answer.** Write it as plain Python in a `@step`, or drive the
+       page.
     2. INSPECT: show_toolset for operations, get_tool_contract for the ones
        you need.
     3. DOCS: get_tool_docs for exact imports and signatures.
@@ -262,6 +264,20 @@ DEFAULT_SYSTEM_PROMPT = textwrap.dedent("""\
     constants. Read them before filtering: one you did not look up is right
     on another account and silently wrong here.
 
+    ## Driving a web page
+
+    Address a control the way a person reads it — `{"role": "textbox", "name":
+    "Email"}` — and write targets from what `navigate` reports, not from what
+    the page probably has. A selector is right on the render you copied it from
+    and then matches nothing, silently. Two matches raise: pass `ordinal` when
+    a page repeats a control.
+
+    `effect` is `read` to fill or move, `write` to submit, `destructive` to
+    delete; it cannot be inferred from the target. Reading a page means a
+    `write` needs `ctx.node("human.approval", ...)` first — and an approval
+    parks the run, so open with `scope="durable"`, pass `session` to every
+    later call, and finish with `browser.close`.
+
     ## Only the toolsets listed above exist
 
     If the spec needs another, do not write code against it — say so, naming
@@ -275,6 +291,52 @@ DEFAULT_SYSTEM_PROMPT = textwrap.dedent("""\
     lists each node with the choice you made and why, so the choice can be
     reviewed rather than inferred from the finished code.
 """)
+
+
+ASK_USER_INSTRUCTIONS = """\
+## Asking the user
+
+You are talking to the person who wrote the spec. When a decision is theirs to
+make and the spec does not make it, use `ask_user` rather than choosing for
+them. Do not ask to confirm what the spec already states, do not ask which
+toolset to use, and do not ask anything a lookup would answer — ask, and you
+have spent their attention on something you could have found. Keep questions to
+one sentence. Prefer `input_type="select"` with `options` whenever the choices
+are known, because a list is answerable in a keystroke and free text is not.
+
+**This changes rung 3 of the resolution ladder.** Two candidates from a lookup
+is the case it was written for, and there are two of those:
+
+- The ambiguous name **came from the spec** — "the saas epic", and the resolver
+  returned two. That is a question about what the requester meant, it has one
+  answer, and that answer does not change between runs. **Ask now** with the
+  candidates as `options`, then bake the chosen id in as rung 2 says, with the
+  name beside it in a comment. Emitting a `ctx.agent()` step here puts a model
+  call into every run to re-answer a question a person could settle once, and
+  the model answering it has less to go on than they do.
+- The ambiguous value **arrives as workflow input** — a name the run is handed,
+  different each time. Nobody can answer that at authoring time. That is what
+  `ctx.agent()` is for, and rung 3 stands unchanged.
+
+**Ask once.** Gather the decisions you need and send up to four questions in a
+single `ask_user` call. One per turn costs a round trip each and pulls them back
+to the terminal four times for what is one conversation.
+
+**Make each one answerable in a keystroke.** Prefer `kind: "select"` with
+`choices`, mark the option you would pick `recommended`, and say why in its
+`description`. A question with no recommendation is one you have not thought
+about, and it costs them a decision you could have made. An off-list answer is
+always accepted, so a list does not have to be exhaustive to be useful.
+
+**The three answers are not the same.**
+
+- `accept` — they chose. Use it.
+- `decline` — they left it to you: it carries your recommended choice when you
+  gave one. Use that and note in a comment that it was your call, not theirs.
+- `cancel` — nobody answered. Do not ask again and do not block: write what you
+  would have written with no `ask_user` at all, which for an ambiguity means the
+  `ctx.agent()` form.
+"""
 
 
 EDIT_INSTRUCTIONS = textwrap.dedent("""\
@@ -377,6 +439,14 @@ class CodingResult:
     review: SupervisorVerdict | None = None
     """A second model's verdict, when a supervisor was configured."""
     plan: list[NodePlan] = field(default_factory=list)
+    questions: list[Any] = field(default_factory=list)
+    """Every ``AskedQuestion`` this generation put to a person, with its answer.
+
+    On the result rather than only in the transcript, because the answers are
+    *inputs to a build*: the same spec and the same answers reproduce the same
+    file, which is what lets a generation that asked anything run in CI at all.
+    Feed it back with ``loom author --answers``.
+    """
     """Each node, classified as code or judgement, with the reason.
 
     Surfaced rather than left in the prompt because a rule the model is asked
@@ -515,6 +585,12 @@ class EditResult:
     model_used: str = ""
     input_tokens: int = 0
     output_tokens: int = 0
+    questions: list[Any] = field(default_factory=list)
+    """Every ``AskedQuestion`` this edit put to a person, with its answer.
+
+    An edit asks for the same reason a generation does, and the record is worth
+    the same thing: an instruction plus its answers reproduces the change.
+    """
     smoke: SmokeResult | None = None
 
     @property
@@ -652,9 +728,10 @@ class WorkflowCodingAgent:
         """Optional second model that reviews the finished code. Off by default:
         it costs an extra call, and it is only worth it when the workflow does
         something you would want a colleague to look at."""
-        self._user_interaction = user_interaction
+        self._user_interaction = _asking(user_interaction)
         self._ask_gate: Any | None = None
-        if user_interaction is not None:
+        self._asked: list[Any] = []
+        if self._user_interaction is not None:
             from loom.agents.interaction import AskUserGate
 
             self._ask_gate = AskUserGate()
@@ -715,13 +792,7 @@ class WorkflowCodingAgent:
             parts.append(self._extra_instructions)
 
         if self._user_interaction is not None:
-            parts.append(
-                "## Asking the user\n\n"
-                "When the spec is ambiguous and you cannot proceed without a "
-                "decision the spec does not make, use ask_user. Do not ask to "
-                "confirm what the spec already states. Keep questions short. "
-                "Prefer select with options when the choices are known."
-            )
+            parts.append(ASK_USER_INSTRUCTIONS)
 
         return "\n\n".join(parts)
 
@@ -1013,7 +1084,8 @@ class WorkflowCodingAgent:
                     )
                 ],
                 model_used=getattr(self._model, "model_name", ""),
-            )
+                       questions=list(self._asked),
+                   )
 
         code, explanation = _code_and_explanation(reply.output)
         code = _extract_code(code) or source
@@ -1031,12 +1103,15 @@ class WorkflowCodingAgent:
                 model_used=self._model.model_name,
                 input_tokens=budget.spent.input_tokens,
                 output_tokens=budget.spent.output_tokens,
-            )
+                       questions=list(self._asked),
+                   )
 
         # The instruction is the spec for this change, so the stages that need
         # one — coverage, resolution, judgement — have something to weigh
         # against. Passing the original spec would ask them about a question
         # nobody just asked.
+        code = tidy(code).code
+
         context = self._check_context(instruction, getattr(reply, "tool_calls", None))
         report = await self._pipeline.run(code, context)
         code, rounds, declined = await self._repair_from(
@@ -1057,7 +1132,8 @@ class WorkflowCodingAgent:
             input_tokens=budget.spent.input_tokens,
             output_tokens=budget.spent.output_tokens,
             smoke=report.detail("smoke"),
-        )
+                   questions=list(self._asked),
+               )
 
     async def generate(self, spec: str) -> CodingResult:
         """Generate a workflow from a natural-language *spec*.
@@ -1085,6 +1161,9 @@ class WorkflowCodingAgent:
             from loom.agents.interaction import AskUserGate
 
             self._ask_gate = AskUserGate()
+        # Per generation, not per agent: a reused agent must not report a
+        # previous run's answers as this one's provenance.
+        self._asked = []
 
         # One budget for the job. Repair and review rounds draw on the same
         # allowance the discovery phase drew on, which is what the old comment
@@ -1113,6 +1192,7 @@ class WorkflowCodingAgent:
                 interaction=self._user_interaction,
                 probes=self._probes,
                 gate=self._ask_gate,
+                asked=self._asked,
             ),
             output_type=CodingOutput,
             model_settings=ModelSettings(temperature=0.2),
@@ -1127,6 +1207,10 @@ class WorkflowCodingAgent:
             # answer it can act on — an exception discards whatever the run
             # learned and gives them a stack trace instead of a reason.
             logger.info("generate | agent loop ended: %s", exc)
+            attempted = [
+                (call.name, _brief_args(call.arguments))
+                for call in getattr(exc, "tool_calls", []) or []
+            ]
             # Advice that cannot help is worse than none: a missing API key
             # is not fixed by raising the turn budget, and telling someone to
             # narrow their spec sends them to rewrite a spec that was fine.
@@ -1155,6 +1239,20 @@ class WorkflowCodingAgent:
                     )
                 ],
                 model_used=getattr(self._model, "model_name", ""),
+                # What the run actually spent before it gave up. This path
+                # reported zeroes, so a generation that burned a budget and
+                # four minutes came back reading as free — and the one number
+                # that would tell you to raise the budget, or that raising it
+                # will be expensive, was the number that had been discarded.
+                # The budget has held the real figures since the job started.
+                input_tokens=budget.spent.input_tokens,
+                output_tokens=budget.spent.output_tokens,
+                repair_attempts=0,
+                # What it managed before giving up. "0 tool calls" reads as
+                # "it did nothing"; seventeen reads as "it never converged",
+                # and those want opposite responses from whoever is looking.
+                tool_calls=attempted,
+                questions=list(self._asked),
             )
 
         # Extract code from structured output
@@ -1206,7 +1304,17 @@ class WorkflowCodingAgent:
                 model_used=getattr(self._model, "model_name", ""),
                 input_tokens=result.usage.input_tokens,
                 output_tokens=result.usage.output_tokens,
+                questions=list(self._asked),
             )
+
+        # Mechanical fixes first, so no repair round is spent on one. An
+        # unused import is not a judgement call, and the SDK manufactures that
+        # particular finding by telling the model to import `Retry`
+        # unconditionally — see `loom.agents.tidy`.
+        tidied = tidy(code)
+        if tidied.changed:
+            logger.info("tidy | fixed %d finding(s) without a model call", tidied.fixed)
+        code = tidied.code
 
         # One pipeline, cheapest stage first, stopping at the first blocking
         # failure. Repair is driven by whatever it reports, so a type error and
@@ -1267,6 +1375,7 @@ class WorkflowCodingAgent:
             # three times reported the cost of one.
             input_tokens=budget.spent.input_tokens,
             output_tokens=budget.spent.output_tokens,
+            questions=list(self._asked),
         )
 
 
@@ -1349,6 +1458,33 @@ def _projected_labels(source: str) -> set[str]:
             graph = build_graph(path, flow_id=flow_id)
             labels.update(node.label for node in graph.nodes)
         return labels
+
+
+def _asking(interaction: Any) -> Any:
+    """*interaction* if something can actually answer, else ``None``.
+
+    A **capability** check, not a timeout, and the difference is what failure
+    costs: a tool that is offered and cannot be answered blocks until it gives
+    up, while a tool that is never offered costs nothing at all. ``None`` omits
+    ``ask_user`` from the tool list entirely — the rule ``observe_target``
+    follows, for the reason it follows it: a tool a model can see is a tool it
+    will spend a turn on.
+
+    Sampled once, when the agent is built. An interaction that reports itself
+    available and then cannot answer still returns ``cancel`` rather than
+    hanging, so this is the cheap check and not the only one.
+    """
+    if interaction is None:
+        return None
+    available = getattr(interaction, "available", None)
+    if available is None:
+        # A host's own implementation predating `available` is taken at its
+        # word: it was passed in deliberately, which is itself the claim.
+        return interaction
+    try:
+        return interaction if available() else None
+    except Exception:
+        return None
 
 
 def _settle_advisories(issues: list[CodeIssue], *, declined: bool) -> list[CodeIssue]:

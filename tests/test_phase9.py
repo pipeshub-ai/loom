@@ -237,7 +237,7 @@ class TestRuntimeBridge:
 
 # Tool and resource handler tests moved to tests/test_mcp_server.py when the
 # handlers were retargeted from RuntimeBridge onto the shared RuntimeFacade.
-# That file covers the same behaviour and more, against the real FastMCP server
+# That file covers the same behaviour and more, against the real MCP server
 # and a live stdio subprocess.
 
 

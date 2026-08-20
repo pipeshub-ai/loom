@@ -242,6 +242,7 @@ _BUILTIN_NODE_MODULES = (
     "loom.nodes.documents",
     "loom.nodes.knowledge",
     "loom.nodes.io",
+    "loom.nodes.browser.nodes",
     "loom.nodes.agentic",
 )
 

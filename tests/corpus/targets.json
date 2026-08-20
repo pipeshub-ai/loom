@@ -1,0 +1,28 @@
+[
+  {"slug": "cal-com-booking",      "url": "https://cal.com/rick/get-rick-rolled",           "vendor": "cal.com",     "category": "booking"},
+  {"slug": "calendly-booking",     "url": "https://calendly.com/acme-demo/30min",           "vendor": "calendly",    "category": "booking"},
+  {"slug": "opentable-search",     "url": "https://www.opentable.com/",                     "vendor": "opentable",   "category": "booking"},
+  {"slug": "resy-venue",           "url": "https://resy.com/cities/ny",                     "vendor": "resy",        "category": "booking"},
+  {"slug": "tablecheck-reserve",   "url": "https://www.tablecheck.com/en/pizza-4ps-in-indiranagar/reserve", "vendor": "tablecheck", "category": "booking"},
+  {"slug": "eventbrite-checkout",  "url": "https://www.eventbrite.com/d/online/free--events/", "vendor": "eventbrite", "category": "booking"},
+
+  {"slug": "gitlab-signup",        "url": "https://gitlab.com/users/sign_up",               "vendor": "gitlab",      "category": "signup"},
+  {"slug": "heroku-signup",        "url": "https://signup.heroku.com/",                     "vendor": "heroku",      "category": "signup"},
+  {"slug": "fastmail-signup",      "url": "https://www.fastmail.com/signup/",               "vendor": "fastmail",    "category": "signup"},
+  {"slug": "protonmail-signup",    "url": "https://account.proton.me/signup",               "vendor": "proton",      "category": "signup"},
+  {"slug": "substack-signup",      "url": "https://substack.com/signup",                    "vendor": "substack",    "category": "signup"},
+
+  {"slug": "shopify-demo-cart",    "url": "https://checkout-demo.myshopify.com/",           "vendor": "shopify",     "category": "checkout"},
+  {"slug": "woocommerce-checkout", "url": "https://woocommerce.com/checkout/",              "vendor": "woocommerce", "category": "checkout"},
+  {"slug": "paypal-checkout-demo", "url": "https://demo.paypal.com/",                       "vendor": "paypal",      "category": "checkout"},
+
+  {"slug": "zendesk-contact",      "url": "https://www.zendesk.com/contact/",               "vendor": "zendesk",     "category": "support"},
+  {"slug": "hubspot-contact",      "url": "https://www.hubspot.com/company/contact",        "vendor": "hubspot",     "category": "support"},
+  {"slug": "mozilla-contact",      "url": "https://www.mozilla.org/en-US/contact/",         "vendor": "mozilla",     "category": "support"},
+  {"slug": "gov-uk-contact",       "url": "https://www.gov.uk/contact",                     "vendor": "gov.uk",      "category": "support"},
+
+  {"slug": "booking-com-search",   "url": "https://www.booking.com/",                       "vendor": "booking.com", "category": "search"},
+  {"slug": "kayak-search",         "url": "https://www.kayak.com/flights",                  "vendor": "kayak",       "category": "search"},
+  {"slug": "airbnb-search",        "url": "https://www.airbnb.com/",                        "vendor": "airbnb",      "category": "search"},
+  {"slug": "wikipedia-search",     "url": "https://en.wikipedia.org/wiki/Main_Page",        "vendor": "wikimedia",   "category": "search"}
+]

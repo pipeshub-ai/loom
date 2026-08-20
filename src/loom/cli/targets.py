@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from loom.agents.interaction import CLIUserInteraction
 from loom.core.exceptions import ConfigurationError, RegistryError
 from loom.facade import LocalFacade, RemoteFacade, RuntimeFacade
 
@@ -190,7 +191,12 @@ def resolve(
         for definition in collect_workflows(module):
             runtime.register(definition)
 
-    backend = LocalFacade(runtime, loaded)
+    # The CLI is the one surface with a person at the other end of stdin, so
+    # it is the one that composes an interaction in. `CLIUserInteraction`
+    # returns a *skipped* answer when stdin is not a TTY, so a piped or CI
+    # invocation degrades to the non-interactive behaviour instead of blocking
+    # on a prompt nobody can see.
+    backend = LocalFacade(runtime, loaded, user_interaction=CLIUserInteraction())
 
     if explicit_name and explicit_name not in runtime.workflows:
         known = ", ".join(sorted(runtime.workflows)) or "none"

@@ -74,6 +74,14 @@ SEAMS: dict[str, tuple[str, str]] = {
         "runtime/admission_state.py",
         "Where flow-control counters live — one process, or all of them",
     ),
+    "BrowserProvider": (
+        "browser/base.py",
+        "Who supplies a browser, and which capabilities it actually honours",
+    ),
+    "BrowserSession": (
+        "browser/base.py",
+        "A live page: navigate, read the accessibility tree, act on one control",
+    ),
 }
 
 MARKER_BEGIN = "<!-- BEGIN GENERATED — do not edit below this line -->"

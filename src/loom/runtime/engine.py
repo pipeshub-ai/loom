@@ -115,6 +115,8 @@ _RECLAIM_PAGE = 500
 #: capability nothing had told the operator was missing.
 CAPABILITY_PORTS: tuple[str, ...] = (
     "blobs",
+    "browser",
+    "browser_sessions",
     "artifacts",
     "staging",
     "signed_urls",
@@ -211,6 +213,8 @@ class Runtime:
         sandbox: ExecutionSandbox | None = None,
         sandbox_policy: SandboxPolicy | None = None,
         sandbox_steps: Mapping[str, Any] | None = None,
+        browser: Any | None = None,
+        browser_policy: Any | None = None,
     ) -> None:
         if backend is not None:
             self.backend = backend
@@ -508,6 +512,14 @@ class Runtime:
         reads it so a workflow can call a service LOOM has no toolset for
         without putting the token in the node's payload — which is journaled.
         Naming a credential is safe to record; holding one is not."""
+        self.browser = browser
+        """A ``BrowserProvider``, or ``None``. Nothing browser-related is
+        reachable without one, and ``Runtime(browser=None)`` is exactly the
+        runtime that shipped before phase 13."""
+        self.browser_policy = browser_policy
+        self._browser_sessions: Any | None = None
+        """Built lazily by the ``browser_sessions`` property. A process that
+        never drives a page allocates nothing."""
         self.embeddings = embeddings
         """An :class:`~loom.knowledge.EmbeddingProvider`, or ``None``.
 
@@ -1386,6 +1398,15 @@ class Runtime:
                 await task
         self._background.clear()
 
+        # Whatever browser this process is still holding. After `release`, that
+        # is only live STEP sessions from drives just cancelled — a DURABLE one
+        # was handed back to the provider when its body exited and must stay
+        # open, because the run it belongs to may be parked on a person and
+        # resuming somewhere else.
+        if self._browser_sessions is not None:
+            with contextlib.suppress(Exception):
+                await self._browser_sessions.close_all()
+
         backend = getattr(self.blobs, "backend", None)
         close = getattr(backend, "close", None)
         if close is not None:
@@ -1832,6 +1853,24 @@ class Runtime:
         if isinstance(self.broker, RunObserver):
             self.broker.observe_run(run_id, journal)
 
+    @property
+    def browser_sessions(self) -> Any | None:
+        """Per-run browser sessions, built on first use.
+
+        ``None`` when no provider is configured, so ``NodeSpec.requires`` and
+        ``NodeContext.capability`` both read it the way they read every other
+        capability — a missing browser is reported before a node body runs,
+        not as an ``AttributeError`` inside one.
+        """
+        if self.browser is None:
+            return None
+        if self._browser_sessions is None:
+            from loom.browser.sessions import BrowserSessions
+
+            self._browser_sessions = BrowserSessions(
+                self.browser, self.browser_policy)
+        return self._browser_sessions
+
     async def _invoke_body(
         self,
         definition: WorkflowDefinition[Any, Any, Any],
@@ -1846,6 +1885,28 @@ class Runtime:
         parking, cancellation, rotation, failure, abandonment — is covered by
         construction rather than by remembering to add a call.
         """
+        try:
+            return await self._invoke_body_inner(definition, ctx, record, payload)
+        finally:
+            # Every way out of a body — completion, parking, cancellation,
+            # failure — releases the run's browser, because "remember to close
+            # it" is not a property a host can rely on and a leaked Chromium
+            # outlives the run that opened it.
+            #
+            # `release` and not `close_run`: a STEP session is closed, a
+            # DURABLE one is let go of. A run parked on a person for two hours
+            # needs the browser to still be there when they finish, which is
+            # the entire reason that scope exists.
+            if self._browser_sessions is not None:
+                await self._browser_sessions.release(record.run_id)
+
+    async def _invoke_body_inner(
+        self,
+        definition: WorkflowDefinition[Any, Any, Any],
+        ctx: Context[Any],
+        record: ExecutionRecord,
+        payload: Any,
+    ) -> Any:
         if not self.hooks.has_body:
             return await self._run_body(definition, ctx, record, payload)
 

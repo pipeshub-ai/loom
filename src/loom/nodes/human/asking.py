@@ -83,6 +83,7 @@ async def ask(
     assignees: list[str] | None = None,
     response_schema: dict[str, Any] | None = None,
     timeout: NodeDuration | None = None,
+    live_view_url: str = "",
 ) -> tuple[Any, bool, HumanTicket]:
     """Raise a request, park, and return ``(answer, timed_out, ticket)``.
 
@@ -107,6 +108,7 @@ async def ask(
         context=context or {},
         response_schema=response_schema or {},
         assignees=assignees or [],
+        live_view_url=live_view_url,
         expires_at=expires_at,
         created_at=created_at,
     )

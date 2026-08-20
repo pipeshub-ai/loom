@@ -1181,7 +1181,150 @@ class TestResolutionFlagsQueriesNotProse:
             ("~", "contains", "like ", "in text"),
         )
 
-        assert operands == ["saas"]
+        assert [m.word for m in operands] == ["saas"]
+        # The rest of the query is kept as scope, never as an operand: `due` is
+        # a JQL field name and a spec word at once, and reporting it as matched
+        # on is what told a model to look up the word "due".
+        assert "due" in operands[0].scope
+
+
+class TestResolutionReadsAQuerysScope:
+    """A match scoped to a namespace is not the guess an unscoped one is.
+
+    Reading only the operand made ``summary ~ "saas"`` and ``issuetype = Epic
+    AND summary ~ "saas"`` the same input. The second is the ladder followed —
+    pick a namespace, search it by name — and for an entity whose service
+    exposes no other lookup it is the *only* lookup: a Jira epic is an issue,
+    so there is no epic endpoint to call instead.
+
+    That mattered because it left the finding with no passing state. The
+    escape hatch is "nothing bears that name", which is false when something
+    does, so every repair round rewrote correct code into another spelling of
+    itself. Severity is the fix: an error drives repair, a warning does not.
+    """
+
+    SPEC = "List tickets that are passed due date in saas epic"
+
+    @staticmethod
+    def _registry():
+        from loom.agents.tool_registry import ToolsetRegistry
+        from loom.toolsets.jira.manifest import JIRA_MANIFEST
+
+        registry = ToolsetRegistry()
+        registry.register(JIRA_MANIFEST)
+        return registry
+
+    @staticmethod
+    def _code(jql: str) -> str:
+        return (
+            "async def f(ctx):\n"
+            f"    jql = {jql!r}\n"
+            "    return await ctx.step(search, jql)\n"
+        )
+
+    async def _run(self, jql: str, *, registry: bool = True):
+        from loom.agents.checks import CheckContext
+        from loom.agents.stages import ResolutionStage
+
+        stage = ResolutionStage(self._registry() if registry else None)
+        return await stage.run(self._code(jql), CheckContext(spec=self.SPEC))
+
+    async def test_an_unscoped_match_is_still_an_error(self) -> None:
+        result = await self._run('summary ~ "saas"')
+
+        assert [i.severity for i in result.issues] == ["error"]
+
+    async def test_a_namespace_scoped_match_is_a_warning(self) -> None:
+        """The whole point: warnings do not reach ``report.errors``, so the
+        repair loop terminates instead of rewriting correct code."""
+        result = await self._run('issuetype = Epic AND summary ~ "saas"')
+
+        assert [i.severity for i in result.issues] == ["warning"]
+        assert "namespace search" in result.issues[0].message
+
+    async def test_the_scope_may_sit_on_either_side_of_the_clause(self) -> None:
+        """``project = PA`` names the namespace on the left, ``issuetype =
+        Epic`` on the right. Which one does is the query language's business."""
+        result = await self._run('project = PA AND summary ~ "saas"')
+
+        assert [i.severity for i in result.issues] == ["warning"]
+
+    async def test_a_scope_that_is_not_a_namespace_does_not_excuse_it(self) -> None:
+        """``status`` is a field, not a namespace, so this is still a guess —
+        and a check that accepted any adjacent clause would excuse everything.
+        """
+        result = await self._run('status = Open AND text ~ "saas"')
+
+        assert [i.severity for i in result.issues] == ["error"]
+
+    async def test_one_operand_cannot_scope_another(self) -> None:
+        """Scope is the query minus *every* operand clause, not minus this one.
+
+        Taking "everything but this clause" per operator would let one
+        unresolved guess excuse the next: ``summary ~ "project alpha"`` puts
+        the word ``project`` in the scope of ``text ~ "saas"``, and the query
+        would read as scoped to a project by a word nothing looked up.
+        """
+        result = await self._run('summary ~ "project alpha" AND text ~ "saas"')
+
+        assert [i.severity for i in result.issues] == ["error"]
+
+    async def test_a_namespace_named_in_a_field_position_still_counts(self) -> None:
+        """The other direction of the same rule — removing operand clauses
+        must not remove a genuine scope that happens to share a word."""
+        result = await self._run('project = PA AND summary ~ "saas"')
+
+        assert [i.severity for i in result.issues] == ["warning"]
+
+    async def test_a_resolved_identifier_is_clean(self) -> None:
+        result = await self._run("parentEpic = PA-1844 AND duedate < now()")
+
+        assert result.issues == []
+
+    async def test_without_a_registry_it_falls_back_to_the_old_behaviour(self) -> None:
+        """No registry means no declared namespaces, so nothing is excused.
+
+        Failing that way round is deliberate: the fallback errors, and an
+        error the model cannot act on is the loop this fix exists to end — so
+        the fallback must never be reached by accident, only by there being no
+        registry at all.
+        """
+        result = await self._run(
+            'issuetype = Epic AND summary ~ "saas"', registry=False
+        )
+
+        assert [i.severity for i in result.issues] == ["error"]
+
+    def test_the_namespaces_come_from_declarations_not_a_word_list(self) -> None:
+        """Nothing in the agent layer names a namespace, or a vendor.
+
+        A hardcoded list is the failure ``opaque_ids`` already avoids: which
+        namespaces a service has is the service's own statement. A toolset
+        declaring ``resolves="board"`` teaches this check about boards with no
+        change to ``stages.py``.
+        """
+        from loom.agents.stages import ResolutionStage
+
+        assert ResolutionStage(self._registry())._namespaces() >= {
+            "epic",
+            "project",
+            "user",
+            "field",
+        }
+        assert ResolutionStage(None)._namespaces() == frozenset()
+
+    def test_the_agent_is_pointed_at_a_resolver_that_exists(self) -> None:
+        """The other half of the deadlock. The message used to enumerate
+        namespaces — project, board, epic, label — that the toolset shipped no
+        resolver for, so the advice sent the model somewhere it could not go
+        and then flagged the one route that worked.
+        """
+        from loom.agents.stages import ResolutionStage
+
+        where = ResolutionStage(self._registry())._where_to_look()
+
+        assert "jira.issues.resolve_epic (epic)" in where
+        assert "jira.projects.resolve (project)" in where
 
 
 # ---------------------------------------------------------------------------

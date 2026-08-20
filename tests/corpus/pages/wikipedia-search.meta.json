@@ -1,0 +1,21 @@
+{
+  "slug": "wikipedia-search",
+  "source": "https://en.wikipedia.org/wiki/Main_Page",
+  "final_url": "https://en.wikipedia.org/wiki/Main_Page",
+  "title": "Wikipedia, the free encyclopedia",
+  "vendor": "wikimedia",
+  "category": "search",
+  "captured": "2026-08-19",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "bytes": 328655,
+  "counts": {
+    "marked_hidden": 1417,
+    "dropped_nodes": 50,
+    "native_controls": 12,
+    "role_widgets": 10,
+    "buttons": 2
+  }
+}

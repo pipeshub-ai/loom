@@ -452,9 +452,30 @@ _RUNNER = textwrap.dedent('''\
             return await real_sleep(0, *args, **kwargs)
 
         asyncio.sleep = _instant
+        # A browser, and a person, that are not there. Both for the reason
+        # `AutoRespondChannel` already exists: the sandbox has no network and
+        # nobody to ask, so a generated workflow that drives a page or waits on
+        # an approval can otherwise only reach a connection error or hang — and
+        # the cheapest repair a model can find for an error it cannot fix is to
+        # delete the browser work or the approval, shipping code that passes
+        # every check having removed the thing the spec asked for.
+        #
+        # Permissive by default: the fake answers any navigation and any
+        # action, and says so in the result. It proves the flow is *wired*, not
+        # that a selector is right — nothing here can prove that, which is what
+        # `tests/corpus` is for.
+        browser = None
+        try:
+            from loom.browser import FakeBrowserProvider
+
+            browser = FakeBrowserProvider(permissive=True)
+        except Exception:
+            pass
+
         runtime = Runtime(
             store=MemoryStore(),
             agent_backend=backend,
+            browser=browser,
             inline_timer_threshold=10**9,
         )
 

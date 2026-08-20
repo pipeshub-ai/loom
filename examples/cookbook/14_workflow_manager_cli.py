@@ -29,6 +29,7 @@ from utils import header, log, require_env
 
 from loom import Context, Runtime, step, workflow
 from loom.agents.coding_agent import WorkflowCodingAgent
+from loom.agents.interaction import CLIUserInteraction
 from loom.agents.providers.anthropic_provider import (
     AnthropicProvider,
 )
@@ -108,6 +109,7 @@ class WorkflowManagerAgent:
             model=model,
             tool_registry=tool_registry,
             executor=executor,
+            user_interaction=CLIUserInteraction(),
         )
 
     async def chat(self, message: str) -> str:

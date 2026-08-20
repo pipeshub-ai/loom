@@ -1,0 +1,19 @@
+{
+  "slug": "protonmail-signup",
+  "source": "https://account.proton.me/signup",
+  "labelled_by": "claude",
+  "labelled_from": "protonmail-signup.png",
+  "flow": "create an account: pick a billing period, then select a plan",
+  "note": "Step 1 of a multi-step signup. The plan cards each carry a radio circle beside a visible plan name, which is the pattern this page contributes to the corpus: a custom-styled radio whose label is a heading rather than a <label>.",
+  "controls": [
+    {"purpose": "select the Free plan",       "role": "radio",  "name": "Free",            "visible_label": true, "required_for_flow": true},
+    {"purpose": "select the Mail Plus plan",  "role": "radio",  "name": "Mail Plus",       "visible_label": true, "required_for_flow": true},
+    {"purpose": "select Proton Unlimited",    "role": "radio",  "name": "Proton Unlimited","visible_label": true, "required_for_flow": true},
+    {"purpose": "select Proton Family",       "role": "radio",  "name": "Proton Family",   "visible_label": true, "required_for_flow": true},
+    {"purpose": "bill monthly",               "role": "button", "name": "1 month",         "visible_label": true, "required_for_flow": true},
+    {"purpose": "bill annually",              "role": "button", "name": "12 months",       "visible_label": true, "required_for_flow": true},
+    {"purpose": "switch to individual plans", "role": "link",   "name": "For individuals", "visible_label": true, "required_for_flow": false},
+    {"purpose": "switch to business plans",   "role": "link",   "name": "For businesses",  "visible_label": true, "required_for_flow": false},
+    {"purpose": "change the language",        "role": "button", "name": "English",         "visible_label": true, "required_for_flow": false}
+  ]
+}

@@ -66,9 +66,43 @@ _CENSUS = """
         .map((el) => (el.innerText || el.value || '').trim())
         .filter(Boolean);
 
+    // Role and accessible name for every visible control — the same two
+    // fields `Target` addresses by, and the same shape `PageSnapshot.tree`
+    // carries. That is deliberate: it makes an authoring observation directly
+    // usable as a smoke fixture, so the page the agent *looked at* is the page
+    // its generated code is tested against. No parallel fixture set to drift.
+    const roleOf = (el) => {
+        const explicit = el.getAttribute('role');
+        if (explicit) return explicit;
+        const tag = el.tagName.toLowerCase();
+        if (tag === 'a') return el.hasAttribute('href') ? 'link' : 'generic';
+        if (tag === 'button') return 'button';
+        if (tag === 'select') return 'combobox';
+        if (tag === 'textarea') return 'textbox';
+        if (tag === 'input') {
+            const t = (el.getAttribute('type') || 'text').toLowerCase();
+            return {checkbox:'checkbox', radio:'radio', search:'searchbox',
+                    submit:'button', button:'button', reset:'button',
+                    range:'slider', number:'spinbutton'}[t] || 'textbox';
+        }
+        return 'generic';
+    };
+    const tree = [...document.querySelectorAll(
+            'a[href],button,input,select,textarea,[role]')]
+        .filter(visible)
+        .slice(0, 300)
+        .map((el) => ({
+            role: roleOf(el),
+            name: label(el) || '',
+            value: (el.value || '').slice(0, 80),
+            disabled: el.disabled === true ||
+                      el.getAttribute('aria-disabled') === 'true',
+        }));
+
     return {
         title: document.title,
         url: location.href,
+        tree: tree,
         native_controls: native,
         role_widgets: widgets,
         buttons: buttons,
@@ -153,7 +187,18 @@ def _summarise(census: dict[str, Any]) -> str:
         f"{widgets} role-based widget(s)",
         f"{buttons} button(s)",
     ]
+    tree = census.get("tree") or ()
+    named = sum(1 for node in tree if node.get("name"))
+    if tree:
+        parts.append(f"{named}/{len(tree)} addressable by name")
     line = ", ".join(parts)
+    if tree and not named:
+        # The sentence that decides whether tier 0 can drive this page at all.
+        line += (
+            ". Nothing here carries an accessible name, so a Target(role=…, "
+            "name=…) will not resolve — this page needs a different approach, "
+            "not a better guess."
+        )
     if native == 0 and widgets:
         line += (
             ". A selector over input/textarea/select will find nothing here — "

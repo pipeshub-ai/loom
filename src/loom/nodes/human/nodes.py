@@ -86,6 +86,15 @@ class ApprovalIn(BaseModel):
         default=TimeoutPolicy.REJECT,
         description="reject | approve | fail — what an unanswered request means.",
     )
+    live_view_url: str = Field(
+        default="",
+        description=(
+            "Where the person can watch or take over a browser this run is "
+            "holding — pass `page.session.live_view_url` from browser.navigate "
+            "with scope='durable'. Threaded explicitly rather than discovered, "
+            "so a human node stays independent of whether a browser exists."
+        ),
+    )
 
 
 class ApprovalOut(BaseModel):
@@ -136,6 +145,7 @@ class ApprovalNode(Node[ApprovalIn, ApprovalOut]):
             assignees=payload.assignees,
             response_schema=ApprovalOut.model_json_schema(),
             timeout=payload.timeout,
+            live_view_url=payload.live_view_url,
         )
         if timed_out:
             if payload.on_timeout == TimeoutPolicy.FAIL:

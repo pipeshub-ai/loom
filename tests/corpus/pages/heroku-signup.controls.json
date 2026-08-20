@@ -1,0 +1,19 @@
+{
+  "slug": "heroku-signup",
+  "source": "https://signup.heroku.com/",
+  "labelled_by": "claude",
+  "labelled_from": "heroku-signup.png",
+  "flow": "sign up: four fields, pick a country, solve the reCAPTCHA, get started",
+  "note": "Every field here is labelled by placeholder text sitting inside the box — there are no labels above them. A person still reads those words off the screen, so they are recorded as visible labels; whether a placeholder reaches the accessible name is precisely what this page is here to answer.",
+  "controls": [
+    {"purpose": "first name field",   "role": "textbox",  "name": "First name",     "visible_label": true, "required_for_flow": true},
+    {"purpose": "last name field",    "role": "textbox",  "name": "Last name",      "visible_label": true, "required_for_flow": true},
+    {"purpose": "email field",        "role": "textbox",  "name": "Email address",  "visible_label": true, "required_for_flow": true},
+    {"purpose": "company name field", "role": "textbox",  "name": "Company name",   "visible_label": true, "required_for_flow": true},
+    {"purpose": "country selector",   "role": "combobox", "name": "Country/Region", "visible_label": true, "required_for_flow": true},
+    {"purpose": "submit the signup",  "role": "button",   "name": "GET STARTED",    "visible_label": true, "required_for_flow": true},
+    {"purpose": "go to log in",       "role": "link",     "name": "Log in",         "visible_label": true, "required_for_flow": false},
+    {"purpose": "privacy policy",     "role": "link",     "name": "Privacy Policy", "visible_label": true, "required_for_flow": false},
+    {"purpose": "solve the captcha",  "role": "button",   "name": "VERIFY",         "visible_label": true, "required_for_flow": true, "in_iframe": true, "note": "reCAPTCHA image challenge; capture drops iframes"}
+  ]
+}

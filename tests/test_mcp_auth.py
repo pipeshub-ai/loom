@@ -1,4 +1,4 @@
-"""MCP server auth: token verifiers, settings, and the FastMCP wiring.
+"""MCP server auth: token verifiers, settings, and the MCPServer wiring.
 
 Three layers, matching ``test_mcp_server.py``'s own split:
 
@@ -8,7 +8,7 @@ Three layers, matching ``test_mcp_server.py``'s own split:
 - **Settings and factory** — ``identity/config.py`` and
   ``mcp_server/auth.py::build_mcp_auth``.
 - **Wiring** — ``mcp_server/server.py``'s per-request facade, and the
-  stdio-is-always-exempt guarantee, driven through a real ``FastMCP``
+  stdio-is-always-exempt guarantee, driven through a real ``MCPServer``
   instance with the SDK's own auth contextvar set exactly as its ASGI
   middleware would set it for a real HTTP request.
 """
@@ -531,7 +531,7 @@ class TestPrincipalFacadeHelper:
         from loom.identity.verifier import VerifiedToken
         from loom.mcp_server.server import _principal_facade
 
-        # VerifiedToken, not the SDK's AccessToken: FastMCP is built with our
+        # VerifiedToken, not the SDK's AccessToken: the server is built with our
         # own token_verifier, so this is the object that actually lands in the
         # context var. The SDK's type models a token issued to a *client* and
         # has no subject field at all — constructing one here would be testing
@@ -577,8 +577,9 @@ class TestServeRefusesUnauthenticatedNetworkBinds:
             called.update(kwargs)
 
             class _Stub:
-                def run(self, transport: str) -> None:
+                def run(self, transport: str, **options: Any) -> None:
                     called["ran"] = transport
+                    called["options"] = options
 
             return _Stub()
 
@@ -593,19 +594,25 @@ class TestServeRefusesUnauthenticatedNetworkBinds:
     ) -> None:
         from loom import mcp_server
 
+        called_with: list[tuple[str, dict[str, Any]]] = []
+
         def fake_build_server(*args: Any, **kwargs: Any):
             class _Stub:
-                def run(self, transport: str) -> None:
-                    pass
+                def run(self, transport: str, **options: Any) -> None:
+                    called_with.append((transport, options))
 
             return _Stub()
 
         monkeypatch.setattr(mcp_server, "build_server", fake_build_server)
         mcp_server.serve(object(), transport="stdio", identity=IdentitySettings())
 
+        # stdio opens no socket, so it is handed no bind address at all — the
+        # same reason it is exempt from the auth requirement above.
+        assert called_with == [("stdio", {})]
+
 
 class TestBuildServerHonoursTransport:
-    """The end-to-end proof, over a real ``FastMCP`` instance: identity is
+    """The end-to-end proof, over a real ``MCPServer`` instance: identity is
     enforced over a networked transport and never over stdio, no matter
     what ``LOOM_AUTH_*`` says."""
 
@@ -642,7 +649,7 @@ class TestBuildServerHonoursTransport:
     async def test_http_transport_rejects_an_unauthenticated_call(
         self, static_identity: IdentitySettings
     ) -> None:
-        from mcp.server.fastmcp.exceptions import ToolError
+        from mcp.server.mcpserver.exceptions import ToolError
 
         from loom.mcp_server import build_server
 
@@ -708,7 +715,7 @@ class TestBuildServerHonoursTransport:
                             "idempotency_key": "shared",
                         },
                     )
-                )[1]["result"]
+                ).structured_content["result"]
             )
         finally:
             auth_context_var.reset(as_alice)
@@ -734,7 +741,7 @@ class TestBuildServerHonoursTransport:
                             "idempotency_key": "shared",
                         },
                     )
-                )[1]["result"]
+                ).structured_content["result"]
             )
         finally:
             auth_context_var.reset(as_bob)

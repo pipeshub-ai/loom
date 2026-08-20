@@ -1,0 +1,88 @@
+{
+  "slug": "gitlab-signup",
+  "source": "https://gitlab.com/users/sign_up",
+  "labelled_by": "claude",
+  "labelled_from": "gitlab-signup.png",
+  "flow": "create an account: fill the five fields, solve the anti-bot puzzle, continue",
+  "controls": [
+    {
+      "purpose": "first name field",
+      "role": "textbox",
+      "name": "First name",
+      "visible_label": true,
+      "required_for_flow": true
+    },
+    {
+      "purpose": "last name field",
+      "role": "textbox",
+      "name": "Last name",
+      "visible_label": true,
+      "required_for_flow": true
+    },
+    {
+      "purpose": "username field",
+      "role": "textbox",
+      "name": "Username",
+      "visible_label": true,
+      "required_for_flow": true
+    },
+    {
+      "purpose": "email field",
+      "role": "textbox",
+      "name": "Company email",
+      "visible_label": true,
+      "required_for_flow": true
+    },
+    {
+      "purpose": "password field",
+      "role": "textbox",
+      "name": "Password",
+      "visible_label": true,
+      "required_for_flow": true
+    },
+    {
+      "purpose": "start the anti-bot puzzle",
+      "role": "button",
+      "name": "Start Puzzle",
+      "visible_label": true,
+      "required_for_flow": true,
+      "in_iframe": true,
+      "note": "third-party anti-bot widget; capture drops iframes"
+    },
+    {
+      "purpose": "marketing consent",
+      "role": "checkbox",
+      "name": "I agree that GitLab can contact me by email about its product, services, or events.",
+      "visible_label": true,
+      "required_for_flow": false
+    },
+    {
+      "purpose": "submit the signup",
+      "role": "button",
+      "name": "Continue",
+      "visible_label": true,
+      "required_for_flow": true
+    },
+    {
+      "purpose": "sign up via Google",
+      "role": "button",
+      "name": "Continue with Google",
+      "visible_label": true,
+      "required_for_flow": false
+    },
+    {
+      "purpose": "sign up via GitHub",
+      "role": "button",
+      "name": "Continue with GitHub",
+      "visible_label": true,
+      "required_for_flow": false
+    },
+    {
+      "purpose": "go to sign in instead",
+      "role": "link",
+      "name": "Sign in",
+      "visible_label": true,
+      "required_for_flow": false
+    }
+  ]
+}
