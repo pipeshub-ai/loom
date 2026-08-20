@@ -221,9 +221,22 @@ def estimate_cost(model: str, usage: Usage) -> float:
     input_price, output_price = prices
     rates = _longest_prefix(CACHE_RATES, model) or DEFAULT_CACHE_RATES
 
-    cached = min(usage.cached_input_tokens, usage.input_tokens)
-    written = min(usage.cache_write_tokens, usage.input_tokens - cached)
-    fresh = max(0, usage.input_tokens - cached - written)
+    cached = usage.cached_input_tokens
+    written = usage.cache_write_tokens
+    if cached + written > usage.input_tokens:
+        # The object is not in the shape `Usage` documents — its total is
+        # smaller than its parts. That is the *old* convention, where
+        # `input_tokens` excluded cache traffic, so it is what a stored
+        # `Usage` from before normalisation looks like, and what third-party
+        # code written against Anthropic's own field names produces.
+        #
+        # Read as fresh-plus-cache rather than clamped. Clamping is the
+        # tempting reading and it fails *open*: it would drop the fresh
+        # tokens to zero and undercount, which is the wrong direction for a
+        # number that backs `max_cost_usd`.
+        fresh = usage.input_tokens
+    else:
+        fresh = usage.input_tokens - cached - written
 
     return (
         fresh * input_price

@@ -499,6 +499,29 @@ class TestCostAccounting:
 
         assert estimate_cost("claude-sonnet-5", usage) == pytest.approx(expected)
 
+    def test_a_usage_from_before_normalisation_is_read_fail_safe(self) -> None:
+        """A stored `Usage`, or third-party code written against Anthropic's own
+        field names, reports `input_tokens` *excluding* cache traffic — so its
+        total is smaller than its parts.
+
+        Clamping is the tempting reading and it fails *open*: it drops the fresh
+        tokens to zero and undercounts, which is the wrong direction for a number
+        that backs `max_cost_usd`. Read as fresh-plus-cache, it comes out at the
+        same figure the normalised shape does.
+        """
+        from loom.agents.models import estimate_cost
+
+        legacy = Usage(
+            input_tokens=500, cached_input_tokens=20_000, output_tokens=1_000
+        )
+        normalised = Usage(
+            input_tokens=20_500, cached_input_tokens=20_000, output_tokens=1_000
+        )
+
+        assert estimate_cost("claude-sonnet-5", legacy) == pytest.approx(
+            estimate_cost("claude-sonnet-5", normalised)
+        )
+
     def test_cache_writes_cost_more_than_fresh_tokens(self) -> None:
         from loom.agents.models import estimate_cost
 
