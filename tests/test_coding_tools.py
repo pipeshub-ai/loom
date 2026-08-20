@@ -161,6 +161,7 @@ class TestBuildCodingTools:
         # missing, and the whole set is the agent's visible surface.
         assert names == {
             "search_toolsets",
+            "search_operations",
             "show_toolset",
             "get_tool_contract",
             "get_tool_docs",

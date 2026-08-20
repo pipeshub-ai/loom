@@ -154,6 +154,14 @@ _HEAD = "eventlog:head"
 _REC = "eventlog:rec"
 _IDX = "eventlog:idx"
 _TOPICS = "eventlog:topics"
+_TAIL = "eventlog:tail"
+"""The lowest sequence that may still exist, advanced by :meth:`retain`.
+
+Without it a read is O(head): ``read`` walked every sequence from the caller's
+position to the head, one store round trip each, skipping the ones retention
+had deleted. A topic retained down to its last hundred events with a head in
+the millions and a checkpoint at 1 issued a million single-key gets to find a
+hundred rows — against Postgres, per drain."""
 
 #: How long one append may hold a topic's lock. Long enough for a slow store to
 #: write a batch, short enough that a writer killed mid-append delays the next
@@ -178,6 +186,7 @@ class StoreBackedEventLog:
 
     ==========================  ====================================
     ``eventlog:head:{topic}``   the highest *committed* sequence
+    ``eventlog:tail:{topic}``   the lowest sequence retention may have left
     ``eventlog:rec:{topic}:N``  the record at sequence N
     ``eventlog:idx:{topic}:ID`` ``event_id`` -> sequence, for dedupe
     ==========================  ====================================
@@ -301,11 +310,24 @@ class StoreBackedEventLog:
         """Track topic names so retention and diagnostics can enumerate them.
 
         A key-value store cannot scan, so the set is maintained explicitly.
+
+        Under its **own** lock, not the caller's. This is a read-modify-write on
+        one global key while the append lock it runs beneath is per *topic*, so
+        two topics appending at once could each read the set before either wrote
+        it and one registration would be lost — after which retention and
+        ``loom events topics`` cannot see that topic at all.
         """
         known = set(await self._store.get(_TOPICS) or [])
-        if topic not in known:
-            known.add(topic)
-            await self._store.set(_TOPICS, sorted(known), _NO_TTL)
+        if topic in known:
+            return
+        async with _AppendLock(
+            self._lock, "eventlog:topics", self._owner, _APPEND_LEASE,
+            self._guard_for(_TOPICS),
+        ):
+            known = set(await self._store.get(_TOPICS) or [])
+            if topic not in known:
+                known.add(topic)
+                await self._store.set(_TOPICS, sorted(known), _NO_TTL)
 
     # -- reading -------------------------------------------------------------
 
@@ -315,7 +337,12 @@ class StoreBackedEventLog:
         if limit <= 0:
             return []
         head = int(await self._store.get(f"{_HEAD}:{topic}") or 0)
-        start = (int(after) if after is not None else 0) + 1
+        tail = int(await self._store.get(f"{_TAIL}:{topic}") or 0)
+        # Start no earlier than the tail. A reader behind the retained window
+        # would otherwise walk every deleted sequence one round trip at a time
+        # to discover they are gone — the cost of catching up would scale with
+        # what was *thrown away* rather than with what is there.
+        start = max((int(after) if after is not None else 0) + 1, tail + 1)
 
         found: list[StoredEvent] = []
         seq = start
@@ -323,9 +350,9 @@ class StoreBackedEventLog:
             raw = await self._store.get(f"{_REC}:{topic}:{seq}")
             if raw is not None:
                 found.append(_decode(raw, seq))
-            # A missing sequence below the head is a retained-away record, not a
-            # stall: skip it. Holes from a crashed append cannot occur below the
-            # head, by construction.
+            # A missing sequence between tail and head is a record retention
+            # removed out of order, which is rare: skip it. Holes from a crashed
+            # append cannot occur below the head, by construction.
             seq += 1
         return found
 
@@ -399,6 +426,7 @@ class StoreBackedEventLog:
             over_by = max(0, head - policy.max_records)
 
         removed = 0
+        highest_removed = 0
         for seq in range(1, floor + 1):
             raw = await self._store.get(f"{_REC}:{topic}:{seq}")
             if raw is None:
@@ -411,6 +439,13 @@ class StoreBackedEventLog:
             await self._store.delete(f"{_REC}:{topic}:{seq}")
             await self._store.delete(f"{_IDX}:{topic}:{stored.event_id}")
             removed += 1
+            highest_removed = seq
+        if removed:
+            # Advanced *after* the deletes, so a crash mid-retention leaves a
+            # tail that is too low rather than too high: a reader then walks a
+            # few missing sequences, where the other way round it would skip
+            # records that are still there.
+            await self._store.set(f"{_TAIL}:{topic}", highest_removed, _NO_TTL)
         return removed
 
     _checkpoints: Checkpoints | None = None

@@ -142,7 +142,13 @@ class TestArgumentVerification:
 
     @pytest.mark.asyncio
     async def test_warn_lets_the_same_reorder_through(self) -> None:
-        """The default keeps running, and says so on the entry."""
+        """WARN keeps running, and says so on the entry.
+
+        No longer the default — see :class:`TestVerificationDefaultsToStrict`
+        — but still the setting for a workflow that deliberately derives a
+        step's arguments from unjournaled state, so the behaviour is pinned
+        as an explicit opt-in.
+        """
 
         @step
         async def fetch_two(url: str) -> str:
@@ -155,7 +161,7 @@ class TestArgumentVerification:
             return f"{first}|{second}"
 
         store = MemoryStore()
-        rt = Runtime(store=store)
+        rt = Runtime(store=store, verify=VerifyMode.WARN)
         result = await rt.run(original)
 
         @workflow(name="two_fetches_warn")
@@ -164,7 +170,7 @@ class TestArgumentVerification:
             first = await ctx.step(fetch_two, "https://a")
             return f"{first}|{second}"
 
-        resumed = Runtime(store=store)
+        resumed = Runtime(store=store, verify=VerifyMode.WARN)
         resumed.register(swapped)
         replayed = await resumed.replay(result.run_id)
         assert replayed.status is ExecutionStatus.COMPLETED
@@ -251,9 +257,19 @@ class TestIngressValidation:
 
 
 class TestDefaultsUnchanged:
-    def test_verification_defaults_to_warn(self) -> None:
+    def test_verification_defaults_to_strict(self) -> None:
+        """It defaulted to WARN, and WARN served another call site's answer.
+
+        The argument for WARN was that a difference is not always a bug — a
+        step whose input comes from ``ctx.state`` legitimately replays with
+        different arguments. What that argument missed is that the *common*
+        cause of a difference was the engine's own path allocation racing under
+        ``ctx.gather``, and warning there meant handing one branch the other's
+        result and reporting the run ``completed``. With branch-local numbering
+        the common cause is gone, so what is left really is a divergence.
+        """
         rt = Runtime(store=MemoryStore())
-        assert rt.verify is VerifyMode.WARN
+        assert rt.verify is VerifyMode.STRICT
 
     def test_compatibility_mode_is_independent_of_verification(self) -> None:
         """Two separate axes: what diverged, and what to do about it."""

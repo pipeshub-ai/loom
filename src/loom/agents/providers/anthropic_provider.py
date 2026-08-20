@@ -188,6 +188,26 @@ def _mark_message_prefix(messages: list[dict[str, Any]]) -> None:
 
 
 
+def _is_tool_result_turn(message: dict[str, Any]) -> bool:
+    """Whether *message* is a user turn made only of tool results.
+
+    Only such a turn absorbs another result. A user turn carrying ordinary text
+    is somebody's actual message, and appending a tool result to it would
+    reorder the conversation.
+    """
+    if message.get("role") != "user":
+        return False
+    content = message.get("content")
+    return (
+        isinstance(content, list)
+        and bool(content)
+        and all(
+            isinstance(block, dict) and block.get("type") == "tool_result"
+            for block in content
+        )
+    )
+
+
 def _split_messages(
     messages: list[Message],
 ) -> tuple[list[dict[str, Any]], str]:
@@ -202,17 +222,22 @@ def _split_messages(
             continue
 
         if msg.role == Role.TOOL:
-            # Tool result — attach to preceding assistant turn or start new user turn
-            converted.append({
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": msg.tool_call_id or "",
-                        "content": msg.content or "",
-                    }
-                ],
-            })
+            # Every tool_result answering one assistant turn belongs in a
+            # *single* user turn. LOOM's runner appends one TOOL message per
+            # call, so a turn with two parallel tool calls produced two
+            # consecutive user messages here — a shape the Messages API does
+            # not accept, on the path an agent takes constantly. Coalescing
+            # into the previous user turn when that turn is itself tool
+            # results is what makes parallel tool use work at all.
+            block = {
+                "type": "tool_result",
+                "tool_use_id": msg.tool_call_id or "",
+                "content": msg.content or "",
+            }
+            if converted and _is_tool_result_turn(converted[-1]):
+                converted[-1]["content"].append(block)
+            else:
+                converted.append({"role": "user", "content": [block]})
             continue
 
         if msg.role == Role.ASSISTANT:
@@ -272,12 +297,20 @@ def _parse_response(raw: Any) -> ModelResponse:
         tool_calls=tool_calls,
     )
 
-    # Cache reads are billed at a fraction of the input rate, so reporting them
-    # separately is what makes the saving visible rather than assumed.
+    # Anthropic reports `input_tokens` *excluding* cache traffic, and reports
+    # reads and writes beside it. `Usage.input_tokens` is defined as the total,
+    # the way OpenAI's `prompt_tokens` already is, so the three are added here
+    # rather than left for the cost model to reconcile — which it could not,
+    # having no way to tell which vendor answered. Subtracting the reads from a
+    # count that already excluded them billed real input tokens at zero.
+    read = int(getattr(raw.usage, "cache_read_input_tokens", 0) or 0)
+    written = int(getattr(raw.usage, "cache_creation_input_tokens", 0) or 0)
     usage = Usage(
-        cached_input_tokens=int(getattr(raw.usage, "cache_read_input_tokens", 0) or 0),
-        input_tokens=raw.usage.input_tokens,
-        output_tokens=raw.usage.output_tokens,
+        requests=1,
+        input_tokens=int(raw.usage.input_tokens or 0) + read + written,
+        cached_input_tokens=read,
+        cache_write_tokens=written,
+        output_tokens=int(raw.usage.output_tokens or 0),
     )
 
     finish_reason = _STOP_REASON_MAP.get(raw.stop_reason or "", FinishReason.STOP)

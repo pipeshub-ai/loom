@@ -46,7 +46,13 @@ import re
 import uuid
 from typing import Any
 
-from loom.runtime.sandbox import ContextChannel, SandboxBody, SandboxOutcome, SandboxPolicy
+from loom.runtime.sandbox import (
+    ContextChannel,
+    NetworkPolicy,
+    SandboxBody,
+    SandboxOutcome,
+    SandboxPolicy,
+)
 from loom.runtime.sandboxes._conversation import converse
 from loom.runtime.sandboxes._harness import build_child_script
 
@@ -107,9 +113,14 @@ class DockerSandbox:
         (platform-conditional on `resource.RLIMIT_*`), a container is always
         Linux from the inside, so every limit applies unconditionally
         regardless of the host this process itself runs on."""
-        return frozenset(
-            {"allowed_env", "max_wall_seconds", "max_memory_mb", "max_cpu_seconds", "network"}
-        )
+        return frozenset({
+            "allowed_env",
+            "allowed_imports",
+            "max_wall_seconds",
+            "max_memory_mb",
+            "max_cpu_seconds",
+            "network",
+        })
 
     async def run(
         self,
@@ -122,14 +133,14 @@ class DockerSandbox:
     ) -> SandboxOutcome:
         active = policy or SandboxPolicy()
 
-        if active.network:
+        if active.network is NetworkPolicy.ALLOW:
             return SandboxOutcome(
                 ok=False,
                 violation="policy",
                 error=(
                     "this sandbox never grants container network access -- "
                     "every effect must go through the channel back to the "
-                    "parent. Drop network=True from the SandboxPolicy."
+                    "parent. Drop network=NetworkPolicy.ALLOW from the SandboxPolicy."
                 ),
             )
 
@@ -163,7 +174,14 @@ class DockerSandbox:
         try:
             return await asyncio.wait_for(
                 converse(
-                    process, source, entrypoint, run_id, input, channel, body.namespace
+                    process,
+                    source,
+                    entrypoint,
+                    run_id,
+                    input,
+                    channel,
+                    body.namespace,
+                    allowed_imports=active.allowed_imports,
                 ),
                 timeout=active.max_wall_seconds,
             )

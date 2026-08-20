@@ -160,7 +160,14 @@ GOLDEN_JOURNAL = [
         "kind": "step",
         "name": "fetch",
         "status": "completed",
-        "fingerprint": "fetch:1",
+        # Empty on purpose. This journal stands for one written before argument
+        # verification existed, and such an entry carries no fingerprint at all
+        # — which is exactly what the verifier skips. The placeholder that used
+        # to sit here ("fetch:1") was not a shape any release ever wrote, so it
+        # was not testing schema tolerance; it was testing what happens when the
+        # arguments genuinely disagree, which is a different question and now has
+        # its own test below.
+        "fingerprint": "",
         "input": {"args": [2], "kwargs": {}},
         "output": 4,
         "attempts": 1,
@@ -178,7 +185,7 @@ GOLDEN_JOURNAL = [
         "kind": "step",
         "name": "double",
         "status": "completed",
-        "fingerprint": "double:1",
+        "fingerprint": "",
         "input": {"args": [4], "kwargs": {}},
         "output": 8,
         "attempts": 1,
@@ -220,6 +227,57 @@ class TestAnOlderJournalStillReplays:
 
         assert [e.name for e in entries] == ["fetch", "now", "double"]
         assert all(e.status is EntryStatus.COMPLETED for e in entries)
+
+    async def test_a_journal_with_no_fingerprints_replays_under_the_strict_default(
+        self,
+    ) -> None:
+        """The upgrade guarantee for `VerifyMode.STRICT` becoming the default.
+
+        An entry written before argument verification existed carries no
+        fingerprint, and refusing those would strand every in-flight run on
+        upgrade — a far worse failure than the one strict verification prevents.
+        """
+        store = MemoryStore()
+        await store.create_execution(ExecutionRecord.model_validate(GOLDEN_RECORD))
+        await store.save_journal(
+            "run_golden", [JournalEntry.model_validate(e) for e in GOLDEN_JOURNAL]
+        )
+
+        rt = Runtime(store=store)  # strict verification, by default
+        rt.register(golden)
+        try:
+            result = await rt.replay("run_golden")
+        finally:
+            await rt.shutdown()
+
+        assert result.status is ExecutionStatus.COMPLETED
+
+    async def test_arguments_that_genuinely_disagree_are_refused(self) -> None:
+        """The question the old placeholder fingerprint was really asking.
+
+        A recorded fingerprint that does not match the replaying call means the
+        stored value may belong to a different call site, and serving it is how
+        a replay silently produces another call's answer.
+        """
+        divergent = [dict(entry) for entry in GOLDEN_JOURNAL]
+        divergent[0]["fingerprint"] = "a-fingerprint-from-another-call"
+
+        store = MemoryStore()
+        await store.create_execution(ExecutionRecord.model_validate(GOLDEN_RECORD))
+        await store.save_journal(
+            "run_golden", [JournalEntry.model_validate(e) for e in divergent]
+        )
+
+        rt = Runtime(store=store)
+        rt.register(golden)
+        try:
+            result = await rt.replay("run_golden")
+        finally:
+            await rt.shutdown()
+
+        assert result.status is ExecutionStatus.FAILED
+        assert result.error is not None
+        assert "different arguments" in result.error.message
 
     def test_fields_added_since_take_their_defaults(self) -> None:
         entry = JournalEntry.model_validate(GOLDEN_JOURNAL[0])

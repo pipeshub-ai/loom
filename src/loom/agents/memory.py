@@ -8,6 +8,7 @@ vector store can back it.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterable
 from typing import Any, Protocol, runtime_checkable
 
 from loom.agents.messages import Message, Role
@@ -94,24 +95,55 @@ async def replace_history(
     await session.append(session_id, messages)
 
 
+#: Characters per token, for bounding a window without a tokenizer.
+#:
+#: Deliberately approximate and deliberately *low*: under-estimating the ratio
+#: over-estimates the token count, so the window comes out smaller than it
+#: needed to be rather than larger than the model accepts. A real tokenizer
+#: would mean a per-vendor dependency to answer a question whose only use is
+#: "is this too big".
+CHARS_PER_TOKEN = 3.5
+
+
+def estimated_tokens(messages: Iterable[Message]) -> int:
+    """Rough token count for a window of messages."""
+    characters = 0
+    for message in messages:
+        characters += len(message.content or "")
+        for call in message.tool_calls:
+            characters += len(call.name) + len(str(call.arguments))
+    return int(characters / CHARS_PER_TOKEN)
+
+
 def trim_history(
     messages: list[Message],
     *,
     max_messages: int = 40,
+    max_tokens: int | None = None,
     keep_system: bool = True,
 ) -> list[Message]:
     """Drop the oldest turns while keeping system prompts and tool-call pairs intact.
 
     Splitting an assistant tool call from its result breaks most providers, so the window
     is snapped backwards to a safe boundary rather than cut at an exact count.
-    """
-    if len(messages) <= max_messages:
-        return list(messages)
 
+    Two ceilings, because a count of messages is a poor proxy for context. A
+    forty-message window of ordinary chat is small; forty messages each carrying
+    a page of tool output is not, and bounding only the count let exactly that
+    overflow. *max_tokens* is applied after the count, oldest-first, and is
+    ``None`` by default so the existing behaviour is unchanged for a caller that
+    does not ask for it.
+    """
     system_messages = [m for m in messages if m.role is Role.SYSTEM] if keep_system else []
     body = [m for m in messages if m.role is not Role.SYSTEM]
 
-    window = body[-max_messages:]
+    window = body[-max_messages:] if len(body) > max_messages else list(body)
+
+    if max_tokens is not None:
+        budget = max(0, max_tokens - estimated_tokens(system_messages))
+        while len(window) > 1 and estimated_tokens(window) > budget:
+            window.pop(0)
+
     # Never begin a window with an orphaned tool result.
     while window and window[0].role is Role.TOOL:
         window.pop(0)

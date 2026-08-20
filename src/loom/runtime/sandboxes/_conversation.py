@@ -46,6 +46,7 @@ async def converse(
     input: Any,
     channel: ContextChannel,
     namespace: dict[str, Any] | None = None,
+    allowed_imports: frozenset[str] | None = None,
 ) -> SandboxOutcome:
     """Speak the wire protocol to an already-running child.
 
@@ -62,6 +63,12 @@ async def converse(
                     "source": source, "entrypoint": entrypoint,
                     "run_id": run_id, "input": input,
                     "namespace": namespace or {},
+                    # `None` rather than an empty list when there is no policy:
+                    # the child distinguishes "no import policy" from "a policy
+                    # permitting nothing", and a list would collapse the two.
+                    "allowed_imports": (
+                        None if allowed_imports is None else sorted(allowed_imports)
+                    ),
                 }
             )
             + "\n"

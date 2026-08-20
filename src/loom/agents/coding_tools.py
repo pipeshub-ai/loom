@@ -120,6 +120,30 @@ async def search_toolsets(query: str) -> str:
 
 
 @tool
+async def search_operations(
+    query: str, toolset_id: str | None = None, limit: int = 10
+) -> str:
+    """Search individual operations across every toolset, by what they do.
+
+    Use this when you know the task but not which operation performs it —
+    "transition an issue", "send an email", "upload a file". search_toolsets
+    answers "is there a Jira integration"; this answers "which of its
+    operations does the thing".
+
+    Args:
+        query: What the operation should do, in your own words.
+        toolset_id: Narrow to one toolset, once you know which.
+        limit: How many matches to return.
+
+    Returns JSON array of {toolset_id, op_id, summary, effect, resolves,
+    import_line}. ``resolves`` naming an entity kind means this operation looks
+    a name up — call it before filtering on that name.
+    """
+    matches = _registry().search_operations(query, limit=limit, toolset_id=toolset_id)
+    return json.dumps([m.model_dump() for m in matches], indent=2)
+
+
+@tool
 async def show_toolset(
     toolset_id: str,
     group: str | None = None,
@@ -662,6 +686,7 @@ def build_coding_tools(
     if registry is None and validator is None and node_registry is None:
         tools = [
             search_toolsets,
+            search_operations,
             show_toolset,
             get_tool_contract,
             get_tool_docs,
@@ -686,6 +711,14 @@ def build_coding_tools(
         async def bound_search(query: str) -> str:
             cards = _registry(registry).search(query)
             return json.dumps([c.model_dump() for c in cards], indent=2)
+
+        async def bound_search_operations(
+            query: str, toolset_id: str | None = None, limit: int = 10
+        ) -> str:
+            matches = _registry(registry).search_operations(
+                query, limit=limit, toolset_id=toolset_id
+            )
+            return json.dumps([m.model_dump() for m in matches], indent=2)
 
         async def bound_show(toolset_id: str, group: str | None = None) -> str:
             try:
@@ -716,6 +749,7 @@ def build_coding_tools(
 
         tools = [
             replace(search_toolsets, fn=bound_search),
+            replace(search_operations, fn=bound_search_operations),
             replace(show_toolset, fn=bound_show),
             replace(get_tool_contract, fn=bound_contract),
             get_tool_docs,

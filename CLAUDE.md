@@ -13,6 +13,7 @@ Installed as both `loom` and `loomsdk`.
 ```bash
 # authoring
 loom author "watch a folder and summarise new PDFs" -o flows/digest.py
+loom edit flows/digest.py "also skip PDFs under one page"   # NL edit, verified
 loom check flows/order.py              # write order.graph.json + order.description.md
 loom check flows/order.py --fail-on-change   # CI: fail if the committed graph is stale
 loom graph flows/order.py --format react-flow
@@ -26,6 +27,8 @@ loom runs --status failed
 loom show <run> / loom watch <run>
 
 # acting on a run
+loom pause <run> / loom unpause <run>   # hold at the next durable step
+loom pin <run> -o tests/test_regression.py   # a run becomes a regression test
 loom approve <run> refund [--reject]
 loom respond <run> <request> '{"choice": "b"}'   # answer a non-approval human request
 loom pending                           # every run parked on a human, across workflows
@@ -329,6 +332,31 @@ agent = Agent(name="x", model=OpenAIProvider("gpt-4.1")) # or name one
 All three implement one method, `complete()`, so swapping vendors is a one-line
 change at the `Agent`. `loom.agents.providers` imports them lazily —
 the extras are optional and importing the package pulls in no vendor SDK.
+`from_env(model)` selects the vendor that serves a *named* model, which is what
+a stratified eval run needs; `from_env()` with no argument is unchanged.
+
+**One token convention, normalised at each provider.** `Usage.input_tokens` is
+the **total** prompt cost — fresh plus cache reads plus cache writes — which is
+what OpenAI's `prompt_tokens` already is and what Anthropic's `input_tokens`
+deliberately is not. `estimate_cost` used to subtract cache reads from a count
+that, for Anthropic, already excluded them: 500 real input tokens beside 20,000
+cache reads were billed as **zero**. Cache *writes* were never counted at all,
+which under-billed every agent loop by the whole write surcharge — a loop
+writes a cache entry on almost every turn. Rates are per family (`CACHE_RATES`:
+Claude reads at 0.10 and writes at 1.25, GPT reads at 0.50), not the flat 0.25
+that was right for no vendor. An unpriced model is an explicit `is_priced`
+question rather than a silent `0.0`, because a zero disables every dollar
+budget downstream.
+
+**Parallel tool calls.** The runner appends one message per tool result, and
+Anthropic's converter turned each into its own user turn — so a turn with two
+parallel tool calls produced two consecutive user messages, on the path an
+agent takes constantly, with `claude-sonnet-5` as the coding agent's default.
+Results answering one assistant turn now share one user turn. The runner also
+dispatches a turn's tool calls **concurrently** — they are independent by
+construction, since the model asked for all of them before seeing any answer —
+using `ctx.gather` when the agent is inside a workflow, so a tool that journals
+takes its paths from a branch-local scope.
 
 `OpenAIProvider` takes `base_url`, so it also serves OpenAI-compatible endpoints
 (Azure, Together, Groq, vLLM, Ollama). It routes o-series and gpt-5 models to
@@ -378,6 +406,15 @@ Detailed implementation plans are in `phases/`. Each file includes HLD, LLD, int
 
 - **Determinism is a dial, not a foundation** — `@pure` → `@effect` → `Agent(...)` are dial positions; moving work between them is a code change on that step, not an architectural migration
 - **Graph is projected from code** — decorators declare the graph; AST extraction produces WGIR; the model narrates a verified skeleton (cannot invent/hide steps)
+- **A run trace overlays the graph by *name*, not by path** — journal paths are
+  ordinals (`"0"`, `"3.1"`) and node ids are slugs (`fetch`, `fetch_1`), two
+  namespaces that never overlapped, so the overlay matched nothing and a
+  completed run rendered every node `pending`. The test that covered it built an
+  entry with `path="fetch"`, a shape the engine has never produced.
+  `RunTrace.unmatched_entries` reports what named nothing, so a stale committed
+  graph is visible rather than silently empty; control-flow nodes are
+  `structural` rather than lying with `pending`; and `TimeTraveler` is built on
+  the same overlay instead of its own copy of the rule.
 - **Generate descriptions at commit, not on demand** — cached per commit; description diff = changelog for non-technical reviewers
 
 ### Determinism Rules
@@ -387,7 +424,34 @@ Workflow bodies must be deterministic across replays:
 - Never call `uuid.uuid4()` directly — use `ctx.uuid4()`
 - Never call `random.*` directly — use `ctx.random()`
 - Never access external state without `ctx.step()` — it won't be journaled
-- Violating these raises `NondeterminismError` in strict mode
+- **Never use `asyncio.gather` / `TaskGroup` / `create_task` in a body** — use
+  `ctx.gather`
+
+Enforced three ways, all of which work: the static scan at `@workflow`
+declaration time (`loom.runtime.determinism`), `CodeValidator` for generated
+code, and `loom.testing.assert_replays()` for a workflow you wrote.
+`Runtime(strict_determinism=True)` is **refused** — it was assigned and read at
+zero sites for its whole life while this file claimed it raised
+`NondeterminismError`, so it now raises `ConfigurationError` naming the three
+that do work.
+
+**Why the concurrency rule is a determinism rule.** A durable call's journal
+path comes from a counter, allocated when the call is *constructed*. Under a
+raw `asyncio.gather` two branches allocate from that one counter as they run,
+so the numbering follows how long the previous step took — and on replay, where
+the timings differ, two logically distinct call sites are served each other's
+recorded values. `ctx.gather` gives each coroutine branch its own numbering
+space (`0.0`, `0.1`, `1.0`), allocated synchronously in argument order before
+any branch starts, via a `contextvars` override the branch's task inherits.
+Already-constructed calls — `ctx.gather(ctx.step(a), ctx.step(b))` — keep their
+flat paths, so every journal written before this still replays.
+
+`VerifyMode.STRICT` is now the **default**. It was `WARN`, which logged and
+served the recorded value anyway — and the common cause of a mismatch was the
+engine's own race, so the run reported `completed` with different output. With
+branch-local numbering that cause is gone. An entry with no fingerprint (one
+journaled before verification existed) is still skipped, which is what makes
+the new default safe to upgrade into.
 
 ### Agent Backends
 
@@ -487,6 +551,15 @@ Three properties, each the fix for a specific failure:
 
 `ctx.wait_for_approval` is unchanged and uses the same `approval:<subject>`
 event, so `runtime.approve()` resolves either.
+
+**Who approved is attested, not asserted.** `ApprovalOut.responder` was read
+straight out of the answer payload, so the audit record for a human decision
+said whatever the caller typed — and `runtime.approve()` set no responder at
+all. That matters most here, because an approval is the act that clears
+read-to-write taint. `AuthorizedFacade` stamps the authenticated principal under
+the reserved key `loom.responder` (`nodes/human/attest.py`) and the node prefers
+it over a claimed one. An unauthenticated deployment is unchanged: with nobody
+to attest, the payload's own `responder` still stands.
 
 #### Guardrail nodes
 
@@ -607,12 +680,12 @@ All opt-in — constructing a bare `Runtime()` enforces none of it.
 
 | Capability | Wiring |
 |---|---|
-| **Flow control** | `@workflow(flow_control=FlowControlPolicy(...))` + `Runtime(admission=AdmissionController())`. Evaluated before the record is created, so a rejected trigger leaves no run behind. Raises `AdmissionRejected`; `.retryable` separates "later" from "never". Slots release on terminal transitions. |
-| **Effect broker** | `Runtime(broker=GuardedBroker(max_calls=…), authority=Authority(grant=…, dry_run=…))`. Mediates every durable operation. `DirectBroker` is the default and checks nothing (~2µs/dispatch). Grants are checked **per dispatch**, not when tools are resolved — a tool an agent is holding cannot outlive its grant. |
-| **RBAC** | `Runtime(role=Role.OPERATOR)`. Checks `flow:run`, `flow:cancel`, `run:view`, `run:replay`. `role=None` enforces nothing. |
+| **Flow control** | `@workflow(flow_control=FlowControlPolicy(...))` + `Runtime(admission=AdmissionController(state=…))`. Evaluated before the record is created, so a rejected trigger leaves no run behind. Raises `AdmissionRejected`; `.retryable` separates "later" from "never". Slots release on terminal transitions. **Where the counters live is a port** — `InMemoryAdmissionState` (default, one process) or `StoreBackedAdmissionState(store)` (many). Every counter used to be a process-local dict, so the limits held in exactly the deployment that does not need them. `SingletonPolicy(mode="cancel_previous")` raises `NotImplementedError` rather than admitting and cancelling nothing. |
+| **Effect broker** | `Runtime(broker=GuardedBroker(max_calls=…), authority=Authority(grant=…, dry_run=…))`. Mediates every durable operation. `DirectBroker` is the default and checks nothing (~2µs/dispatch). Grants are checked **per dispatch**, not when tools are resolved — a tool an agent is holding cannot outlive its grant. `max_calls` is **reserved before the await, never credited after it**: counting completions bounded nothing under `ctx.gather`, since every in-flight call read the count before any of them wrote it, and ten concurrent calls passed a ceiling of three. |
+| **RBAC** | `Runtime(role=Role.OPERATOR)`. `role=None` enforces nothing. Every mutating method carries `@requires(Permission…)` from `security/rbac.py`, and `TestEveryMutatingRuntimeMethodIsGuarded` enumerates them — `retry`, `approve`, `send_event` and `publish` had no check at all, while `test_phase5` asserted the role *table* and never a call site. `publish` is `flow:deploy`; `pause` is `flow:cancel`, the same authority as stopping a run applied reversibly. |
 | **Leader election** | `await rt.start_scheduler(elector=LeaderElector(lock_provider, node_id))`. Only the lease holder ticks, so many processes can share one store. |
 | **Retention** | `await RetentionManager(policy).compact(store)`. Drops journals past the warm cutoff, deletes records past `run_record_days`, never touches suspended runs. |
-| **Grants** | `@workflow(grants=GrantSet(toolsets=["jira.issues:read"]))` narrows what `ctx.agent()` resolves. Denied toolset by name → `GrantDenied`. |
+| **Grants** | `@workflow(grants=GrantSet(toolsets=["jira.issues:read"], nodes=["io"]))` narrows what `ctx.agent()` resolves and what `ctx.node()` may call. Denied toolset by name → `GrantDenied`. **Nodes are their own dimension**: a node call journals as a step whose target is `<category>.<id>`, which the bridged-toolset branch read as a toolset called `control` — so declaring *any* toolset grant denied every `ctx.node()` call, `control.switch` included, and told the author to grant a toolset no manifest declares. `control`/`transform`/`guard` reach nothing and pass without an entry even under `strict`; `io`/`agent`/`human` need one. `artifact` and `event` are refused under `strict` rather than left unchecked. |
 
 ### Events, Output, and Workflow State
 
@@ -1004,7 +1077,16 @@ Three things worth knowing:
   what this platform actually honours — macOS has `RLIMIT_AS` and rejects every
   finite value, including a lower one — and `run` refuses a policy asking for
   anything outside it. A host told "not here" is better off than one that
-  believes untrusted code is bounded when nothing bounds it.
+  believes untrusted code is bounded when nothing bounds it. The check is
+  derived from the policy (`sandbox.unenforceable`), not from a hand-kept list
+  of field names: that list had two entries, so `network` and `allowed_imports`
+  were accepted and dropped in silence — the exact failure the module's own
+  docstring forbids. `SandboxPolicy.network` is now three-valued
+  (`NetworkPolicy.UNSPECIFIED`/`DENY`/`ALLOW`), because two states could not
+  carry "I have not thought about egress" and "egress must be impossible"
+  separately. `allowed_imports` is **enforced** in the child rather than
+  refused, by an `__import__` guard keyed on the calling frame — so an allowed
+  module's own transitive imports still work.
 - **Parking is not an outcome.** `Suspend` and `WorkflowCancelled` propagate out
   of a sandbox untouched. A subprocess body that parks dies with its child and
   re-executes from the top on re-entry, with every earlier call served from the
@@ -1383,6 +1465,23 @@ suite that quietly shrinks when a service is down reports green for coverage it
 did not have. `tests/conformance/test_harness.py` drives deliberately-broken
 stores through the suite to prove it still catches each defect class.
 
+### Which code an in-flight run resumes against
+
+`Runtime(version_policy=…)`. `resolve_workflow` reads the in-process registry
+and nothing else, so a run parked on a 24-hour approval resumed against whatever
+was deployed in the meantime — the version store was consulted only to recover
+source text for a sandbox.
+
+`LATEST` is the default and is what every release before this did. It stays the
+default because a `code_hash` moves on any edit, comments included, and refusing
+every in-flight run after a no-op redeploy is worse than the hazard — and the
+two ways a changed body can actually corrupt a replay are now both refused by
+default (`CompatibilityMode.STRICT`, `VerifyMode.STRICT`). `REFUSE` raises
+`CodeChanged` rather than resuming; `PINNED` refuses rather than falling back,
+because asking to be pinned and silently getting `LATEST` is the outcome the
+dial exists to make impossible. The divergence is recorded on the run either
+way, under `metadata["loom.code_changed"]`.
+
 ### Workflow versions
 
 `WorkflowRecord` says a workflow exists; `WorkflowVersion` says what its code
@@ -1573,6 +1672,95 @@ and the coding agent's model were reading the same three keys from two places.
 No key set is reported as which keys to set, rather than as a stack trace from
 inside a vendor SDK.
 
+### Editing a workflow
+
+`loom edit flows/digest.py "also skip PDFs under one page"`, or
+`facade.edit(source, instruction)` from the MCP server and anything else on the
+port. `generate` was the only entry point, so every change meant regenerating
+from a spec — while every comparable platform has shipped conversational
+editing. Teams iterate on workflows; they do not re-describe them.
+
+What makes this worth more than a visual editor's equivalent is that it reuses
+machinery that can **verify** the edit: the same sixteen stages run on the
+result, so a change that breaks entity resolution, silently caps a fetch, or
+puts the answer behind a model call nobody asked for is caught before it is
+offered. An `EditResult` carries a unified diff *and* a `graph_changes` delta
+projected from both versions — `+summarise`, `-fetch` — which is the reviewable
+form for someone who does not read Python.
+
+`EDIT_INSTRUCTIONS` states the rules an edit has and a generation does not:
+smallest change, **never rename a step** (a name is what the journal records, so
+changing one strands every run in flight), return the whole file, resolve before
+filtering, and *decline* rather than guess. Returning the file unchanged is a
+valid answer, and `changed=False` says so.
+
+### Holding and pinning a run
+
+**`loom pause <run>` / `loom unpause <run>`.** A run parked only when its own
+code said so, so the only things an operator could do to a misbehaving run were
+cancel it — terminal, unwinding compensations — or watch it. A pause is not a
+new mechanism: the run suspends on `resume:<run_id>`, an ordinary event, at the
+next durable boundary. Never mid-step, which is what keeps the journal
+consistent and lets it resume exactly where a crash would have.
+
+**`loom pin <run> -o tests/test_regression.py`** turns a run into a pytest file
+built from its journal via `given(...)`. A seeded entry means exactly what a
+recorded one means, so this reproduces what happened rather than approximating
+it — the loop durable execution exists for, and the one piece of it that was
+missing. Values are redacted on the way out (`core/redaction`), because a step's
+*outputs* were never redacted into the journal, and the generated file says so
+when redaction actually changed something.
+
+**Cancellation is durable.** `cancel_requested` lives on the record and is
+observed through the lease heartbeat, so a cancel from one process reaches the
+worker driving the run in another — and its body raises `WorkflowCancelled`,
+which is the only place the compensation stack can unwind. It used to be an
+in-memory set plus a direct write to `CANCELLED`, which the driving worker
+overwrote on its next update.
+
+### Measuring the coding agent
+
+`loom.eval` — `EvalRunner` over a `Coder`, scored by a `Judge`, gated by
+`scripts/run_eval.py`. The package shipped three Pydantic models and no runner,
+judge, dataset or gate, while `phases/phase-7` specified a model-stratified
+suite: every other defect is a bug that can be fixed once, and this was the
+absence of the instrument that says whether any fix helped.
+
+`StructuralJudge` is **deterministic** — it reads what the sixteen stages
+already established (compiled, ran, answered, repair rounds) rather than asking
+a model, because a CI gate over a sampled distribution moves on its own.
+`ModelJudge` is opt-in for the axis a rule cannot reach. The gate is
+**no-regression against a committed baseline**, not an absolute bar: a
+threshold picked today is one nobody can adopt tomorrow, and a baseline
+ratchets as the numbers improve.
+
+```bash
+python scripts/run_eval.py --write-baseline evals/baseline.json
+python scripts/run_eval.py --baseline evals/baseline.json   # exit 1 on regression
+python scripts/run_eval.py --stratify                        # haiku / sonnet / gpt
+```
+
+### One conversation, one budget
+
+`agents/generation.py`. A generation was a sequence of *unrelated* agent
+invocations: `agent(spec)`, then `agent(repair_prompt)`, always without a
+`context`. So every repair round lost the toolset schemas the model had
+fetched, the entity ids it had resolved through real API calls, and its own
+plan — it was asked to fix a traceback in code it could not remember writing.
+And because `turn` and `cumulative_usage` are locals in the runner's loop, each
+invocation restarted at turn 1 with the full allowance: three repair rounds and
+two review rounds meant six independent budgets, and `max_cost_usd` bounded one
+call and never the work.
+
+`CodingSession` carries the transcript forward and charges every call against
+one `GenerationBudget`. `WorkflowCodingAgent(max_total_tokens=…, max_cost_usd=…)`
+bounds the *job*. A dollar ceiling on a model with no price on file is refused
+at construction, because `estimate_cost` returns `0.0` for one — a ceiling that
+can never be reached is not a ceiling.
+
+The repair and review loops take an `Asking` protocol (one method), so they stay
+testable without a model, a budget or a transcript.
+
 ### Verification Pipeline
 
 `agents/checks.py` defines `Check` and `CheckPipeline`; `agents/stages.py` holds
@@ -1669,6 +1857,17 @@ with `smoke_test=False`.
 `CodeValidator` also resolves imported symbols, so `from loom import
 Retryy` is caught with a suggestion rather than failing on the user's machine.
 
+**The smoke child holds no credentials.** `smoke_run` inherited `os.environ` in
+full — every API key the process held — while the MCP tool exposing it told the
+model "no real network or credentials". `SmokeIsolation` is an allowlist of the
+variables an interpreter needs to *start*, and nothing else;
+`inherit_env=True` is the escape hatch for a host that has decided the code is
+trusted. `SmokeIsolation.describe()` is what the tool description should say,
+because network is still not restricted and claiming otherwise is how this
+happened. The authoring tools that *act* — `smoke_test_workflow`,
+`save_workflow`, `call_read_operation` — go through `AuthoringGate`, which
+requires `workflows:author`; the three that read a catalogue stay open.
+
 Optionally add a **supervisor**: `WorkflowCodingAgent(supervisor=CodeSupervisor(model))`
 runs a second model over the finished code — durability, determinism, retry
 safety, error handling, spec fidelity. Use a different model from the author
@@ -1685,6 +1884,16 @@ those events permanently and one added tomorrow sees nothing from today. A log
 makes *the record* durable and delivery a resumable read — the only shape where
 many workflows independently consume one event and every one of them survives
 being killed.
+
+**Reads are bounded by a tail marker.** `read` walked every sequence from the
+caller's position to the head, one store round trip each, skipping the ones
+retention had deleted — so a topic retained down to its last hundred events with
+a head in the millions and a checkpoint at 1 issued a million single-key gets
+per drain. `eventlog:tail:{topic}` is advanced by `retain()` *after* the
+deletes, so a crash mid-retention leaves a tail too low rather than too high.
+`_remember_topic` takes its own lock: it is a read-modify-write on one global
+key while the append lock is per *topic*, so two topics appending at once lost
+one registration, after which retention could not see that topic at all.
 
 **The package ships no broker.** Two Protocols (`EventLog`, `Checkpoints`), one
 reference implementation over capabilities every store already has

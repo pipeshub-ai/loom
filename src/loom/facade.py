@@ -194,6 +194,60 @@ class RuntimeFacade(Protocol):
         """
         ...
 
+    async def edit(
+        self,
+        source: str,
+        instruction: str,
+        *,
+        packages: list[str] | None = None,
+        smoke_input: Any = None,
+        observe: bool = True,
+    ) -> dict[str, Any]:
+        """Change a workflow that already exists, and verify the result.
+
+        The half of authoring the product did not have. ``author`` was the only
+        entry point, so every change meant regenerating from a spec — while
+        every comparable platform has shipped conversational editing. Teams
+        iterate on workflows; they do not re-describe them.
+
+        On the port for the same reason ``author`` is: one implementation, and
+        ``test_surface_parity`` fails the build when an adapter implements less
+        than the whole thing.
+
+        Returns the edited source, a unified diff, the node-level delta
+        projected from both versions, and whatever the verification pipeline
+        still has to say. ``changed`` is ``False`` when the model declined —
+        which is the answer it is asked to give when an instruction cannot be
+        satisfied, and is better than a plausible edit that does the wrong
+        thing.
+        """
+        ...
+
+    async def pause(self, run_id: str) -> dict[str, Any]:
+        """Hold a run at its next durable boundary.
+
+        There was no way to do this. A run parked only when its own code said
+        so, so the only things an operator could do to a misbehaving run were
+        cancel it — terminal, unwinding compensations — or watch it.
+        """
+        ...
+
+    async def unpause(self, run_id: str) -> dict[str, Any]:
+        """Release a held run and let it continue."""
+        ...
+
+    async def pin(
+        self, run_id: str, *, module: str = ""
+    ) -> dict[str, Any]:
+        """Generate a regression test that reproduces this run from its journal.
+
+        Closes the loop durable execution exists for: a production failure
+        becomes a committed test in one command. Values are redacted on the way
+        out, because a step's *outputs* were never redacted into the journal and
+        nobody expected them in a file somebody commits.
+        """
+        ...
+
     async def nodes(
         self, query: str = "", *, category: str | None = None
     ) -> list[dict[str, Any]]:
@@ -766,30 +820,8 @@ class LocalFacade:
         smoke_input: Any = None,
         observe: bool = True,
     ) -> dict[str, Any]:
-        from loom.agents import providers
-        from loom.agents.coding_agent import WorkflowCodingAgent
-
-        model = providers.from_env()
-        if model is None:
-            raise ConfigurationError(
-                "authoring needs a model. Set one of "
-                + ", ".join(providers.env_keys())
-                + " and install that provider's extra."
-            )
-
-        probes = None
-        if observe:
-            from loom.agents.probes import default_probes
-
-            probes = default_probes()
-
-        agent = WorkflowCodingAgent(
-            model,
-            tool_registry=self.runtime.toolsets,
-            node_registry=self.runtime.nodes,
-            probes=probes,
-            allowed_packages=set(packages) if packages else None,
-            smoke_input=smoke_input,
+        agent = self._coding_agent(
+            packages=packages, smoke_input=smoke_input, observe=observe
         )
         result = await agent.generate(spec)
 
@@ -826,6 +858,118 @@ class LocalFacade:
                 "error": result.smoke.error,
             },
         }
+
+    async def edit(
+        self,
+        source: str,
+        instruction: str,
+        *,
+        packages: list[str] | None = None,
+        smoke_input: Any = None,
+        observe: bool = True,
+    ) -> dict[str, Any]:
+        agent = self._coding_agent(
+            packages=packages, smoke_input=smoke_input, observe=observe
+        )
+        result = await agent.edit(source, instruction)
+        return {
+            "code": result.code,
+            "changed": result.changed,
+            "clean": result.is_clean,
+            "explanation": result.explanation,
+            "diff": result.diff,
+            "graph_changes": result.graph_changes,
+            "repairs": result.repair_attempts,
+            "model": result.model_used,
+            "input_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens,
+            "issues": [
+                {
+                    "category": issue.category,
+                    "severity": issue.severity,
+                    "message": issue.message,
+                }
+                for issue in result.issues
+            ],
+            "smoke": None
+            if result.smoke is None
+            else {
+                "ok": result.smoke.ok,
+                "phase": result.smoke.phase,
+                "error": result.smoke.error,
+            },
+        }
+
+    async def pause(self, run_id: str) -> dict[str, Any]:
+        await self.runtime.pause(run_id)
+        return await self._describe(run_id)
+
+    async def unpause(self, run_id: str) -> dict[str, Any]:
+        await self.runtime.unpause(run_id)
+        return await self._describe(run_id)
+
+    async def pin(self, run_id: str, *, module: str = "") -> dict[str, Any]:
+        from loom.testing.pin import pin_run
+
+        record = await self.runtime.get(run_id)
+        if record is None:
+            raise RegistryError(f"no run {run_id}")
+        journal = await self.runtime.store.load_journal(run_id)
+        pinned = pin_run(record, journal, module=module)
+        return {
+            "run_id": run_id,
+            "workflow": record.workflow,
+            "source": pinned.source,
+            "filename": pinned.filename,
+            "seeded": pinned.seeded,
+            "notes": pinned.notes,
+        }
+
+    async def _describe(self, run_id: str) -> dict[str, Any]:
+        record = await self.runtime.get(run_id)
+        if record is None:
+            raise RegistryError(f"no run {run_id}")
+        return describe_record(record)
+
+    def _coding_agent(
+        self,
+        *,
+        packages: list[str] | None,
+        smoke_input: Any,
+        observe: bool,
+    ) -> Any:
+        """One place that builds the agent, for authoring and for editing.
+
+        Extracted rather than duplicated: the two entry points must agree about
+        which toolsets, nodes and probes the agent may see, or an edit would be
+        verified against a different world than the one that wrote the file.
+        """
+        from loom.agents import providers
+        from loom.agents.coding_agent import WorkflowCodingAgent
+
+        model = providers.from_env()
+        if model is None:
+            raise ConfigurationError(
+                "authoring needs a model. Set one of "
+                + ", ".join(providers.env_keys())
+                + " and install that provider's extra."
+            )
+
+        probes = None
+        if observe:
+            from loom.agents.probes import default_probes
+
+            probes = default_probes()
+
+        return WorkflowCodingAgent(
+            model,
+            tool_registry=self.runtime.toolsets,
+            node_registry=self.runtime.nodes,
+            probes=probes,
+            allowed_packages=set(packages) if packages else None,
+            smoke_input=smoke_input,
+        )
+
 
     async def nodes(
         self, query: str = "", *, category: str | None = None
@@ -1210,6 +1354,43 @@ class RemoteFacade:
     ) -> dict[str, Any]:
         raise ConfigurationError(_NO_REMOTE_AUTHORING)
 
+    async def pause(self, run_id: str) -> dict[str, Any]:
+        raise ConfigurationError(
+            "pausing a run is not exposed over HTTP yet — hold it from the "
+            "process that owns the store, or add the route to your own server."
+        )
+
+    async def unpause(self, run_id: str) -> dict[str, Any]:
+        raise ConfigurationError(
+            "releasing a paused run is not exposed over HTTP yet — the "
+            "underlying event is: send 'resume:<run_id>' to it."
+        )
+
+    async def pin(self, run_id: str, *, module: str = "") -> dict[str, Any]:
+
+        record = await self.client.get(run_id)
+        if record is None:
+            raise RegistryError(f"no run {run_id}")
+        journal = await self.client.journal(run_id)
+        # Works remotely: everything it needs is in the journal the server
+        # already serves, and the generation itself is local text assembly.
+        return _pinned_payload(run_id, record, journal, module)
+
+    async def edit(
+        self,
+        source: str,
+        instruction: str,
+        *,
+        packages: list[str] | None = None,
+        smoke_input: Any = None,
+        observe: bool = True,
+    ) -> dict[str, Any]:
+        # Refused for the reason authoring is: editing reads *this* process's
+        # toolsets, nodes and probes to decide what the workflow may call, and
+        # spends model tokens doing it. A server's key would be spending
+        # somebody else's budget on a decision made against the wrong catalogue.
+        raise ConfigurationError(_NO_REMOTE_AUTHORING)
+
     async def nodes(
         self, query: str = "", *, category: str | None = None
     ) -> list[dict[str, Any]]:
@@ -1323,4 +1504,41 @@ def _describe_version(version: Any, *, active: bool) -> dict[str, Any]:
         "code_hash": version.code_hash,
         "created_at": version.created_at.isoformat() if version.created_at else None,
         "active": active,
+    }
+
+
+def _pinned_payload(
+    run_id: str, record: Any, journal: Any, module: str
+) -> dict[str, Any]:
+    """Shared rendering for a pinned test, whatever served the journal.
+
+    The remote facade gets JSON rows where the local one gets models, so the
+    rows are coerced here rather than in either adapter — a second copy of this
+    is how the two surfaces drift into different tests for the same run.
+    """
+    from loom.runtime.journal import JournalEntry
+    from loom.testing.pin import pin_run
+
+    entries = [
+        row if isinstance(row, JournalEntry) else JournalEntry.model_validate(row)
+        for row in journal
+    ]
+    described = (
+        record
+        if not isinstance(record, dict)
+        else type("Row", (), {
+            "run_id": record.get("run_id", run_id),
+            "workflow": record.get("workflow", "workflow"),
+            "input": record.get("input"),
+            "status": type("S", (), {"value": record.get("status", "unknown")})(),
+        })()
+    )
+    pinned = pin_run(described, entries, module=module)
+    return {
+        "run_id": run_id,
+        "workflow": getattr(described, "workflow", "workflow"),
+        "source": pinned.source,
+        "filename": pinned.filename,
+        "seeded": pinned.seeded,
+        "notes": pinned.notes,
     }

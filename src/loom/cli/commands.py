@@ -294,6 +294,150 @@ def cmd_author(args: argparse.Namespace) -> int:
     return run_async(body())
 
 
+def cmd_pause(args: argparse.Namespace) -> int:
+    """Hold a run at its next durable boundary.
+
+    Between steps, never inside one — so nothing is half-done and the run
+    resumes exactly where a crash would have.
+    """
+
+    async def body() -> int:
+        out = printer_for(args)
+        target = with_backend(args)
+        try:
+            record = await target.backend.pause(args.run)
+        finally:
+            await target.backend.close()
+        out.json(record)
+        if not args.json:
+            out.line(f"{args.run} will hold at its next durable step")
+            out.line(f"release it with: loom unpause {args.run}")
+        return Exit.OK
+
+    return run_async(body())
+
+
+def cmd_unpause(args: argparse.Namespace) -> int:
+    """Release a held run and let it continue."""
+
+    async def body() -> int:
+        out = printer_for(args)
+        target = with_backend(args)
+        try:
+            record = await target.backend.unpause(args.run)
+        finally:
+            await target.backend.close()
+        out.json(record)
+        if not args.json:
+            out.line(f"{args.run} released")
+        return Exit.OK
+
+    return run_async(body())
+
+
+def cmd_pin(args: argparse.Namespace) -> int:
+    """Turn a run into a regression test.
+
+    The loop durable execution exists for: a production failure becomes a
+    committed test that fails for the same reason and passes when it is fixed.
+    """
+
+    async def body() -> int:
+        out = printer_for(args)
+        target = with_backend(args)
+        try:
+            # `--module` is a repeatable "where the workflows live" flag; the
+            # generated test needs one import path, so the first is used and
+            # the rest are the resolver's business.
+            modules = args.module or []
+            pinned = await target.backend.pin(
+                args.run, module=modules[0] if modules else ""
+            )
+        finally:
+            await target.backend.close()
+
+        out.json(pinned)
+        destination = args.output
+        if destination is None and not args.json:
+            out.verbatim(pinned["source"])
+        elif destination is not None:
+            destination.write_text(pinned["source"], encoding="utf-8")
+            if not args.json:
+                out.line(f"wrote {destination} ({pinned['seeded']} entries seeded)")
+
+        if not args.json:
+            for note in pinned["notes"]:
+                out.line(f"note: {note}")
+        return Exit.OK
+
+    return run_async(body())
+
+
+def cmd_edit(args: argparse.Namespace) -> int:
+    """Change a workflow that already exists, by describing the change.
+
+    Thin over ``RuntimeFacade.edit``, exactly as ``cmd_author`` is over
+    ``author``: reads flags, renders a result, decides nothing.
+
+    Writes in place by default — an edit whose result you have to copy
+    somewhere is not an edit — and ``--output`` sends it elsewhere for a
+    reviewer who wants both versions. ``--dry-run`` prints the diff and writes
+    nothing, which is what you want the first time you try an instruction.
+    """
+
+    async def body() -> int:
+        out = printer_for(args)
+        try:
+            source = args.file.read_text(encoding="utf-8")
+        except OSError as exc:
+            out.error(f"cannot read {args.file}: {exc}")
+            return Exit.USAGE
+
+        target = with_backend(args)
+        try:
+            result = await target.backend.edit(
+                source,
+                _spec_text(args.instruction),
+                packages=args.package or None,
+                smoke_input=parse_input(args.input),
+                observe=not args.no_observe,
+            )
+        finally:
+            await target.backend.close()
+
+        out.json(result)
+
+        if not result["changed"]:
+            if not args.json:
+                out.line("unchanged")
+                if result.get("explanation"):
+                    out.line(result["explanation"])
+            # Not a failure. The instructions tell the model to decline rather
+            # than guess, so declining is the requested behaviour and the file
+            # on disk is still the one that works.
+            return Exit.OK
+
+        destination = args.output or args.file
+        if not args.dry_run:
+            destination.write_text(result["code"], encoding="utf-8")
+
+        if not args.json:
+            if result.get("diff"):
+                out.verbatim(result["diff"])
+            if result.get("graph_changes"):
+                out.line("graph: " + " ".join(result["graph_changes"]))
+            if result.get("explanation"):
+                out.line(result["explanation"])
+            out.line(
+                f"{'would write' if args.dry_run else 'wrote'} {destination}"
+            )
+
+        _report_authoring(out, result, args)
+        return Exit.OK if result["code"] else Exit.FAILED
+
+    return run_async(body())
+
+
 def _spec_text(spec: str) -> str:
     """The spec itself, or the contents of ``@file``.
 

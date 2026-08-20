@@ -249,14 +249,28 @@ class VerifyMode(StrEnum):
     WARN = "warn"
     """Serve the recorded value, log once, and flag the entry.
 
-    The default, because an argument difference is not always a bug: a step
-    whose input derives from ``ctx.state`` — which is deliberately not
-    journaled — legitimately replays with different arguments. Raising on that
-    would break correct workflows, so the first release only tells you.
+    Was the default, and should not have been. It was chosen because an
+    argument difference is not always a bug — a step whose input derives from
+    ``ctx.state``, deliberately not journaled, legitimately replays with
+    different arguments — but at the time the *common* cause of a difference
+    was the engine's own path allocation racing under ``ctx.gather``, and
+    warning there meant serving one branch's result to another and reporting
+    the run ``completed``. That cause is fixed (see
+    :attr:`~loom.runtime.context.Context._scope`), which is what makes
+    :attr:`STRICT` affordable as the default.
+
+    Still the right setting for a workflow that genuinely reads unjournaled
+    state into a step's arguments — but that is now a deliberate choice rather
+    than a silent one.
     """
 
     STRICT = "strict"
-    """Raise :class:`NondeterminismError` naming the step and both fingerprints."""
+    """Raise :class:`NondeterminismError` naming the step and both fingerprints.
+
+    The default. A fingerprint that does not match means the entry being served
+    was recorded by a different call, and there is no version of that which is
+    safe to paper over: the value handed back is another call site's answer.
+    """
 
 
 def _describe_hash_mismatch(
@@ -283,7 +297,7 @@ class Journal:
         entries: list[JournalEntry] | None = None,
         *,
         compatibility: CompatibilityMode = CompatibilityMode.STRICT,
-        verify: VerifyMode = VerifyMode.WARN,
+        verify: VerifyMode = VerifyMode.STRICT,
         resume_exhausted: bool = True,
     ) -> None:
         self._entries: dict[str, JournalEntry] = {e.path: e for e in entries or []}

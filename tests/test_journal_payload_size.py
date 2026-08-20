@@ -158,4 +158,4 @@ class TestAgentItemsAreBoundedToo:
 
         source = inspect.getsource(runner)
 
-        assert "content=bounded if agent.bounds is not None else result_str" in source
+        assert "content=text.bounded if agent.bounds is not None else text.raw" in source

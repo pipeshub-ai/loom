@@ -42,6 +42,10 @@ __all__ = ["main"]
 
 _HANDLERS = {
     "author": commands.cmd_author,
+    "edit": commands.cmd_edit,
+    "pause": commands.cmd_pause,
+    "unpause": commands.cmd_unpause,
+    "pin": commands.cmd_pin,
     "check": commands.cmd_check,
     "graph": commands.cmd_graph,
     "describe": commands.cmd_describe,
@@ -245,6 +249,44 @@ def _authoring(sub: _Subparsers) -> None:
     )
     _add_output(author)
 
+    edit = sub.add_parser(
+        "edit", help="Change an existing workflow by describing the change"
+    )
+    edit.add_argument("file", type=_path, help="The workflow file to change")
+    edit.add_argument(
+        "instruction",
+        help="What to change, or @instruction.txt for anything longer than a "
+        "shell argument",
+    )
+    edit.add_argument(
+        "--output",
+        "-o",
+        type=_path,
+        help="Write the result here instead of editing the file in place",
+    )
+    edit.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the diff and write nothing",
+    )
+    edit.add_argument(
+        "--package",
+        action="append",
+        metavar="NAME",
+        help="A third-party package the target environment has (repeatable)",
+    )
+    edit.add_argument(
+        "--input",
+        "-i",
+        help="Input for the verification run: JSON, @file.json, or a bare string",
+    )
+    edit.add_argument(
+        "--no-observe",
+        action="store_true",
+        help="Do not let the agent look at systems the instruction names",
+    )
+    _add_output(edit)
+
     init = sub.add_parser("init", help="Scaffold a new workflow project")
     init.add_argument("directory", type=_path, help="Directory to create files in")
     init.add_argument(
@@ -374,6 +416,32 @@ def _acting(sub: _Subparsers) -> None:
     )
     _add_backend(send)
     _add_output(send)
+
+    pause = sub.add_parser(
+        "pause", help="Hold a run at its next durable step"
+    )
+    pause.add_argument("run", help="Run id")
+    _add_backend(pause)
+    _add_output(pause)
+
+    unpause = sub.add_parser("unpause", help="Release a held run")
+    unpause.add_argument("run", help="Run id")
+    _add_backend(unpause)
+    _add_output(unpause)
+
+    pin = sub.add_parser(
+        "pin", help="Generate a regression test that reproduces a run"
+    )
+    pin.add_argument("run", help="Run id")
+    pin.add_argument(
+        "--output", "-o", type=_path, help="Write the test here instead of stdout"
+    )
+    # The import path for the generated test comes from `--module`, which
+    # `_add_backend` already defines as "where the workflows live" — one flag,
+    # one meaning. Without it the generated file carries a TODO rather than an
+    # import that may not resolve.
+    _add_backend(pin)
+    _add_output(pin)
 
     cancel = sub.add_parser("cancel", help="Cancel a run")
     cancel.add_argument("run_id", help="Run identifier")

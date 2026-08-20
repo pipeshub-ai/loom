@@ -73,9 +73,10 @@ from loom.runtime.state import (
     StateStore,
     StoreBackedState,
 )
+from loom.runtime.versions import VersionPolicy
 from loom.runtime.workflow import WorkflowDefinition
 from loom.security.authority import Authority
-from loom.security.rbac import Permission, Role, require
+from loom.security.rbac import Permission, Role, require, requires
 from loom.steps.definition import StepDefinition
 from loom.stores.base import CacheStore
 from loom.stores.memory import MemoryStore
@@ -104,6 +105,39 @@ _UNFINISHED = (ExecutionStatus.PENDING, ExecutionStatus.RUNNING)
 #: Rows per store round trip while scanning for expired leases. Bigger than the
 #: number of orphans anyone expects, small enough that one page is a cheap read.
 _RECLAIM_PAGE = 500
+
+
+#: Every optional port a Runtime can be given, by attribute name.
+#:
+#: One list, so "what can this deployment do" has a single answer. It was
+#: previously answerable only by reading a fifty-one parameter constructor and
+#: a string map in ``loom.nodes.base``, which is why a node could demand a
+#: capability nothing had told the operator was missing.
+CAPABILITY_PORTS: tuple[str, ...] = (
+    "blobs",
+    "artifacts",
+    "staging",
+    "signed_urls",
+    "human",
+    "connections",
+    "credentials",
+    "embeddings",
+    "vectors",
+    "events",
+    "checkpoints",
+    "sources",
+    "sessions",
+    "spill",
+    "versions",
+    "catalog",
+    "admission",
+    "agent_backend",
+)
+
+
+def _resume_event(run_id: str) -> str:
+    """The event a paused run waits on. Per-run, so releasing one holds nothing else."""
+    return f"resume:{run_id}"
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -165,7 +199,7 @@ class Runtime:
         max_inline_wait: Duration = 0.0,
         flush_every: int = 1,
         compatibility: CompatibilityMode = CompatibilityMode.STRICT,
-        verify: VerifyMode = VerifyMode.WARN,
+        verify: VerifyMode = VerifyMode.STRICT,
         validate_input: bool = True,
         connections: Any | None = None,
         embeddings: Any | None = None,
@@ -173,6 +207,7 @@ class Runtime:
         redact_keys: Iterable[str] | None = None,
         spill: Any | None = None,
         strict_determinism: bool = False,
+        version_policy: VersionPolicy = VersionPolicy.LATEST,
         sandbox: ExecutionSandbox | None = None,
         sandbox_policy: SandboxPolicy | None = None,
         sandbox_steps: Mapping[str, Any] | None = None,
@@ -425,14 +460,46 @@ class Runtime:
         Failing loudly beats replaying a million entries on every attempt until
         the process runs out of memory."""
 
+        self.version_policy = version_policy
+        """What an in-flight run resumes against when the code has changed.
+
+        A run records the ``code_hash`` of the definition that started it, and
+        until this existed nothing ever compared it: ``resolve_workflow`` reads
+        the in-process registry and only the registry, so a run parked on a
+        24-hour approval resumed against whatever was deployed in the meantime.
+        The version store — ``WorkflowVersion``, ``content_hash``,
+        ``activate_version`` — was consulted only to recover source text for a
+        sandbox.
+
+        Defaults to :attr:`VersionPolicy.LATEST`, which is what every release
+        before this did, because the alternative punishes the common case: a
+        ``code_hash`` moves on any edit, comments included, and refusing every
+        in-flight run after a no-op redeploy is worse than the hazard. What
+        makes ``LATEST`` defensible now is that the two ways a changed body can
+        actually corrupt a replay — a different operation at a position, and
+        the same operation with different arguments — are both refused by
+        default (``CompatibilityMode.STRICT``, ``VerifyMode.STRICT``).
+
+        Set :attr:`VersionPolicy.REFUSE` where a divergence must never be
+        attempted, or :attr:`VersionPolicy.PINNED` to resume against the source
+        the run started with.
+        """
+
         self.compatibility = compatibility
         self.verify = verify
         """Whether a replayed entry must prove it belongs to the call that found it.
 
-        Defaults to :attr:`VerifyMode.WARN`: a difference is reported and the
-        recorded value is still served. Arguments read from ``ctx.state`` — not
-        journaled by design — legitimately differ across replays, so raising by
-        default would break correct workflows to catch an uncommon one.
+        Defaults to :attr:`VerifyMode.STRICT`: a mismatch raises rather than
+        serving another call site's recorded answer. It was ``WARN``, and the
+        difference it was tolerating was mostly the engine's own — durable
+        calls under ``ctx.gather`` took their journal paths from a shared
+        counter as they ran, so replaying with different timings served each
+        branch the other's values and reported ``completed``. With branch-local
+        numbering that cause is gone, and what is left is a real divergence.
+
+        A workflow that deliberately derives a step's arguments from
+        ``ctx.state`` — not journaled, by design — should set
+        :attr:`VerifyMode.WARN` and say so.
         """
         self.connections = connections
         """A :class:`~loom.toolsets.connections.ConnectionBroker`, or ``None``.
@@ -492,7 +559,24 @@ class Runtime:
         twice is how two settings drift apart. Without blobs there is no store,
         and bounding degrades to truncation with an honest notice.
         """
-        self.strict_determinism = strict_determinism
+        if strict_determinism:
+            # Refused rather than accepted and ignored — the rule
+            # `SubprocessSandbox` already applies to a limit it cannot honour.
+            # This parameter was assigned here and read at zero sites in the
+            # codebase for its whole life, while the documentation said
+            # "violating these raises NondeterminismError in strict mode". A
+            # host that set it believed it had a runtime guard and had nothing.
+            raise ConfigurationError(
+                "Runtime(strict_determinism=True) never enforced anything — it "
+                "was stored and never read. Determinism is checked three other "
+                "ways, all of which do work: the static scan that runs at "
+                "@workflow declaration time (loom.runtime.determinism), "
+                "CodeValidator for generated code, and "
+                "loom.testing.assert_replays() for a workflow you have "
+                "written. For a hard runtime guard in a test, use "
+                "loom.runtime.determinism.strict_determinism() as a context "
+                "manager."
+            )
 
         self.inline_timer_threshold = to_seconds(inline_timer_threshold)
         """Sleeps shorter than this stay in memory instead of parking the run."""
@@ -506,6 +590,7 @@ class Runtime:
         self._completion: dict[str, asyncio.Event] = {}
         self._event_waiters: dict[tuple[str, str], asyncio.Event] = {}
         self._cancelled: set[str] = set()
+        self._paused: set[str] = set()
         self._driving: set[str] = set()
         self._background: set[asyncio.Task[Any]] = set()
         self._scheduler_task: asyncio.Task[None] | None = None
@@ -602,6 +687,7 @@ class Runtime:
         for definition in definitions:
             self.register(definition)
 
+    @requires(Permission.FLOW_DEPLOY)
     async def publish(
         self, target: WorkflowDefinition[Any, Any, Any] | str, **metadata: Any
     ) -> WorkflowRecord:
@@ -703,6 +789,7 @@ class Runtime:
 
     # -- starting work ----------------------------------------------------------------
 
+    @requires(Permission.FLOW_RUN)
     async def run(
         self,
         target: WorkflowDefinition[Any, Any, Any] | str,
@@ -729,7 +816,6 @@ class Runtime:
         layered over :attr:`credentials` for this run only. ``env`` is a
         name→value map layered over :attr:`env` and ``os.environ``.
         """
-        self._authorize(Permission.FLOW_RUN)
         definition = self.resolve_workflow(target)
         await self._admit(definition, metadata)
 
@@ -758,6 +844,7 @@ class Runtime:
         )
         return await self._drive(record.run_id, deps=deps)
 
+    @requires(Permission.FLOW_RUN)
     async def submit(
         self,
         target: WorkflowDefinition[Any, Any, Any] | str,
@@ -765,7 +852,6 @@ class Runtime:
         **kwargs: Any,
     ) -> str:
         """Start a workflow in the background and return its run id immediately."""
-        self._authorize(Permission.FLOW_RUN)
         definition = self.resolve_workflow(target)
 
         # Check idempotency before admission: a redelivery is not a new arrival,
@@ -839,10 +925,12 @@ class Runtime:
             )
             return winner
 
+    @requires(Permission.FLOW_RUN)
     async def resume(self, run_id: str, *, deps: Any = None) -> ExecutionResult:
         """Continue a parked run. Safe to call redundantly."""
         return await self._drive(run_id, deps=deps)
 
+    @requires(Permission.FLOW_RUN)
     async def retry(
         self,
         run_id: str,
@@ -883,6 +971,7 @@ class Runtime:
         finally:
             self.compatibility = previous
 
+    @requires(Permission.RUN_REPLAY)
     async def replay(self, run_id: str, *, deps: Any = None) -> ExecutionResult:
         """Re-execute a run from its recorded inputs without repeating side effects.
 
@@ -890,7 +979,6 @@ class Runtime:
         rehearsal of the orchestration logic — the code-first answer to "what would this
         have done?".
         """
-        self._authorize(Permission.RUN_REPLAY)
         source = await self._require(run_id)
         clone = source.model_copy(deep=True)
         clone.run_id = f"{run_id}:replay"
@@ -912,23 +1000,96 @@ class Runtime:
             self._run_credentials[clone.run_id] = source_store
         return await self._drive(clone.run_id, deps=deps)
 
+    @requires(Permission.FLOW_CANCEL)
     async def cancel(self, run_id: str, *, reason: str = "cancelled by request") -> None:
         """Request cancellation. Takes effect at the next durable operation."""
-        self._authorize(Permission.FLOW_CANCEL)
         self._cancelled.add(run_id)
         record = await self.store.get_execution(run_id)
-        if record is not None and not record.status.is_terminal:
-            record.status = ExecutionStatus.CANCELLED
-            record.error = ErrorInfo(type="WorkflowCancelled", message=reason, retryable=False)
-            record.finished_at = self.clock.now()
+        if record is None or record.status.is_terminal:
+            return
+
+        record.cancel_requested = True
+        if self._is_being_driven(record):
+            # Its driver is alive and will see the flag on its next heartbeat.
+            # Writing CANCELLED here instead would race that driver — it
+            # overwrites the record on its next update — and would skip the
+            # compensation stack entirely, because only the process running the
+            # body can unwind it.
             await self.store.update_execution(record)
-            self._signal_completion(run_id)
+            return
+
+        record.status = ExecutionStatus.CANCELLED
+        record.error = ErrorInfo(type="WorkflowCancelled", message=reason, retryable=False)
+        record.finished_at = self.clock.now()
+        await self.store.update_execution(record)
+        self._signal_completion(run_id)
+
+    @requires(Permission.FLOW_CANCEL)
+    async def pause(self, run_id: str) -> None:
+        """Hold a run at its next durable boundary.
+
+        Gated on ``FLOW_CANCEL`` rather than a permission of its own: pausing
+        is the same authority as stopping, applied reversibly, and inventing a
+        third token for it would mean a role that can kill a run but not hold
+        it.
+
+        Takes effect between durable calls, never inside one — which is what
+        keeps the journal consistent and is the same boundary cancellation
+        uses. A run already parked on a timer or an event stays parked and will
+        not advance when it fires.
+        """
+        record = await self._require(run_id)
+        if record.status.is_terminal:
+            raise RegistryError(
+                f"run {run_id} is already {record.status.value}; there is "
+                "nothing to pause"
+            )
+        self._paused.add(run_id)
+        record.pause_requested = True
+        await self.store.update_execution(record)
+        logger.info("run %s: pause requested", run_id)
+
+    @requires(Permission.FLOW_RUN)
+    async def unpause(self, run_id: str) -> ExecutionResult:
+        """Release a paused run and let it continue.
+
+        Delivered as the ordinary ``resume:<run_id>`` event the pause parked on,
+        so nothing about waking a held run is special-cased — it goes through
+        the same suspension machinery, the same idempotency, and the same
+        journal entry a ``ctx.wait_for_event`` would.
+        """
+        record = await self._require(run_id)
+        self._paused.discard(run_id)
+        if record.pause_requested:
+            record.pause_requested = False
+            await self.store.update_execution(record)
+        await self.send_event(run_id, _resume_event(run_id))
+        return await self._result_for(await self._require(run_id))
+
+    def is_pause_requested(self, run_id: str) -> bool:
+        """Whether this run has been asked to hold."""
+        return run_id in self._paused
+
+    def _is_being_driven(self, record: ExecutionRecord) -> bool:
+        """Whether some process still holds a live lease on this run.
+
+        A run with no lease, or one whose lease has expired, is nobody's: there
+        is no body to raise ``WorkflowCancelled`` inside, so cancelling it means
+        writing the terminal status directly. A leased run belongs to its
+        driver, which is the only place compensations can run.
+        """
+        if record.run_id in self._driving:
+            return True
+        if record.lease_expires_at is None:
+            return False
+        return _as_utc(record.lease_expires_at) > self.clock.now()
 
     def is_cancellation_requested(self, run_id: str) -> bool:
         return run_id in self._cancelled
 
     # -- events -----------------------------------------------------------------------
 
+    @requires(Permission.FLOW_RUN)
     async def send_event(
         self,
         run_id: str | None,
@@ -1040,26 +1201,34 @@ class Runtime:
             return event
         return event
 
+    @requires(Permission.FLOW_RUN)
     async def approve(self, run_id: str, subject: str, *, approved: bool = True) -> None:
-        """Resolve a pending human approval."""
+        """Resolve a pending human approval.
+
+        Gated on ``FLOW_RUN`` rather than ``GRANT_APPROVE``: answering a human
+        gate continues an execution, where ``GRANT_APPROVE`` is about widening
+        what a run may *reach*. Held by OPERATOR and above, so the role whose
+        job this is can do it and VIEWER — which could approve anything at all
+        before this — cannot.
+        """
         await self.send_event(run_id, f"approval:{subject}", {"approved": approved})
 
     # -- queries ----------------------------------------------------------------------
 
+    @requires(Permission.RUN_VIEW)
     async def get(self, run_id: str) -> ExecutionRecord | None:
-        self._authorize(Permission.RUN_VIEW)
         return await self.store.get_execution(run_id)
 
+    @requires(Permission.RUN_VIEW)
     async def result(self, run_id: str) -> ExecutionResult:
-        self._authorize(Permission.RUN_VIEW)
         return await self._result_for(await self._require(run_id))
 
+    @requires(Permission.RUN_VIEW)
     async def list_runs(self, **filters: Any) -> list[ExecutionRecord]:
-        self._authorize(Permission.RUN_VIEW)
         return await self.store.list_executions(**filters)
 
+    @requires(Permission.RUN_VIEW)
     async def history(self, run_id: str) -> list[Any]:
-        self._authorize(Permission.RUN_VIEW)
         journal = Journal(await self.store.load_journal(run_id))
         return journal.records()
 
@@ -1386,6 +1555,15 @@ class Runtime:
     async def _drive_inner(self, run_id: str, *, deps: Any) -> ExecutionResult:
         record = await self._require(run_id)
         definition = self.resolve_workflow(record.workflow)
+        refusal = self._version_refusal(record, definition)
+        if refusal is not None:
+            return await self._finish_failed(
+                record,
+                Journal(await self.store.load_journal(run_id)),
+                refusal,
+                definition,
+                [],
+            )
 
         while True:
             if record.status.is_terminal:
@@ -1417,6 +1595,7 @@ class Runtime:
             record.awaiting_event = None
             record.lease_owner = self.node_id
             record.lease_expires_at = self.clock.now() + timedelta(seconds=self.lease_ttl)
+            self._stamp_requests(record)
             try:
                 await self.store.update_execution(
                     record,
@@ -1432,6 +1611,21 @@ class Runtime:
                 if current is None:
                     return await self._result_for(record)
                 return await self._result_for(current)
+
+            if record.pause_requested or run_id in self._paused:
+                # Held before the body runs, so a paused run costs nothing
+                # while it waits and resumes through the ordinary event path.
+                self._paused.add(run_id)
+                await self._park(
+                    record,
+                    Suspend(
+                        f"run {run_id} is paused",
+                        path="",
+                        awaiting_event=_resume_event(run_id),
+                    ),
+                    journal,
+                )
+                return await self._result_for(record, journal)
 
             # Before the body re-enters, not after: a broker whose decision
             # depends on what the run has already done has to know that first,
@@ -1533,6 +1727,92 @@ class Runtime:
                 span.end()
                 await self.persist_journal(record, journal)
                 return await self._finish_completed(record, journal, output)
+
+    def capabilities(self) -> dict[str, bool]:
+        """Which optional ports this Runtime actually has wired.
+
+        There was no way to ask. Fifteen of ``Runtime.__init__``'s fifty-one
+        keyword parameters are optional ports, and nodes reach them through
+        ``getattr(runtime, name, None)`` driven by a string map — so mypy sees
+        none of them, a rename passes every gate and fails at run time inside
+        somebody's workflow, and an operator could not find out what their
+        deployment could do without reading the constructor.
+
+        Read by ``NodeRegistry.check_requirements`` through the same names, so
+        this and the requirement check cannot disagree about what "configured"
+        means.
+        """
+        return {
+            name: getattr(self, name, None) is not None
+            for name in CAPABILITY_PORTS
+        }
+
+    def missing_capabilities(self, *names: str) -> list[str]:
+        """Which of *names* this Runtime does not have, in the order asked."""
+        wired = self.capabilities()
+        return [name for name in names if not wired.get(name, False)]
+
+    def _version_refusal(
+        self,
+        record: ExecutionRecord,
+        definition: WorkflowDefinition[Any, Any, Any],
+    ) -> BaseException | None:
+        """Whether this run may be driven by the code this process holds.
+
+        ``None`` means proceed. Anything else is refused before the body runs,
+        which is the only useful moment — after the first durable call there is
+        already a journal entry written by code the run did not start with.
+
+        The comparison costs nothing and needs no version store: a run records
+        its definition's ``code_hash`` when it is created, and the current
+        definition carries its own. What the store is needed for is
+        :attr:`VersionPolicy.PINNED`, which has to *fetch* the old source.
+        """
+        recorded = record.code_hash
+        if not recorded or recorded == definition.code_hash:
+            return None
+
+        record.metadata["loom.code_changed"] = {
+            "started_with": recorded,
+            "now": definition.code_hash,
+        }
+
+        if self.version_policy is VersionPolicy.LATEST:
+            logger.warning(
+                "run %s started under %s of workflow '%s' and this process has "
+                "%s. Resuming against the current code (version_policy=latest); "
+                "a divergent journal is still refused by compatibility and "
+                "verification.",
+                record.run_id,
+                recorded[:12],
+                record.workflow,
+                definition.code_hash[:12],
+            )
+            return None
+
+        from loom.runtime.versions import CodeChanged
+
+        if self.version_policy is VersionPolicy.PINNED:
+            # Deliberately not a silent fall back to LATEST. Asking to be
+            # pinned and being run against something else is the one outcome
+            # this dial exists to make impossible.
+            return CodeChanged(
+                f"run {record.run_id} started under code_hash {recorded[:12]} "
+                f"of '{record.workflow}' and this process has "
+                f"{definition.code_hash[:12]}. version_policy=pinned needs the "
+                "original source from a VersionStore; publish workflows with "
+                "rt.publish(flow, source=...) so a run can be resumed against "
+                "the code that started it."
+            )
+
+        return CodeChanged(
+            f"run {record.run_id} started under code_hash {recorded[:12]} of "
+            f"'{record.workflow}' and this process has "
+            f"{definition.code_hash[:12]}. version_policy=refuse will not "
+            "resume a run whose body changed underneath it. Deploy the "
+            "original code to drain this run, or set "
+            "version_policy=VersionPolicy.LATEST to accept the change."
+        )
 
     def observe_run(self, run_id: str, journal: Journal) -> None:
         """Let a stateful broker re-derive this run's state from the journal.
@@ -1710,12 +1990,26 @@ class Runtime:
         steps.update(self._sandbox_steps_extra)
         return steps
 
+    def _stamp_requests(self, record: ExecutionRecord) -> None:
+        """Copy pause/cancel intent onto the record before the drive writes it.
+
+        Without this the two are lost. ``pause()`` and ``cancel()`` load their
+        own copy of the record, set a flag and save it — while the drive holds a
+        copy from before, and overwrites the flag on its next update. The intent
+        lives in this process's sets from the moment it is observed (either
+        directly or via the lease heartbeat), so stamping it here is what makes
+        the persisted record agree with what the process is actually doing.
+        """
+        record.pause_requested = record.run_id in self._paused
+        record.cancel_requested = record.run_id in self._cancelled
+
     async def _park(self, record: ExecutionRecord, suspension: Suspend, journal: Journal) -> bool:
         """Persist a suspension. Returns True if we should immediately re-enter the body."""
         record.status = ExecutionStatus.SUSPENDED
         record.wake_at = suspension.wake_at
         record.awaiting_event = suspension.awaiting_event
         record.usage = journal.total_usage()
+        self._stamp_requests(record)
         await self.store.update_execution(record)
         logger.debug("run %s suspended: %s", record.run_id, suspension.reason)
 
@@ -1749,7 +2043,7 @@ class Runtime:
         record.finished_at = self.clock.now()
         record.usage = journal.total_usage()
         await self.store.update_execution(record)
-        self._release_admission(record)
+        await self._release_admission(record)
         self._signal_completion(record.run_id)
         return await self._result_for(record, journal, raw_output=output)
 
@@ -1790,7 +2084,7 @@ class Runtime:
         record.usage = journal.total_usage()
         record.metadata["continued_as"] = successor.run_id
         await self.store.update_execution(record)
-        self._release_admission(record)
+        await self._release_admission(record)
         self._signal_completion(record.run_id)
         logger.info("run %s rotated into %s", record.run_id, successor.run_id)
 
@@ -1818,7 +2112,7 @@ class Runtime:
         if compensation_failures:
             record.metadata["compensation_failures"] = list(compensation_failures)
         await self.store.update_execution(record)
-        self._release_admission(record)
+        await self._release_admission(record)
         self._signal_completion(record.run_id)
         logger.warning("run %s failed: %s", record.run_id, error)
 
@@ -1836,7 +2130,7 @@ class Runtime:
         if compensation_failures:
             record.metadata["compensation_failures"] = list(compensation_failures)
         await self.store.update_execution(record)
-        self._release_admission(record)
+        await self._release_admission(record)
         self._signal_completion(record.run_id)
         return await self._result_for(record, journal)
 
@@ -1919,6 +2213,14 @@ class Runtime:
             record = await self.store.get_execution(run_id)
             if record is None or record.status.is_terminal:
                 return
+            if record.pause_requested:
+                self._paused.add(run_id)
+            if record.cancel_requested:
+                # Somebody cancelled this run, possibly from another process.
+                # Recording it locally is what makes the next durable call
+                # raise `WorkflowCancelled` inside *this* body — which is the
+                # only place the compensation stack can unwind.
+                self._cancelled.add(run_id)
             if record.lease_owner != self.node_id:
                 # Someone else took over; stop touching their run.
                 return
@@ -2087,7 +2389,7 @@ class Runtime:
             self._spawn(self._drive(record.run_id))
         return reclaimed
 
-    def _release_admission(self, record: ExecutionRecord) -> None:
+    async def _release_admission(self, record: ExecutionRecord) -> None:
         """Free the in-flight slot a concurrency or singleton policy reserved,
         and drop any per-run state a broker was keeping.
 
@@ -2106,7 +2408,7 @@ class Runtime:
         definition = self._workflows.get(record.workflow)
         if definition is None or definition.flow_control is None:
             return
-        self.admission.record_end(
+        await self.admission.record_end(
             record.workflow, str(record.metadata.get("partition_key", ""))
         )
 
@@ -2135,7 +2437,7 @@ class Runtime:
             definition.name, policy, partition_key=partition
         )
         if outcome.decision is AdmissionDecision.ADMIT:
-            self.admission.record_start(definition.name, partition)
+            await self.admission.record_start(definition.name, partition)
             return
         raise AdmissionRejected(
             f"'{definition.name}' was not admitted ({outcome.decision.value}): "

@@ -22,15 +22,20 @@ a raise aborts the calling model's turn; a payload it can read and act on.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
+
+from loom.identity.scopes import Scope
 
 #: Same ceiling as ``mcp_server/tools.py`` — a discipline on what this server
 #: hands back, not a client-side limit.
 MAX_RESPONSE_CHARS = 8_000
 
 __all__ = [
+    "ACTING_TOOLS",
     "MAX_RESPONSE_CHARS",
     "STATIC_STAGE_NAMES",
+    "AuthoringGate",
     "call_read_operation",
     "get_tool_contract",
     "get_tool_docs",
@@ -38,6 +43,84 @@ __all__ = [
     "smoke_test_workflow",
     "validate_workflow_code",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Who may do the parts that *act*
+# ---------------------------------------------------------------------------
+
+#: The authoring tools that are not reads. ``smoke_test_workflow`` executes
+#: caller-supplied Python, ``save_workflow`` writes to the host's filesystem,
+#: and ``call_read_operation`` reaches a third-party API with the credentials
+#: this server holds. The other three browse a catalogue and compile a string.
+#:
+#: Named as data rather than left implicit in three decorators, because the
+#: test that matters is "is every acting tool gated", and that question needs a
+#: list to ask against.
+ACTING_TOOLS: frozenset[str] = frozenset({
+    "call_read_operation",
+    "save_workflow",
+    "smoke_test_workflow",
+})
+
+
+class AuthoringGate:
+    """Decides whether the caller may use an authoring tool that *acts*.
+
+    These tools were registered outside the facade — deliberately, because
+    "what toolsets exist" is a server-wide fact rather than per-run data. The
+    reasoning held for the three that read and did not for the three that act,
+    so an ``AuthorizedFacade`` protecting every run-management tool sat beside
+    an ungated tool that executes arbitrary Python on the same host.
+
+    Built with a callable rather than a :class:`~loom.identity.principal.Principal`
+    because the principal is per *request* and the gate is built once at server
+    construction. ``principal=None`` (the default) is the compatibility
+    contract: an install that configures no identity gets exactly the
+    behaviour it had before this class existed.
+    """
+
+    def __init__(
+        self,
+        principal: Callable[[], Any] | None = None,
+        *,
+        scope: str = Scope.WORKFLOWS_AUTHOR.value,
+    ) -> None:
+        self._principal = principal
+        self._scope = scope
+
+    @property
+    def enforcing(self) -> bool:
+        """Whether this gate can actually refuse anything."""
+        return self._principal is not None
+
+    def refusal(self, tool: str) -> str | None:
+        """A JSON refusal payload, or ``None`` when the caller may proceed.
+
+        A payload rather than a raise, for the reason this whole module returns
+        payloads: a raise aborts the calling model's turn and it learns
+        nothing. This tells it exactly which scope its token is missing.
+        """
+        if self._principal is None or tool not in ACTING_TOOLS:
+            return None
+        try:
+            principal = self._principal()
+        except Exception as exc:  # no token on this request at all
+            return _json({
+                "error": f"'{tool}' needs an authenticated caller: {exc}",
+                "required_scope": self._scope,
+            })
+        allows = getattr(principal, "has", None)
+        if principal is not None and allows is not None and allows(self._scope):
+            return None
+        return _json({
+            "error": (
+                f"'{tool}' runs code, writes files, or reaches a third-party "
+                f"API with this server's credentials, so it needs the "
+                f"'{self._scope}' scope."
+            ),
+            "required_scope": self._scope,
+        })
 
 
 def _json(payload: Any) -> str:

@@ -243,6 +243,22 @@ class DirectBroker:
 
 
 
+#: Node categories whose nodes reach nothing outside this process. Read from
+#: the catalogue's own split between "a rule you can write today"
+#: (control/transform) and "judgement or the outside world" (agent/io/human) —
+#: the same distinction `NodeSpec.open_world` records per node.
+_SELF_CONTAINED_NODE_CATEGORIES: frozenset[str] = frozenset({
+    "control",
+    "transform",
+    "guard",
+})
+
+#: Effect kinds with no grant dimension of their own. Refused under `strict`,
+#: unchecked otherwise — never silently permitted under a flag that promises
+#: the opposite.
+_UNDECLARED_KINDS: frozenset[str] = frozenset({"artifact", "event"})
+
+
 #: The resource id workflow state is granted under. Reserved rather than derived
 #: from the workflow name: a grant naming `state` means "this run may use its own
 #: key-value space", which is one decision, not one per workflow.
@@ -275,6 +291,60 @@ def _allows_resource(held: list[str], resource: str, effect: str) -> bool:
             return True
     return False
 
+class _CallCeiling:
+    """A bounded counter reserved before the work, not credited after it.
+
+    Its own class rather than two attributes on the broker, because the
+    ordering is the whole correctness argument and it deserves somewhere to be
+    stated and tested on its own: a ceiling that counts *completions* bounds
+    nothing under concurrency, since every in-flight call reads the count
+    before any of them writes it.
+
+    Not thread-safe, and does not need to be: a broker is dispatched from one
+    event loop, and within one loop `reserve()` is atomic because it contains
+    no await.
+    """
+
+    __slots__ = ("_used", "limit")
+
+    def __init__(self, limit: int | None) -> None:
+        self.limit = limit
+        self._used = 0
+
+    @property
+    def used(self) -> int:
+        return self._used
+
+    @property
+    def exhausted(self) -> bool:
+        return self.limit is not None and self._used >= self.limit
+
+    def reserve(self) -> bool:
+        """Claim a slot. ``False`` when there is none left, having claimed nothing."""
+        if self.exhausted:
+            return False
+        self._used += 1
+        return True
+
+    def release(self) -> None:
+        """Hand a slot back — for a reservation whose work never started."""
+        self._used = max(0, self._used - 1)
+
+    def refusal(self, target: str) -> EffectResult:
+        return EffectResult(
+            ok=False,
+            error=(
+                f"call ceiling reached: {self.limit} effects already "
+                f"performed, refusing '{target}'"
+            ),
+            needs=f"max_calls > {self.limit}",
+        )
+
+    def __repr__(self) -> str:
+        ceiling = "unbounded" if self.limit is None else str(self.limit)
+        return f"<_CallCeiling {self._used}/{ceiling}>"
+
+
 class GuardedBroker:
     """Enforces an authority on every dispatch.
 
@@ -296,12 +366,19 @@ class GuardedBroker:
     """
 
     def __init__(self, *, max_calls: int | None = None) -> None:
-        self.max_calls = max_calls
+        self._ceiling = _CallCeiling(max_calls)
+
+    @property
+    def max_calls(self) -> int | None:
         """Effects this broker will dispatch before refusing. ``None`` is
         unbounded."""
-        self.dispatched = 0
-        """How many have been performed. Refusals do not count — a run should
+        return self._ceiling.limit
+
+    @property
+    def dispatched(self) -> int:
+        """How many have been reserved. Refusals do not count — a run should
         not be able to exhaust its own budget by being denied."""
+        return self._ceiling.used
 
     async def dispatch(self, call: EffectCall, authority: Authority) -> EffectResult:
         refusal = self._refuse(call, authority)
@@ -309,8 +386,16 @@ class GuardedBroker:
             return refusal
         if call.perform is None:
             return EffectResult(ok=False, error=f"nothing to perform for {call.target}")
+        # Reserved *before* the await, never after it. Everything above this
+        # line is synchronous, so the check in `_refuse` and this reservation
+        # happen in one uninterrupted event-loop step and no second coroutine
+        # can observe the pre-reservation count. Counting after `perform()`
+        # returned made the ceiling a no-op under `ctx.gather`: every branch
+        # read `dispatched` before any branch wrote it, so ten concurrent
+        # calls all passed a ceiling of three.
+        if not self._ceiling.reserve():  # pragma: no cover - _refuse covers it
+            return self._ceiling.refusal(call.target)
         value = await call.perform()
-        self.dispatched += 1
         return EffectResult(value=value)
 
     def _refuse(self, call: EffectCall, authority: Authority) -> EffectResult | None:
@@ -324,15 +409,8 @@ class GuardedBroker:
                 ),
             )
 
-        if self.max_calls is not None and self.dispatched >= self.max_calls:
-            return EffectResult(
-                ok=False,
-                error=(
-                    f"call ceiling reached: {self.max_calls} effects already "
-                    f"performed, refusing '{call.target}'"
-                ),
-                needs=f"max_calls > {self.max_calls}",
-            )
+        if self._ceiling.exhausted:
+            return self._ceiling.refusal(call.target)
 
         return self._check_grant(call, authority)
 
@@ -444,6 +522,42 @@ class GuardedBroker:
                 needs=f"{STATE_RESOURCE}:{call.effect.value}",
                 held=grant.resources,
             )
+
+        if call.kind == "node":
+            # Categories that reach nothing outside the process are permitted
+            # without an entry, even under `strict`. `control.switch` is a
+            # comparison and `transform.template` is string formatting; making
+            # a workflow enumerate them to be allowed to compute would turn
+            # `strict` into something nobody switches on. The categories that
+            # *do* reach out — io, agent, human — need saying.
+            if call.target.partition(".")[0] in _SELF_CONTAINED_NODE_CATEGORIES:
+                return None
+            if not grant.nodes:
+                if grant.strict:
+                    return self._denied(
+                        call, f"node '{call.target}' is not granted",
+                        needs=call.target, held=[],
+                    )
+                return None
+            if grant.allows_node(call.target):
+                return None
+            return self._denied(
+                call, f"node '{call.target}' is not granted",
+                needs=call.target, held=grant.nodes,
+            )
+
+        if call.kind in _UNDECLARED_KINDS:
+            # `artifact` and `event` had no branch at all, so `strict` — whose
+            # whole promise is "every dimension is deny-by-default, declared or
+            # not" — left them open. There is no grant dimension for either
+            # yet; until there is, strict refuses rather than silently
+            # permitting, which is the direction the flag exists to fail in.
+            if grant.strict:
+                return self._denied(
+                    call, f"{call.kind} '{call.target}' is not granted",
+                    needs=f"{call.kind}:{call.target}", held=[],
+                )
+            return None
 
         if call.kind == "child":
             if not grant.subflows:

@@ -135,6 +135,51 @@ class AuthorizedFacade:
             spec, packages=packages, smoke_input=smoke_input, observe=observe
         )
 
+    async def edit(
+        self,
+        source: str,
+        instruction: str,
+        *,
+        packages: list[str] | None = None,
+        smoke_input: Any = None,
+        observe: bool = True,
+    ) -> dict[str, Any]:
+        """Its own scope, for the same reason ``author`` has one.
+
+        Editing spends model tokens and, with *observe*, reaches systems the
+        instruction names. Someone trusted to publish a workflow that has been
+        read is not thereby trusted to do either on this server's budget.
+        """
+        self.principal.requires(Scope.WORKFLOWS_AUTHOR.value)
+        return await self.inner.edit(
+            source,
+            instruction,
+            packages=packages,
+            smoke_input=smoke_input,
+            observe=observe,
+        )
+
+    async def pause(self, run_id: str) -> dict[str, Any]:
+        """Same authority as stopping a run, applied reversibly."""
+        self.principal.requires(Scope.RUNS_CANCEL.value)
+        return await self.inner.pause(run_id)
+
+    async def unpause(self, run_id: str) -> dict[str, Any]:
+        self.principal.requires(Scope.RUNS_WRITE.value)
+        await self._require_owned(run_id)
+        return await self.inner.unpause(run_id)
+
+    async def pin(self, run_id: str, *, module: str = "") -> dict[str, Any]:
+        """Reading a run's journal, so it is gated like reading a journal.
+
+        Ownership-checked as well as scope-checked: the generated test carries
+        recorded values, which is exactly the run *content* this wrapper exists
+        to keep from leaking to a principal that did not create the run.
+        """
+        self.principal.requires(Scope.RUNS_READ.value)
+        await self._require_owned(run_id)
+        return await self.inner.pin(run_id, module=module)
+
     async def get(self, run_id: str) -> dict[str, Any] | None:
         self.principal.requires(Scope.RUNS_READ.value)
         result = await self.inner.get(run_id)
@@ -160,10 +205,20 @@ class AuthorizedFacade:
     async def send_event(
         self, run_id: str, name: str, payload: Any, *, dedupe_key: str | None = None
     ) -> dict[str, Any]:
+        """Delivering an event is also the act of *answering* one.
+
+        An approval arrives as an event named ``approval:<subject>``, and the
+        answer's ``responder`` was read straight out of the payload — so the
+        audit record of who approved a refund said whatever the caller typed.
+        This is the only layer that knows who is actually calling, so it is the
+        only layer that can stamp it.
+        """
+        from loom.nodes.human.attest import attest
+
         self.principal.requires(Scope.RUNS_WRITE.value)
         await self._require_owned(run_id)
         return await self.inner.send_event(
-            run_id, name, payload, dedupe_key=dedupe_key
+            run_id, name, attest(payload, self.principal.subject), dedupe_key=dedupe_key
         )
 
     async def cancel(self, run_id: str) -> dict[str, Any]:
@@ -215,9 +270,13 @@ class AuthorizedFacade:
     async def respond(
         self, run_id: str, subject: str, answer: dict[str, Any]
     ) -> dict[str, Any]:
+        from loom.nodes.human.attest import attest
+
         self.principal.requires(Scope.RUNS_WRITE.value)
         await self._require_owned(run_id)
-        return await self.inner.respond(run_id, subject, answer)
+        return await self.inner.respond(
+            run_id, subject, attest(answer, self.principal.subject)
+        )
 
     async def nodes(
         self, query: str = "", *, category: str | None = None

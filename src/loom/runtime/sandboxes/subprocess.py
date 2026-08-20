@@ -37,6 +37,7 @@ from loom.runtime.sandbox import (
     SandboxBody,
     SandboxOutcome,
     SandboxPolicy,
+    unenforceable,
 )
 from loom.runtime.sandboxes._conversation import converse
 from loom.runtime.sandboxes._harness import build_child_script
@@ -81,11 +82,15 @@ class SubprocessSandbox:
         Computed, not constant: rlimits are POSIX, and claiming a memory limit
         on Windows would leave a host believing in a bound that is not there.
         """
-        applied = {"allowed_env", "max_wall_seconds"}
+        applied = {"allowed_env", "max_wall_seconds", "allowed_imports"}
         if hasattr(resource, "RLIMIT_CPU"):
             applied.add("max_cpu_seconds")
         if _MEMORY_LIMIT_SUPPORTED:
             applied.add("max_memory_mb")
+        # Deliberately absent: "network". A child process shares the host's
+        # network namespace and nothing here can take it away, so a policy that
+        # requires egress to be impossible is refused rather than accepted and
+        # dropped. DockerSandbox is the tier that can honour it.
         return frozenset(applied)
 
     async def run(
@@ -152,7 +157,14 @@ class SubprocessSandbox:
         try:
             return await asyncio.wait_for(
                 converse(
-                    process, source, entrypoint, run_id, input, channel, body.namespace
+                    process,
+                    source,
+                    entrypoint,
+                    run_id,
+                    input,
+                    channel,
+                    body.namespace,
+                    allowed_imports=active.allowed_imports,
                 ),
                 timeout=active.max_wall_seconds,
             )
@@ -194,14 +206,14 @@ class SubprocessSandbox:
         return allowed
 
     def _unenforceable(self, policy: SandboxPolicy) -> list[str]:
-        """Limits this policy asks for that this platform will not apply."""
-        asked = {
-            "max_memory_mb": policy.max_memory_mb,
-            "max_cpu_seconds": policy.max_cpu_seconds,
-        }
-        return sorted(
-            name for name, value in asked.items() if value and name not in self.enforces
-        )
+        """Limits this policy asks for that this platform will not apply.
+
+        Derived from the policy rather than from a hand-kept list of two field
+        names — which is how ``network`` and ``allowed_imports`` came to be
+        accepted and silently ignored. See
+        :func:`~loom.runtime.sandbox.unenforceable`.
+        """
+        return unenforceable(policy, self.enforces)
 
     @staticmethod
     def _limits(policy: SandboxPolicy) -> Any:

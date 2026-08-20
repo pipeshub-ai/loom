@@ -60,6 +60,20 @@ class GrantSet(BaseModel):
     """e.g. ``["pg:read"]``"""
     subflows: list[str] = Field(default_factory=list)
     """Referenced sub-workflow names."""
+    nodes: list[str] = Field(default_factory=list)
+    """Catalogued nodes this workflow may call, e.g. ``["io.http_request"]``.
+
+    Its own dimension, and it had to become one. A node call journals as a step
+    whose target is ``<category>.<id>``, which the broker's bridged-toolset
+    branch read as a *toolset* called ``control`` — a toolset no manifest
+    declares and no grant can name. So a workflow that narrowed itself to
+    ``toolsets=["jira.issues:read"]`` — the very workflow a careful author
+    writes — had every ``ctx.node()`` call refused, ``control.switch``
+    included, with an error telling it to grant a toolset that does not exist.
+
+    An entry is a node id, or a category to permit all of it
+    (``"human"`` permits ``human.approval`` and ``human.choice``).
+    """
     egress: list[str] = Field(default_factory=list)
     """e.g. ``["api.atlassian.com"]``"""
     budget: dict[str, Any] = Field(default_factory=dict)
@@ -94,9 +108,21 @@ class GrantSet(BaseModel):
             self.agents,
             self.resources,
             self.subflows,
+            self.nodes,
             self.egress,
             self.budget,
         ])
+
+    def allows_node(self, node_id: str) -> bool:
+        """Whether this grant set permits calling *node_id*.
+
+        Entries are a full id (``"io.http_request"``) or a category
+        (``"io"``). Categories are the useful granularity: a workflow either
+        may reach out over HTTP or it may not, and enumerating every ``io.*``
+        node to say so would go stale the moment one is added.
+        """
+        category, _, _ = node_id.partition(".")
+        return any(entry in (node_id, category) for entry in self.nodes)
 
     def allows_operation(self, toolset_id: str, op_id: str, effect: str) -> bool:
         """Whether this grant set permits one operation on one toolset.

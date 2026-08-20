@@ -497,18 +497,26 @@ class TestTheEscapeHatch:
 
         calls = 0
 
-        async def agent(prompt: str):
-            nonlocal calls
-            calls += 1
-            # The model was asked about the finding, and declines by
-            # returning the file it already wrote.
-            assert "came back empty" in prompt
-            return _Reply(settled)
+        class _Session:
+            """The `Asking` contract, which is all the repair loop needs.
+
+            The loop drives a `CodingSession` in production so the model keeps
+            the schemas and resolved ids discovery paid for; here it only has
+            to answer.
+            """
+
+            async def ask(self, prompt: str):
+                nonlocal calls
+                calls += 1
+                # The model was asked about the finding, and declines by
+                # returning the file it already wrote.
+                assert "came back empty" in prompt
+                return _Reply(settled)
 
         coder = WorkflowCodingAgent.__new__(WorkflowCodingAgent)
         coder._max_repair = 3
         code, rounds = await coder._repair_from(
-            agent, settled, report, context(WANTS_EVERYTHING)
+            _Session(), settled, report, context(WANTS_EVERYTHING)
         )
 
         assert code == settled, "the model's judgement stands"
@@ -626,12 +634,23 @@ class TestAuthoringHasASurface:
 
         assert "--server" in str(caught.value)
 
-    async def test_no_model_key_says_which_to_set(self) -> None:
-        """Not a stack trace from inside a vendor SDK."""
+    async def test_no_model_key_says_which_to_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Not a stack trace from inside a vendor SDK.
+
+        The keys are cleared explicitly: this asserts what happens when *none*
+        is set, and a developer machine with one exported turned it into a
+        failure that looked like a code defect.
+        """
         from loom.core.exceptions import ConfigurationError
         from loom.facade import LocalFacade
         from loom.runtime.engine import Runtime
         from loom.stores.memory import MemoryStore
+
+        for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
+                    "GOOGLE_API_KEY"):
+            monkeypatch.delenv(key, raising=False)
 
         facade = LocalFacade(Runtime(store=MemoryStore()))
         with pytest.raises(ConfigurationError) as caught:

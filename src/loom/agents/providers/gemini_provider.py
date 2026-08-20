@@ -277,6 +277,9 @@ def _parse_response(raw: Any, fallback_model: str) -> ModelResponse:
     usage = Usage()
     if metadata is not None:
         usage.requests = 1
+        # `prompt_token_count` already includes cached content, which is the
+        # convention `Usage.input_tokens` declares, so nothing is added here.
+        # Anthropic is the odd one out and normalises in its own provider.
         usage.input_tokens = getattr(metadata, "prompt_token_count", 0) or 0
         usage.output_tokens = getattr(metadata, "candidates_token_count", 0) or 0
         usage.cached_input_tokens = getattr(metadata, "cached_content_token_count", 0) or 0

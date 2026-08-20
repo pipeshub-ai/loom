@@ -7,6 +7,8 @@ Tier 3 (stub):   ~250-500 tokens — typed contract for a single operation.
 
 from __future__ import annotations
 
+import math
+import re
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -16,6 +18,20 @@ from loom.toolsets.manifest import EffectClass, OperationSpec, ToolsetManifest
 # ---------------------------------------------------------------------------
 # Tier 1 — Index Card
 # ---------------------------------------------------------------------------
+
+
+class OpMatch(BaseModel):
+    """One operation that matched an operation-level search."""
+
+    toolset_id: str
+    op_id: str
+    summary: str = ""
+    effect: str = ""
+    resolves: str = ""
+    """The entity kind this operation resolves, when it resolves one — the
+    signal that turns "filter on a name" into "look the name up first"."""
+    import_line: str = ""
+    """What generated code has to write to call it."""
 
 
 class IndexCard(BaseModel):
@@ -160,7 +176,7 @@ class ToolsetCatalog:
         """Return index cards matching *query* (~40 tokens each)."""
         query_lower = query.lower()
         terms = query_lower.split()
-        results: list[tuple[int, IndexCard]] = []
+        results: list[tuple[float, IndexCard]] = []
         for m in self._manifests.values():
             score = self._score(terms, m)
             if score > 0:
@@ -228,20 +244,132 @@ class ToolsetCatalog:
             pagination=op.pagination,
         )
 
+    def search_operations(
+        self, query: str, *, limit: int = 10, toolset_id: str | None = None
+    ) -> list[OpMatch]:
+        """Find individual *operations* matching *query*, across every toolset.
+
+        The gap this fills: toolset-level search answers "is there a Jira
+        integration", and the coding agent's next question is "which of Jira's
+        forty operations transitions an issue". Only ``show_toolset`` answered
+        that, and only by listing all forty — so a model either read the whole
+        table or guessed. Nothing searched at this granularity.
+
+        Scored the same way as :meth:`search`, over the operation's own id,
+        summary, description and the entity kind it resolves.
+        """
+        terms = _terms(query)
+        matches: list[tuple[float, OpMatch]] = []
+        for manifest in self._manifests.values():
+            if toolset_id is not None and manifest.id != toolset_id:
+                continue
+            for op in manifest.all_operations():
+                score = _score_text(terms, _operation_text(manifest, op))
+                if score <= 0:
+                    continue
+                matches.append((
+                    score,
+                    OpMatch(
+                        toolset_id=manifest.id,
+                        op_id=op.id,
+                        summary=op.summary,
+                        effect=op.effect,
+                        resolves=op.resolves or "",
+                        import_line=_import_for(manifest, op),
+                    ),
+                ))
+        matches.sort(key=lambda pair: (-pair[0], pair[1].toolset_id, pair[1].op_id))
+        return [match for _, match in matches[:limit]]
+
     # -- internals ------------------------------------------------------------
 
     @staticmethod
-    def _score(terms: list[str], manifest: ToolsetManifest) -> int:
-        """Simple term-frequency scoring."""
-        haystack = " ".join([
-            manifest.id,
-            manifest.summary,
-            manifest.description,
-            " ".join(manifest.groups.keys()),
-            " ".join(
-                op.summary
-                for ops in manifest.groups.values()
-                for op in ops
-            ),
-        ]).lower()
-        return sum(1 for t in terms if t in haystack)
+    def _score(terms: list[str], manifest: ToolsetManifest) -> float:
+        """Term-frequency scoring, normalised by how much text a manifest has.
+
+        Normalisation matters here and did not exist: the haystack for a large
+        integration is many times longer than for a small one, so an unnormalised
+        count ranked whichever toolset simply had the most prose. Salesforce
+        outranking DuckDuckGo for "search the web" is not a relevance judgement.
+        """
+        return _score_text(terms, _manifest_text(manifest))
+
+
+# ---------------------------------------------------------------------------
+# Scoring
+# ---------------------------------------------------------------------------
+
+_WORD = re.compile(r"[a-z0-9]+")
+
+#: Words that match everything and therefore rank nothing. Dropped before
+#: scoring so "search the web for news" is scored on "search", "web" and
+#: "news" rather than being diluted by "the" and "for".
+_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in",
+    "into", "is", "it", "of", "on", "or", "that", "the", "then", "this", "to",
+    "with",
+})
+
+
+def _terms(query: str) -> list[str]:
+    """The words worth scoring, lowercased and de-duplicated in order."""
+    seen: dict[str, None] = {}
+    for word in _WORD.findall(query.lower()):
+        if word not in _STOPWORDS and len(word) > 1:
+            seen.setdefault(word, None)
+    return list(seen)
+
+
+def _score_text(terms: list[str], text: str) -> float:
+    """How well *text* answers *terms*, normalised for length.
+
+    A hit is worth one point; the total is then divided by the square root of
+    the text's word count, which is the standard correction for the fact that a
+    longer document matches more terms by accident. Without it, ranking is a
+    proxy for how much documentation a toolset happens to carry.
+    """
+    if not terms or not text:
+        return 0.0
+    words = _WORD.findall(text)
+    if not words:
+        return 0.0
+    present = set(words)
+    hits = sum(1 for term in terms if term in present)
+    # Substring hits count for less: "list" inside "blocklist" is a weaker
+    # signal than the word itself, but discarding it entirely loses stemming.
+    partial = sum(0.5 for term in terms if term not in present and term in text)
+    if hits + partial == 0:
+        return 0.0
+    return (hits + partial) / math.sqrt(len(words))
+
+
+def _manifest_text(manifest: ToolsetManifest) -> str:
+    return " ".join([
+        manifest.id,
+        manifest.summary,
+        manifest.description,
+        " ".join(manifest.groups.keys()),
+        " ".join(op.summary for op in manifest.all_operations()),
+    ]).lower()
+
+
+def _operation_text(manifest: ToolsetManifest, op: Any) -> str:
+    return " ".join([
+        manifest.id,
+        op.id,
+        op.summary or "",
+        op.description or "",
+        op.resolves or "",
+    ]).lower()
+
+
+def _import_for(manifest: ToolsetManifest, op: Any) -> str:
+    """The import line for *one* operation.
+
+    ``ToolsetManifest.import_line()`` composes every function in the toolset,
+    which is right for the docs block and wrong for a search result: a match on
+    one operation should not hand the model forty names to choose from.
+    """
+    if not manifest.tools_module or not op.function:
+        return ""
+    return f"from {manifest.tools_module} import {op.function}"

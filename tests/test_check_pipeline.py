@@ -395,7 +395,7 @@ class TestRepairKeepsContext:
         prose = "I need to see the original workflow specification to help.\n"
 
         class Replying:
-            async def __call__(self, _prompt: str):
+            async def ask(self, _prompt: str):
                 return type("R", (), {"output": CodingOutput(code=prose)})()
 
         agent = WorkflowCodingAgent(object(), smoke_test=False)
@@ -415,7 +415,7 @@ class TestRepairKeepsContext:
         fixed = GOOD
 
         class Fixing:
-            async def __call__(self, _prompt: str):
+            async def ask(self, _prompt: str):
                 return type("R", (), {"output": CodingOutput(code=fixed)})()
 
         agent = WorkflowCodingAgent(object(), smoke_test=False)

@@ -56,6 +56,83 @@ def is_environmental(text: str) -> bool:
     return any(marker in haystack for marker in ENVIRONMENTAL_MARKERS)
 
 
+#: Environment variables the smoke child is allowed to see. An allowlist, not a
+#: denylist, for the reason `SandboxPolicy.allowed_env` gives: a denylist has to
+#: enumerate every secret name anybody will ever use and gets it wrong once.
+#:
+#: Everything here is something the *interpreter* needs in order to start and
+#: find its own packages. Nothing here is a credential. In particular
+#: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, every `LOOM_*` var, and every cloud
+#: credential are absent — which is what makes the claim "this runs with no
+#: credentials" true rather than aspirational.
+DEFAULT_SMOKE_ENV: frozenset[str] = frozenset({
+    "PATH",
+    # Passed through deliberately, and the reason `-I` is *not* used on the
+    # child: an editable or monorepo install resolves `loom` through
+    # PYTHONPATH, and an interpreter told to ignore it would smoke-test against
+    # a different copy of the SDK than the one the caller is running.
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "VIRTUAL_ENV",
+    "HOME",
+    "USERPROFILE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+})
+
+
+@dataclass(frozen=True)
+class SmokeIsolation:
+    """What the smoke child may reach.
+
+    The smoke stage executes code a *model* wrote. It ran with the host's
+    entire environment inherited — every API key the process held — while the
+    tool that exposes it told the model "no real network or credentials". The
+    allowlist below is what closes the credential half of that gap; the network
+    half needs a real sandbox, which is what `sandbox` is for.
+
+    Separated from `smoke_run` rather than being a pile of keyword arguments so
+    that a host has one object to override and one place to read what the
+    current policy actually is.
+    """
+
+    env_allowlist: frozenset[str] = DEFAULT_SMOKE_ENV
+    """Variable names passed through to the child. Everything else is stripped."""
+
+    inherit_env: bool = False
+    """Escape hatch. ``True`` restores the pre-allowlist behaviour for a host
+    that has deliberately decided the code it smoke-tests is trusted. Off by
+    default, because the default caller is a coding agent."""
+
+    def environment(self) -> dict[str, str]:
+        """The child's environment, built from this process's."""
+        import os
+
+        if self.inherit_env:
+            return dict(os.environ)
+        return {
+            name: os.environ[name]
+            for name in self.env_allowlist
+            if name in os.environ
+        }
+
+    def describe(self) -> str:
+        """One line, for a tool description that must not overclaim."""
+        if self.inherit_env:
+            return "inherits the host environment (credentials included)"
+        return "no host credentials; network is not restricted"
+
+
+DEFAULT_ISOLATION = SmokeIsolation()
+
+
 @dataclass
 class SmokeResult:
     """Outcome of executing generated code once."""
@@ -174,6 +251,7 @@ def smoke_run(
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     python: str | None = None,
     fakes: list[tuple[str, str]] | None = None,
+    isolation: SmokeIsolation | None = None,
 ) -> SmokeResult:
     """Compile, import, and execute *code* once in a subprocess.
 
@@ -193,6 +271,12 @@ def smoke_run(
         replaced with stand-ins before the code runs. Without them a workflow
         that talks to a real service can only reach an authentication failure
         here, which proves nothing about the code.
+
+    isolation:
+        What the child may reach. Defaults to :data:`DEFAULT_ISOLATION`, which
+        strips every environment variable that is not needed to start a Python
+        interpreter — so the code being tested cannot read the credentials the
+        host happens to hold.
 
     Never raises for a *generated code* problem — a failure is a
     :class:`SmokeResult`, because the caller's job is to feed it back to the
@@ -221,6 +305,8 @@ def smoke_run(
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                # Never the inherited environment. See SmokeIsolation.
+                env=(isolation or DEFAULT_ISOLATION).environment(),
             )
         except subprocess.TimeoutExpired:
             return SmokeResult(

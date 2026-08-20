@@ -231,13 +231,97 @@ def _find_entrypoint(namespace, name):
         "were found (need exactly 1 to fall back)" % (name, len(candidates))
     )
 
+SANDBOXED_FILENAME = "<sandboxed>"
+
+
+class ImportDenied(ImportError):
+    """A module the policy did not permit."""
+
+
+def _install_import_guard(allowed):
+    """Restrict `import` *in sandboxed source* to *allowed*.
+
+    Runs before user source is compiled, and only when the host asked for an
+    import policy — `allowed is None` leaves `__import__` untouched, which is
+    every policy written before this existed.
+
+    The guard applies to a module only when the import was issued **from the
+    sandboxed source itself**, decided by the calling frame's filename. The
+    obvious implementation — exempt whatever is already in `sys.modules` —
+    enforces nothing: this harness imports `asyncio`, `asyncio` imports
+    `socket`, and a body asking for `socket` is then handed the module the
+    harness happened to load. Keying on the caller instead means an allowed
+    module's own transitive imports still work, which is what makes a narrow
+    allowlist usable at all.
+
+    `importlib.import_module` is followed through, because its frames sit
+    between the caller and here. Beyond that this is a second line and not the
+    first: a body reaching into `sys.modules` directly is not stopped here, and
+    `CodeValidator` is where that is caught.
+    """
+    import builtins
+
+    permitted = frozenset(allowed)
+    real_import = builtins.__import__
+
+    # This function's own frame is the harness script's, and so is
+    # `guarded`'s. Both sit between `__import__` and the code that issued the
+    # import, and both have to be stepped over before the caller is visible.
+    _guard_frame = sys._getframe(0).f_code.co_filename
+
+    def _issued_by_sandboxed_source():
+        """Whether the import statement being executed came from user source."""
+        depth = 1
+        while depth < 12:
+            try:
+                frame = sys._getframe(depth)
+            except ValueError:
+                return False
+            name = frame.f_code.co_filename
+            if name == SANDBOXED_FILENAME:
+                return True
+            if name == _guard_frame:
+                depth += 1
+                continue
+            # Step over importlib's own machinery, so
+            # `importlib.import_module("socket")` is attributed to its caller
+            # rather than to importlib. Any other frame decides immediately —
+            # walking past one would let a harness-internal import be blamed on
+            # user source further up the stack.
+            if "importlib" in name:
+                depth += 1
+                continue
+            return False
+        return False
+
+    def guarded(name, globals=None, locals=None, fromlist=(), level=0):
+        if not _issued_by_sandboxed_source():
+            return real_import(name, globals, locals, fromlist, level)
+        if level:
+            raise ImportDenied(
+                "relative imports are not available to sandboxed source"
+            )
+        root = name.split(".")[0] if name else name
+        if root and root not in permitted:
+            raise ImportDenied(
+                "import of %r is not permitted here; the sandbox policy allows "
+                "%s" % (name, ", ".join(sorted(permitted)) or "nothing")
+            )
+        return real_import(name, globals, locals, fromlist, level)
+
+    builtins.__import__ = guarded
+
+
 async def _main():
     request = json.loads(sys.stdin.readline())
     namespace = dict(request.get("namespace") or {})
     # User source runs with stdout redirected to stderr: only `_emit`
     # (bound to the real stdout above) may write to the wire.
     sys.stdout = sys.stderr
-    exec(compile(request["source"], "<sandboxed>", "exec"), namespace)
+    allowed_imports = request.get("allowed_imports")
+    if allowed_imports is not None:
+        _install_import_guard(allowed_imports)
+    exec(compile(request["source"], SANDBOXED_FILENAME, "exec"), namespace)
     entry = _find_entrypoint(namespace, request["entrypoint"])
     result = entry(Ctx(request["run_id"]), request["input"])
     if hasattr(result, "__await__"):

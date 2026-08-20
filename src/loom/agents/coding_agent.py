@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field
 
 from loom.agents.checks import CheckContext, CheckPipeline
+from loom.agents.generation import Asking
 from loom.agents.smoke import SmokeResult, smoke_run
 from loom.agents.stages import default_stages
 from loom.agents.supervisor import CodeSupervisor, SupervisorVerdict
@@ -59,10 +60,9 @@ DEFAULT_SYSTEM_PROMPT = textwrap.dedent("""\
 
     ## Your process
 
-    1. DISCOVER: search_toolsets with keywords from the spec. **Two empty
-       searches mean there is no integration for this — a normal answer.**
-       Write it as plain Python in a `@step`; reading unrelated toolsets' docs
-       instead ends in no code at all.
+    1. DISCOVER: search_toolsets for keywords; search_operations when you know
+       the task, not the operation. **Both empty means no integration — a
+       normal answer.** Write it as plain Python in a `@step`.
     2. INSPECT: show_toolset for operations, get_tool_contract for the ones
        you need.
     3. DOCS: get_tool_docs for exact imports and signatures.
@@ -277,6 +277,44 @@ DEFAULT_SYSTEM_PROMPT = textwrap.dedent("""\
 """)
 
 
+EDIT_INSTRUCTIONS = textwrap.dedent("""\
+    You are editing a workflow that already exists and already works.
+
+    ## What you are given
+    A complete Python file, and one instruction describing a change to it.
+
+    ## The rules of an edit, which are not the rules of writing one
+    1. **Make the smallest change that satisfies the instruction.** Every line
+       you touch is a line a reviewer has to read and a behaviour that might
+       move. Renaming a variable you were not asked about, reformatting, or
+       "improving" an unrelated step is not an edit — it is a rewrite wearing
+       an edit's clothes, and it hides the change that was asked for.
+    2. **Keep every step, node and workflow name.** A name is what the journal
+       records, so changing one strands every run already in flight: on resume
+       the engine looks for the recorded name at that position, does not find
+       it, and the run diverges. If the instruction genuinely requires a
+       rename, say so in your explanation rather than doing it silently.
+    3. **Return the whole file**, not a diff and not a fragment. The `code`
+       field must contain complete, runnable source.
+    4. **Resolve before you filter**, exactly as when writing new code: if the
+       instruction names a person, project, status or field, look it up with
+       `call_read_operation` and bake in the id with the name in a comment.
+       A word from the instruction reaching a query as raw text matches nothing
+       and reports "none found".
+    5. **Say what you changed** in the explanation, in terms of behaviour: what
+       the workflow now does that it did not do before. Not a list of lines.
+
+    ## When the instruction cannot be satisfied
+    Say so and change nothing. An instruction needing an integration this
+    environment does not have, or contradicting what the file does, is answered
+    with an explanation — not with a guess. Returning the file unchanged is a
+    valid answer and is better than a plausible edit that does the wrong thing.
+
+    Every SDK rule from the authoring instructions still applies to the result:
+    the file must still validate, still run, and still be projectable.
+""")
+
+
 # ---------------------------------------------------------------------------
 # Structured output model for the final_output tool
 # ---------------------------------------------------------------------------
@@ -447,6 +485,44 @@ class CodingResult:
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class EditResult:
+    """The outcome of changing a workflow that already exists.
+
+    Separate from :class:`CodingResult` because an edit has a question a
+    generation does not: *what moved*. A reviewer of new code reads the code; a
+    reviewer of an edit reads the difference, and the two artifacts LOOM already
+    generates at commit time — the graph and the narration — are the reviewable
+    form of that difference for someone who does not read Python.
+    """
+
+    code: str
+    """The complete edited source. Equal to the input when nothing changed."""
+    issues: list[CodeIssue] = field(default_factory=list)
+    explanation: str = ""
+    """What the workflow now does that it did not before, in behaviour terms."""
+    diff: str = ""
+    """Unified diff against the original, for a reviewer."""
+    changed: bool = False
+    """``False`` when the model declined — which is a valid answer, and the one
+    it is told to give when an instruction cannot be satisfied."""
+    graph_changes: list[str] = field(default_factory=list)
+    """Nodes added or removed, projected from both versions.
+
+    The reviewable half of an edit: "three nodes changed" is a claim anybody can
+    check, where a code diff needs Python."""
+    repair_attempts: int = 0
+    model_used: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    smoke: SmokeResult | None = None
+
+    @property
+    def is_clean(self) -> bool:
+        """No blocking issue survived the pipeline."""
+        return not any(issue.severity == "error" for issue in self.issues)
+
+
 class WorkflowCodingAgent:
     """LLM-powered agent that authors LOOM workflow code.
 
@@ -499,6 +575,8 @@ class WorkflowCodingAgent:
         executor: Any = None,
         user_interaction: Any | None = None,
         probes: Any | None = None,
+        max_total_tokens: int | None = None,
+        max_cost_usd: float | None = None,
     ) -> None:
         self._model = model
         self._executor = executor
@@ -512,6 +590,14 @@ class WorkflowCodingAgent:
         suite is what stops one shipping that way."""
         self._max_repair = max_repair_attempts
         self._max_discovery = max_discovery_turns
+        self._max_total_tokens = max_total_tokens
+        self._max_cost_usd = max_cost_usd
+        """Optional ceilings for the *job*, not for one call.
+
+        Every ceiling used to be per invocation, because each call restarted
+        the runner's turn counter and its usage accumulator — so a generation
+        with three repair rounds got four independent budgets and nothing
+        bounded the whole. See :class:`~loom.agents.generation.GenerationBudget`."""
         """Turns allowed before repair: search, inspect, read docs, resolve the
         entities the spec names, write, validate. Separate from the repair
         budget because they are separate activities — folding them together
@@ -643,7 +729,7 @@ class WorkflowCodingAgent:
     _build_system_prompt = build_system_prompt
 
     async def _repair_until_it_runs(
-        self, agent: Any, code: str
+        self, session: Asking, code: str
     ) -> tuple[str, SmokeResult, int]:
         """Execute the code, and on failure hand the traceback back to the model.
 
@@ -668,7 +754,7 @@ class WorkflowCodingAgent:
             logger.info("smoke_repair | round=%d %s", rounds, smoke.error[:120])
 
             try:
-                retry = await agent(smoke.as_feedback(code))
+                retry = await session.ask(smoke.as_feedback(code))
             except Exception as exc:
                 # The repair shares the agent's turn budget with the generation
                 # that preceded it, so a long discovery phase can leave nothing
@@ -694,7 +780,7 @@ class WorkflowCodingAgent:
         return code, smoke, rounds
 
     async def _revise_until_approved(
-        self, agent: Any, spec: str, code: str
+        self, session: Asking, spec: str, code: str
     ) -> tuple[str, SupervisorVerdict, int]:
         """Review, revise, re-review — up to the repair budget.
 
@@ -712,7 +798,14 @@ class WorkflowCodingAgent:
                 "review_repair | round=%d findings=%d", rounds, len(verdict.findings)
             )
 
-            revised = await agent(verdict.as_feedback(code))
+            try:
+                revised = await session.ask(verdict.as_feedback(code))
+            except Exception as exc:
+                # Out of budget, or the loop failed. Keep the reviewed code:
+                # a verdict nobody could act on does not make working code
+                # worse.
+                logger.info("review_repair | giving up: %s", exc)
+                break
             candidate = _extract_code(
                 revised.output.code
                 if isinstance(revised.output, CodingOutput)
@@ -799,7 +892,7 @@ class WorkflowCodingAgent:
         )
 
     async def _repair_from(
-        self, agent: Any, code: str, report: Any, context: CheckContext
+        self, session: Asking, code: str, report: Any, context: CheckContext
     ) -> tuple[str, int]:
         """Feed the pipeline's errors back to the model until they clear.
 
@@ -813,7 +906,9 @@ class WorkflowCodingAgent:
                 break
             rounds += 1
             try:
-                retry = await agent(_repair_prompt(report, code, context.spec))
+                retry = await session.ask(
+                    _repair_prompt(report, code, context.spec)
+                )
             except Exception as exc:
                 # The repair shares the agent's turn budget with the generation
                 # before it. Keep the code rather than lose it to a fix that
@@ -845,6 +940,109 @@ class WorkflowCodingAgent:
 
         return code, rounds
 
+    async def edit(self, source: str, instruction: str) -> EditResult:
+        """Change a workflow that already exists, and verify the result.
+
+        The capability the product did not have. ``generate`` was the only
+        entry point, so every change to a workflow meant regenerating it from a
+        spec — and n8n, Zapier and Make have all shipped conversational
+        editing, Zapier with checkpoint versioning and one-click rollback.
+
+        What makes this worth more than their equivalent is that the machinery
+        it reuses can *verify* the edit: the same sixteen stages run on the
+        result, so a change that breaks entity resolution, silently caps a
+        fetch, or puts the answer behind a model call the instruction never
+        asked for is caught before it is offered. A visual editor cannot do
+        that, because it has no notion of what the workflow was asked to do.
+
+        Returns the file unchanged, with ``changed=False``, when the model
+        declines — which the instructions above tell it to do rather than guess.
+        """
+        from loom.agents.agent import Agent
+        from loom.agents.coding_tools import build_coding_tools
+        from loom.agents.generation import CodingSession, GenerationBudget
+        from loom.agents.models import ModelSettings
+
+        budget = GenerationBudget.for_agent(
+            self._model.model_name,
+            max_turns=self._max_discovery + self._max_repair,
+            max_total_tokens=self._max_total_tokens,
+            max_cost_usd=self._max_cost_usd,
+        )
+        agent: Agent[Any] = Agent(
+            name="workflow_editor",
+            instructions=self.build_system_prompt() + "\n\n" + EDIT_INSTRUCTIONS,
+            model=self._model,
+            tools=build_coding_tools(
+                registry=self._tool_registry,
+                validator=self._validator,
+                node_registry=self._node_registry,
+                probes=self._probes,
+            ),
+            output_type=CodingOutput,
+            model_settings=ModelSettings(temperature=0.2),
+            executor=self._executor,
+        )
+        session = CodingSession(agent, budget)
+
+        try:
+            reply = await session.ask(_edit_prompt(source, instruction))
+        except Exception as exc:
+            logger.info("edit | agent loop ended: %s", exc)
+            return EditResult(
+                code=source,
+                issues=[
+                    CodeIssue(
+                        "unsupported",
+                        f"The agent did not produce an edit: {exc}",
+                        "error",
+                    )
+                ],
+                model_used=getattr(self._model, "model_name", ""),
+            )
+
+        code, explanation = _code_and_explanation(reply.output)
+        code = _extract_code(code) or source
+
+        if code.strip() == source.strip():
+            # Declining is a valid answer and the one the instructions ask for
+            # when the change cannot be made. Running the pipeline over
+            # unchanged code would report the *original* file's findings as
+            # though this edit had introduced them.
+            return EditResult(
+                code=source,
+                explanation=explanation
+                or "The agent left the workflow unchanged and gave no reason.",
+                changed=False,
+                model_used=self._model.model_name,
+                input_tokens=budget.spent.input_tokens,
+                output_tokens=budget.spent.output_tokens,
+            )
+
+        # The instruction is the spec for this change, so the stages that need
+        # one — coverage, resolution, judgement — have something to weigh
+        # against. Passing the original spec would ask them about a question
+        # nobody just asked.
+        context = self._check_context(instruction, getattr(reply, "tool_calls", None))
+        report = await self._pipeline.run(code, context)
+        code, rounds = await self._repair_from(session, code, report, context)
+        if rounds:
+            report = await self._pipeline.run(code, context)
+
+        return EditResult(
+            code=code,
+            issues=list(report.issues),
+            explanation=explanation,
+            diff=unified_diff_of(source, code),
+            changed=True,
+            graph_changes=graph_delta(source, code),
+            repair_attempts=rounds,
+            model_used=self._model.model_name,
+            input_tokens=budget.spent.input_tokens,
+            output_tokens=budget.spent.output_tokens,
+            smoke=report.detail("smoke"),
+        )
+
     async def generate(self, spec: str) -> CodingResult:
         """Generate a workflow from a natural-language *spec*.
 
@@ -864,7 +1062,7 @@ class WorkflowCodingAgent:
         """
         from loom.agents.agent import Agent
         from loom.agents.coding_tools import build_coding_tools
-        from loom.agents.limits import UsageLimits
+        from loom.agents.generation import CodingSession, GenerationBudget
         from loom.agents.models import ModelSettings
 
         if self._user_interaction is not None:
@@ -872,11 +1070,19 @@ class WorkflowCodingAgent:
 
             self._ask_gate = AskUserGate()
 
-        max_turns = self._max_discovery + self._max_repair
-        logger.info(
-            "generate | model=%s max_turns=%d pre_loaded_docs=%d",
+        # One budget for the job. Repair and review rounds draw on the same
+        # allowance the discovery phase drew on, which is what the old comment
+        # here claimed and the code did not do.
+        budget = GenerationBudget.for_agent(
             self._model.model_name,
-            max_turns,
+            max_turns=self._max_discovery + self._max_repair,
+            max_total_tokens=self._max_total_tokens,
+            max_cost_usd=self._max_cost_usd,
+        )
+        logger.info(
+            "generate | model=%s budget=%d turns pre_loaded_docs=%d",
+            self._model.model_name,
+            budget.max_turns,
             len(self._tool_docs),
         )
 
@@ -894,12 +1100,12 @@ class WorkflowCodingAgent:
             ),
             output_type=CodingOutput,
             model_settings=ModelSettings(temperature=0.2),
-            limits=UsageLimits(max_turns=max_turns),
             executor=self._executor,
         )
+        session = CodingSession(agent, budget)
 
         try:
-            result = await agent(spec)
+            result = await session.ask(spec)
         except Exception as exc:
             # Never propagate. A caller asked for code and is entitled to an
             # answer it can act on — an exception discards whatever the run
@@ -991,7 +1197,7 @@ class WorkflowCodingAgent:
         # a traceback reach the model by the same path.
         context = self._check_context(spec, getattr(result, "tool_calls", None))
         report = await self._pipeline.run(code, context)
-        code, rounds = await self._repair_from(agent, code, report, context)
+        code, rounds = await self._repair_from(session, code, report, context)
         report = await self._pipeline.run(code, context) if rounds else report
 
         issues = list(report.issues)
@@ -1004,7 +1210,7 @@ class WorkflowCodingAgent:
         review_rounds = 0
         if self._supervisor is not None and not errors:
             code, review, review_rounds = await self._revise_until_approved(
-                agent, spec, code
+                session, spec, code
             )
             issues.extend(
                 CodeIssue("review", f"{f.category}: {f.message}", f.severity)
@@ -1038,14 +1244,93 @@ class WorkflowCodingAgent:
             review=review,
             repair_attempts=repair_attempts,
             model_used=self._model.model_name,
-            input_tokens=result.usage.input_tokens,
-            output_tokens=result.usage.output_tokens,
+            # The *job's* totals, not the first call's. Every round after the
+            # first was previously uncounted, so a generation that repaired
+            # three times reported the cost of one.
+            input_tokens=budget.spent.input_tokens,
+            output_tokens=budget.spent.output_tokens,
         )
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _edit_prompt(source: str, instruction: str) -> str:
+    """What the model is asked, with the file it is editing."""
+    return (
+        f"Here is the workflow as it stands:\n\n```python\n{source}\n```\n\n"
+        f"Change it so that: {instruction}\n\n"
+        "Return the complete edited file via final_output. If the change "
+        "cannot be made, return the file unchanged and say why."
+    )
+
+
+def _code_and_explanation(output: Any) -> tuple[str, str]:
+    """Pull ``(code, explanation)`` out of whatever the model returned."""
+    if isinstance(output, CodingOutput):
+        return output.code, output.explanation
+    if isinstance(output, dict):
+        return str(output.get("code", "")), str(output.get("explanation", ""))
+    return str(output or ""), ""
+
+
+def unified_diff_of(before: str, after: str) -> str:
+    """A reviewable diff between two versions of a workflow."""
+    import difflib
+
+    return "".join(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile="before.py",
+            tofile="after.py",
+            n=3,
+        )
+    )
+
+
+def graph_delta(before: str, after: str) -> list[str]:
+    """Nodes added and removed, projected from both versions of the source.
+
+    The half of an edit a non-programmer can review. Best-effort: source that
+    cannot be projected yields no delta rather than an error, because a diff is
+    a courtesy and the code is the artifact.
+    """
+    # Both sides must at least compile. The extractor tolerates source it
+    # cannot project by returning nothing, which would report a broken edit as
+    # "every node removed" — a delta that is not merely unhelpful but wrong.
+    for source in (before, after):
+        try:
+            compile(source, "<delta>", "exec")
+        except (SyntaxError, ValueError):
+            return []
+    try:
+        was = _projected_labels(before)
+        now = _projected_labels(after)
+    except Exception:  # pragma: no cover - projection is best-effort here
+        return []
+    added = sorted(now - was)
+    removed = sorted(was - now)
+    return [f"+{label}" for label in added] + [f"-{label}" for label in removed]
+
+
+def _projected_labels(source: str) -> set[str]:
+    """Every node label the WGIR extractor finds in *source*."""
+    import tempfile
+    from pathlib import Path
+
+    from loom.graph.pipeline import build_graph, flows_in
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "flow.py"
+        path.write_text(source, encoding="utf-8")
+        labels: set[str] = set()
+        for flow_id in flows_in(path) or [""]:
+            graph = build_graph(path, flow_id=flow_id)
+            labels.update(node.label for node in graph.nodes)
+        return labels
 
 
 def _toolset_modules(registry: Any | None) -> dict[str, str]:

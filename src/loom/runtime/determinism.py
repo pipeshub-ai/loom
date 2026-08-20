@@ -40,6 +40,17 @@ UNSAFE_CALLS: dict[str, str] = {
     "time.monotonic": "ctx.now().timestamp()",
     "time.sleep": "await ctx.sleep(...)",
     "asyncio.sleep": "await ctx.sleep(...)",
+    # Not a clock or a random source, but the same class of defect: a durable
+    # call's journal path is allocated when the call is constructed, so two
+    # branches racing on one counter produce a numbering that follows timing
+    # instead of the code. `ctx.gather` gives each branch its own numbering
+    # space; these do not.
+    "asyncio.gather": "await ctx.gather(...)",
+    "asyncio.wait": "await ctx.gather(...)",
+    "asyncio.as_completed": "await ctx.gather(...)",
+    "asyncio.create_task": "await ctx.gather(...)",
+    "asyncio.ensure_future": "await ctx.gather(...)",
+    "asyncio.TaskGroup": "await ctx.gather(...)",
     "uuid.uuid1": "ctx.uuid4()",
     "uuid.uuid4": "ctx.uuid4()",
     "random.random": "ctx.random().random()",

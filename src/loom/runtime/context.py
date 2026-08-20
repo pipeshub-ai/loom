@@ -14,6 +14,7 @@ import logging
 import random as _random
 import warnings
 from collections.abc import Awaitable, Callable, Generator, Iterable, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Generic, NoReturn, TypeVar, overload
@@ -216,6 +217,16 @@ class DurableCall(Generic[T]):
                 self._recorded_failure(recorded), attempts=recorded.attempts
             )
 
+        # Nothing recorded, so this call is about to *happen*. That makes it
+        # the boundary a cancellation takes effect at — after every already
+        # answered call is served from the journal, and before a new side
+        # effect is performed. Raising here rather than only at the top of the
+        # body is what lets a cancel land mid-body: the exception unwinds
+        # through the workflow, the engine catches it, and the compensation
+        # stack runs.
+        ctx.raise_if_cancelled()
+        ctx.park_if_paused()
+
         entry = JournalEntry(
             path=self.path,
             kind=self.kind,
@@ -381,7 +392,13 @@ class DurableCall(Generic[T]):
             return await self._attempt_loop(entry, span)
 
         return EffectCall(
-            kind=_EFFECT_KINDS.get(self.kind, self.kind.value),
+            # A node journals as a step — nodes add packaging, not a second
+            # durability mechanism — but it is not a step to a *policy*, which
+            # has a catalogue of node ids to decide against and no manifest for
+            # `control` or `human`. The journal keeps its kind; the broker is
+            # told what this really is.
+            kind=self._metadata.get("effect_kind")
+            or _EFFECT_KINDS.get(self.kind, self.kind.value),
             target=self._metadata.get("effect_target") or self.name,
             arguments=_effect_arguments(self._input),
             effect=resolve_effect(
@@ -742,6 +759,25 @@ def _authority_for(
     return base.narrowed(grant=scopes_to_grant(frozenset(scopes), base.grant))
 
 
+#: The branch scope in force for the *current task*, and which Context it
+#: belongs to.
+#:
+#: A ``contextvars.ContextVar`` rather than an attribute, because the coroutine
+#: that has to be redirected already closed over the parent ``Context``:
+#: ``ctx.gather(branch_a(), branch_b())`` hands `gather` two coroutines that
+#: will call ``ctx.step(...)`` on the *same* object. `asyncio` copies the
+#: current context when a task is created, so a value set inside one branch's
+#: task is invisible to its siblings — which is exactly the isolation needed
+#: and exactly what an attribute could not provide.
+#:
+#: Paired with the owning Context so that a ``nested()`` view created *inside*
+#: a branch keeps its own numbering: the override applies to the object that
+#: opened it, never to a different one that merely runs beneath it.
+_BRANCH_SCOPE: ContextVar[tuple[object, Scope] | None] = ContextVar(
+    "loom_branch_scope", default=None
+)
+
+
 class Context(Generic[DepsT]):
     """Durable orchestration API, passed as the first argument to every workflow."""
 
@@ -763,7 +799,7 @@ class Context(Generic[DepsT]):
         self._journal = journal
         self._definition = definition
         self._deps = deps
-        self._scope = scope or journal.root
+        self._root_scope = scope or journal.root
         self.logger = logger or logging.getLogger(f"workflow.{record.workflow}")
         self._tracer = runtime.tracer
         self._clock = runtime.clock
@@ -801,6 +837,27 @@ class Context(Generic[DepsT]):
         self._active_patches: frozenset[str] = frozenset()
         self._warned_journal_size = False
         self._warned_payload_size = False
+
+    @property
+    def _scope(self) -> Scope:
+        """Where this context's next durable call takes its path from.
+
+        The root scope, unless a concurrent branch opened by :meth:`gather` is
+        running in this task — see :data:`_BRANCH_SCOPE`.
+
+        This indirection is the fix for a defect at the centre of the engine.
+        Paths were allocated from one counter shared by every branch, at the
+        moment a call was *constructed*, so under `gather` the numbering
+        depended on how long the previous step took: change a latency and two
+        logically distinct call sites swap paths. On replay each was then
+        served the other's recorded value — silently, because the default
+        verify mode logged and served it anyway, and the run reported
+        ``completed`` with different output.
+        """
+        override = _BRANCH_SCOPE.get()
+        if override is not None and override[0] is self:
+            return override[1]
+        return self._root_scope
 
     def nested(self, path: str) -> Context[DepsT]:
         """A view of this context whose durable calls nest beneath ``path``.
@@ -1331,7 +1388,8 @@ class Context(Generic[DepsT]):
             async with semaphore:
                 return await awaitable
 
-        tasks = [asyncio.ensure_future(guarded(item)) for item in items]
+        prepared = [self._as_branch(index, item) for index, item in enumerate(items)]
+        tasks = [asyncio.ensure_future(guarded(item)) for item in prepared]
         results: list[Any] = []
         suspensions: list[BaseException] = []
         failures: list[BaseException] = []
@@ -1354,6 +1412,34 @@ class Context(Generic[DepsT]):
         if failures:
             raise failures[0]
         return results
+
+    def _as_branch(self, index: int, item: Awaitable[Any]) -> Awaitable[Any]:
+        """Give *item* its own numbering space, when it needs one.
+
+        A :class:`DurableCall` is left exactly as it is: its path was fixed
+        when it was constructed, which happened in argument order, before
+        `gather` ever saw it. ``ctx.gather(ctx.step(a), ctx.step(b))`` is
+        therefore already deterministic and must keep the paths it has, or
+        every journal written before this change stops replaying.
+
+        Anything else is a coroutine that will allocate *while it runs*, and
+        that is the shape the ordering defect lives in. It gets a prefix
+        allocated here — synchronously, in argument order, before any of them
+        starts — so its internal calls number within the branch and cannot
+        interleave with a sibling's.
+        """
+        if isinstance(item, DurableCall):
+            return item
+        del index  # position is expressed by allocation order, not by value
+        return self._in_branch(self._scope.allocate(), item)
+
+    async def _in_branch(self, base: str, awaitable: Awaitable[Any]) -> Any:
+        """Run *awaitable* with durable calls numbered beneath *base*."""
+        token = _BRANCH_SCOPE.set((self, Scope(prefix=f"{base}.")))
+        try:
+            return await awaitable
+        finally:
+            _BRANCH_SCOPE.reset(token)
 
     async def map(
         self,
@@ -1768,6 +1854,7 @@ class Context(Generic[DepsT]):
             ),
             timeout=timeout,
             metadata={
+                "effect_kind": "node",
                 "node_id": node_id,
                 "node_version": spec.version,
                 "effect_class": spec.effect,
@@ -2179,6 +2266,21 @@ class Context(Generic[DepsT]):
     async def checkpoint(self) -> None:
         """Force the journal to durable storage right now."""
         await self._flush()
+
+    def park_if_paused(self) -> None:
+        """Suspend now if an operator has asked this run to hold.
+
+        Called at the same boundary cancellation is checked at — after every
+        already-answered call has been served from the journal, and before a new
+        side effect is performed. That is what makes a pause safe: nothing is
+        half-done, so the run resumes exactly where a crash would have.
+        """
+        if self._runtime.is_pause_requested(self.run_id):
+            raise Suspend(
+                f"run {self.run_id} is paused",
+                path=self._scope.prefix,
+                awaiting_event=f"resume:{self.run_id}",
+            )
 
     def raise_if_cancelled(self) -> None:
         """Abort now if cancellation has been requested.

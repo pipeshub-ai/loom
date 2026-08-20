@@ -6,11 +6,11 @@ policy and decides: admit, delay, skip, debounce, or batch.
 
 from __future__ import annotations
 
-from collections import defaultdict
 from enum import StrEnum
 
 from pydantic import BaseModel
 
+from loom.runtime.admission_state import AdmissionState, InMemoryAdmissionState
 from loom.runtime.clock import Clock, SystemClock
 
 # ---------------------------------------------------------------------------
@@ -128,9 +128,13 @@ def _flow_key(flow_id: str, partition_key: str = "") -> str:
 class AdmissionController:
     """Evaluate :class:`FlowControlPolicy` to decide whether a run may start.
 
-    All state is held in-memory, making the controller easy to test and
-    suitable for single-process deployments.  Distributed deployments should
-    back these counters with a shared store (Redis, database row locks, etc.).
+    Where the counters live is a :class:`AdmissionState`, not a dict on this
+    object. It *was* a dict, and the consequence was that
+    ``Runtime(admission=...)`` provided no concurrency limit, no rate limit and
+    no singleton guarantee in any multi-worker deployment — the only kind that
+    has these problems. Pass
+    :class:`~loom.runtime.admission_state.StoreBackedAdmissionState` there and
+    the same policies hold across processes.
 
     Every window this evaluates — throttle, rate limit, debounce, batch — is
     measured against the :class:`~loom.runtime.clock.Clock`, so pass the
@@ -148,38 +152,35 @@ class AdmissionController:
     trigger that never fired.
     """
 
-    def __init__(self, *, clock: Clock | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        clock: Clock | None = None,
+        state: AdmissionState | None = None,
+    ) -> None:
         self._clock: Clock = clock or SystemClock()
-        self._in_flight: dict[str, int] = defaultdict(int)
+        self._state: AdmissionState = state or InMemoryAdmissionState()
+        """Where the counters live.
 
-        # Throttle: track the timestamp of the last admitted run per key.
-        self._last_admitted: dict[str, float] = {}
-
-        # Rate limit: sliding log of admission timestamps per key.
-        self._rate_log: dict[str, list[float]] = defaultdict(list)
-
-        # Debounce: last trigger timestamp per key.
-        self._debounce_last: dict[str, float] = {}
-
-        # Batch: accumulated count and first-trigger timestamp per key.
-        self._batch_counts: dict[str, int] = defaultdict(int)
-        self._batch_first_ts: dict[str, float] = {}
+        Defaults to process-local, which is exactly what shipped and is correct
+        for one process. Pass
+        :class:`~loom.runtime.admission_state.StoreBackedAdmissionState` for a
+        deployment with more than one worker — which is the only kind that has
+        the problems these policies solve."""
 
     # -- public bookkeeping --------------------------------------------------
 
-    def record_start(self, flow_id: str, partition_key: str = "") -> None:
+    async def record_start(self, flow_id: str, partition_key: str = "") -> None:
         """Mark that a run has started (increment in-flight counter)."""
-        self._in_flight[_flow_key(flow_id, partition_key)] += 1
+        await self._state.enter(_flow_key(flow_id, partition_key))
 
-    def record_end(self, flow_id: str, partition_key: str = "") -> None:
+    async def record_end(self, flow_id: str, partition_key: str = "") -> None:
         """Mark that a run has finished (decrement in-flight counter)."""
-        key = _flow_key(flow_id, partition_key)
-        if self._in_flight[key] > 0:
-            self._in_flight[key] -= 1
+        await self._state.leave(_flow_key(flow_id, partition_key))
 
-    def in_flight_count(self, flow_id: str, partition_key: str = "") -> int:
+    async def in_flight_count(self, flow_id: str, partition_key: str = "") -> int:
         """Return the current in-flight count for a flow/partition."""
-        return self._in_flight[_flow_key(flow_id, partition_key)]
+        return await self._state.in_flight(_flow_key(flow_id, partition_key))
 
     # -- evaluation ----------------------------------------------------------
 
@@ -211,7 +212,7 @@ class AdmissionController:
                 flow_id,
                 policy.concurrency.key or partition_key,
             )
-            if self._in_flight[ck] >= policy.concurrency.limit:
+            if await self._state.in_flight(ck) >= policy.concurrency.limit:
                 return AdmissionResult(
                     decision=AdmissionDecision.DELAY,
                     reason=(
@@ -223,18 +224,27 @@ class AdmissionController:
         # 2. Singleton ------------------------------------------------------
         if policy.singleton is not None:
             sk = _flow_key(flow_id, policy.singleton.key or partition_key)
-            if self._in_flight[sk] > 0 and policy.singleton.mode == "skip":
-                return AdmissionResult(
-                    decision=AdmissionDecision.SKIP,
-                    reason=f"singleton already running for {sk}",
+            if await self._state.in_flight(sk) > 0:
+                if policy.singleton.mode == "skip":
+                    return AdmissionResult(
+                        decision=AdmissionDecision.SKIP,
+                        reason=f"singleton already running for {sk}",
+                    )
+                # `cancel_previous` admitted the new run and cancelled nothing —
+                # the comment said "caller is responsible", and no caller was.
+                # Refused rather than silently ignored, the rule a sandbox
+                # already applies to a limit it cannot honour.
+                raise NotImplementedError(
+                    f"SingletonPolicy(mode={policy.singleton.mode!r}) is not "
+                    "implemented — it admitted the new run and cancelled "
+                    "nothing. Use mode='skip', or cancel the prior run yourself "
+                    "before submitting."
                 )
-                # "cancel_previous" — caller is responsible for actually
-                # cancelling the prior run; we just admit the new one.
 
         # 3. Throttle -------------------------------------------------------
         if policy.throttle is not None:
             min_interval = 1.0 / policy.throttle.max_per_second
-            last = self._last_admitted.get(key)
+            last = await self._state.read(f"{key}:last")
             if last is not None:
                 elapsed = moment - last
                 if elapsed < min_interval:
@@ -247,10 +257,11 @@ class AdmissionController:
 
         # 4. Rate limit -----------------------------------------------------
         if policy.rate_limit is not None:
-            log = self._rate_log[key]
+            log = list(await self._state.read(f"{key}:rate", []) or [])
             cutoff = moment - policy.rate_limit.period_seconds
             # Prune expired entries.
-            log[:] = [ts for ts in log if ts > cutoff]
+            log = [ts for ts in log if ts > cutoff]
+            await self._state.write(f"{key}:rate", log)
             if len(log) >= policy.rate_limit.requests:
                 oldest = log[0]
                 wait = oldest + policy.rate_limit.period_seconds - moment
@@ -263,8 +274,8 @@ class AdmissionController:
         # 5. Debounce -------------------------------------------------------
         if policy.debounce is not None:
             dk = _flow_key(flow_id, policy.debounce.key or partition_key)
-            last_trigger = self._debounce_last.get(dk)
-            self._debounce_last[dk] = moment
+            last_trigger = await self._state.read(f"{dk}:debounce")
+            await self._state.write(f"{dk}:debounce", moment)
             if last_trigger is not None:
                 elapsed = moment - last_trigger
                 if elapsed < policy.debounce.period_seconds:
@@ -276,12 +287,13 @@ class AdmissionController:
 
         # 6. Batch ----------------------------------------------------------
         if policy.batch is not None:
-            self._batch_counts[key] += 1
-            if key not in self._batch_first_ts:
-                self._batch_first_ts[key] = moment
-
-            count = self._batch_counts[key]
-            elapsed = moment - self._batch_first_ts[key]
+            count = int(await self._state.read(f"{key}:batch", 0) or 0) + 1
+            first = await self._state.read(f"{key}:batch_first")
+            if first is None:
+                first = moment
+                await self._state.write(f"{key}:batch_first", first)
+            await self._state.write(f"{key}:batch", count)
+            elapsed = moment - float(first)
 
             if count < policy.batch.max_size and elapsed < policy.batch.window_seconds:
                 return AdmissionResult(
@@ -290,10 +302,12 @@ class AdmissionController:
                     delay_seconds=policy.batch.window_seconds - elapsed,
                 )
             # Window expired or batch full — flush.
-            self._batch_counts[key] = 0
-            self._batch_first_ts.pop(key, None)
+            await self._state.write(f"{key}:batch", 0)
+            await self._state.write(f"{key}:batch_first", None)
 
         # All checks passed — record and admit.
-        self._last_admitted[key] = moment
-        self._rate_log[key].append(moment)
+        await self._state.write(f"{key}:last", moment)
+        admitted = list(await self._state.read(f"{key}:rate", []) or [])
+        admitted.append(moment)
+        await self._state.write(f"{key}:rate", admitted)
         return AdmissionResult(decision=AdmissionDecision.ADMIT)

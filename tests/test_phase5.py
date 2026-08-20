@@ -145,8 +145,8 @@ class TestAdmissionController:
         ctrl = AdmissionController()
         policy = FlowControlPolicy(concurrency=ConcurrencyPolicy(limit=2))
 
-        ctrl.record_start("flow1")
-        ctrl.record_start("flow1")
+        await ctrl.record_start("flow1")
+        await ctrl.record_start("flow1")
         result = await ctrl.evaluate("flow1", policy)
         assert result.decision == AdmissionDecision.DELAY
 
@@ -154,7 +154,7 @@ class TestAdmissionController:
         ctrl = AdmissionController()
         policy = FlowControlPolicy(concurrency=ConcurrencyPolicy(limit=2))
 
-        ctrl.record_start("flow1")
+        await ctrl.record_start("flow1")
         result = await ctrl.evaluate("flow1", policy)
         assert result.decision == AdmissionDecision.ADMIT
 
@@ -162,11 +162,11 @@ class TestAdmissionController:
         ctrl = AdmissionController()
         policy = FlowControlPolicy(concurrency=ConcurrencyPolicy(limit=1))
 
-        ctrl.record_start("flow1")
+        await ctrl.record_start("flow1")
         result = await ctrl.evaluate("flow1", policy)
         assert result.decision == AdmissionDecision.DELAY
 
-        ctrl.record_end("flow1")
+        await ctrl.record_end("flow1")
         result = await ctrl.evaluate("flow1", policy)
         assert result.decision == AdmissionDecision.ADMIT
 
@@ -176,7 +176,7 @@ class TestAdmissionController:
             singleton=SingletonPolicy(mode="skip")
         )
 
-        ctrl.record_start("flow1")
+        await ctrl.record_start("flow1")
         result = await ctrl.evaluate("flow1", policy)
         assert result.decision == AdmissionDecision.SKIP
 
@@ -203,20 +203,20 @@ class TestAdmissionController:
 
     async def test_in_flight_count(self) -> None:
         ctrl = AdmissionController()
-        assert ctrl.in_flight_count("flow1") == 0
-        ctrl.record_start("flow1")
-        assert ctrl.in_flight_count("flow1") == 1
-        ctrl.record_start("flow1")
-        assert ctrl.in_flight_count("flow1") == 2
-        ctrl.record_end("flow1")
-        assert ctrl.in_flight_count("flow1") == 1
+        assert await ctrl.in_flight_count("flow1") == 0
+        await ctrl.record_start("flow1")
+        assert await ctrl.in_flight_count("flow1") == 1
+        await ctrl.record_start("flow1")
+        assert await ctrl.in_flight_count("flow1") == 2
+        await ctrl.record_end("flow1")
+        assert await ctrl.in_flight_count("flow1") == 1
 
     async def test_partitioned_concurrency(self) -> None:
         ctrl = AdmissionController()
         policy = FlowControlPolicy(
             concurrency=ConcurrencyPolicy(limit=1, key="tenant")
         )
-        ctrl.record_start("flow1", partition_key="tenant")
+        await ctrl.record_start("flow1", partition_key="tenant")
 
         result = await ctrl.evaluate("flow1", policy, partition_key="tenant")
         assert result.decision == AdmissionDecision.DELAY

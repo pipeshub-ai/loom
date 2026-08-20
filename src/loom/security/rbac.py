@@ -1,12 +1,25 @@
 """Role-based access control for workflow operations.
 
-Defines roles, permissions, and an ``authorize`` function that checks
-whether a role can perform a given action.
+Defines roles, permissions, an ``authorize`` function that checks whether a
+role can perform a given action, and the :func:`requires` decorator that binds
+a permission to the method it guards.
+
+The decorator exists because the alternative did not work. A bare
+``self._authorize(Permission.X)`` on the first line of a method is a line
+somebody can forget, and four of them were forgotten — ``retry``, ``approve``,
+``send_event`` and ``publish`` all mutated a run with no check at all, while
+``tests/test_phase5.py`` asserted the role table and never once asserted a call
+site. A permission the method *carries* can be enumerated, so
+``TestEveryMutatingRuntimeMethodIsGuarded`` fails the build when the next
+method is added without one.
 """
 
 from __future__ import annotations
 
+import functools
+from collections.abc import Awaitable, Callable
 from enum import StrEnum
+from typing import Any, ParamSpec, TypeVar, cast
 
 
 class Permission(StrEnum):
@@ -76,3 +89,44 @@ def require(role: Role, permission: Permission) -> None:
         raise AuthorizationError(
             f"role '{role}' lacks permission '{permission}'"
         )
+
+
+# ---------------------------------------------------------------------------
+# Binding a permission to the method it guards
+# ---------------------------------------------------------------------------
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+PERMISSION_ATTR = "__loom_permission__"
+"""Where :func:`requires` records what it enforces, so a test can enumerate it."""
+
+
+def requires(
+    permission: Permission,
+) -> Callable[[Callable[_P, Awaitable[_R]]], Callable[_P, Awaitable[_R]]]:
+    """Enforce *permission* before the decorated coroutine runs, and say so.
+
+    The guard is a no-op when the object has no role configured — the
+    ``role=None`` default — so an embedded Runtime behaves exactly as it did
+    before any of this existed. The marker is set unconditionally, because the
+    test that reads it is about what the method *declares*, not about how a
+    particular instance is configured.
+    """
+
+    def decorate(fn: Callable[_P, Awaitable[_R]]) -> Callable[_P, Awaitable[_R]]:
+        @functools.wraps(fn)
+        async def guarded(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+            subject: Any = args[0]
+            subject._authorize(permission)
+            return await fn(*args, **kwargs)
+
+        setattr(guarded, PERMISSION_ATTR, permission)
+        return cast("Callable[_P, Awaitable[_R]]", guarded)
+
+    return decorate
+
+
+def permission_of(fn: Any) -> Permission | None:
+    """The permission :func:`requires` bound to *fn*, or ``None``."""
+    return cast("Permission | None", getattr(fn, PERMISSION_ATTR, None))

@@ -10,9 +10,11 @@ resumes at turn 9 rather than re-paying for the first eight turns.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from loom.agents.bounds import bound_result
@@ -33,6 +35,7 @@ from loom.agents.models import (
     ModelSettings,
     ToolSchema,
     estimate_cost,
+    supports_native_output,
 )
 from loom.agents.output import FINAL_OUTPUT_TOOL, OutputMode, OutputSpec
 from loom.agents.result import AgentResult, ItemKind, RunItem
@@ -85,6 +88,145 @@ class BuiltInAgentRuntime:
         said so once, and asking twice is how the two drift apart.
         """
         return getattr(context, "spill", None)
+
+    @dataclass(frozen=True)
+    class _ToolText:
+        """What one tool call contributed, in two forms.
+
+        `raw` is what the tool returned, rendered; `bounded` is what the model
+        is allowed to see. Kept apart because `ResultBounds` caps the
+        conversation and never the journal — a replay has to reconstruct the
+        run that happened.
+        """
+
+        raw: str
+        bounded: str
+
+    async def _dispatch_turn(
+        self,
+        calls: list[ToolCall],
+        *,
+        agent: Agent[Any],
+        tool_map: dict[str, Tool],
+        context: AgentContext | None,
+        turn: int,
+    ) -> list[BuiltInAgentRuntime._ToolText]:
+        """Run every tool call in one turn, concurrently, in call order.
+
+        The concurrency primitive is chosen by whether the agent is running
+        *inside a workflow*. If it is, `ctx.gather` is used rather than
+        `asyncio.gather`, because a tool that journals (`ctx.step` through
+        `ToolContext.workflow_ctx`) must take its journal paths from a
+        branch-local scope — the same reason `ctx.gather` exists at all. Using
+        the raw primitive here would reintroduce the ordering defect one layer
+        up, in code no workflow author wrote.
+
+        Failures are collected rather than propagated per call: a tool that
+        raised has an answer for the model ("Tool error: ..."), and one call
+        blowing up must not discard the answers its siblings produced. A
+        guardrail tripwire is the exception and is re-raised, because it means
+        the run must stop.
+        """
+        if not calls:
+            return []
+
+        workflow_ctx = getattr(context, "workflow_ctx", None) if context else None
+        work = [
+            self._one_tool_call(
+                call, agent=agent, tool_map=tool_map, context=context, turn=turn
+            )
+            for call in calls
+        ]
+        if workflow_ctx is not None and hasattr(workflow_ctx, "gather"):
+            settled = await workflow_ctx.gather(*work, return_exceptions=True)
+        else:
+            settled = await asyncio.gather(*work, return_exceptions=True)
+
+        for outcome in settled:
+            if isinstance(outcome, GuardrailTripwire):
+                raise outcome
+        for outcome in settled:
+            if isinstance(outcome, BaseException):
+                raise outcome
+        return list(settled)
+
+    async def _one_tool_call(
+        self,
+        call: ToolCall,
+        *,
+        agent: Agent[Any],
+        tool_map: dict[str, Tool],
+        context: AgentContext | None,
+        turn: int,
+    ) -> BuiltInAgentRuntime._ToolText:
+        """Guardrails, dispatch, logging and bounding for a single call."""
+        tool = tool_map.get(call.name)
+        if tool is None:
+            message = f"Unknown tool '{call.name}'. Available: {list(tool_map)}"
+            return self._ToolText(raw=message, bounded=message)
+
+        for guard in agent.guardrails:
+            verdict = await guard.evaluate(call.arguments, call.name)
+            if verdict.action is GuardrailAction.TRIPWIRE:
+                raise GuardrailTripwire(
+                    verdict.message, guardrail_name=guard.name, info=verdict.info
+                )
+            if verdict.blocked:
+                message = f"Guardrail rejected: {verdict.message}"
+                return self._ToolText(raw=message, bounded=message)
+
+        started = time.monotonic()
+        outcome = "ok"
+        result: Any = None
+        try:
+            tool_ctx = ToolContext(
+                run_id=context.run_id if context else "",
+                agent_name=agent.name,
+                tool_call_id=call.id,
+                deps=getattr(context, "deps", None) if context else None,
+                workflow_ctx=(
+                    getattr(context, "workflow_ctx", None) if context else None
+                ),
+            )
+            result = await _dispatch_tool(tool, call, tool_ctx, context)
+            result_str = tool.render_result(result)
+        except EffectDenied as denied:
+            # Answered rather than raised: an agent told what it may not do can
+            # pick another route, where a raised denial ends the run and loses
+            # the turn's work. The refusal names the grant, so the message is
+            # actionable to whoever reads the transcript too.
+            result_str = str(denied)
+            outcome = "denied"
+        except ModelRetry as retry:
+            result_str = str(retry)
+            outcome = "retry"
+        except Exception as exc:
+            result_str = f"Tool error: {type(exc).__name__}: {exc}"
+            outcome = "error"
+
+        # One line per call, at DEBUG: what was asked, what came back, and how
+        # long it took. An agent that loops does so invisibly otherwise — the
+        # turn count says it happened, not what it was doing.
+        tool_logger.debug(
+            "turn=%d %s(%s) -> %s %s in %.0fms",
+            turn,
+            call.name,
+            _brief(call.arguments),
+            outcome,
+            _brief(result_str, limit=160),
+            (time.monotonic() - started) * 1000,
+        )
+
+        bounded = await bound_result(
+            result_str,
+            result if outcome == "ok" else None,
+            bounds=agent.bounds,
+            store=self._spill_store(context),
+            run_id=context.run_id if context else "",
+            tool=call.name,
+            call_id=call.id,
+        )
+        return self._ToolText(raw=result_str, bounded=bounded)
 
     async def execute(
         self,
@@ -213,7 +355,8 @@ class BuiltInAgentRuntime:
         ]
         # Add final_output tool if using tool-based structured output
         resolved_mode = output_spec.resolve_mode(
-            supports_native=False, has_tools=bool(tool_schemas)
+            supports_native=supports_native_output(agent.model),
+            has_tools=bool(tool_schemas),
         )
         if resolved_mode is OutputMode.TOOL and output_spec.is_structured:
             tool_schemas.append(
@@ -242,7 +385,11 @@ class BuiltInAgentRuntime:
             # Prior turns sit between the system prompt and this turn's input, so
             # the agent sees the conversation in the order it happened.
             messages.extend(
-                trim_history(context.history, max_messages=limits.max_history_messages)
+                trim_history(
+                context.history,
+                max_messages=limits.max_history_messages,
+                max_tokens=limits.max_history_tokens,
+            )
             )
         messages.append(user(str(input)))
 
@@ -327,11 +474,19 @@ class BuiltInAgentRuntime:
                         tool_calls=all_tool_calls,
                     )
 
-                # Process regular tool calls
-                for call in response.message.tool_calls:
-                    if call.name == FINAL_OUTPUT_TOOL:
-                        continue
-                    all_tool_calls.append(call)
+                # Every tool call the model issued in this turn, dispatched
+                # together. They are independent by construction — the model
+                # asked for all of them before seeing any answer — so running
+                # them one after another spent the sum of their latencies for
+                # no reason. A turn calling four read operations was four round
+                # trips of waiting.
+                pending = [
+                    call
+                    for call in response.message.tool_calls
+                    if call.name != FINAL_OUTPUT_TOOL
+                ]
+                all_tool_calls.extend(pending)
+                for call in pending:
                     items.append(
                         RunItem(
                             kind=ItemKind.TOOL_CALL,
@@ -342,97 +497,17 @@ class BuiltInAgentRuntime:
                         )
                     )
 
-                    tool = tool_map.get(call.name)
-                    if tool is None:
-                        msg = f"Unknown tool '{call.name}'. Available: {list(tool_map)}"
-                        messages.append(tool_result(call.id, msg, name=call.name))
-                        items.append(RunItem(
-                            kind=ItemKind.TOOL_OUTPUT,
-                            agent=agent.name,
-                            name=call.name,
-                            content=msg,
-                            turn=turn,
-                        ))
-                        continue
+                outcomes = await self._dispatch_turn(
+                    pending, agent=agent, tool_map=tool_map, context=context, turn=turn
+                )
 
-                    # Run guardrails on tool call
-                    guardrail_blocked = False
-                    for guard in agent.guardrails:
-                        verdict = await guard.evaluate(call.arguments, call.name)
-                        if verdict.action is GuardrailAction.TRIPWIRE:
-                            raise GuardrailTripwire(
-                                verdict.message, guardrail_name=guard.name, info=verdict.info
-                            )
-                        if verdict.blocked:
-                            msg = f"Guardrail rejected: {verdict.message}"
-                            messages.append(
-                                tool_result(call.id, msg, name=call.name)
-                            )
-                            guardrail_blocked = True
-                            break
-                    if guardrail_blocked:
-                        continue
-
-                    # Execute tool
-                    started = time.monotonic()
-                    outcome = "ok"
-                    result: Any = None
-                    try:
-                        tool_ctx = ToolContext(
-                            run_id=context.run_id if context else "",
-                            agent_name=agent.name,
-                            tool_call_id=call.id,
-                            deps=getattr(context, "deps", None) if context else None,
-                            workflow_ctx=(
-                                getattr(context, "workflow_ctx", None) if context else None
-                            ),
-                        )
-                        result = await _dispatch_tool(tool, call, tool_ctx, context)
-                        result_str = tool.render_result(result)
-                    except EffectDenied as denied:
-                        # Answered rather than raised: an agent told what it may
-                        # not do can pick another route, where a raised denial
-                        # ends the run and loses the turn's work. The refusal
-                        # names the grant, so the message is actionable to
-                        # whoever reads the transcript too.
-                        result_str = str(denied)
-                        outcome = "denied"
-                    except ModelRetry as retry:
-                        result_str = str(retry)
-                        outcome = "retry"
-                    except Exception as exc:
-                        result_str = f"Tool error: {type(exc).__name__}: {exc}"
-                        outcome = "error"
-
-                    # One line per call, at DEBUG: what was asked, what came
-                    # back, and how long it took. An agent that loops does so
-                    # invisibly otherwise — the turn count says it happened,
-                    # not what it was doing.
-                    tool_logger.debug(
-                        "turn=%d %s(%s) -> %s %s in %.0fms",
-                        turn,
-                        call.name,
-                        _brief(call.arguments),
-                        outcome,
-                        _brief(result_str, limit=160),
-                        (time.monotonic() - started) * 1000,
+                # Appended in call order regardless of completion order, so the
+                # transcript a replay reconstructs does not depend on which
+                # tool happened to finish first.
+                for call, outcome in zip(pending, outcomes, strict=True):
+                    messages.append(
+                        tool_result(call.id, outcome.bounded, name=call.name)
                     )
-
-                    # Bound what the *conversation* carries. The item below
-                    # keeps the rendered result as-is, and the journal keeps
-                    # the value whole: a replay has to reconstruct the run that
-                    # happened, and an unbounded result is still what the tool
-                    # returned. Only the model's view is capped.
-                    bounded = await bound_result(
-                        result_str,
-                        result if outcome == "ok" else None,
-                        bounds=agent.bounds,
-                        store=self._spill_store(context),
-                        run_id=context.run_id if context else "",
-                        tool=call.name,
-                        call_id=call.id,
-                    )
-                    messages.append(tool_result(call.id, bounded, name=call.name))
                     items.append(RunItem(
                         kind=ItemKind.TOOL_OUTPUT,
                         agent=agent.name,
@@ -446,17 +521,27 @@ class BuiltInAgentRuntime:
                         # Without bounds this is unchanged — the journal keeps
                         # the value whole, because a replay has to reconstruct
                         # the run that happened.
-                        content=bounded if agent.bounds is not None else result_str,
+                        content=(
+                            outcome.bounded
+                            if agent.bounds is not None
+                            else outcome.raw
+                        ),
                         turn=turn,
                     ))
-                    limits.check_tool_calls(len(all_tool_calls))
+                limits.check_tool_calls(len(all_tool_calls))
 
                 continue
 
             # No tool calls — check for text-based final output
             if response.finish_reason is FinishReason.STOP:
                 text = response.message.text()
-                if output_spec.is_structured and resolved_mode is OutputMode.PROMPTED:
+                if output_spec.is_structured and resolved_mode in (
+                    OutputMode.PROMPTED,
+                    # NATIVE was never handled here, so a provider that opted
+                    # in would have had its schema-conforming JSON handed back
+                    # as a raw string — the parse the whole mode exists for.
+                    OutputMode.NATIVE,
+                ):
                     try:
                         output = output_spec.parse_text(text)
                     except ModelRetry as retry:

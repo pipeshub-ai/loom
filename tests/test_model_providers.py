@@ -656,7 +656,7 @@ class TestProvidersAreInterchangeable:
             instance.model_name = "x"
             assert isinstance(instance, ModelProvider), cls.__name__
 
-    def test_the_package_exports_the_three_providers_and_the_env_helper(self) -> None:
+    def test_the_package_exports_the_three_providers_and_the_env_helpers(self) -> None:
         import importlib
 
         module = importlib.import_module("loom.agents.providers")
@@ -664,8 +664,26 @@ class TestProvidersAreInterchangeable:
             "AnthropicProvider",
             "GeminiProvider",
             "OpenAIProvider",
+            # `vendor_of` and the model-selecting form of `from_env` exist so a
+            # caller can ask for one *specific* model — a stratified eval run,
+            # which is what a suite aimed at small-model compatibility needs.
+            "env_keys",
             "from_env",
+            "vendor_of",
         }
+
+    def test_from_env_can_select_a_named_model(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from loom.agents import providers
+
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        assert providers.from_env("claude-sonnet-5") is None
+
+    def test_an_unknown_model_family_selects_nothing(self) -> None:
+        from loom.agents.providers import vendor_of
+
+        assert vendor_of("llama-3-70b") is None
 
     def test_importing_the_package_needs_no_vendor_sdk(self) -> None:
         """Lazy exports: the extras are optional, so importing must be free.

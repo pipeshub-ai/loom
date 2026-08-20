@@ -96,6 +96,25 @@ NONDETERMINISTIC_CALLS: set[str] = {
     "random.choice",
 }
 
+#: Concurrency primitives that schedule work the journal cannot identify, and
+#: the ``ctx`` equivalent that can.
+#:
+#: A durable call takes its journal path from a counter, allocated when the
+#: call is *constructed*. Under a raw ``asyncio.gather`` two branches allocate
+#: from the same counter as they run, so the numbering depends on how long the
+#: previous step took — and on replay, where the timings differ, two logically
+#: distinct call sites are served each other's recorded values. ``ctx.gather``
+#: gives each branch its own numbering space and does not have this problem,
+#: which is why this is a redirection rather than a prohibition.
+UNSAFE_CONCURRENCY: dict[str, str] = {
+    "asyncio.gather": "ctx.gather(...)",
+    "asyncio.wait": "ctx.gather(...)",
+    "asyncio.as_completed": "ctx.gather(...)",
+    "asyncio.create_task": "ctx.gather(...)",
+    "asyncio.ensure_future": "ctx.gather(...)",
+    "asyncio.TaskGroup": "ctx.gather(...)",
+}
+
 
 @dataclass
 class CodeIssue:
@@ -405,6 +424,20 @@ class CodeValidator:
                         "determinism",
                         f"Nondeterministic call '{name}' in"
                         " workflow body — use ctx equivalent",
+                        "error",
+                    ),
+                )
+            if name in UNSAFE_CONCURRENCY:
+                issues.append(
+                    CodeIssue(
+                        "determinism",
+                        f"'{name}' in a workflow body schedules durable calls "
+                        f"the journal cannot tell apart on replay — two "
+                        f"branches allocate journal paths from one counter as "
+                        f"they run, so the numbering follows timing rather "
+                        f"than the code. Use "
+                        f"{UNSAFE_CONCURRENCY[name]}, which gives each branch "
+                        f"its own numbering space.",
                         "error",
                     ),
                 )

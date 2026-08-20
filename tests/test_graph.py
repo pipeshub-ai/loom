@@ -699,6 +699,14 @@ class TestGraphPatch:
 
 class TestRunTrace:
     def test_overlay_journal(self) -> None:
+        """Paths are the shape the *engine* produces — ordinals, not names.
+
+        This test used to build its entry with ``path="fetch"``, which no run
+        has ever written, and it passed while the overlay matched nothing at
+        all in production: a completed run rendered with every node pending.
+        A fixture that cannot occur proves nothing about the code that has to
+        handle the fixtures that do.
+        """
         graph = WGIRGraph(
             flow_id="test",
             nodes=[
@@ -708,7 +716,7 @@ class TestRunTrace:
         )
         journal = [
             JournalEntry(
-                path="fetch",
+                path="0",
                 name="fetch",
                 kind=EntryKind.STEP,
                 status=EntryStatus.COMPLETED,
@@ -731,6 +739,26 @@ class TestRunTrace:
         )
         trace = overlay_journal(graph, [])
         assert trace.node_traces["a"].status == "pending"
+
+    def test_a_journal_entry_naming_nothing_is_reported(self) -> None:
+        """A silently empty overlay is indistinguishable from a run that did
+        nothing, which is how the previous implementation stayed broken."""
+        graph = WGIRGraph(
+            flow_id="test",
+            nodes=[WGIRNode(id="a", kind=NodeKind.EFFECT, label="a")],
+        )
+        trace = overlay_journal(
+            graph,
+            [
+                JournalEntry(
+                    path="0",
+                    name="not_in_the_graph",
+                    kind=EntryKind.STEP,
+                    status=EntryStatus.COMPLETED,
+                )
+            ],
+        )
+        assert trace.unmatched_entries == ["not_in_the_graph"]
 
 
 # ---------------------------------------------------------------------------

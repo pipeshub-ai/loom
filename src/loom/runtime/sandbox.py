@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
 from loom.core.exceptions import WorkflowError
@@ -35,6 +36,7 @@ __all__ = [
     "ContextChannel",
     "ExecutionSandbox",
     "InlineSandbox",
+    "NetworkPolicy",
     "RuntimeChannel",
     "SandboxBody",
     "SandboxOutcome",
@@ -50,6 +52,24 @@ class SandboxViolation(WorkflowError):  # noqa: N818 - names the event
     A host wanting to tell "this workflow is broken" from "this workflow tried
     something it may not" needs the two to be different exceptions.
     """
+
+
+class NetworkPolicy(StrEnum):
+    """Whether a body may reach the network — asked, not assumed.
+
+    Three states because two could not distinguish "no opinion" from "must be
+    impossible", and collapsing those is how a sandbox ends up accepting an
+    isolation flag it does not implement.
+    """
+
+    UNSPECIFIED = "unspecified"
+    """No requirement either way. The sandbox applies its own default."""
+
+    DENY = "deny"
+    """Egress must be impossible. A sandbox that cannot guarantee it refuses."""
+
+    ALLOW = "allow"
+    """Egress is required. A sandbox that never grants it refuses."""
 
 
 @dataclass(frozen=True)
@@ -72,15 +92,73 @@ class SandboxPolicy:
     allowed_imports: frozenset[str] | None = None
     """Top-level modules the body may import. ``None`` means no import policy —
     the check belongs to ``CodeValidator`` at authoring time and this is a
-    second line, not the first."""
+    second line, not the first. A set that names nothing is still a policy: it
+    permits nothing beyond what the harness itself needs."""
 
     max_memory_mb: int | None = None
     max_cpu_seconds: int | None = None
     max_wall_seconds: float = 300.0
-    network: bool = False
-    """Declared rather than enforced by this class. A sandbox that cannot
-    actually prevent egress must say so through :attr:`ExecutionSandbox.enforces`
-    rather than accept the flag and ignore it."""
+
+    network: NetworkPolicy = NetworkPolicy.UNSPECIFIED
+    """Whether the body may reach the network, as a *three*-valued question.
+
+    It was a ``bool`` defaulting to ``False``, and the two states could not
+    carry three meanings: "I have not thought about egress" and "I require
+    egress to be impossible" were the same value, so the only safe reading was
+    the permissive one and :class:`SubprocessSandbox` accepted the flag and
+    ignored it — the exact failure this class's own docstring forbids.
+
+    ``UNSPECIFIED`` states no requirement and is the default, so every policy
+    written before this behaves as it did. ``DENY`` is a requirement, and a
+    sandbox that cannot honour it refuses the policy rather than running the
+    body unbounded. ``ALLOW`` is also a requirement, which is why
+    :class:`DockerSandbox` — which never grants egress — refuses it.
+
+    ``bool`` is still accepted for compatibility and normalised below.
+    """
+
+    def __post_init__(self) -> None:
+        # Frozen, so the normalisation goes through object.__setattr__. Only
+        # `True` maps to ALLOW: a bare `SandboxPolicy()` must keep meaning "no
+        # requirement", or every existing construction starts being refused.
+        if isinstance(self.network, bool):
+            resolved = NetworkPolicy.ALLOW if self.network else NetworkPolicy.DENY
+            object.__setattr__(self, "network", resolved)
+
+    def requirements(self) -> frozenset[str]:
+        """The limits this policy actually asks for, by field name.
+
+        A *requirement* is not the same as a field having a value: the
+        permissive end of each axis asks for nothing. Naming them here rather
+        than in each adapter is what keeps "what was asked" and "what can be
+        enforced" comparable — see :func:`unenforceable`.
+        """
+        asked: set[str] = set()
+        if self.allowed_env is not None:
+            asked.add("allowed_env")
+        if self.allowed_imports is not None:
+            asked.add("allowed_imports")
+        if self.max_memory_mb:
+            asked.add("max_memory_mb")
+        if self.max_cpu_seconds:
+            asked.add("max_cpu_seconds")
+        if self.max_wall_seconds:
+            asked.add("max_wall_seconds")
+        if self.network is not NetworkPolicy.UNSPECIFIED:
+            asked.add("network")
+        return frozenset(asked)
+
+
+def unenforceable(policy: SandboxPolicy, enforces: frozenset[str]) -> list[str]:
+    """Limits *policy* asks for that a sandbox declaring *enforces* will not apply.
+
+    One function rather than one per adapter, because the bug it prevents is a
+    per-adapter list that falls behind the policy: ``SubprocessSandbox`` checked
+    exactly two fields, so ``network`` and ``allowed_imports`` were accepted and
+    dropped in silence. Deriving the question from the policy means a field
+    added later is covered by every adapter at once.
+    """
+    return sorted(policy.requirements() - enforces)
 
 
 @dataclass

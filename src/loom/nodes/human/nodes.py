@@ -19,6 +19,7 @@ from loom.core.exceptions import ApprovalRejected
 from loom.nodes.base import Node, NodeContext
 from loom.nodes.errors import HumanRequestExpired
 from loom.nodes.human.asking import TimeoutPolicy, ask
+from loom.nodes.human.attest import ATTESTED_KEY, responder_of
 from loom.nodes.registry import register_node
 from loom.nodes.spec import (
     EffectClass,
@@ -164,7 +165,7 @@ def _approval_from(answer: Any, *, decided_at: datetime) -> ApprovalOut:
     if isinstance(answer, dict):
         return ApprovalOut(
             approved=bool(answer.get("approved", False)),
-            responder=str(answer.get("responder", "")),
+            responder=responder_of(answer),
             comment=str(answer.get("comment", "")),
             decided_at=answer.get("decided_at") or decided_at,
         )
@@ -247,7 +248,7 @@ class ChoiceNode(Node[ChoiceIn, ChoiceOut]):
             )
         return ChoiceOut(
             selected=selected,
-            responder=str(answer.get("responder", "")) if isinstance(answer, dict) else "",
+            responder=responder_of(answer),
         )
 
 
@@ -339,8 +340,12 @@ class FormNode(Node[FormIn, FormOut]):
             nested = answer.get("values")
             values: dict[str, Any] = nested if isinstance(nested, dict) else answer
             return FormOut(
-                values={k: v for k, v in values.items() if k != "responder"},
-                responder=str(answer.get("responder", "")),
+                values={
+                    k: v
+                    for k, v in values.items()
+                    if k not in ("responder", ATTESTED_KEY)
+                },
+                responder=responder_of(answer),
             )
         return FormOut(values={"value": answer})
 
@@ -426,7 +431,7 @@ class ReviewNode(Node[ReviewIn, ReviewOut]):
             content=content,
             edited=content != payload.draft,
             approved=approved,
-            responder=str(answer.get("responder", "")),
+            responder=responder_of(answer),
             comment=str(answer.get("comment", "")),
         )
 

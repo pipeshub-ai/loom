@@ -203,7 +203,7 @@ class TestTheAgentSurface:
         names = {t.name for t in build_coding_tools()}
 
         assert "observe_target" not in names
-        assert len(names) == 9
+        assert len(names) == 10
 
     def test_an_empty_registry_means_no_tool(self) -> None:
         """Present-and-always-failing is worse than absent: it spends context

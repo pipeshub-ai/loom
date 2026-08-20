@@ -30,6 +30,12 @@ class UsageLimits:
     max_history_messages: int = 40
     """How many prior turns a session replays into a new run. Older turns are
     dropped from the window, never from the stored session."""
+    max_history_tokens: int | None = None
+    """Token ceiling on that same window, applied after the message count.
+
+    A count of messages is a poor proxy for context: forty ordinary turns are
+    small, and forty turns each carrying a page of tool output are not. ``None``
+    keeps the previous behaviour, where only the count was bounded."""
 
     def check_turn(self, turn: int) -> None:
         if turn > self.max_turns:

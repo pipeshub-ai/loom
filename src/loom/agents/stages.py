@@ -164,6 +164,18 @@ class TypeStage:
                         "--no-error-summary",
                         "--no-color-output",
                         "--ignore-missing-imports",
+                        # The version *running* this, not whatever floor a
+                        # host's mypy config declares. `pyproject.toml` pins
+                        # 3.11 because that is LOOM's own support floor, and
+                        # inheriting it here makes mypy parse this
+                        # environment's site-packages stubs under a grammar
+                        # they were not written for.
+                        "--python-version",
+                        f"{sys.version_info.major}.{sys.version_info.minor}",
+                        # A generated file is not part of any project, so a
+                        # discovered config would apply somebody else's rules
+                        # to it.
+                        "--no-site-packages",
                         # Check this file, not the library it imports. Without
                         # this, mypy follows into loom itself and
                         # reports its internals as defects in the generated
@@ -191,12 +203,64 @@ class TypeStage:
             except (OSError, subprocess.TimeoutExpired) as exc:
                 return CheckResult(self.name, skipped=True, reason=f"mypy failed: {exc}")
 
-        issues = [
-            CodeIssue("types", line.split(":", 1)[-1].strip(), "warning")
-            for line in completed.stdout.splitlines()
-            if ": error:" in line
-        ]
-        return CheckResult(self.name, issues=issues)
+        return _mypy_result(self.name, path, completed.stdout)
+
+
+
+#: What mypy prints when it stopped before type-checking anything — a stub it
+#: could not parse, a plugin that failed to load. The distinction matters more
+#: than it looks: the errors that accompany it are about somebody else's files,
+#: and attributing them to the generated code sends the repair loop after a
+#: defect that is not there. ``scripts/typecheck.py`` exists to catch exactly
+#: this for LOOM's own sources; the stage that checks *generated* sources never
+#: had the same defence, so an environment with numpy installed reported
+#: "737: error: Type statement is only supported in Python 3.12 and greater"
+#: against a fourteen-line workflow.
+_MYPY_ABORTED = "errors prevented further checking"
+
+
+def _mypy_result(stage: str, target: Path, stdout: str) -> CheckResult:
+    """Turn mypy's stdout into findings *about the generated file only*.
+
+    Two rules, and the second is the one that was missing. Lines are attributed
+    by filename, so a diagnostic raised inside a dependency's stubs is not
+    reported as a defect in code the model wrote. And when mypy says it stopped
+    early, the stage reports itself **skipped** rather than passing or failing —
+    the pipeline's own rule that a check which could not run has found nothing.
+    """
+    if _MYPY_ABORTED in stdout:
+        return CheckResult(
+            stage,
+            skipped=True,
+            reason=(
+                "mypy stopped before checking anything (it could not parse "
+                "something in this environment), so it found nothing about "
+                "this code either way"
+            ),
+        )
+    issues = [
+        CodeIssue("types", line.split(":", 1)[-1].strip(), "warning")
+        for line in stdout.splitlines()
+        if ": error:" in line and _names_file(line, target)
+    ]
+    return CheckResult(stage, issues=issues)
+
+
+def _names_file(line: str, target: Path) -> bool:
+    """Whether a mypy diagnostic is about *target*.
+
+    Compared on the path mypy printed rather than on a prefix: it echoes back
+    whatever form it was given (absolute here, since the file lives in a
+    temporary directory), so a `startswith(basename)` test matches nothing and
+    a bare `in` test would match a dependency that happens to contain the name.
+    """
+    reported = line.split(":", 1)[0]
+    if not reported:
+        return False
+    try:
+        return Path(reported).name == target.name
+    except (OSError, ValueError):  # pragma: no cover - defensive
+        return False
 
 
 @dataclass

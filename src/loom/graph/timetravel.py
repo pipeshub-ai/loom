@@ -1,23 +1,30 @@
 """Time-travel — scrub a run timeline to any journal sequence number.
 
-Given a WGIR graph and a journal, ``snapshot_at(seq)`` returns the graph
-state at journal entry ``seq``: which nodes were completed, pending,
-or failed at that moment.
+Given a WGIR graph and a journal, ``snapshot_at(seq)`` returns the graph state
+at journal entry ``seq``: which nodes had completed, which had failed, and
+which had not been reached yet.
+
+Built on :func:`~loom.graph.trace.overlay_journal` rather than on its own
+matching pass. It had its own, and inherited the defect that made the overlay
+never match anything — two copies of one broken rule instead of one. Slicing
+the journal and overlaying the prefix is the same operation the live trace
+performs, so the scrubber and the run view cannot disagree about what a node
+was doing at a given moment.
 """
 
 from __future__ import annotations
 
-from loom.graph.trace import _match_to_node
+from loom.graph.trace import overlay_journal
 from loom.graph.wgir import WGIRGraph
 from loom.runtime.journal import JournalEntry
+
+__all__ = ["TimeTraveler"]
 
 
 class TimeTraveler:
     """Scrub the run timeline to any journal position."""
 
-    def __init__(
-        self, graph: WGIRGraph, journal: list[JournalEntry]
-    ) -> None:
+    def __init__(self, graph: WGIRGraph, journal: list[JournalEntry]) -> None:
         self._graph = graph
         self._journal = journal
         self._max_seq = len(journal) - 1 if journal else 0
@@ -30,33 +37,19 @@ class TimeTraveler:
     def snapshot_at(self, seq: int) -> WGIRGraph:
         """Return graph state at journal sequence *seq*.
 
-        Nodes that have been visited by sequence *seq* carry their
-        latest status in ``metadata["status"]``.  Unvisited nodes
-        have ``metadata["status"] = "pending"``.
+        Nodes reached by sequence *seq* carry their latest status in
+        ``metadata["status"]`` and the journal position that set it in
+        ``metadata["seq"]``. Nodes not yet reached are ``pending``; nodes that
+        express control flow are ``structural``, because a loop has no
+        execution of its own to be pending about.
         """
         snapshot = self._graph.model_copy(deep=True)
-        node_ids = snapshot.node_ids()
+        prefix = self._journal[: max(seq, -1) + 1]
+        overlay = overlay_journal(snapshot, prefix)
 
-        # Collect entries up to seq
-        active_entries = [
-            e for i, e in enumerate(self._journal) if i <= seq
-        ]
-
-        # Build latest status per node
-        node_status: dict[str, str] = {}
-        node_seq: dict[str, int] = {}
-        for i, entry in enumerate(active_entries):
-            nid = _match_to_node(entry.path, node_ids)
-            if nid is not None:
-                node_status[nid] = entry.status.value
-                node_seq[nid] = i
-
-        # Apply to snapshot
         for node in snapshot.nodes:
-            if node.id in node_status:
-                node.metadata["status"] = node_status[node.id]
-                node.metadata["seq"] = node_seq[node.id]
-            else:
-                node.metadata["status"] = "pending"
-
+            trace = overlay.node_traces.get(node.id)
+            node.metadata["status"] = trace.status if trace else "pending"
+            if trace is not None and trace.last_entry_index is not None:
+                node.metadata["seq"] = trace.last_entry_index
         return snapshot

@@ -39,6 +39,7 @@ import uuid
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
@@ -46,16 +47,65 @@ from pydantic import BaseModel, Field
 from loom.core.exceptions import WorkflowError
 
 __all__ = [
+    "CodeChanged",
     "MissingVersionContent",
     "Pins",
     "StoreBackedVersionStore",
     "UnknownVersion",
     "VersionActivation",
     "VersionConflict",
+    "VersionPolicy",
     "VersionStore",
     "WorkflowVersion",
     "content_hash_of",
 ]
+
+
+class CodeChanged(WorkflowError):  # noqa: N818 - names the event
+    """An in-flight run's workflow body is not the one it started with.
+
+    Distinct from a workflow failure and from a nondeterminism error: the code
+    did not go wrong and the journal did not diverge — a deployment happened
+    underneath a run that was waiting. A host that wants to hold such runs
+    until somebody looks needs this to be its own exception.
+    """
+
+
+class VersionPolicy(StrEnum):
+    """What a run resumes against when its workflow's code has changed.
+
+    The question only arises for a run that outlives a deploy, which is every
+    run parked on a timer or a human. Temporal answers it with worker build-IDs
+    plus ``patched()``; LOOM had ``ctx.patched()`` and nothing else, so the
+    author had to have anticipated the change.
+    """
+
+    LATEST = "latest"
+    """Run the code this process has. The historical behaviour, and the default.
+
+    Safe *because* the two divergences that actually corrupt a replay are
+    refused elsewhere by default: a different operation at a journal position
+    (``CompatibilityMode.STRICT``) and the same operation with different
+    arguments (``VerifyMode.STRICT``). What ``LATEST`` tolerates is the large
+    remainder — comments, renames, a new branch nothing reached — where
+    refusing would be pure cost.
+    """
+
+    PINNED = "pinned"
+    """Resume against the source the run started with.
+
+    Needs a :class:`VersionStore` holding that source; a run whose version was
+    never published cannot be pinned, and is refused rather than quietly
+    falling back to ``LATEST`` — silently doing the opposite of what was asked
+    is the failure this whole dial exists to remove.
+    """
+
+    REFUSE = "refuse"
+    """Do not resume at all. Leave the run where it is and say why.
+
+    For a deployment where a body changing underneath a live run is an incident
+    rather than a routine event.
+    """
 
 
 class MissingVersionContent(WorkflowError):  # noqa: N818 - names the absence
