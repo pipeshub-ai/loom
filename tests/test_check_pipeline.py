@@ -402,7 +402,7 @@ class TestRepairKeepsContext:
         context = CheckContext(spec="build something")
         report = await agent._pipeline.run(original, context)
 
-        code, rounds, declined = await agent._repair_from(Replying(), original, report, context)
+        code, rounds, _ = await agent._repair_from(Replying(), original, report, context)
 
         assert code == original, "prose replaced the code"
         assert rounds >= 1
@@ -422,7 +422,7 @@ class TestRepairKeepsContext:
         context = CheckContext(spec="double a number")
         report = await agent._pipeline.run(broken, context)
 
-        code, rounds, declined = await agent._repair_from(Fixing(), broken, report, context)
+        code, rounds, _ = await agent._repair_from(Fixing(), broken, report, context)
 
         assert code.strip() == fixed.strip()  # _extract_code strips
         assert rounds == 1
