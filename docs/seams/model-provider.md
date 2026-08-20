@@ -23,5 +23,6 @@ The single integration point for any LLM vendor.
 
 - `agents.agent`
 - `agents.coding_agent`
+- `agents.runner`
 
 <!-- END GENERATED -->

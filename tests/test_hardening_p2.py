@@ -797,6 +797,175 @@ class TestAWrongArgumentNameIsAnsweredNotJustReported:
         assert "unexpected keyword argument" in reply["error"]
 
 
+class TestALookupReplyKeepsItsShape:
+    """From a real run: the workflow was generated with `issues.result`, and
+    smoke failed with `'Results' object has no attribute 'result'`.
+
+    The model had not invented that. Over 8,000 characters the lookup tool
+    returned `{"result": <the serialized payload, as a string>}` — the envelope
+    nested inside itself, under the same key that otherwise holds the data, cut
+    mid-token so it did not even parse. The model read `result.result` and
+    wrote `.result` in the workflow.
+    """
+
+    @staticmethod
+    async def _reply(rows: int, width: int = 120):
+        import json
+        import sys
+        import types
+
+        import loom.agents.coding_tools as ct
+        from loom.agents.tool_registry import ToolsetRegistry
+        from loom.toolsets.manifest import EffectClass, OperationSpec, ToolsetManifest
+        from loom.toolsets.pagination import Results
+
+        found = Results(
+            [
+                {"key": f"PA-{i}", "summary": "x" * width, "status": "To Do"}
+                for i in range(rows)
+            ]
+        )
+        found.complete = False
+        found.total = 312
+
+        module = types.ModuleType("stub_read_tools")
+
+        async def stub_search(jql: str, max_results: int = 20):
+            return found
+
+        module.stub_search = stub_search
+        sys.modules["stub_read_tools"] = module
+
+        registry = ToolsetRegistry()
+        registry.register(
+            ToolsetManifest(
+                id="stub",
+                version="1.0.0",
+                summary="s",
+                tools_module="stub_read_tools",
+                groups={
+                    "issues": [
+                        OperationSpec(
+                            id="issues.search",
+                            function="stub_search",
+                            summary="search",
+                            effect=EffectClass.READ,
+                            input_schema={
+                                "type": "object",
+                                "properties": {"jql": {"type": "string"}},
+                                "required": ["jql"],
+                            },
+                        )
+                    ]
+                },
+            )
+        )
+        return json.loads(
+            await ct._call_read_operation(
+                "stub.issues.search", {"jql": "x"}, registry=registry, seen={}
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_small_result_is_a_list(self) -> None:
+        reply = await self._reply(rows=2)
+
+        assert isinstance(reply["result"], list)
+
+    @pytest.mark.asyncio
+    async def test_an_oversized_result_is_still_a_list(self) -> None:
+        """The shape must not depend on the size. It did, and the large case is
+        the one a lookup meets most."""
+        reply = await self._reply(rows=60)
+
+        assert reply["truncated"] is True
+        assert isinstance(reply["result"], list), "shape changed with size"
+
+    @pytest.mark.asyncio
+    async def test_the_envelope_is_not_nested_inside_itself(self) -> None:
+        """The direct cause of `issues.result` reaching the workflow."""
+        import json
+
+        reply = await self._reply(rows=60)
+
+        assert chr(34) + "result" + chr(34) not in json.dumps(reply["result"])
+
+    @pytest.mark.asyncio
+    async def test_every_row_shown_is_whole(self) -> None:
+        """Cutting the rendering left half a row and unparseable JSON; dropping
+        rows leaves every row that is shown readable."""
+        reply = await self._reply(rows=60)
+
+        assert reply["result"]
+        assert all(
+            set(row) == {"key", "summary", "status"} for row in reply["result"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_it_says_how_many_rows_it_left_out(self) -> None:
+        reply = await self._reply(rows=60)
+
+        assert "left out" in reply["note"]
+        assert reply["coverage"]["total"] == 312, "coverage survives truncation"
+
+
+class TestMechanicalFixesCostNoModelCall:
+    """A repair round costs a model call, several seconds, and — because a
+    reply that changes anything is a reply that did not *decline* — the ability
+    to accept an advisory finding. Spending one on deleting an unused import is
+    a bad trade twice over, and the SDK manufactures that finding by telling
+    the model to import `Retry` unconditionally."""
+
+    def test_the_prompts_own_mandated_import_is_removed_when_unused(self) -> None:
+        from loom.agents.tidy import tidy
+
+        source = chr(10).join([
+            "from loom import Context, Retry, step, workflow",
+            "",
+            "",
+            "@workflow(name='w')",
+            "async def w(ctx: Context, i=None) -> int:",
+            "    return 1",
+            "",
+        ])
+
+        result = tidy(source)
+
+        assert "Retry" not in result.code
+        assert "Context" in result.code and "workflow" in result.code
+        assert result.changed
+
+    def test_a_models_own_unused_import_goes_too(self) -> None:
+        from loom.agents.tidy import tidy
+
+        source = chr(10).join(["from datetime import date", "", "x = 1", ""])
+
+        assert "datetime" not in tidy(source).code
+
+    def test_code_that_needs_nothing_is_returned_unchanged(self) -> None:
+        from loom.agents.tidy import tidy
+
+        source = chr(10).join(["import os", "", "x = os.getcwd()", ""])
+
+        assert tidy(source).code == source
+
+    def test_only_behaviour_preserving_rules_are_applied(self) -> None:
+        """The licence for rewriting what a model wrote is that the change
+        cannot alter behaviour. Anything needing judgement stays a finding."""
+        from loom.agents.tidy import TIDY_RULES
+
+        assert set(TIDY_RULES) <= {"F401", "F541", "UP035", "UP008"}
+
+    def test_generate_tidies_before_the_pipeline_sees_the_code(self) -> None:
+        import inspect
+
+        from loom.agents.coding_agent import WorkflowCodingAgent
+
+        source = inspect.getsource(WorkflowCodingAgent.generate)
+
+        assert source.index("tidy(code)") < source.index("self._pipeline.run")
+
+
 class TestAnExhaustedRunReportsWhatItSpent:
     """A generation that burned twenty-two turns and four minutes came back
     reading `Tokens in 0`, `Tokens out 0`, `0 tool calls`.

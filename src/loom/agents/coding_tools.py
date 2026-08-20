@@ -617,14 +617,64 @@ async def _call_read_operation(
     rendered = json.dumps(payload, indent=2, default=str)
     if len(rendered) <= _READ_RESULT_LIMIT:
         return rendered
+
+    # Too big. Drop whole *rows*, never cut the *rendering*.
+    #
+    # This used to return `{"result": rendered[:LIMIT]}` — the serialized
+    # payload, as a string, under the same key that otherwise holds the data.
+    # Three things went wrong at once, and all of them reached the generated
+    # workflow:
+    #
+    #   * The shape changed with size. Under the limit `result` was a list;
+    #     over it, a string. One key, two types, and the model meets the second
+    #     far more often because big results are what get looked up.
+    #   * It nested the envelope inside itself, so the model read
+    #     `result.result` — and then wrote `issues.result` in the workflow,
+    #     against a `Results`, which is a list and has no such attribute. That
+    #     is a smoke failure caused entirely by the shape of a *lookup* reply.
+    #   * The cut landed mid-token, so what was left was not parseable JSON.
+    #     The only thing a reader could do with it was pattern-match the
+    #     prefix — which is exactly the wrong lesson to teach.
+    #
+    # Dropping rows keeps the shape invariant, keeps every row that is shown
+    # whole and readable, and says plainly how many were left out. The comment
+    # on `coverage` above already knew truncation destroys structure; this
+    # applies the same reasoning to the rows it was protecting.
+    rows = payload["result"]
+    if isinstance(rows, list) and rows:
+        kept = list(rows)
+        while kept and len(
+            json.dumps({**payload, "result": kept}, indent=2, default=str)
+        ) > _READ_RESULT_LIMIT:
+            kept.pop()
+        dropped = len(rows) - len(kept)
+        return json.dumps(
+            {
+                "result": kept,
+                "truncated": True,
+                "note": (
+                    f"{dropped} of {len(rows)} rows were left out to fit "
+                    f"{_READ_RESULT_LIMIT} characters. Narrow the query rather "
+                    "than assuming the rest look like these."
+                ),
+                **({"coverage": coverage} if coverage is not None else {}),
+            },
+            indent=2,
+            default=str,
+        )
+
+    # Not a list of rows — a single large value. There is nothing to drop, so
+    # say what it was rather than handing back half of it under a key that
+    # promises the whole.
     return json.dumps(
         {
-            "result": rendered[:_READ_RESULT_LIMIT],
+            "result": None,
             "truncated": True,
             "note": (
-                "This rendering was cut at "
-                f"{_READ_RESULT_LIMIT} characters — it is not the whole result. "
-                "Narrow the query rather than reading past the cut."
+                f"The result rendered to {len(rendered)} characters, over the "
+                f"{_READ_RESULT_LIMIT} limit, and is not a list of rows that "
+                "could be shortened. Ask for less: narrow the query, or read a "
+                "single record instead."
             ),
             **({"coverage": coverage} if coverage is not None else {}),
         },
