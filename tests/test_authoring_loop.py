@@ -513,8 +513,11 @@ class TestTheEscapeHatch:
                 assert "came back empty" in prompt
                 return _Reply(settled)
 
-        coder = WorkflowCodingAgent.__new__(WorkflowCodingAgent)
-        coder._max_repair = 3
+        # Constructed rather than hand-assembled with `__new__`: the loop grew
+        # `_on_stage` and `_narrate` after this test was written, and a stub
+        # built from a list of private attributes breaks every time one is
+        # added — which says nothing about the escape hatch.
+        coder = WorkflowCodingAgent(_NoModel(), max_repair_attempts=3)
         code, rounds, declined = await coder._repair_from(
             _Session(), settled, report, context(WANTS_EVERYTHING)
         )
@@ -572,6 +575,15 @@ class TestNothingElseMoved:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+class _NoModel:
+    """Enough of a ModelProvider to construct an agent. Never called."""
+
+    model_name = "none"
+
+    async def complete(self, request):  # pragma: no cover - never invoked
+        raise AssertionError("the repair loop is driven by the fake session")
 
 
 class _Reply:

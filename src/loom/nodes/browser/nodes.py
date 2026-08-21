@@ -24,6 +24,7 @@ import contextlib
 
 from pydantic import BaseModel, Field
 
+from loom.blobs.attachment import Attachment
 from loom.browser.base import (
     ActionMethod,
     ActionPlan,
@@ -35,6 +36,7 @@ from loom.browser.base import (
     Target,
     TreeNode,
 )
+from loom.browser.cache import PlanCache
 from loom.browser.errors import (
     AmbiguousTarget,
     SelectorDrift,
@@ -137,6 +139,19 @@ class PageOut(BaseModel):
         description="One line. Says when nothing on the page carries an "
                     "accessible name, which is the reason a target will not "
                     "resolve rather than a description of the page.")
+    screenshot: Attachment | None = Field(
+        default=None,
+        description="The page as an image, when `vision` was asked for. None "
+                    "otherwise — pixels are expensive to journal and tier 0 "
+                    "never reads them.")
+    """Evidence, for a person or a run trace rather than for the resolver.
+
+    The provider has always captured this under `vision`; until now `_page_out`
+    dropped it on the way out, so a caller paid for the pixels and received
+    nothing. An `Attachment` rather than a path: it journals losslessly, and
+    with `Runtime(blobs=…)` it offloads by content hash instead of putting a
+    quarter-megabyte of PNG in a journal row.
+    """
 
 
 async def _session_ref(session: BrowserSession) -> SessionRef:
@@ -160,6 +175,7 @@ def _page_out(snapshot: PageSnapshot, session: SessionRef | None = None) -> Page
         ],
         text=snapshot.text,
         summary=snapshot.summary(),
+        screenshot=snapshot.screenshot,
     )
 
 
@@ -204,6 +220,11 @@ class NavigateIn(BaseModel):
         default=120.0,
         description="Bounds the whole session. Without it a hung page holds a "
                     "provider slot until the run's lease expires.")
+    vision: bool = Field(
+        default=False,
+        description="Also capture a screenshot of the page that opened. For a "
+                    "person or a trace — tier 0 resolves targets from the "
+                    "accessibility tree and never reads pixels.")
     scope: SessionScope = Field(
         default=SessionScope.STEP,
         description=(
@@ -256,6 +277,12 @@ class BrowserNavigateNode(Node[NavigateIn, PageOut]):
         async def go() -> PageOut:
             session = await sessions.open(ctx.run_id, policy)
             page = await session.navigate(payload.url, wait=payload.wait)
+            if payload.vision:
+                # `navigate` has no vision flag of its own on the provider, so
+                # re-read once. One extra round trip against a page already
+                # open, rather than a second node call the author has to know
+                # to make.
+                page = await session.snapshot(vision=True)
             return _page_out(page, await _session_ref(session))
 
         produced: PageOut = await ctx.call("browser:navigate", go,
@@ -648,6 +675,25 @@ class BrowserObserveNode(Node[ObserveIn, ObserveOut]):
                 reason=("no control on this page carries an accessible name, so "
                         "there is nothing for a description to match"))
 
+        # A previous run may already have paid a model to answer this. A hit is
+        # **verified against the live page before it is used** — that is what
+        # makes a cross-run cache safe here: a stale entry costs a wasted lookup,
+        # never a wrong click.
+        cache = _plan_cache(ctx)
+        if cache is not None:
+            remembered = await cache.get(page.url, payload.intent, payload.role_hint)
+            if remembered is not None:
+                if await session.locate(remembered) == 1:
+                    return ObserveOut(
+                        found=True, tier=0,
+                        target=TargetIn(role=remembered.role, name=remembered.name,
+                                        ordinal=remembered.ordinal,
+                                        exact=remembered.exact),
+                        reason="from the plan cache; no model call")
+                # It no longer resolves. Drop it rather than let every later run
+                # re-verify the same dead entry before falling through.
+                await cache.forget(page.url, payload.intent, payload.role_hint)
+
         choice = await _choose(ctx, payload.intent, named)
         picked = next((c for c in named if c.name == choice), None)
         if picked is None:
@@ -655,6 +701,9 @@ class BrowserObserveNode(Node[ObserveIn, ObserveOut]):
                 found=False, tier=1,
                 candidates=[ControlOut(role=c.role, name=c.name) for c in named[:20]],
                 reason=f"no control matched {choice!r}")
+        resolved = Target(role=picked.role, name=picked.name, exact=True)
+        if cache is not None:
+            await cache.put(page.url, payload.intent, resolved, payload.role_hint)
         return ObserveOut(
             found=True, tier=1,
             target=TargetIn(role=picked.role, name=picked.name, exact=True),
@@ -701,6 +750,21 @@ async def _ask_model(ctx: NodeContext, intent: str, listed: str) -> str:
         "else. If none of them matches, reply NONE."
     )
     return str(getattr(answer, "output", answer) or "").strip()
+
+
+def _plan_cache(ctx: NodeContext) -> PlanCache | None:
+    """The Runtime's plan cache, or ``None`` when there is nothing to cache in.
+
+    Opportunistic, never required: a node that *demanded* a cache would refuse
+    to run somewhere it would otherwise work perfectly, just more expensively.
+    The same shape ``io.http_request`` uses for a ``ConnectionBroker`` it only
+    sometimes needs.
+    """
+    try:
+        store = ctx.capability("cache")
+    except ConfigurationError:
+        return None
+    return PlanCache(store, workflow=ctx.workflow)
 
 
 # ---------------------------------------------------------------------------

@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — every agent is told what day it is
+
+`loom author "who won the IPL in 2026"` wrote a refusal into the file where the
+workflow should have been: the season "hasn't happened yet", it explained, four
+months after it ended. Every verification stage passed it, and correctly — the
+file compiled, ran, and answered. Nothing downstream can catch that, because a
+model's sense of "now" is the end of its training data and it has no way to
+notice the sense is stale.
+
+So the system prompt now says when it is. `loom.agents.now.time_block()` renders
+the local date and time, the zone it is in (`Asia/Kolkata (UTC+05:30)` — the
+IANA name *and* the offset, since `IST` is three different zones and an offset
+alone cannot place a DST boundary), and the same instant in UTC, followed by the
+sentence that makes the date usable: your training data ended before this, so
+treat what you remember about what has happened as out of date, and look it up
+rather than declaring it impossible.
+
+It reaches `WorkflowCodingAgent` — appended even when `instructions=` has
+replaced the base prompt, because what a caller replaces is the *instructions*
+and the date has never been one of them — and every `Agent`, so `ctx.agent()`
+gets it too. The coding agent's copy carries one extra sentence: this is when
+the workflow is being **written**, so resolve a relative date the spec states
+and bake it in the way a resolved entity id is baked in, but anything the
+workflow needs about its own runtime comes from `ctx.now()`, never from a date
+copied out of the block.
+
+Rendered **once per agent run, never per turn** — `build_system_prompt()` is
+called once for a job and `execute()` builds its messages once for a turn loop
+— so a system prompt stays byte-identical across the conversation and remains
+eligible for provider-side caching. Time comes from the `Clock` port rather than
+`datetime.now()`, and `LocalFacade`, `run_agent_durably` and `BuiltInBackend`
+all hand over the Runtime's own, so an agent inside a workflow under
+`ManualClock` is told the moment the test chose. The zone is read from
+`$LOOM_TIMEZONE`, then `$TZ`, then `/etc/localtime` — which is the only place a
+Unix host keeps the zone's *name*, as `tzname()` returns an abbreviation — and
+falls back to the offset `astimezone()` reports.
+
+`Agent(time_aware=False)` is bit-for-bit what shipped before, for an agent whose
+job cannot turn on the date.
+
 ### Changed — the authoring job gets 30 turns, not 22
 
 `max_discovery_turns` was 20 and repair adds 2, so a spec naming several

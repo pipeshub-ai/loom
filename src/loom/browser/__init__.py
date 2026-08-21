@@ -29,6 +29,7 @@ from loom.browser.base import (
     Target,
     TreeNode,
 )
+from loom.browser.cache import PlanCache, page_shape
 from loom.browser.errors import (
     ActionFailed,
     AmbiguousTarget,
@@ -63,6 +64,7 @@ __all__ = [
     "LocalBrowserProvider",
     "LocalBrowserSession",
     "PageSnapshot",
+    "PlanCache",
     "SelectorDrift",
     "SessionHandle",
     "SessionLost",
@@ -72,5 +74,6 @@ __all__ = [
     "TreeNode",
     "get_browser_registry",
     "load_browser_entry_points",
+    "page_shape",
     "register_browser_provider",
 ]

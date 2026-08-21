@@ -919,6 +919,51 @@ advancing alone leaves a parked run parked, because nothing is driving the
 scheduler in a test. The lease heartbeat deliberately stays on the real clock:
 a lease is a claim against other processes, and a ManualClock would spin it.
 
+### What time the agent thinks it is
+
+A model's "now" is the end of its training data, and it cannot tell that the
+sense is stale. `loom author "who won the IPL in 2026"` returned a refusal
+written into the workflow file — the season "hasn't happened yet" — four months
+after it ended, and **every verification stage passed it**, correctly: the file
+compiled, ran, and answered. That failure is invisible from below, so it is
+fixed at the prompt.
+
+`loom.agents.now.time_block()` renders the local date and time, the zone
+(`Asia/Kolkata (UTC+05:30)` — the IANA name *and* the offset, because `IST` is
+Indian, Irish and Israeli Standard Time and an offset alone cannot place a DST
+boundary), the same instant in UTC, and the sentence that makes a date usable:
+your training data ended before this, so an event you remember as upcoming may
+be months past — look it up rather than declaring it impossible.
+
+Every `Agent` gets it (`time_aware=False` is bit-for-bit what shipped before,
+for a classifier whose job cannot turn on the date), and so does
+`WorkflowCodingAgent` — **appended even when `instructions=` has replaced the
+base prompt outright**, the position the package list and the toolset docs
+already take: what a caller replaces is the *instructions*, and what day it is
+has never been one of them.
+
+The coding agent's copy carries `AUTHORING_TIME_NOTE`, which exists because a
+date in a prompt is an invitation to write it into the file. This is when the
+workflow is being *written*: resolve a relative date the spec states ("last
+quarter") into a fixed one and bake it in with the spec's words in a comment,
+exactly as rung 2 of the resolution ladder does with an entity id — but
+anything the workflow needs about **its own** runtime comes from `ctx.now()`,
+which is wrong on every run after today if copied from here.
+
+**Rendered once per agent run, never per turn.** `build_system_prompt()` is
+called once for a job and `execute()` builds its messages once for a turn loop,
+so the system prompt stays byte-identical across a conversation and remains
+eligible for provider-side caching. A block recomputed per turn would invalidate
+that cache every minute, on every agent, to report a minute nobody reads.
+
+Time comes from the `Clock` port, not `datetime.now()` — `LocalFacade`,
+`run_agent_durably` and `BuiltInBackend` all hand over the Runtime's own, so an
+agent inside a workflow under `ManualClock` is told the moment the test chose
+and "does the agent know the date" is an assertion rather than something that
+drifts with the wall clock. The zone ladder is `$LOOM_TIMEZONE`, `$TZ`,
+`/etc/localtime` — the only place a Unix host keeps the zone's *name*, since
+`tzname()` returns an abbreviation — then the offset `astimezone()` reports.
+
 ### Pagination
 
 `toolsets/pagination.py`. **The return type is the declaration**: a read that

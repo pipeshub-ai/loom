@@ -26,6 +26,7 @@ Wait for *seconds*, however this clock understands waiting.
 
 ## Consumers
 
+- `agents.now`
 - `connectors.credentials`
 - `connectors.oauth_client`
 - `connectors.refresh`

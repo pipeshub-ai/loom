@@ -605,7 +605,7 @@ one is the failure mode a reader will copy.
 **New**
 
 ```
-src/loom/browser/{__init__,base,errors,local,fake,resolve,sessions,registry}.py
+src/loom/browser/{__init__,base,errors,local,fake,resolve,sessions,cache,registry}.py
 src/loom/nodes/browser/{__init__,nodes}.py
 tests/test_browser_nodes.py                 # nodes, lifecycle, journal shape
 tests/test_browser_effects.py               # 13.2 — declared effects, taint, tier 1, drift
@@ -653,14 +653,6 @@ and `[all]` gains one Apache-2.0 package.** `browser/registry.py` is the
 `loom_browser_provider` entry point loader, ~40 lines copied in shape from
 `probes/registry.py`; it is how Stagehand and browser-use adapters arrive
 without LOOM importing either.
-
-**Not built: `cache.py`.** A cross-run plan cache wants `ctx.state`, and
-`NodeContext` deliberately excludes it — "shared across every run of the
-workflow… a node that could reach them can change a run its author never saw".
-Reaching past that boundary for a cache is not a call to make in passing, and
-the alternative (a cache capability on the Runtime) is a design decision of its
-own. Tier 0 already answers without a model on an exact name, which is where
-most of the saving was. See 13.2 below.
 
 **Adapters LOOM does not ship**, documented in the guide with the conformance
 call that proves them:
@@ -740,13 +732,20 @@ browser write is therefore unreachable, and the usable configuration today is
 the narrow dial. `TestApprovalNeedsADurableSession` pins this so it is visible
 in the suite rather than in somebody's production run.
 
-**Deferred with a reason: `PlanCache`.** Caching plans across runs wants
-`ctx.state`, and `NodeContext` deliberately excludes it — "shared across every
-run of the workflow… a node that could reach them can change a run its author
-never saw". Reaching past that boundary for a cache is not a call to make in
-passing; the alternative (a cache capability) is a design decision of its own.
-Tier 0 already answers without a model on an exact name, which is where most of
-the saving was.
+**`PlanCache` — built, and the objection that deferred it was answered rather
+than overruled.** Caching wanted `ctx.state`, which `NodeContext` excludes
+because state is *semantic*: a workflow branches on it, and a node writing to it
+can change a run nobody reviewed. A plan cache is none of those things —
+deleting it changes no outcome, nothing branches on it, and **a hit is verified
+against the live page before it is used**, so a stale entry costs a wasted
+lookup rather than a wrong click. It also needed no new capability: `Runtime.cache`
+already exists and defaults to the store.
+
+Keyed on the page *shape* (scheme, host, path — never the query), so two rows of
+one form share a plan instead of filling the cache with an entry per record, and
+scoped per workflow, because the same words can mean different controls to
+different workflows. A stale entry is replaced rather than dropped, so the run
+that finds it also fixes it.
 
 **13.2 — as designed.** `observe`, `ActionPlan.tier`,
 `PlanCache`, declared act effects, drift policy. *Exit:* **E2 and E3** — a

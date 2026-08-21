@@ -208,6 +208,12 @@ _CAPABILITY_ATTRS: dict[str, str] = {
     "browser": "browser",
     "browser_sessions": "browser_sessions",
 }
+#: Deliberately absent: ``cache``. This map exists for capability names that
+#: *differ* from the attribute holding them (``human_channel`` -> ``human``),
+#: and ``capability()`` already falls back to the name itself. Adding an
+#: identity entry would also break the invariant that everything mapped here is
+#: a reportable optional port — and ``Runtime.cache`` is never ``None``, since
+#: it defaults to the store.
 
 
 # ---------------------------------------------------------------------------

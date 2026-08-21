@@ -63,6 +63,14 @@ class AgentContext(BaseModel):
     results too large to put in front of the model. Passed in rather than
     discovered, so the agent layer keeps no reference to the Runtime."""
 
+    clock: Any = None
+    """Optional :class:`~loom.runtime.clock.Clock` for the current-date block in
+    the system prompt. Passed in rather than discovered, for the reason
+    ``spill`` and ``hooks`` are: the agent layer holds no reference to a
+    Runtime, so an agent invoked directly falls back to the wall clock instead
+    of needing one to tell it the time. Threading it means an agent inside a
+    workflow under ``ManualClock`` is told the moment the test chose."""
+
     hooks: Any = None
     """Optional :class:`~loom.runtime.hooks.HookRegistry`, when this agent runs
     inside a workflow. Passed in rather than discovered, for the same reason

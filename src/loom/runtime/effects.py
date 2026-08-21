@@ -100,11 +100,23 @@ class EffectCall:
     asks_human: bool = False
     """Whether this call is the run *asking a person*, rather than acting.
 
-    Set from a node declaring ``requires=["human_channel"]`` — a structural
-    marker rather than a name match, so a project's own approval node is
-    covered too. Read by ``TaintBroker``, which must never refuse one: the
-    escape hatch that makes the taint rule usable is a human saying yes, and a
-    rule that blocks the only way to ask is a deadlock rather than a policy.
+    Set from a node that declares **both** ``requires=["human_channel"]`` and
+    ``suspends`` — structural rather than a name match, so a project's own
+    approval node is covered, and narrow because either claim alone is not the
+    thing. A node that merely names a channel could be doing anything; one that
+    also parks the run is waiting for a person, which is what this exempts.
+
+    Read by ``TaintBroker``, which must never refuse one: the escape hatch that
+    makes the taint rule usable is a human saying yes, and a rule that blocks
+    the only way to ask is a deadlock rather than a policy.
+
+    **What it does not do.** It exempts the *asking*, not the run. A write
+    after the ask is weighed normally, and the recipient a workflow names in
+    ``assignees`` is the channel's business — LOOM has always said it "claims
+    nothing more about it" than what the channel reports. A host whose channel
+    honours arbitrary recipients has a delivery path a tainted run can reach;
+    that is a property of the channel, and it is asserted rather than implied
+    in ``tests/test_taint.py``.
     """
 
     open_world: bool = True

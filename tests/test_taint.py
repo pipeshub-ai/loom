@@ -738,3 +738,176 @@ class TestAskingAPersonIsNeverRefused:
         assert len(seen) >= 2, "expected the node call and its delivery"
         assert all(flag for _, flag in seen), (
             f"a human call reached the broker without asks_human: {seen}")
+
+
+class TestTheHumanExemptionIsNarrow:
+    """What ``asks_human`` covers, and — more importantly — what it does not.
+
+    Exempting anything from a security control earns adversarial tests rather
+    than a docstring. Three properties below, and one residual that is
+    *asserted* so nobody mistakes silence for coverage — the shape
+    ``core/redaction.py`` already uses for a secret interpolated into a string.
+    """
+
+    @staticmethod
+    def _channel():
+        from loom.nodes.human.channel import DeliveryReceipt
+
+        class Recording:
+            name = "recording"
+
+            def __init__(self) -> None:
+                self.delivered: list[Any] = []
+
+            async def deliver(self, request: Any) -> Any:
+                self.delivered.append(request)
+                return DeliveryReceipt(channel=self.name, delivered=True)
+
+            async def withdraw(self, request_id: str, reference: str = "") -> None:
+                return None
+
+        return Recording()
+
+    @staticmethod
+    def _node(*, requires: list[str], suspends: bool, node_id: str):
+        """A node claiming whatever the test needs it to claim."""
+        from pydantic import BaseModel
+
+        from loom.nodes.base import Node
+        from loom.nodes.spec import NodeCategory, NodeSpec
+
+        class In(BaseModel):
+            pass
+
+        class Out(BaseModel):
+            done: bool = True
+
+        class Claimant(Node[In, Out]):
+            spec = NodeSpec(
+                id=node_id,
+                category=NodeCategory.CUSTOM,
+                summary="Claims a human channel.",
+                effect=EffectClass.WRITE,
+                open_world=True,
+                deterministic=False,
+                requires=requires,
+                suspends=suspends,
+            )
+            Input, Output = In, Out
+
+            async def run(self, ctx: Any, payload: In) -> Out:
+                return Out(done=True)
+
+        return Claimant
+
+    async def test_a_node_that_names_a_channel_but_never_parks_is_not_exempt(
+        self,
+    ) -> None:
+        """The hole the narrowing closes.
+
+        On ``requires`` alone, any third-party node could declare a human
+        channel it never uses and receive blanket taint exemption for whatever
+        else it does. Asking a person means *waiting* for one.
+        """
+        runtime = Runtime(store=MemoryStore(), human=self._channel(),
+                          broker=TaintBroker(DirectBroker(), TaintPolicy()))
+        runtime.nodes.register_node(
+            TestAskingAPersonIsNeverRefused._reader())
+        runtime.nodes.register_node(
+            self._node(requires=["human_channel"], suspends=False,
+                       node_id="custom.pretends_to_ask"))
+
+        @workflow(name="claims_a_channel_only")
+        async def flow(ctx: Any, _input: Any) -> str:
+            await ctx.node("custom.read_the_world", {})
+            await ctx.node("custom.pretends_to_ask", {})
+            return "wrote"
+
+        result = await runtime.run(flow, None)
+        assert result.status is ExecutionStatus.FAILED
+        assert result.error and "read external data" in result.error.message
+
+    async def test_a_node_that_parks_without_a_channel_is_not_exempt(self) -> None:
+        """The other half. Parking alone is a timer, not a person."""
+        runtime = Runtime(store=MemoryStore(), human=self._channel(),
+                          broker=TaintBroker(DirectBroker(), TaintPolicy()))
+        runtime.nodes.register_node(
+            TestAskingAPersonIsNeverRefused._reader())
+        runtime.nodes.register_node(
+            self._node(requires=[], suspends=True, node_id="custom.just_waits"))
+
+        @workflow(name="parks_without_asking")
+        async def flow(ctx: Any, _input: Any) -> str:
+            await ctx.node("custom.read_the_world", {})
+            await ctx.node("custom.just_waits", {})
+            return "wrote"
+
+        result = await runtime.run(flow, None)
+        assert result.status is ExecutionStatus.FAILED
+        assert result.error and "read external data" in result.error.message
+
+    async def test_the_exemption_does_not_survive_the_ask(self) -> None:
+        """Asking is exempt; acting afterwards is not — until somebody answers.
+
+        The rule would be pointless if reaching a person also licensed the
+        write they had not yet approved.
+        """
+        runtime = Runtime(store=MemoryStore(), human=self._channel(),
+                          broker=TaintBroker(DirectBroker(), TaintPolicy()))
+        runtime.nodes.register_node(
+            TestAskingAPersonIsNeverRefused._reader())
+
+        @workflow(name="ask_then_write_anyway")
+        async def flow(ctx: Any, _input: Any) -> str:
+            await ctx.node("custom.read_the_world", {})
+            await ctx.node("human.approval", {"subject": "please"})
+            await ctx.node("io.http_request",
+                           {"url": "http://127.0.0.1:9/x", "method": "POST"})
+            return "wrote"
+
+        parked = await runtime.run(flow, None)
+        assert parked.status is ExecutionStatus.SUSPENDED
+
+        # Resumed *without* an approval event: the ask happened, nobody said
+        # yes, and the write must still be refused.
+        resumed = await runtime.resume(parked.run_id)
+        assert resumed.status is not ExecutionStatus.COMPLETED
+
+    async def test_the_residual_a_tainted_run_can_still_reach_the_channel(
+        self,
+    ) -> None:
+        """Asserted, not closed — and the distinction is the point.
+
+        A tainted run may put what it read into an approval's ``context`` and
+        name its own ``assignees``. Both are deliberate: showing the reviewer
+        what was read is the *purpose* of the request, and routing it to the
+        right team is ordinary. But it does mean the human channel is a
+        delivery path a tainted run can reach, and whether that path leaks
+        depends on whether the host's channel honours a recipient the workflow
+        chose.
+
+        LOOM has always disclaimed that — "whether they are authenticated is
+        the channel's business" — and this test exists so the disclaimer is
+        visible in the suite rather than only in a docstring.
+        """
+        channel = self._channel()
+        runtime = Runtime(store=MemoryStore(), human=channel,
+                          broker=TaintBroker(DirectBroker(), TaintPolicy()))
+        runtime.nodes.register_node(
+            TestAskingAPersonIsNeverRefused._reader())
+
+        @workflow(name="carries_what_it_read")
+        async def flow(ctx: Any, _input: Any) -> str:
+            found = await ctx.node("custom.read_the_world", {})
+            await ctx.node("human.approval", {
+                "subject": "review",
+                "context": {"read": found.text},
+                "assignees": ["whoever-the-workflow-named@example.com"]})
+            return "asked"
+
+        result = await runtime.run(flow, None)
+        assert result.status is ExecutionStatus.SUSPENDED
+
+        request = channel.delivered[0]
+        assert request.context["read"] == "something nobody reviewed"
+        assert request.assignees == ["whoever-the-workflow-named@example.com"]

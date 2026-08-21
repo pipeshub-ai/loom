@@ -73,6 +73,19 @@ class Agent(Generic[OutputT]):
     value still reaches the journal, and, when a spill store is configured,
     stays retrievable through ``read_spill`` / ``grep_spill``.
     """
+    time_aware: bool = True
+    """Whether to tell the model what day it is.
+
+    On by default, because the failure it prevents is silent: a model's sense
+    of "now" is the end of its training data, so it answers questions about
+    anything since then from a position it has no way to know is stale — and
+    the answer reads as considered rather than as a guess. The block is
+    rendered once per run, not per turn, so it costs a few dozen tokens and
+    does not disturb provider-side caching of the system prompt.
+
+    Turn it off for an agent whose job cannot turn on the date — a classifier
+    over a fixed taxonomy — where those tokens buy nothing."""
+
     metadata: dict[str, Any] = field(default_factory=dict)
 
     async def __call__(

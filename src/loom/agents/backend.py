@@ -80,6 +80,12 @@ class BuiltInBackend:
         A ``ModelProvider`` instance (e.g. ``AnthropicProvider()``).
     instructions:
         Optional system prompt prepended to every agent call.
+    clock:
+        Optional :class:`~loom.runtime.clock.Clock`, threaded through to the
+        current-date block the turn loop puts in the system prompt. Left out,
+        that block reads the wall clock — right in production, and wrong for a
+        test that has moved the Runtime's clock and expects the agent to agree
+        with the workflow calling it.
     """
 
     supports_history = True
@@ -89,9 +95,11 @@ class BuiltInBackend:
         model: Any,
         *,
         instructions: str = "",
+        clock: Any | None = None,
     ) -> None:
         self._model = model
         self._instructions = instructions
+        self._clock = clock
 
     async def run(
         self,
@@ -115,5 +123,9 @@ class BuiltInBackend:
         return await agent(
             prompt,
             settings=AgentSettings(max_turns=max_turns) if max_turns else None,
-            context=AgentContext(agent_id=agent_id, history=list(history or [])),
+            context=AgentContext(
+                agent_id=agent_id,
+                history=list(history or []),
+                clock=self._clock,
+            ),
         )

@@ -336,3 +336,90 @@ class TestEffectDeclarations:
 
         assert NodeCategory.BROWSER in CATEGORY_BLURBS
         assert "\n" not in CATEGORY_BLURBS[NodeCategory.BROWSER]
+
+
+class TestEvidenceReachesTheCaller:
+    """`vision` captured a screenshot and threw it away.
+
+    The provider has always taken the picture — `PageSnapshot.screenshot` held
+    it, and `local.py` filled it in — but `_page_out` built its `PageOut`
+    without that field, so a caller passed `vision=True`, paid for the pixels,
+    and received nothing. Found by watching the coding agent: given a spec that
+    asked for screenshots it searched the catalogue for "screenshot", "vision",
+    "capture", "artifact" and "image" across twelve turns, found nothing that
+    could produce one, and ran out of budget without writing a line.
+    """
+
+    def test_page_out_can_carry_a_screenshot(self) -> None:
+        from loom.nodes.browser import PageOut
+
+        assert "screenshot" in PageOut.model_fields
+
+    def test_it_is_an_attachment_not_a_path(self) -> None:
+        """So it journals losslessly, and offloads by content hash when blobs
+        are configured rather than putting a PNG in a journal row."""
+        from loom.blobs.attachment import Attachment
+        from loom.nodes.browser import PageOut
+
+        shot = Attachment.from_bytes("page.png", b"\x89PNG" + b"x" * 64,
+                                     mime="image/png")
+        page = PageOut(url="https://example.test", screenshot=shot)
+
+        assert page.screenshot is not None
+        assert page.screenshot.mime == "image/png"
+        assert PageOut.model_validate_json(page.model_dump_json()).screenshot == shot
+
+    def test_no_vision_means_no_screenshot(self) -> None:
+        """Pixels stay opt-in: tier 0 resolves from the accessibility tree and
+        never reads them."""
+        from loom.nodes.browser import PageOut
+
+        assert PageOut(url="https://example.test").screenshot is None
+
+    def test_navigate_can_ask_for_one(self) -> None:
+        """Proving you reached a page should not need a second node call."""
+        from loom.nodes.browser import NavigateIn
+
+        assert "vision" in NavigateIn.model_fields
+        assert NavigateIn(url="https://example.test").vision is False
+
+
+class TestTheRuntimeCanReachABrowser:
+    """Without this the whole node suite is unreachable from every surface.
+
+    `loom run` refused a browser workflow with "requires browser, which this
+    Runtime does not have configured", and the only way to satisfy it was to
+    construct the Runtime by hand in Python — so no CLI, MCP or HTTP caller
+    could use a browser node at all.
+    """
+
+    def test_from_env_wires_a_provider_when_the_extra_is_installed(self) -> None:
+        import pytest as _pytest
+
+        _pytest.importorskip("playwright.async_api")
+        from loom.runtime.engine import Runtime
+
+        assert Runtime.from_env().browser is not None
+
+    def test_an_explicit_none_still_wins(self) -> None:
+        """`Runtime(browser=None)` is how a caller insists on having none."""
+        from loom.runtime.engine import Runtime
+
+        assert Runtime.from_env(browser=None).browser is None
+
+    def test_a_missing_extra_is_not_an_error(self, monkeypatch) -> None:
+        """The node's own requirement check reports it, the same way a missing
+        model key leaves `agent_backend` unset rather than failing startup."""
+        import builtins
+
+        real = builtins.__import__
+
+        def refuse(name, *args, **kwargs):
+            if name.startswith("playwright"):
+                raise ImportError("no playwright here")
+            return real(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", refuse)
+        from loom.runtime.engine import _browser_from_env
+
+        assert _browser_from_env() is None

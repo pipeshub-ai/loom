@@ -642,6 +642,10 @@ class Runtime:
         here rather than failing on a Runtime that cannot call a model. Pass
         ``agent_backend=`` to choose one explicitly, or ``agent_backend=None``
         to insist on having none.
+
+        A browser provider is wired the same way when the ``browser`` extra is
+        installed, so a workflow calling a ``browser.*`` node runs here instead
+        of refusing. Nothing launches until such a node is actually called.
         """
         from loom.blobs.blob import blob_service_from_env
         from loom.stores.factory import store_from_env
@@ -652,9 +656,13 @@ class Runtime:
             if blobs is not None:
                 overrides["blobs"] = blobs
         if "agent_backend" not in overrides:
-            backend = _backend_from_env()
+            backend = _backend_from_env(overrides.get("clock"))
             if backend is not None:
                 overrides["agent_backend"] = backend
+        if "browser" not in overrides:
+            provider = _browser_from_env()
+            if provider is not None:
+                overrides["browser"] = provider
         return cls(**overrides)
 
     # -- registration -----------------------------------------------------------------
@@ -2568,7 +2576,29 @@ class Runtime:
         return spawned
 
 
-def _backend_from_env() -> Any | None:
+def _browser_from_env() -> Any | None:
+    """A local browser provider when playwright is installed, else ``None``.
+
+    Wiring the provider costs nothing until a workflow calls a ``browser.*``
+    node — no browser is launched by having one available. Without this the
+    nodes are unreachable from every surface that builds its Runtime from the
+    environment, which is all of them: ``loom run`` refused a browser workflow
+    with "requires browser, which this Runtime does not have configured", and
+    the only way to satisfy it was to construct the Runtime by hand in Python.
+
+    ``None`` when the extra is absent, so the node's own requirement check
+    reports it — the same shape as ``_backend_from_env`` and blobs above.
+    """
+    try:
+        import playwright.async_api  # noqa: F401
+
+        from loom.browser.local import LocalBrowserProvider
+    except Exception:
+        return None
+    return LocalBrowserProvider()
+
+
+def _backend_from_env(clock: Any | None = None) -> Any | None:
     """Build an agent backend from whichever provider key is present.
 
     ``None`` when no key is set, or when the pieces are not installed — a
@@ -2584,7 +2614,7 @@ def _backend_from_env() -> Any | None:
         from loom.agents.backend import BuiltInBackend
     except Exception:  # pragma: no cover - depends on env
         return None
-    return BuiltInBackend(model=provider)
+    return BuiltInBackend(model=provider, clock=clock)
 
 
 _RESERVED_METADATA = frozenset({"loom.env", "loom.credential_names"})

@@ -1880,7 +1880,14 @@ class Context(Generic[DepsT]):
             # `deliver:` call inside it was not, so a tainted run still could
             # not reach the person whose answer was the only thing that would
             # clear it. A node's own work is the node.
-            "asks_human": "human_channel" in spec.requires,
+            # Two claims, not one, and the second is what keeps this narrow.
+            # A node that *asks* a person needs a channel **and parks the
+            # run** — every shipped `human.*` node declares both. On
+            # `requires` alone, a third-party node could name a channel it
+            # never uses and receive blanket taint exemption for whatever
+            # else it does.
+            "asks_human": (
+                "human_channel" in spec.requires and spec.suspends),
         }
 
         async def perform(attempt: int, step_ctx: StepContext) -> Any:
@@ -1930,7 +1937,9 @@ class Context(Generic[DepsT]):
                 "effect_by": spec.effect_by,
                 "open_world": spec.open_world,
                 "effect_target": node_id,
-                "asks_human": "human_channel" in spec.requires,
+                # See the note on the inherited dict: a channel *and* a park.
+                "asks_human": (
+                    "human_channel" in spec.requires and spec.suspends),
                 # Journaled so a node upgraded between a run and its replay is
                 # caught rather than decoding an old payload into a new model.
                 "contract": spec.contract_hash,

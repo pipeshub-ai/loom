@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 
 from loom.agents.checks import CheckContext, CheckPipeline
 from loom.agents.generation import Asking
+from loom.agents.now import time_block
 from loom.agents.smoke import SmokeResult, smoke_run
 from loom.agents.stages import ADVISORY_STAGES, default_stages
 from loom.agents.supervisor import CodeSupervisor, SupervisorVerdict
@@ -632,6 +633,25 @@ def _session_id_for(store: Any, resume: Any) -> str:
     return new_session_id()
 
 
+#: The one sentence about "now" that is true for an author and for nobody else.
+#:
+#: A date in the prompt is an invitation to write it into the file, and a
+#: workflow with today's date frozen in it is wrong on every run after this
+#: one. So the block that tells the agent when it is says, in the same breath,
+#: which half of that date belongs in the code — the same split the resolution
+#: ladder already makes between an id resolved once at authoring time and a
+#: value that arrives with each run.
+AUTHORING_TIME_NOTE = (
+    "This is when the workflow is being *written*, not when it will run. Use it"
+    " to reason about what exists and what has already happened, and to resolve"
+    " a relative date the spec states (\"last quarter\") into a fixed one, with"
+    " the words from the spec in a comment beside it. Anything the workflow"
+    " needs to know about *its own* runtime comes from `ctx.now()` — never a"
+    " date copied out of this block, which would be wrong on every run after"
+    " today."
+)
+
+
 class WorkflowCodingAgent:
     """LLM-powered agent that authors LOOM workflow code.
 
@@ -659,6 +679,10 @@ class WorkflowCodingAgent:
         from the spec. Left out, the ``observe_target`` tool is not offered and
         the agent behaves exactly as it did before, which is the intended
         degradation rather than a limitation to work around.
+    clock:
+        Where "now" comes from for the current-date block in the system
+        prompt. Defaults to the wall clock; pass ``Runtime.clock`` to have an
+        authoring job read the same time as everything else in a deployment.
     tool_docs:
         Optional pre-loaded tool documentation strings.
         When provided, the agent can skip discovery and go straight
@@ -690,8 +714,15 @@ class WorkflowCodingAgent:
         on_stage: Any | None = None,
         session_store: Any | None = None,
         resume: Any | None = None,
+        clock: Any | None = None,
     ) -> None:
         self._model = model
+        self._clock = clock
+        """Where the current date in the system prompt is read from.
+
+        ``None`` means the wall clock. A caller with a Runtime should pass its
+        own — ``Runtime.clock`` — so an authoring job under ``ManualClock`` is
+        told the moment the test chose rather than the moment it runs."""
         self._session_store = session_store
         """Optional :class:`~loom.agents.session_store.SessionStore`.
 
@@ -817,6 +848,14 @@ class WorkflowCodingAgent:
         to the model before invoking ``generate()``.
         """
         parts = [self._instructions if self._instructions is not None else DEFAULT_SYSTEM_PROMPT]
+
+        # Environment, like the package list below it, and so appended even when
+        # `instructions=` has replaced the base prompt outright: what a caller
+        # replaces is the *instructions*, and what day it is has never been one
+        # of them. A model cannot derive the date, and one that assumes it is
+        # still in its training window writes a refusal where the workflow
+        # should be.
+        parts.append(time_block(self._clock, note=AUTHORING_TIME_NOTE))
 
         if self._allowed_packages is not None:
             listed = ", ".join(sorted(self._allowed_packages)) or "none"

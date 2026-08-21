@@ -38,6 +38,7 @@ from loom.agents.models import (
     estimate_cost,
     supports_native_output,
 )
+from loom.agents.now import time_block
 from loom.agents.output import FINAL_OUTPUT_TOOL, OutputMode, OutputSpec
 from loom.agents.result import AgentResult, ItemKind, RunItem
 from loom.agents.tools import Tool, ToolContext
@@ -455,19 +456,26 @@ class BuiltInAgentRuntime:
                 )
             )
 
-        # Build initial messages
-        messages: list[Message] = []
+        # Build initial messages.
+        #
+        # One system message, assembled here and then held for the whole turn
+        # loop. The date is rendered once for that reason: re-rendering it per
+        # turn would change the system prompt every minute, and a system prompt
+        # that changes is one no provider can cache.
+        sections: list[str] = []
         if agent.instructions:
             prompt = agent.instructions
             if "{input}" in prompt:
                 prompt = prompt.replace("{input}", str(input))
-            messages.append(system(prompt))
+            sections.append(prompt)
+        if agent.time_aware:
+            sections.append(time_block(getattr(context, "clock", None)))
         if resolved_mode is OutputMode.PROMPTED and output_spec.is_structured:
-            messages[0] = system(
-                (messages[0].content or "")
-                + "\n\n"
-                + output_spec.prompt_instructions()
-            )
+            sections.append(output_spec.prompt_instructions())
+
+        messages: list[Message] = []
+        if sections:
+            messages.append(system("\n\n".join(sections)))
         if context is not None and context.history:
             # Prior turns sit between the system prompt and this turn's input, so
             # the agent sees the conversation in the order it happened.
@@ -912,5 +920,9 @@ async def run_agent_durably(
         workflow_ctx=ctx,
         spill=ctx._runtime.spill,
         hooks=ctx._runtime.hooks,
+        # So an agent inside a workflow reads the same clock the engine does —
+        # under `ManualClock` it is told the moment the test chose rather than
+        # the moment the test runs.
+        clock=ctx._runtime.clock,
     )
     return await agent(input, settings=settings, context=context)

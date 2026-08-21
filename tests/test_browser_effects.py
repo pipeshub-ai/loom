@@ -384,3 +384,147 @@ class TestDrift:
         assert result.status.value == "failed"
         assert result.error is not None
         assert result.error.type == "TargetNotFound"
+
+
+class TestThePlanCache:
+    """Paying a model once for an intent, not once per run.
+
+    The saving Stagehand's action cache and Skyvern's code cache both exist to
+    capture — here it is 30 lines over ``CacheStore``, because the hard part
+    (serving a settled call without re-resolving) is what the journal already
+    does, and this only has to cover the *second run*.
+    """
+
+    async def test_a_second_run_costs_no_model_call(self) -> None:
+        model = MockModelProvider(responses=[mock_response("Confirm booking")])
+        provider = FakeBrowserProvider({PAGE.url: PAGE}, permissive=False)
+        store = MemoryStore()
+
+        @workflow(name="observe_twice")
+        async def flow(ctx: Context, _input) -> dict:
+            await ctx.node("browser.navigate", {"url": PAGE.url})
+            found = await ctx.node(
+                "browser.observe", {"intent": "whichever one finalises it"})
+            return {"tier": found.tier, "name": found.target.name
+                    if found.target else None, "why": found.reason}
+
+        rt = Runtime(store=store, browser=provider,
+                     agent_backend=BuiltInBackend(model))
+        first = await rt.run(flow, None)
+        assert first.output["tier"] == 1, first.output
+
+        # One scripted response. A second model call would raise, so this run
+        # passing *is* the assertion that none was made.
+        second = await rt.run(flow, None)
+        assert second.status.value == "completed", second.error
+        assert second.output["tier"] == 0
+        assert second.output["name"] == "Confirm booking"
+        assert "plan cache" in second.output["why"]
+
+    async def test_a_stale_entry_is_discarded_not_acted_on(self) -> None:
+        """The property that makes a cross-run cache safe at all.
+
+        A remembered target is verified against the live page before it is
+        used. Without that, the cache would be a way to click something that is
+        no longer there — or worse, something else that has taken its place.
+        """
+        from loom.browser import PlanCache, Target
+
+        store = MemoryStore()
+        cache = PlanCache(store, workflow="observe_stale")
+        # A plan from a page that has since changed.
+        await cache.put(PAGE.url, "whichever one finalises it",
+                        Target(role="button", name="Submit order", exact=True))
+
+        model = MockModelProvider(responses=[mock_response("Confirm booking")])
+        provider = FakeBrowserProvider({PAGE.url: PAGE}, permissive=False)
+
+        @workflow(name="observe_stale")
+        async def flow(ctx: Context, _input) -> dict:
+            await ctx.node("browser.navigate", {"url": PAGE.url})
+            found = await ctx.node(
+                "browser.observe", {"intent": "whichever one finalises it"})
+            return {"tier": found.tier, "name": found.target.name
+                    if found.target else None}
+
+        rt = Runtime(store=store, browser=provider,
+                     agent_backend=BuiltInBackend(model))
+        result = await rt.run(flow, None)
+
+        assert result.status.value == "completed", result.error
+        # Fell through to tier 1 rather than handing back "Submit order".
+        assert result.output == {"tier": 1, "name": "Confirm booking"}
+
+        # And it has been *replaced*, not merely dropped — so the next run gets
+        # the corrected answer for free rather than paying tier 1 again.
+        remembered = await cache.get(PAGE.url, "whichever one finalises it")
+        assert remembered is not None
+        assert remembered.name == "Confirm booking"
+
+    async def test_replay_never_reaches_the_cache(self) -> None:
+        """A settled observe is served by the journal, which is stricter.
+
+        The cache answers the second *run*; the journal answers the *replay*.
+        Confusing the two would let a replay pick up a plan the original run
+        never used.
+        """
+        model = MockModelProvider(responses=[mock_response("Confirm booking")])
+        provider = FakeBrowserProvider({PAGE.url: PAGE}, permissive=False)
+        store = MemoryStore()
+
+        @workflow(name="observe_then_replay")
+        async def flow(ctx: Context, _input) -> int:
+            await ctx.node("browser.navigate", {"url": PAGE.url})
+            found = await ctx.node(
+                "browser.observe", {"intent": "whichever one finalises it"})
+            return found.tier
+
+        rt = Runtime(store=store, browser=provider,
+                     agent_backend=BuiltInBackend(model))
+        first = await rt.run(flow, None)
+        assert first.output == 1
+
+        replayed = await rt.replay(first.run_id)
+        # Still 1 — the journal returned what actually happened, not what the
+        # cache would say now.
+        assert replayed.output == 1
+
+    def test_the_key_ignores_the_part_that_identifies_a_record(self) -> None:
+        """Two rows of the same form share a plan; two forms do not.
+
+        Keying on the full URL would miss on every record while filling the
+        cache with one entry per row — the per-record identity lives in the
+        query, which is exactly what must stay out of the key.
+        """
+        from loom.browser import PlanCache
+
+        cache = PlanCache(MemoryStore(), workflow="w")
+        same = cache.key("https://x.test/book?id=1", "the confirm button")
+        also = cache.key("https://x.test/book?id=2", "the confirm button")
+        other = cache.key("https://x.test/cancel", "the confirm button")
+
+        assert same == also
+        assert same != other
+
+    def test_two_workflows_do_not_share_an_answer(self) -> None:
+        """The same words can mean different controls to different workflows."""
+        from loom.browser import PlanCache
+
+        one = PlanCache(MemoryStore(), workflow="alpha")
+        two = PlanCache(MemoryStore(), workflow="beta")
+        assert one.key(PAGE.url, "submit") != two.key(PAGE.url, "submit")
+
+    async def test_a_broken_cache_is_a_missing_one(self) -> None:
+        """Best-effort throughout: a cache that raises would turn a saving into
+        an outage, and there is nothing here a caller cannot simply redo."""
+        from loom.browser import PlanCache, Target
+
+        class Hostile:
+            async def get(self, key): raise RuntimeError("down")
+            async def set(self, key, value, ttl): raise RuntimeError("down")
+            async def delete(self, key): raise RuntimeError("down")
+
+        cache = PlanCache(Hostile(), workflow="w")
+        assert await cache.get(PAGE.url, "x") is None
+        await cache.put(PAGE.url, "x", Target(role="button", name="Go"))
+        await cache.forget(PAGE.url, "x")

@@ -544,6 +544,10 @@ class TestTheEscapeHatchIsHonoured:
         from loom.agents.coding_agent import WorkflowCodingAgent, _settle_advisories
 
         agent = WorkflowCodingAgent.__new__(WorkflowCodingAgent)
+        # `_repair_from` narrates through `_on_stage`; a bare instance has no
+        # attributes at all, and `_narrate` tolerates a None *value* but not a
+        # missing one.
+        agent._on_stage = None
         agent._max_repair = 3
         agent._pipeline = CheckPipeline([])
         session = _Declining()
@@ -627,6 +631,10 @@ class TestTheEscapeHatchIsHonoured:
         from loom.agents.coding_agent import WorkflowCodingAgent
 
         agent = WorkflowCodingAgent.__new__(WorkflowCodingAgent)
+        # `_repair_from` narrates through `_on_stage`; a bare instance has no
+        # attributes at all, and `_narrate` tolerates a None *value* but not a
+        # missing one.
+        agent._on_stage = None
         agent._max_repair = 3
         agent._pipeline = CheckPipeline([])
 
@@ -1148,6 +1156,10 @@ class TestResolutionFlagsQueriesNotProse:
                 return type("R", (), {"output": CodingOutput(code=code)})()
 
         agent = WorkflowCodingAgent.__new__(WorkflowCodingAgent)
+        # `_repair_from` narrates through `_on_stage`; a bare instance has no
+        # attributes at all, and `_narrate` tolerates a None *value* but not a
+        # missing one.
+        agent._on_stage = None
         agent._max_repair = 3
         agent._pipeline = pipeline
         _, _, declined = await agent._repair_from(

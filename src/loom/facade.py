@@ -1076,6 +1076,10 @@ class LocalFacade:
             allowed_packages=set(packages) if packages else None,
             smoke_input=smoke_input,
             user_interaction=self.user_interaction,
+            # The same "now" the runs read. A Runtime under `ManualClock` and
+            # an authoring job reading the wall clock would disagree about the
+            # date in the one place that has to agree with it.
+            clock=self.runtime.clock,
             # Only when asked. A spec naming several systems needs more turns
             # than the default, and a run that ends "exceeded its budget"
             # produced nothing having spent everything.
