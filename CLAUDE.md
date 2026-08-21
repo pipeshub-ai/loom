@@ -40,12 +40,15 @@ loom artifacts <run>                   # what the run produced
 loom providers                         # OAuth providers with endpoints built in
 loom connect gmail                     # OAuth a credential a workflow can read
 loom whoami                            # what is stored, and whether it is ok/due/expired
-loom refresh [--all] [--force]         # renew what is near expiry; exit 1 if any failed
+loom refresh [names...] [--force]      # renew what is near expiry; exit 1 if any failed
 loom disconnect gmail / loom logout    # drop one credential, or all of them
 
 # catalogue
 loom toolsets / loom toolset <id>      # integrations this process can reach
 loom nodes / loom node <id>            # the node catalogue, and one node's contract
+
+# the environment itself
+loom doctor                            # store, model, modules, toolsets, extras
 
 # serving
 loom workflows
@@ -53,6 +56,9 @@ loom publish onboard
 loom serve --port 8000
 loom mcp                               # serve over MCP, needs [mcp]
 loom ui                                # terminal UI, needs [tui]
+
+# the session
+loom                                   # no subcommand, at a terminal: a session
 ```
 
 **Finding a workflow.** `loom run path.py::name` always works. `loom run name`
@@ -61,11 +67,62 @@ imports nothing and asks a running server — every run-side command takes it, a
 nothing else about the command changes, because local and remote go through one
 `RuntimeFacade`.
 
+**A project keeps its runs; a scratch directory does not.** `loom.cli.config`
+resolves the store `--store` > `$LOOM_STORE` > `[tool.loom] store` >
+`.loom/runs.db` beside the nearest `pyproject.toml` > `memory://`. The last one
+is reached only when there is no project at all, because nowhere-to-write and
+not-wanting-to-write are different things.
+
+The default used to be `memory://` outright, and it made twelve of the forty
+commands inert: every process built its own journal, so a run recorded by one
+invocation did not exist for the next and `loom runs` answered "none" out of the
+box. `--detach` was worse — it printed an identifier for a run that ceased to
+exist when the command ended, so looking it up reported no such run, which reads
+as the run having vanished rather than as never having been kept. Where a
+*library* keeps its journal is still the host's decision; where a *command line*
+keeps it is a property of the directory you are standing in, exactly as
+`[tool.loom] modules` already is.
+
+`.env` is read from the project root, real environment variables winning. The
+cookbooks have done this since they existed and the CLI did not — only
+`auth_commands`, only for one OAuth port — so a project with
+`ANTHROPIC_API_KEY` in `.env` ran under `python examples/…` and failed under
+`loom author`, and the failure message said so in as many words.
+
+**`loom doctor` answers "why did that not work" before it happens.** Store URL
+and whether it can actually be written (a URL that parses and a store that
+accepts a write are different claims), which provider key is set, whether the
+declared modules import, how many workflows registered, toolsets reachable,
+extras installed, credentials stored. Exit 1 on anything that would fail later:
+a checker that always succeeds can only be read by a person, and the failures
+worth catching are the ones nobody is looking at.
+
 **Exit codes are the contract:** `0` completed, `1` failed, `2` usage,
 **`3` suspended**, `4` cancelled, and `128 + signum` interrupted (`130` Ctrl+C,
 `143` SIGTERM). The third one matters — a run parked on a human has neither
 succeeded nor failed, and collapsing it into either makes calling scripts do the
 wrong thing. A suspended run prints the command that unparks it.
+
+`3` also covers **giving up on a run still in flight**. `STATUS_EXIT` mapped
+`running` to `0`, so a CI job that watched a run for five minutes and stopped
+exited green — the same conflation, one state over. `exit_for(run, settled=)`
+takes the flag from `follow()`, which is the only thing that knows: a run
+reported mid-flight by `loom show` is a successful report, and the same status
+after a `--timeout` expired is not.
+
+**A rendering fault must never change any of that.** `Printer.value`
+interpolated a run's own output into a markup-enabled `console.print`, so a
+workflow returning `"[/tag]"` raised `MarkupError` from inside the renderer,
+nothing caught it, and a run that *completed* printed a traceback and exited 1
+while `--json` printed it and exited 0. The renderers carrying data —
+`value`, `status`, `table` — build `rich.text.Text`, which has no markup to
+parse; `line` stays markup-capable because its templates are literals in this
+repository, escapes interpolated data through `output.esc`, and falls back to
+the escaped form rather than raising if a call site ever forgets. `_strip_markup`
+removes the ten tags this package writes and nothing else — it used to match any
+bracketed lowercase word, which deleted `[dev]` out of `pip install -e '.[dev]'`
+and handed every new user an install that leaves them without the pytest the
+next line tells them to run.
 
 **A signal is not an error.** `loom.runtime.shutdown` routes SIGINT and SIGTERM
 to one place: cancel the work, let it unwind, report it as what it is. That
@@ -83,8 +140,92 @@ and `serve`/`mcp` exit `0` on either signal, because a server asked to stop and
 which stopped has succeeded. Nothing is installed by importing the module — a
 library that seizes the process's signal handlers is one you cannot embed.
 
+**Grouped help, and a page.** `loom --help` printed argparse's default —
+forty entries, ungrouped, with `author` and `run` sixth and seventh in a list
+nobody reads to the end. The epilog groups them by what you are trying to do,
+built from `_HANDLERS` so a new command cannot fall out; anything not in
+`_GROUPS` is listed under "Other" rather than hidden, because a capability that
+ships and vanishes from `--help` is the discoverability problem restated.
+
+`docs/guides/cli.md` is the thirteenth guide, and the first one about the
+surface most people meet — `getting-started.md` was Python-first and never
+mentioned `loom`. `scripts/docs_examples.py` executes `python` blocks, which a
+CLI page has none of, so `tests/test_cli_docs.py` checks the part that actually
+rots instead: every `loom <subcommand>` the page names exists, every `--flag`
+it shows is one that subcommand accepts, and the exit-code table matches the
+enum. It found `loom refresh --all` on its first run — a flag `CLAUDE.md` had
+promised in two places and the parser never had.
+
 **`--json` on every command**, so output pipes into `jq`. Human output uses
 `rich` when installed (`[cli]` extra) and strips styling when not a TTY.
+`--quiet` suppresses human output entirely and `--debug` keeps the traceback for
+a failure no command anticipated — everything the three `except` arms in
+`run_async` do not name reached the user as forty frames that say nothing about
+which of them is theirs to fix.
+
+**`--follow` follows.** It did not imply `--detach`, so `start` drove the run to
+completion and `follow` then polled a run that had already finished: every
+journal line arriving at once, after the fact, from the one flag whose purpose
+is that they do not. `submit` spawns the drive on the same loop, so the poll and
+the run now progress together. `RuntimeFacade.journal()` takes the `offset`
+`reports()` already had, so a follower reads what is new rather than refetching
+the whole log every 400ms and paying for it again in transfer.
+
+**An absent `--input` is not `--input null`.** The engine passes the input
+positionally, so omitting the flag used to override a body's own default with
+`None` — `async def flow(ctx, x: str = "a")` ran with `None` and failed inside
+the first step with a `TypeError` that reads as a broken workflow.
+`WorkflowDefinition.input_default` exposes the declared default rather than
+`invoke` applying it, because an explicit `None` and an absent argument are
+different things and only the caller knows which it has.
+
+### The session
+
+`loom` with no subcommand, at a terminal, opens an interactive session
+(`loom/cli/repl/`, needs `[cli]` for `prompt_toolkit`). Piped, redirected, in
+CI, or under `--json` it prints help and exits 0 exactly as it always has —
+the terminal check is what makes the change safe for everything already
+written against it.
+
+**Free text acts on the file in focus.** With one, it is an *edit*; with none,
+it writes a new workflow and focus follows what it wrote, which is the loop —
+describe, look, change, run — the CLI had no surface for. That is a rule about
+session state rather than about the words typed: a keyword list over the prompt
+is exactly the guess `DEFAULT_SYSTEM_PROMPT` names as the tell for a rule
+nobody should write. `/author` and `/edit` say which explicitly and `/new`
+drops focus, because it will still sometimes route wrongly.
+
+**A slash command *is* the subcommand.** `/run digest -i @payload.json` is
+parsed by `build_parser()` and dispatched through `_HANDLERS` — same parser,
+same handler, same exit code. The tempting shape is a registry of small
+functions over the facade, and it is a second implementation of every command:
+the two drift, and the drift is invisible because both resolve and both run.
+`tests/test_cli_session.py` asserts `repl/commands.py` never imports the facade
+for that reason. What it costs is a fresh `resolve()` per command, which is
+arguably correct rather than a compromise — a session *edits workflow files*,
+so re-reading them is what makes `/run` run the code you just changed.
+
+Only seven commands are the session's own — `help`, `exit`, `quit`, `clear`,
+`open`, `new`, `status` — and they are exactly the ones that act on the session
+rather than on a Runtime. Anything touching a Runtime stays a subcommand so it
+is reachable from a script.
+
+Unique **prefixes** resolve (`/work` → `/workflows`); ambiguous ones refuse,
+because guessing between `cancel`, `check` and `connect` is how a session
+cancels a run when asked to check one. An abbreviation is not a prefix — `/wf`
+is refused, since accepting it means deciding what counts as one.
+
+`/command`, `#workflow` and `@file` complete on Tab, the workflow list read
+from the project's own registry and re-read every few seconds so a file saved
+in another window appears without restarting.
+
+`PromptUserInteraction` is the fourth `UserInteraction` and **adds a rendering,
+never a second set of rules**: everything it cannot draw is handed to
+`CLIUserInteraction`, where the three outcomes, the timeout and the non-TTY
+behaviour already live. What the arrow-key list changes is that the recommended
+option is *preselected*, so Enter is a one-keystroke `decline` — the outcome
+the three-outcome protocol exists to make usable, and the one that costs the
+same as any other when the question is a numbered list.
 
 **`loom ui`** (`[tui]` extra) is three panes: runs, the selected run's journal,
 and a queue of runs parked on a human that you can approve in place. That last
@@ -142,9 +283,19 @@ Desktop, and Cursor over the Model Context Protocol, built on the official SDK's
 so status goes to stderr.
 
 ```bash
-loom setup claude          # or cursor, codex, all — writes the client's MCP config
-claude mcp add loom -- loom mcp --module flows.py   # the same thing by hand
+loom setup claude-code     # writes .mcp.json at the project root
+loom setup all             # + claude-desktop, cursor, codex
 ```
+
+**`claude` used to mean Claude *Desktop*** while reading as the whole family,
+so anyone running Claude Code got a command that reported success and wired up
+nothing — and this file worked around it by telling the reader to type
+`claude mcp add` by hand. The clients are now `claude-code` and
+`claude-desktop`; `claude` still resolves to the desktop app, which is what it
+has always configured, and says which one it picked rather than silently
+continuing to mean the less likely of the two. Claude Code is **project
+scoped** (`.mcp.json`), because which workflows a server can see is a property
+of the project.
 
 **The SDK is mcp 2.x — `mcp>=2.0,<3`.** 2.0
 removed `mcp.server.fastmcp` outright — `FastMCP` became `MCPServer` in
@@ -178,6 +329,21 @@ is a deprecated shim over `LocalFacade`, not an alias for it — it warns once p
 call site and remaps the old key names, emitting `workflow_id`/`id` where the
 facade emits `workflow`/`name`. Swapping one for the other changes the payload,
 so port the key names with it.
+
+**The port and the tools do not drift apart.** `RuntimeFacade` declares 33
+methods and the server registered 19 tools, so `edit`, `pending`, `respond`,
+`pause`, `unpause`, `pin`, `nodes`, `node`, `publish` and `artifact_history`
+were reachable from the CLI and from nothing else — an MCP client could start a
+run and never answer the human gate it parked on, or author a workflow and
+never change it. All of them are tools now, `edit_workflow` included.
+
+The schema budget in `tests/test_mcp_server.py` moved with the count (18k →
+24k) and gained the check that actually catches the regression it exists for: a
+ceiling on the **mean**, which is independent of how many tools there are. A
+total either freezes the surface or gets raised without anyone reading it.
+Design rationale belongs in this file; a tool description is paid for on every
+turn a model holds the server in scope, so it carries only what a model needs
+to choose the tool and call it correctly.
 
 **Layering inside `mcp_server/`:** `tools.py`, `resources.py`, and `prompts.py`
 are plain coroutines over a facade and import nothing from `mcp`; `server.py` is
@@ -874,14 +1040,24 @@ absence is the design: a body hook that could refuse would let a replay
 re-derive an outcome from middleware that has since changed, which is also what
 would force middleware into the workflow version.
 
-`on_agent_start/end`, `on_turn_start/end`, `on_model_start/end` are the **agent
-family**, in the runner. Replay-free by containment — an agent run is a single
+`on_agent_start/end`, `on_turn_start/end`, `on_model_start/end`,
+`on_tool_start/end` are the **agent family**, in the runner. Replay-free by containment — an agent run is a single
 journal entry. Also non-deciding, but for a different reason: "may this agent
 run?" and "may this tool call run?" are *already* effect hooks on `kind="agent"`
 and `kind="tool"`. What is left is shaping and observing, which is most of what
 middleware does. `on_model_start` mutates `ctx.messages` **in place** — that is
 the compaction/trimming/redaction point, and rebinding the list does nothing.
 `ctx.stop(reason)` ends the loop — the runner raises `AgentStopped` at the top of the next turn, because the loop's only other early exit (the turn budget) raises too, and a partial result handed back quietly would make "a stall detector gave up" indistinguishable from "the agent finished". First stop wins, reason included, matching the escalate-only decision rule.
+
+`on_tool_start`/`on_tool_end` bracket each call the turn dispatches, carrying
+`ctx.tool`, `ctx.arguments`, `ctx.outcome` and `ctx.elapsed`. **Observation, not
+a second way to refuse a tool call** — "may this run?" is already an effect hook
+on `kind="tool"`. What it adds is a call visible *as it happens* to an agent
+running **outside** a workflow, which has no broker and so never fires that
+hook. Every exit closes the pair, the unknown-tool and guardrail-rejected paths
+included: a `tool_start` with no `tool_end` leaves a renderer describing a call
+that finished. A tripwire is the deliberate exception — it ends the run, and
+`agent_end` carries the error.
 
 Both non-deciding families **always fail open**: they cannot change what a run
 does, so a broken logger must not become a failed workflow — least of all one
@@ -1037,7 +1213,7 @@ and it holds no renewal logic at all — it decides *when* to ask and calls
 `store.refresh()`. `start()` sweeps immediately (that is "on restart"), then on
 a timer, and registers through `Runtime.supervise()` so `shutdown()` stops it.
 `loom serve` and `loom mcp` start one; short-lived commands rely on the skew in
-`get()`, and `loom refresh [--all] [--force]` is the explicit hook for a systemd
+`get()`, and `loom refresh [names...] [--force]` is the explicit hook for a systemd
 timer or a login profile — exit **1** when any credential could not be renewed,
 so a scheduled run reports a dead refresh token instead of succeeding quietly.
 A failed credential backs off exponentially to an hour: retrying a permanently
@@ -1493,9 +1669,27 @@ browser exists at all.
 `WRITE` and `open_world` — both accurate — so a tainted run could not reach the
 person whose approval is *the only thing that clears the taint*. The rule
 blocked its own exit. `EffectCall.asks_human` now carries it, derived from
-`requires=["human_channel"]` rather than a name match. It had two halves and
-fixing one looked identical to fixing neither: the node call and the `deliver:`
-call inside it, which inherits the node's classification.
+`requires=["human_channel"]` **and** `suspends` rather than a name match: on
+`requires` alone any node could claim a channel it never uses and get blanket
+exemption for whatever else it did, while one that also parks is waiting for a
+person. It had two halves and fixing one looked identical to fixing neither: the
+node call and the `deliver:` call inside it, which inherits the classification.
+
+**The exemption covers the asking, not the run.** A write after the ask is
+weighed normally. What it does leave open — asserted in `tests/test_taint.py`
+rather than implied — is that a tainted run may put what it read into an
+approval's `context` and name its own `assignees`, so the human channel is a
+delivery path it can reach. Whether that leaks is a property of the host's
+channel, which LOOM has always disclaimed knowing anything about.
+
+**`browser.observe` caches what an intent resolved to**, across runs, over
+`Runtime.cache` — the saving Stagehand's action cache exists for. A hit is
+**verified against the live page before use**, which is what makes a cross-run
+cache safe: a stale entry costs a wasted lookup, never a wrong click, and is
+replaced rather than dropped. Keyed on page *shape* (never the query, where
+per-record identity lives) and scoped per workflow. Not journaled — the journal
+already serves a settled `observe` on replay, so the cache only ever answers the
+second *run*.
 
 **A session lives exactly as long as one execution of the body** — opened by the
 first `navigate`, closed by the engine however the body exits, including on
@@ -1967,6 +2161,34 @@ and the coding agent's model were reading the same three keys from two places.
 No key set is reported as which keys to set, rather than as a stack trace from
 inside a vendor SDK.
 
+### Nothing is written before it has been shown
+
+`loom/cli/changes.py`. `loom edit` called `write_text(...)` and *then* printed
+the diff, the graph delta and the explanation — no confirmation, no backup — so
+the first answer to "what did that instruction do to my workflow?" arrived
+after the answer was the only copy. `loom author -o existing.py` clobbered
+silently, for the same reason: the write was the first thing either did with
+the path.
+
+Ordering is most of the fix; the diff was already computed. `FileChange` +
+`propose` + `apply` are three steps rather than one so a caller keeps the
+choice of what a refusal means, and so `propose` can be asserted to be pure
+with respect to the filesystem — a test that only reads stdout cannot tell
+"shown then written" from "written then shown".
+
+The ladder is yes / yes-and-don't-ask-again-for-this-file / no, because a
+prompt on every write is one people learn to answer without reading. The
+allowlist is per **session** and never written to disk: "don't ask again" is a
+statement about the next few minutes of work on a file somebody is watching,
+and persisting it would silently disarm the gate for a later run, including an
+unattended one. It is a process-level object because the session dispatches
+through argparse — a slash command *is* the subcommand — so there is nothing to
+thread it through.
+
+**Non-interactive denies**, the rule `before` hooks already follow: a gate that
+could not run has not passed. `--yes` is the override and the refusal names it,
+because a CI job that silently did nothing is worse than one that stopped.
+
 ### Editing a workflow
 
 `loom edit flows/digest.py "also skip PDFs under one page"`, or
@@ -2133,6 +2355,41 @@ which is what the shared reader buys.
 Adding a stage is registration, not surgery — `WorkflowCodingAgent(stages=[...])`
 replaces the arrangement. A stage whose tool is missing reports itself
 **skipped**: a check that cannot run has found nothing, which is not passing.
+
+`CheckPipeline.run(..., on_stage=)` is called twice per stage — once as it
+opens, once with its result. Sixteen stages including a subprocess smoke run and
+a full replay is most of the wall clock of a job, and without it the whole of
+that was one silent pause. A callback rather than a hook because a stage reaches
+no model, so the agent family has nothing to say about it; it fails open, the
+rule the non-deciding hook families already follow, because a renderer must
+never be able to fail a clean generation.
+
+### Watching the agent work
+
+`loom/cli/progress.py`. `loom author` awaited one coroutine and printed nothing
+until it returned — up to twenty discovery turns, sixteen stages, three repair
+rounds each re-invoking the model, a smoke run and a replay, all silent. The
+seventeen `logger.info` calls in `coding_agent.py` narrating exactly the right
+things went to a logger no CLI configures, and there was no `-v`.
+
+**Nothing new was needed under it.** `AgentContext.hooks` already existed and
+`BuiltInAgentRuntime` already drove the agent family from it; `CodingSession`
+built the one `AgentContext` a job makes and simply left the field empty. That
+is the whole shape of the defect, and it is why `tests/test_cli_progress.py`
+asserts *wiring* rather than rendering: every piece was complete and correct
+while `generate()` constructed its session without the registry, so the feature
+was dead at one keyword argument that no unit test could see. `edit()` had it
+and `generate()` did not — the same asymmetry, in the same file.
+
+`ProgressRenderer` is an ordinary consumer of those seams. Progress goes to
+**stderr**, because `loom author "spec" > flow.py` must put the *code* in the
+file and because `CLIUserInteraction` writes there too, so a question and the
+progress around it interleave on one stream. A terminal gets a live region; a
+pipe gets one line per event, since a live region rewritten into a file is a
+file full of escape codes. It is registered on its own `HookRegistry` rather
+than the Runtime's — that registry is per-Runtime precisely so one caller's
+middleware is not another's, and drawing is this command's business rather than
+the deployment's.
 
 Repair consumes the pipeline's issues, so a type error and a traceback reach the
 model by one path. Errors about the environment rather than the code never drive
@@ -2541,7 +2798,7 @@ a `RuntimeFacade`, the same port `mcp_server/tools.py` uses, and
 | Agent frameworks | `langchain`, `agno`, `pydantic-ai` |
 | Surfaces | `cli`, `tui`, `api`, `mcp` |
 | Toolsets | `google` (service-account JWT only), `duckduckgo` (`ddgs`) |
-| Authoring | `browser` (playwright, for the observation probe) |
+| Browser | `browser` (playwright): the `browser.*` nodes, and the authoring probe |
 | Auth | `identity` (token verification), `credentials` (OS keyring) |
 | Meta | `dev`, `testing`, `all` |
 

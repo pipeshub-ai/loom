@@ -86,6 +86,8 @@ _AGENT_EVENTS = (
     "turn_start",
     "model_start",
     "model_end",
+    "tool_start",
+    "tool_end",
     "turn_end",
     "agent_end",
 )
@@ -343,15 +345,19 @@ class AgentHookContext:
 
     __slots__ = (
         "agent_name",
+        "arguments",
+        "elapsed",
         "error",
         "input",
         "messages",
         "metadata",
+        "outcome",
         "response",
         "result",
         "run_id",
         "stop_reason",
         "stopped",
+        "tool",
         "tools",
         "turn",
     )
@@ -367,6 +373,10 @@ class AgentHookContext:
         response: Any = None,
         result: Any = None,
         tools: list[str] | None = None,
+        tool: str = "",
+        arguments: dict[str, Any] | None = None,
+        outcome: str = "",
+        elapsed: float = 0.0,
         error: BaseException | None = None,
     ) -> None:
         self.agent_name = agent_name
@@ -381,6 +391,17 @@ class AgentHookContext:
         self.response = response
         self.result = result
         self.tools = tools or []
+        self.tool = tool
+        """The tool being called, on ``tool_start``/``tool_end`` only."""
+        self.arguments = arguments if arguments is not None else {}
+        self.outcome = outcome
+        """How the call ended: ``ok``, ``denied``, ``retry`` or ``error``.
+
+        Distinct from ``error``, which stays empty here: a tool that raised is
+        *answered* rather than propagated — the model is told and picks another
+        route — so an exception is an outcome of the call, not of the run."""
+        self.elapsed = elapsed
+        """Seconds the call took, on ``tool_end``."""
         self.error = error
         self.metadata: dict[str, Any] = {}
         self.stopped = False
@@ -736,7 +757,15 @@ class HookRegistry:
 
     #: ``on_agent_start``/``on_agent_end`` bracket one agent run;
     #: ``on_turn_start``/``on_turn_end`` each turn; ``on_model_start`` is where
-    #: messages are shaped and ``on_model_end`` where the response is observed.
+    #: messages are shaped and ``on_model_end`` where the response is observed;
+    #: ``on_tool_start``/``on_tool_end`` bracket each tool call the turn makes.
+    #:
+    #: The tool pair is observation, not a second way to refuse a tool call —
+    #: "may this run?" is already an effect hook on ``kind="tool"``. What it
+    #: adds is a call *visible as it happens*, which an effect hook cannot give
+    #: an agent running outside a workflow, since that agent has no broker.
+    #: Without it the only signal an authoring run emitted for four minutes of
+    #: work was its final return value.
 
     async def dispatch_agent(self, event: str, ctx: AgentHookContext) -> None:
         """Run the agent hooks for *event*, in registration order.

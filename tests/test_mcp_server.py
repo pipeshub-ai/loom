@@ -375,23 +375,50 @@ class TestSchemaBudget:
     this server's tools in scope — this makes that a failing test instead of
     a silent regression.
 
-    Raised from 12,000 to 18,000 when the six authoring tools (each carrying
-    a ``code: str`` parameter and a several-sentence docstring) joined the
-    sixteen run-management ones — measured total is ~10.3k, so this still
-    leaves headroom to catch a real regression rather than being sized to
-    exactly today's total."""
+    Raised twice, each time for a *count* rather than for verbosity: from
+    12,000 to 18,000 when the six authoring tools joined the sixteen
+    run-management ones, and from 18,000 to 24,000 when thirteen more closed
+    the gap between what ``RuntimeFacade`` can do and what an MCP client could
+    reach — ``edit_workflow`` most of all, which was reachable only from the
+    CLI.
 
-    MAX_TOTAL_SCHEMA_CHARS = 18_000
+    Which is why the mean matters more than the total, and is asserted
+    separately. A total is the only number a *user* pays, but it moves whenever
+    the surface grows, so a ceiling on it either freezes the surface or gets
+    raised without anyone reading it. The mean is what catches the actual
+    regression this exists for: a description that drifts into explaining
+    itself to a human. Design history belongs in ``CLAUDE.md``; what stays here
+    is what a model needs to choose the tool and call it correctly.
+    """
+
+    MAX_TOTAL_SCHEMA_CHARS = 24_000
+    #: Measured mean is ~530. A tool needing much more than this is usually one
+    #: whose docstring is arguing rather than instructing.
+    MAX_MEAN_SCHEMA_CHARS = 650
+
+    @staticmethod
+    def _size(tool) -> int:
+        return len(tool.name) + len(tool.description or "") + len(
+            json.dumps(tool.input_schema)
+        )
 
     async def test_total_tool_schema_size_stays_under_budget(self, server) -> None:
         registered = await server.list_tools()
-        total = sum(
-            len(t.name) + len(t.description or "") + len(json.dumps(t.input_schema))
-            for t in registered
-        )
+        total = sum(self._size(t) for t in registered)
         assert total <= self.MAX_TOTAL_SCHEMA_CHARS, (
             f"{len(registered)} tools' schemas total {total} chars, over the "
             f"{self.MAX_TOTAL_SCHEMA_CHARS} budget"
+        )
+
+    async def test_the_average_tool_stays_terse(self, server) -> None:
+        """Independent of how many tools there are, which is the point."""
+        registered = await server.list_tools()
+        mean = sum(self._size(t) for t in registered) / max(1, len(registered))
+        worst = max(registered, key=self._size)
+        assert mean <= self.MAX_MEAN_SCHEMA_CHARS, (
+            f"mean schema is {mean:.0f} chars over {len(registered)} tools "
+            f"(worst: {worst.name} at {self._size(worst)}). Trim the prose — "
+            "rationale belongs in CLAUDE.md, not in a schema sent every turn."
         )
 
 
@@ -563,7 +590,11 @@ class TestServerRegistration:
 
         server = build_server(facade, authoring=AuthoringConfig(enabled=False))
         names = {tool.name for tool in await server.list_tools()}
-        assert len(names) == 18
+        # The run-management surface, which is everything an operator needs and
+        # nothing that spends a model token.
+        assert len(names) == 27
+        assert "author_workflow" not in names
+        assert "edit_workflow" not in names
         assert "save_workflow" not in names
 
     async def test_read_only_tools_marked_correctly(self, server) -> None:
@@ -603,6 +634,19 @@ class TestServerRegistration:
             "list_artifacts",
             "get_artifact_url",
             "put_artifact",
+            # Closing the gap between what `RuntimeFacade` can do and what a
+            # client could reach. Every one of these was a CLI-only capability,
+            # so an MCP client could start a run and never answer the human
+            # gate it parked on, or author a workflow and never change it.
+            "list_pending",
+            "respond_to_run",
+            "pause_run",
+            "unpause_run",
+            "pin_run",
+            "search_nodes",
+            "show_node",
+            "publish_workflow",
+            "artifact_history",
             # Authoring tools — on by default; see test_mcp_authoring.py for
             # the coroutines themselves and the on/off gating.
             "get_tool_contract",
@@ -612,6 +656,7 @@ class TestServerRegistration:
             "smoke_test_workflow",
             "save_workflow",
             "author_workflow",
+            "edit_workflow",
         }
 
     async def test_every_tool_has_annotations(self, server) -> None:
@@ -837,7 +882,7 @@ class TestStdioEndToEnd:
             assert "run_workflow" in names
             assert "save_workflow" in names  # authoring tools on by default
             assert "author_workflow" in names  # …including the one-shot one
-            assert len(names) == 25
+            assert len(names) == 35
 
     async def test_workflows_from_the_module_are_visible(self, project: Path) -> None:
         """The gap that made the original server useless: an empty registry."""

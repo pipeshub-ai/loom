@@ -316,6 +316,157 @@ async def send_event(
     return _run_json(await facade.get(run_id) or {})
 
 
+async def edit_workflow(
+    facade: RuntimeFacade,
+    source: str,
+    instruction: str,
+    packages_json: str = "[]",
+    workflow_input_json: str = "",
+    observe: bool = True,
+    interaction: Any = None,
+) -> str:
+    """Change a workflow that already exists, and verify the result.
+
+    The half of authoring that reached only the CLI. ``author_workflow`` was
+    the only way in over MCP, so every change meant regenerating from a spec —
+    while teams iterate on workflows rather than re-describing them.
+
+    Returns the whole file, a unified diff, and ``graph_changes`` — the delta
+    projected from both versions, which is the reviewable form for a reader who
+    does not read Python. ``changed: false`` is a valid answer: the
+    instructions tell the model to decline rather than guess.
+    """
+    try:
+        packages = json.loads(packages_json) if packages_json else []
+    except json.JSONDecodeError:
+        return _json({"error": f"packages_json is not JSON: {packages_json!r}"})
+    workflow_input = None
+    if workflow_input_json:
+        try:
+            workflow_input = json.loads(workflow_input_json)
+        except json.JSONDecodeError:
+            workflow_input = workflow_input_json
+
+    try:
+        result = await _can_ask(facade, interaction).edit(
+            source,
+            instruction,
+            packages=[str(p) for p in packages] or None,
+            smoke_input=workflow_input,
+            observe=observe,
+        )
+    except Exception as exc:
+        # A payload, never a raise: a raise aborts the model's turn.
+        return _json({"error": str(exc), "changed": False})
+    return _json(result)
+
+
+async def list_pending(facade: RuntimeFacade, run_id: str | None = None) -> str:
+    """Runs parked on a person, and what each is being asked.
+
+    The command that makes a parked run a queue item rather than a mystery.
+    ``delivered: false`` is the one worth reading — a request nobody was told
+    about leaves the run looking patient.
+    """
+    return _json(await facade.pending(run_id))
+
+
+async def respond_to_run(
+    facade: RuntimeFacade, run_id: str, subject: str, answer_json: str
+) -> str:
+    """Answer a parked human request with a typed payload.
+
+    ``approve_run`` is the yes/no shortcut; this is what a choice, a form, or
+    an edited draft needs. The accepted shape is on the request itself — see
+    ``list_pending``.
+    """
+    if await facade.get(run_id) is None:
+        return _missing(run_id)
+    try:
+        answer = json.loads(answer_json) if answer_json else {}
+    except json.JSONDecodeError:
+        return _json({"error": f"answer_json is not JSON: {answer_json!r}"})
+    if not isinstance(answer, dict):
+        answer = {"value": answer}
+    return _run_json(await facade.respond(run_id, subject, answer))
+
+
+async def pause_run(facade: RuntimeFacade, run_id: str) -> str:
+    """Hold a run at its next durable step.
+
+    Between steps, never inside one, so nothing is half-done and the run
+    resumes exactly where a crash would have. Reversible — ``unpause_run`` —
+    which is what makes it the right answer for a misbehaving run where
+    cancelling is not.
+    """
+    if await facade.get(run_id) is None:
+        return _missing(run_id)
+    return _run_json(await facade.pause(run_id))
+
+
+async def unpause_run(facade: RuntimeFacade, run_id: str) -> str:
+    """Release a held run and let it continue."""
+    if await facade.get(run_id) is None:
+        return _missing(run_id)
+    return _run_json(await facade.unpause(run_id))
+
+
+async def pin_run(facade: RuntimeFacade, run_id: str, module: str = "") -> str:
+    """Turn a run into a pytest file that reproduces it.
+
+    Built from the run's own journal via ``given(...)``, so it reproduces what
+    happened rather than approximating it — a seeded entry means exactly what a
+    recorded one means. Values are redacted on the way out, and the generated
+    file says so when redaction changed anything.
+
+    Args:
+        run_id: The run to pin.
+        module: Import path for the workflow, e.g. "flows.digest". Without it
+            the generated file carries a TODO rather than an import that may
+            not resolve.
+    """
+    if await facade.get(run_id) is None:
+        return _missing(run_id)
+    return _json(await facade.pin(run_id, module=module))
+
+
+async def search_nodes(
+    facade: RuntimeFacade, query: str = "", category: str | None = None
+) -> str:
+    """Search the node catalogue — typed, versioned units of workflow work.
+
+    An empty query with a category lists that category. Categories: human,
+    guard, control, transform, io, browser, agent, custom.
+    """
+    return _json(await facade.nodes(query, category=category))
+
+
+async def show_node(facade: RuntimeFacade, node_id: str) -> str:
+    """One node's contract: **the code to write** to call it.
+
+    Not a JSON Schema — a description *of* a call. The next action is to write
+    one, and every schema-to-Python translation is a chance to invent a keyword
+    argument. This is rendered from the node's own models, so it cannot drift.
+    """
+    try:
+        return _json(await facade.node(node_id))
+    except Exception as exc:
+        return _json({"error": str(exc), "node": node_id})
+
+
+async def publish_workflow(facade: RuntimeFacade, workflow: str) -> str:
+    """Record a workflow in the durable catalog, so a run can be traced to it."""
+    try:
+        return _json(await facade.publish(workflow))
+    except Exception as exc:
+        return _json({"error": str(exc), "workflow": workflow})
+
+
+async def artifact_history(facade: RuntimeFacade, name: str) -> str:
+    """Every version of one named artifact, newest first."""
+    return _json(await facade.artifact_history(name))
+
+
 def _can_ask(facade: RuntimeFacade, interaction: Any) -> RuntimeFacade:
     """*facade*, able to put a question to the user through the MCP client.
 

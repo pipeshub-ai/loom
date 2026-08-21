@@ -3,10 +3,29 @@
 ## Installation
 
 ```bash
-pip install loomsdk
+pip install 'loomsdk[cli]'
 ```
 
-Optional extras for specific backends:
+## The two-minute version
+
+```bash
+loom init my-project && cd my-project
+pip install -e '.[dev]'
+loom doctor                   # store, model, modules — and what is missing
+loom run quickstart -i alice
+loom runs                     # it is still there: a project keeps its runs
+```
+
+`loom author "watch a folder and summarise new PDFs"` writes one for you, and
+`loom` on its own opens an interactive session. See
+[the command line](guides/cli.md) for all of it.
+
+The rest of this page is the same thing from Python, which is what the CLI is
+built on and what you reach for when embedding Loom in something else.
+
+## Installing more
+
+Extras, by what they add:
 
 ```bash
 # MongoDB storage

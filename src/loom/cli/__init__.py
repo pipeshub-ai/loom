@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from loom import __version__
-from loom.cli import auth_commands, commands, event_commands, mcp_setup
+from loom.cli import auth_commands, commands, doctor, event_commands, mcp_setup
 from loom.cli.output import Exit
 
 if TYPE_CHECKING:
@@ -72,6 +72,7 @@ _HANDLERS = {
     "mcp": commands.cmd_mcp,
     "ui": commands.cmd_ui,
     "artifacts": commands.cmd_artifacts,
+    "doctor": doctor.cmd_doctor,
     "events": event_commands.cmd_events,
     "login": auth_commands.cmd_login,
     "logout": auth_commands.cmd_logout,
@@ -115,18 +116,43 @@ def _dispatch(argv: list[str] | None) -> int:
     args = parser.parse_args(argv)
 
     if args.command is None:
+        return _no_command(parser, args)
+    return int(_HANDLERS[args.command](args))
+
+
+def _no_command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """``loom`` on its own: a session at a terminal, help anywhere else.
+
+    The terminal check is what keeps the change safe for everything already
+    written against this. A pipe, a CI job or a ``loom`` in a script gets the
+    help it has always got and exit 0; only a person at a keyboard gets the
+    loop. ``--json`` is honoured for the same reason — asking for machine
+    output and being handed a prompt would be the worst of both.
+    """
+    from loom.cli import repl
+
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    if not interactive or getattr(args, "json", False) or not repl.available():
         parser.print_help()
         return Exit.OK
-    return int(_HANDLERS[args.command](args))
+    return repl.run_session(args)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="loom",
         description="Author, run, and inspect LOOM workflows.",
-        epilog="Exit codes: 0 completed, 1 failed, 2 usage, 3 suspended, 4 cancelled.",
+        epilog=_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=__version__)
+    # Root-level copies of the session's own flags, so `loom --store … ` with
+    # no subcommand reaches the loop with them set. Every subcommand declares
+    # its own; argparse only accepts a root flag *before* the subcommand, and
+    # `loom run x --json` is how everyone types it.
+    parser.add_argument("--store", metavar="URL", help=argparse.SUPPRESS)
+    parser.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
     _authoring(sub)
@@ -135,7 +161,69 @@ def build_parser() -> argparse.ArgumentParser:
     _serving(sub)
     _authenticating(sub)
     event_commands.add_parser(sub)
+    # Every subcommand is registered with `help=`, which argparse would render
+    # as a flat alphabetical-ish list of forty entries with `author` and `run`
+    # somewhere in the middle. The epilog groups them instead; suppressing the
+    # default listing is what stops the same forty being printed twice.
+    for action in sub._get_subactions():
+        action.help = argparse.SUPPRESS
+    sub.help = argparse.SUPPRESS
+    sub.metavar = "<command>"
     return parser
+
+
+#: The four groups the module docstring already names, plus the two the CLI
+#: grew afterwards. A reader scanning this needs to find `author` and `run`
+#: first — they are what the tool is for — and argparse's own ordering buried
+#: them sixth and seventh in a list nobody reads to the end.
+_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Write a workflow", ("author", "edit", "init", "check", "graph", "describe")),
+    ("Run one", ("run", "runs", "show", "watch", "artifacts")),
+    (
+        "Act on a run",
+        ("pending", "approve", "respond", "send", "pause", "unpause",
+         "cancel", "retry", "replay", "pin"),
+    ),
+    ("See what is available", ("workflows", "toolsets", "toolset", "nodes", "node", "doctor")),
+    ("Serve it", ("serve", "mcp", "ui", "publish", "versions", "events", "setup")),
+    (
+        "Credentials",
+        ("login", "logout", "whoami", "connect", "disconnect", "refresh", "providers"),
+    ),
+)
+
+
+def _epilog() -> str:
+    """The grouped command list, built from the handlers so it cannot drift.
+
+    A command missing from :data:`_GROUPS` is listed under "Other" rather than
+    hidden: an unlisted command that simply vanishes from ``--help`` is how a
+    capability ships and nobody finds it, which is most of what this CLI's
+    discoverability problem was.
+    """
+    grouped = {name for _, names in _GROUPS for name in names}
+    sections = [*_GROUPS]
+    leftover = tuple(sorted(set(_HANDLERS) - grouped))
+    if leftover:
+        sections.append(("Other", leftover))
+
+    lines = ["", "Commands:"]
+    for title, names in sections:
+        shown = [name for name in names if name in _HANDLERS]
+        if shown:
+            lines.append(f"  {title}:")
+            lines.append("    " + "  ".join(shown))
+    lines += [
+        "",
+        "  loom <command> --help  for one command's options.",
+        "  loom                   with no command, at a terminal: a session.",
+        "",
+        "Exit codes: 0 completed, 1 failed, 2 usage, 3 suspended, 4 cancelled.",
+    ]
+    return "\n".join(lines)
+
+
+_EPILOG = _epilog()
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +268,13 @@ def _add_backend(parser: argparse.ArgumentParser) -> None:
         metavar="MOD",
         help="Import this module to find workflows (repeatable). "
         "Defaults to [tool.loom] modules in pyproject.toml",
+    )
+    parser.add_argument(
+        "--store",
+        metavar="URL",
+        help="Where the journal lives, e.g. sqlite://runs.db or postgres://…. "
+        "Overrides $LOOM_STORE and [tool.loom] store. Defaults to "
+        ".loom/runs.db beside pyproject.toml",
     )
 
 
@@ -294,6 +389,12 @@ def _authoring(sub: _Subparsers) -> None:
         help="Do not let the agent look at systems the spec names before "
         "writing code against them",
     )
+    author.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Write without showing the change and asking first",
+    )
     _add_output(author)
 
     edit = sub.add_parser(
@@ -353,6 +454,12 @@ def _authoring(sub: _Subparsers) -> None:
         "--no-observe",
         action="store_true",
         help="Do not let the agent look at systems the instruction names",
+    )
+    edit.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Write without showing the change and asking first",
     )
     _add_output(edit)
 
@@ -623,12 +730,21 @@ def _serving(sub: _Subparsers) -> None:
     _add_backend(ui)
     _add_output(ui)
 
+    doctor = sub.add_parser(
+        "doctor", help="Check this environment: store, model, modules, clients"
+    )
+    _add_backend(doctor)
+    _add_output(doctor)
+
     setup = sub.add_parser(
         "setup",
         help="Write this install into Claude/Cursor/Codex's MCP config",
     )
     setup.add_argument(
-        "client", choices=("claude", "cursor", "codex", "all"), help="Which client to configure"
+        "client",
+        choices=("claude-code", "claude-desktop", "claude", "cursor", "codex", "all"),
+        help="Which client to configure. 'claude' is kept as an alias for "
+        "claude-desktop, which is what it has always meant",
     )
     setup.add_argument(
         "--module",

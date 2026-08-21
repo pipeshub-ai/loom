@@ -57,6 +57,7 @@ this story — the product built on top of LOOM that this table is describing.
 
 ## Guides
 
+- [The command line](guides/cli.md) -- Write, run, watch and steer workflows from a terminal
 - [Agent Backends](guides/agent-backends.md) -- Use LangChain, Agno, PydanticAI, or your own
 - [Storage Backends](guides/storage.md) -- MemoryStore, SQLite, MongoDB, PostgreSQL
 - [Triggers](guides/triggers.md) -- Cron, webhook, polling, events

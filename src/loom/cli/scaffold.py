@@ -149,6 +149,16 @@ QUICKSTART_PYPROJECT: str = dedent("""\
     [tool.loom]
     modules = ["workflows/quickstart.py"]
 
+    # Where runs are kept. Left commented because the default is already
+    # right for a project: `.loom/runs.db` beside this file, so a run you
+    # start in one command is there for `loom runs`, `loom watch` and
+    # `loom approve` in the next. Set it when the journal should live
+    # somewhere shared instead.
+    #
+    #   store = "postgres://user@host/loom"
+    #
+    # $LOOM_STORE overrides this, and `--store` overrides both.
+
     [tool.pytest.ini_options]
     testpaths = ["tests"]
     asyncio_mode = "auto"
@@ -156,6 +166,37 @@ QUICKSTART_PYPROJECT: str = dedent("""\
     [tool.ruff]
     target-version = "py311"
     line-length = 100
+""")
+
+
+QUICKSTART_GITIGNORE: str = dedent("""\
+    # Loom keeps this project's run journal here. It is derived state — the
+    # workflows are the source of truth — so it is ignored the way .venv is.
+    .loom/
+
+    # Secrets. `loom` reads this file, so a provider key put here is picked up
+    # by `loom author` without exporting anything.
+    .env
+
+    __pycache__/
+    *.py[cod]
+    .venv/
+    .pytest_cache/
+""")
+
+QUICKSTART_ENV_EXAMPLE: str = dedent("""\
+    # Copy to `.env`. Loom reads it from the project root, and a real
+    # environment variable always wins over a line here.
+
+    # Authoring needs one of these. `loom author` and `loom edit` refuse
+    # without it, and so does any workflow calling ctx.agent().
+    # ANTHROPIC_API_KEY=
+    # OPENAI_API_KEY=
+    # GEMINI_API_KEY=
+
+    # Where runs are kept. Unset, they go to .loom/runs.db beside
+    # pyproject.toml, which is what you want on a laptop.
+    # LOOM_STORE=postgres://user@host/loom
 """)
 
 # ------------------------------------------------------------------
@@ -166,13 +207,16 @@ _TEMPLATES: dict[str, str] = {
     "workflow": QUICKSTART_WORKFLOW,
     "test": QUICKSTART_TEST,
     "pyproject": QUICKSTART_PYPROJECT,
+    "gitignore": QUICKSTART_GITIGNORE,
+    "env": QUICKSTART_ENV_EXAMPLE,
 }
 
 
 def get_template(name: str) -> str | None:
     """Return template content by *name*, or ``None`` if unknown.
 
-    Recognised names: ``"workflow"``, ``"test"``, ``"pyproject"``.
+    Recognised names: ``"workflow"``, ``"test"``, ``"pyproject"``,
+    ``"gitignore"``, ``"env"``.
     """
     return _TEMPLATES.get(name)
 
@@ -188,14 +232,7 @@ def scaffold_project(directory: str) -> list[str]:
     The function does **not** write to disk -- it only computes the
     manifest so callers can preview or confirm before committing.
     """
-    base = os.path.abspath(directory)
-    return [
-        os.path.join(base, "pyproject.toml"),
-        os.path.join(base, "workflows", "__init__.py"),
-        os.path.join(base, "workflows", "quickstart.py"),
-        os.path.join(base, "tests", "__init__.py"),
-        os.path.join(base, "tests", "test_quickstart.py"),
-    ]
+    return list(_contents(directory))
 
 
 def write_project(directory: str) -> list[str]:
@@ -205,18 +242,8 @@ def write_project(directory: str) -> list[str]:
     directory someone has already worked in should be additive, never
     destructive.
     """
-    contents = {
-        "pyproject.toml": QUICKSTART_PYPROJECT,
-        os.path.join("workflows", "__init__.py"): "",
-        os.path.join("workflows", "quickstart.py"): QUICKSTART_WORKFLOW,
-        os.path.join("tests", "__init__.py"): "",
-        os.path.join("tests", "test_quickstart.py"): QUICKSTART_TEST,
-    }
-
-    base = os.path.abspath(directory)
     written: list[str] = []
-    for relative, body in contents.items():
-        target = os.path.join(base, relative)
+    for target, body in _contents(directory).items():
         if os.path.exists(target):
             continue
         os.makedirs(os.path.dirname(target), exist_ok=True)
@@ -226,7 +253,33 @@ def write_project(directory: str) -> list[str]:
     return written
 
 
+def _contents(directory: str) -> dict[str, str]:
+    """Absolute path to body, for every file a scaffold writes.
+
+    One definition, so the preview and the write cannot disagree about what a
+    scaffold contains — which is the only way ``--dry-run`` is worth anything.
+    """
+    base = os.path.abspath(directory)
+    return {
+        os.path.join(base, relative): body
+        for relative, body in {
+            "pyproject.toml": QUICKSTART_PYPROJECT,
+            # Both are what makes the scaffolded project actually work: `.env`
+            # is where a provider key goes and `loom` reads it, and `.gitignore`
+            # is what keeps the run journal — derived state — out of the commit.
+            ".gitignore": QUICKSTART_GITIGNORE,
+            ".env.example": QUICKSTART_ENV_EXAMPLE,
+            os.path.join("workflows", "__init__.py"): "",
+            os.path.join("workflows", "quickstart.py"): QUICKSTART_WORKFLOW,
+            os.path.join("tests", "__init__.py"): "",
+            os.path.join("tests", "test_quickstart.py"): QUICKSTART_TEST,
+        }.items()
+    }
+
+
 __all__ = [
+    "QUICKSTART_ENV_EXAMPLE",
+    "QUICKSTART_GITIGNORE",
     "QUICKSTART_PYPROJECT",
     "QUICKSTART_TEST",
     "QUICKSTART_WORKFLOW",

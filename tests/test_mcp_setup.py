@@ -87,8 +87,25 @@ class TestConfigPath:
         assert path == CLIENTS["codex"].global_path
 
     def test_claude_desktop_has_no_project_scope(self, tmp_path: Path) -> None:
-        path = config_path(CLIENTS["claude"], use_global=False, project_dir=tmp_path)
-        assert path == CLIENTS["claude"].global_path
+        spec = CLIENTS["claude-desktop"]
+        path = config_path(spec, use_global=False, project_dir=tmp_path)
+        assert path == spec.global_path
+
+    def test_claude_code_is_project_scoped(self, tmp_path: Path) -> None:
+        """Which workflows a server can see is a property of the project, so
+        project scope is both the safe default and the right one."""
+        spec = CLIENTS["claude-code"]
+        path = config_path(spec, use_global=False, project_dir=tmp_path)
+        assert path == tmp_path / ".mcp.json"
+
+    def test_claude_still_resolves_to_the_desktop_app(self) -> None:
+        """It has always meant that, and silently changing which client a
+        working command configures would be worse than the ambiguity."""
+        from loom.cli.mcp_setup import client_named
+
+        assert client_named("claude") is CLIENTS["claude-desktop"]
+        assert client_named("claude-code") is CLIENTS["claude-code"]
+        assert client_named("nope") is None
 
 
 class TestMergeConfig:
@@ -256,7 +273,10 @@ class TestAllClients:
         cmd_setup(args)
 
         assert (tmp_path / "cursor_dir" / "mcp.json").exists()
-        assert (tmp_path / "claude_global").exists()
+        assert (tmp_path / "claude-desktop_global").exists()
+        # Claude Code is the client this project is most often driven from, and
+        # `all` did not reach it at all before it had a target of its own.
+        assert (tmp_path / "claude-code_global").exists()
         assert (tmp_path / "codex_global").exists()
 
 

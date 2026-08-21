@@ -194,9 +194,20 @@ class CodingSession:
     unaware — this is composition around it, not a fork of the turn loop.
     """
 
-    def __init__(self, agent: Any, budget: GenerationBudget) -> None:
+    def __init__(
+        self, agent: Any, budget: GenerationBudget, *, hooks: Any | None = None
+    ) -> None:
         self._agent = agent
         self._budget = budget
+        self._hooks = hooks
+        """Carried on every call rather than passed at one of them.
+
+        The runner reads ``AgentContext.hooks`` and, when it finds a registry,
+        brackets the whole run with the agent family — turns, model calls, and
+        each tool call as it is dispatched. This class already constructs the
+        one ``AgentContext`` a job makes, so it is where the registry has to
+        arrive; the field was simply never filled, which is why an authoring
+        run had no observable progress at all."""
         self._history: list[Message] = []
 
     @property
@@ -228,6 +239,7 @@ class CodingSession:
                 context=AgentContext(
                     agent_id=getattr(self._agent, "name", ""),
                     history=list(self._history),
+                    hooks=self._hooks,
                 ),
             )
         except BaseException as failed:

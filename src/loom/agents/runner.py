@@ -162,22 +162,55 @@ class BuiltInAgentRuntime:
         turn: int,
     ) -> BuiltInAgentRuntime._ToolText:
         """Guardrails, dispatch, logging and bounding for a single call."""
+        hooks = getattr(context, "hooks", None)
+        if hooks is not None and hooks.has_agent:
+            await self._tool_event(
+                hooks, "tool_start", agent, context, turn, call.name, call.arguments
+            )
+
+        started = time.monotonic()
+
+        async def closed(message: str, outcome: str) -> BuiltInAgentRuntime._ToolText:
+            """Answer the model, having said the call is over.
+
+            Every exit from this method closes the pair — a ``tool_start`` with
+            no ``tool_end`` leaves a renderer showing a call that finished.
+            """
+            if hooks is not None and hooks.has_agent:
+                await self._tool_event(
+                    hooks,
+                    "tool_end",
+                    agent,
+                    context,
+                    turn,
+                    call.name,
+                    call.arguments,
+                    outcome=outcome,
+                    result=message,
+                    elapsed=time.monotonic() - started,
+                )
+            return self._ToolText(raw=message, bounded=message)
+
         tool = tool_map.get(call.name)
         if tool is None:
-            message = f"Unknown tool '{call.name}'. Available: {list(tool_map)}"
-            return self._ToolText(raw=message, bounded=message)
+            return await closed(
+                f"Unknown tool '{call.name}'. Available: {list(tool_map)}", "unknown"
+            )
 
         for guard in agent.guardrails:
             verdict = await guard.evaluate(call.arguments, call.name)
             if verdict.action is GuardrailAction.TRIPWIRE:
+                # Not closed: a tripwire ends the whole run, and `agent_end`
+                # carries the error. Reporting the call as merely finished
+                # would say the opposite of what happened.
                 raise GuardrailTripwire(
                     verdict.message, guardrail_name=guard.name, info=verdict.info
                 )
             if verdict.blocked:
-                message = f"Guardrail rejected: {verdict.message}"
-                return self._ToolText(raw=message, bounded=message)
+                return await closed(
+                    f"Guardrail rejected: {verdict.message}", "rejected"
+                )
 
-        started = time.monotonic()
         outcome = "ok"
         result: Any = None
         try:
@@ -219,6 +252,20 @@ class BuiltInAgentRuntime:
             (time.monotonic() - started) * 1000,
         )
 
+        if hooks is not None and hooks.has_agent:
+            await self._tool_event(
+                hooks,
+                "tool_end",
+                agent,
+                context,
+                turn,
+                call.name,
+                call.arguments,
+                outcome=outcome,
+                result=result_str,
+                elapsed=time.monotonic() - started,
+            )
+
         bounded = await bound_result(
             result_str,
             result if outcome == "ok" else None,
@@ -229,6 +276,44 @@ class BuiltInAgentRuntime:
             call_id=call.id,
         )
         return self._ToolText(raw=result_str, bounded=bounded)
+
+    @staticmethod
+    async def _tool_event(
+        hooks: Any,
+        event: str,
+        agent: Agent[Any],
+        context: AgentContext | None,
+        turn: int,
+        name: str,
+        arguments: Any,
+        *,
+        outcome: str = "",
+        result: Any = None,
+        elapsed: float = 0.0,
+    ) -> None:
+        """Announce a tool call, before and after.
+
+        Observation only — whether the call is *allowed* is an effect hook on
+        ``kind="tool"``, which is where it stays. This exists because an agent
+        outside a workflow has no broker, so that hook never fires for it, and
+        an authoring run therefore emitted nothing at all between its first
+        prompt and its final answer.
+        """
+        from loom.runtime.hooks import AgentHookContext
+
+        await hooks.dispatch_agent(
+            event,
+            AgentHookContext(
+                agent_name=agent.name,
+                run_id=context.run_id if context else "",
+                turn=turn,
+                tool=name,
+                arguments=arguments if isinstance(arguments, dict) else {},
+                outcome=outcome,
+                result=result,
+                elapsed=elapsed,
+            ),
+        )
 
     async def execute(
         self,

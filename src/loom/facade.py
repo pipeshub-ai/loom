@@ -522,6 +522,23 @@ class LocalFacade:
     library that reads stdin because it was imported is the ambient behaviour
     ``Runtime`` avoids everywhere else: the CLI opts in, a server does not.
     """
+    hooks: Any = None
+    """Optional :class:`~loom.runtime.hooks.HookRegistry` for authoring runs.
+
+    Here for the same reasons ``user_interaction`` is: it is an object rather
+    than a payload, so it cannot cross ``RemoteFacade`` — which refuses to
+    author anyway — and a surface that wants progress opts into it rather than
+    every caller getting a renderer it did not ask for.
+
+    Threaded into the coding agent, whose runner brackets each turn, model call
+    and tool call with the agent hook family. Without it an authoring run
+    emitted nothing between the first prompt and the final answer.
+    """
+    on_stage: Any = None
+    """Optional ``(check, result) -> None`` called around each verification
+    stage. Not a hook: a stage reaches no model, so the agent family has
+    nothing to say about it, and inventing an event for a plain loop would be a
+    mechanism where a callback is the thing."""
     async def workflows(self, *, published: bool = True) -> list[dict[str, Any]]:
         available = {
             definition.name: {
@@ -996,6 +1013,8 @@ class LocalFacade:
 
         return WorkflowCodingAgent(
             model,
+            hooks=self.hooks,
+            on_stage=self.on_stage,
             tool_registry=self.runtime.toolsets,
             node_registry=self.runtime.nodes,
             probes=probes,

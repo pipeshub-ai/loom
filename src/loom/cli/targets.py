@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from loom.agents.interaction import CLIUserInteraction
+from loom.cli.config import ProjectConfig
 from loom.core.exceptions import ConfigurationError, RegistryError
 from loom.facade import LocalFacade, RemoteFacade, RuntimeFacade
 
@@ -54,26 +55,13 @@ __all__ = [
 
 
 def configured_modules(start: Path | None = None) -> list[str]:
-    """Modules listed under ``[tool.loom] modules`` in the nearest pyproject."""
-    root = _find_pyproject(start or Path.cwd())
-    if root is None:
-        return []
-    try:
-        import tomllib
+    """Modules listed under ``[tool.loom] modules`` in the nearest pyproject.
 
-        data = tomllib.loads(root.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    modules = data.get("tool", {}).get("loom", {}).get("modules", [])
-    return [str(m) for m in modules] if isinstance(modules, list) else []
-
-
-def _find_pyproject(start: Path) -> Path | None:
-    for directory in [start, *start.parents]:
-        candidate = directory / "pyproject.toml"
-        if candidate.exists():
-            return candidate
-    return None
+    Kept as its own name because that is what it answers; the rest of what the
+    project says now lives in :class:`~loom.cli.config.ProjectConfig`, which
+    also reads this key.
+    """
+    return ProjectConfig.discover(start, load_env=False).modules
 
 
 def load_module(spec: str) -> Any:
@@ -115,10 +103,25 @@ def collect_workflows(module: Any) -> list[Any]:
 
 @dataclass
 class Target:
-    """A resolved command target: a backend, and the workflow name if given."""
+    """A resolved command target: a backend, and the workflow name if given.
+
+    ``project`` is what the local backend was built from — ``None`` against
+    ``--server``, where the store is the server's business. Carried so a
+    command can say *which* store it used without re-deriving it, which is
+    what made the old ephemeral default so hard to notice.
+    """
 
     backend: RuntimeFacade
     workflow: str | None = None
+    project: ProjectConfig | None = None
+
+
+def _interaction() -> Any:
+    """The best question renderer this terminal supports."""
+    from loom.cli.repl.interaction import PromptUserInteraction
+
+    picker = PromptUserInteraction()
+    return picker if picker.available() else CLIUserInteraction()
 
 
 def resolve(
@@ -126,6 +129,7 @@ def resolve(
     *,
     server: str | None = None,
     modules: list[str] | None = None,
+    store: str | None = None,
 ) -> Target:
     """Build the backend a command should use, and resolve a workflow name.
 
@@ -142,6 +146,14 @@ def resolve(
     from loom.cli.auth_commands import credential_store_for
     from loom.nodes.human import LogChannel
     from loom.runtime.engine import Runtime
+    from loom.stores import from_url
+
+    # The project decides where the journal lives, and says why — see
+    # `loom.cli.config`. `Runtime.from_env()` would answer `memory://` for a
+    # directory that plainly is a project, which is what made twelve commands
+    # report "none" out of the box.
+    project = ProjectConfig.discover(store=store, modules=modules)
+    project.prepare()
 
     # The CLI is a *host*, and a host chooses where human requests go — the same
     # reason a workflow does not choose its store. A bare ``Runtime()`` still
@@ -153,7 +165,7 @@ def resolve(
     # ``delivered=False``, so `loom pending` finds it and the table says plainly
     # that nobody was notified. Configure a real one in the host process for
     # anything that should reach a person.
-    runtime = Runtime.from_env(human=LogChannel())
+    runtime = Runtime.from_env(human=LogChannel(), store=from_url(project.store_url))
 
     # What `loom connect <name>` stored is what a workflow's toolsets read via
     # ctx.credential(name) — without this the CLI could authenticate a
@@ -170,7 +182,7 @@ def resolve(
     loaded: list[str] = []
 
     explicit_name: str | None = None
-    to_import = list(modules or configured_modules())
+    to_import = list(project.modules)
 
     if target and "::" in target:
         module_spec, _, explicit_name = target.partition("::")
@@ -192,11 +204,18 @@ def resolve(
             runtime.register(definition)
 
     # The CLI is the one surface with a person at the other end of stdin, so
-    # it is the one that composes an interaction in. `CLIUserInteraction`
-    # returns a *skipped* answer when stdin is not a TTY, so a piped or CI
+    # it is the one that composes an interaction in. Both implementations
+    # return a *skipped* answer when stdin is not a TTY, so a piped or CI
     # invocation degrades to the non-interactive behaviour instead of blocking
     # on a prompt nobody can see.
-    backend = LocalFacade(runtime, loaded, user_interaction=CLIUserInteraction())
+    #
+    # The picker is preferred where it can run because the recommended option
+    # is preselected there, which makes Enter a usable "you decide" — the
+    # outcome the three-outcome protocol exists for, and the one that costs the
+    # same as any other answer when the question is a numbered list. It adds a
+    # rendering and no rules: everything it cannot draw is handed to
+    # `CLIUserInteraction`, which is where the rules already are.
+    backend = LocalFacade(runtime, loaded, user_interaction=_interaction())
 
     if explicit_name and explicit_name not in runtime.workflows:
         known = ", ".join(sorted(runtime.workflows)) or "none"
@@ -207,4 +226,4 @@ def resolve(
             "[tool.loom] modules in pyproject.toml."
         )
 
-    return Target(backend, explicit_name)
+    return Target(backend, explicit_name, project)

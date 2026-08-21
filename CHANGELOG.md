@@ -7,6 +7,174 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `loom` is an interactive session
+
+`loom` with no subcommand, at a terminal, opens one (`[cli]` extra). Type what
+you want: with a file in focus that changes it, with none it writes a new one
+and focus follows what it wrote. Piped, redirected or in CI it prints help and
+exits 0 exactly as it always has.
+
+A slash command **is** the subcommand — `/run digest -i @x.json` is parsed by
+the same parser and dispatched to the same handler as `loom run digest -i
+@x.json`, down to the exit code. The tempting shape is a registry of small
+functions over the facade, and it is a second implementation of every command:
+the two drift, and the drift is invisible because both resolve and both run.
+
+### Added — the agent is visible while it works
+
+`loom author` awaited one coroutine and printed nothing until it returned:
+twenty discovery turns, sixteen verification stages, three repair rounds each
+re-invoking the model, a smoke run and a replay, all silent. The seventeen
+`logger.info` calls narrating it went to a logger no CLI configures, and there
+was no `-v`.
+
+Nothing new was needed under it. `AgentContext.hooks` already existed and the
+runner already drove the agent family from it; `CodingSession` built the one
+`AgentContext` a job makes and left the field empty. `edit()` passed the
+registry through and `generate()` did not — one keyword argument, in the same
+file, and no unit test could see it. `tests/test_cli_progress.py` therefore
+asserts wiring rather than rendering.
+
+`tool_start`/`tool_end` join the agent hook family, carrying the tool, its
+arguments, the outcome and the elapsed time. Observation, not a second way to
+refuse a call — that is already an effect hook on `kind="tool"`, which never
+fires for an agent running outside a workflow, because it has no broker.
+
+### Added — `loom doctor`
+
+Store URL and whether it can actually be written, which provider key is set,
+whether the declared modules import, workflows registered, toolsets reachable,
+extras installed. Exit 1 on anything that would fail later. Every one of those
+failures was previously found by running a real command and working backwards
+from a symptom.
+
+### Changed — a project keeps its runs
+
+The default store was `memory://`, so every `loom` process built its own
+journal and a run recorded by one invocation did not exist for the next.
+Twelve of the forty commands were inert out of the box, and `--detach` printed
+an identifier for a run that ceased to exist when the command ended.
+
+Resolution is now `--store` > `$LOOM_STORE` > `[tool.loom] store` >
+`.loom/runs.db` beside the nearest `pyproject.toml` > `memory://`. The last is
+reached only with no project at all, because nowhere-to-write and
+not-wanting-to-write are different things. `.env` is read from the project
+root, real environment variables winning — the cookbooks have done that since
+they existed and the CLI did not.
+
+### Changed — nothing is written before it has been shown
+
+`loom edit` wrote the file and *then* printed the diff, the graph delta and the
+explanation. No confirmation, no backup. `loom author -o existing.py` clobbered
+silently for the same reason. Both now show the change and ask; `--yes` writes
+without asking and non-interactive **denies**, because a gate that could not
+run has not passed.
+
+### Fixed — a completed run could exit 1
+
+`Printer.value` interpolated a run's own output into a markup-enabled
+`console.print`, so a workflow returning `"[/tag]"` raised `MarkupError` from
+inside the renderer, nothing caught it, and a run that completed printed a
+traceback and exited 1 — while `--json` printed it and exited 0. A rendering
+fault could change what the exit-code contract reported.
+
+The renderers carrying data build `rich.text.Text`, which has no markup to
+parse. `_strip_markup` now removes the ten tags this package writes and nothing
+else: it used to match any bracketed lowercase word, which deleted `[dev]` out
+of the `pip install -e '.[dev]'` that `loom init` prints — the first command a
+new user runs, handing them an install that leaves them without the pytest the
+same line tells them to run.
+
+### Fixed — `--follow` did not follow
+
+It did not imply `--detach`, so `start` drove the run to completion and
+`follow` then polled a run that had already finished: every journal line
+arriving at once, after the fact, from the one flag whose purpose is that they
+do not. Measured at 1.9s/2.7s/3.9s for three one-second steps, against all
+three within 30ms. `RuntimeFacade.journal()` gained the `offset` `reports()`
+already had.
+
+### Fixed — giving up on a run reported success
+
+`STATUS_EXIT` mapped `running` to 0, so `loom watch --timeout` on a run still
+going exited green — the conflation exit 3 exists to prevent, one state over.
+`follow()` now reports whether the run *settled*, which is not readable from
+the status alone.
+
+### Fixed — an absent `--input` overrode the workflow's own default
+
+The engine passes the input positionally, so omitting the flag passed an
+explicit `None`: `async def flow(ctx, x: str = "a")` ran with `None` and failed
+inside the first step with a `TypeError` that reads as a broken workflow.
+`WorkflowDefinition.input_default` exposes the declared default rather than
+`invoke` applying it — an explicit `None` and an absent argument are different
+things, and only the caller knows which it has.
+
+### Fixed — thirteen capabilities reached the CLI and nothing else
+
+`RuntimeFacade` declares 33 methods and the MCP server registered 19 tools, so
+`edit`, `pending`, `respond`, `pause`, `unpause`, `pin`, `nodes`, `node`,
+`publish` and `artifact_history` were unreachable from a client — which could
+start a run and never answer the human gate it parked on. All are tools now,
+and `tests/test_surface_parity.py` fails on a port method that reaches no
+surface and carries no written reason.
+
+### Fixed — `loom setup claude` configured the wrong Claude
+
+It wrote Claude *Desktop*'s config while reading as the whole family, so anyone
+running Claude Code got a command that reported success and wired up nothing.
+The clients are now `claude-code` (project `.mcp.json`) and `claude-desktop`;
+`claude` still resolves to the desktop app and says which one it picked.
+
+### Fixed — `loom refresh --all` never existed
+
+Documented in two places in `CLAUDE.md` and copied into the new CLI guide.
+`loom refresh` with no names already means every stored credential. Found by
+`tests/test_cli_docs.py` on its first run.
+
+### Added — a CLI guide, and grouped help
+
+`docs/guides/cli.md`, the first page about the surface most people meet;
+`getting-started.md` was Python-first and never mentioned `loom`. `--help`
+groups its forty commands by what you are trying to do instead of printing
+argparse's flat list with `author` and `run` sixth and seventh.
+
+
+### Fixed — a browser screenshot was captured and then discarded
+
+`SnapshotIn.vision` asked the provider for a picture, `local.py` took it, and
+`PageSnapshot.screenshot` carried it as an `Attachment` — then `_page_out` built
+its `PageOut` without that field and dropped it. A caller passed `vision=True`,
+paid for the pixels, and received nothing back.
+
+`PageOut.screenshot` now carries it, and `browser.navigate` gained `vision` of
+its own so proving you reached a page does not need a second node call. An
+`Attachment` rather than a path: it journals losslessly, and with
+`Runtime(blobs=…)` it offloads by content hash instead of putting a
+quarter-megabyte of PNG in a journal row.
+
+Found by watching the coding agent rather than by reading the code. Given a spec
+that asked for screenshots, it read all six browser node contracts in four turns
+— exemplary — and then spent twelve turns searching the catalogue for
+"screenshot", "vision", "capture", "image" and "artifact", found nothing that
+could produce one, and exhausted its budget without writing a line. The wander
+was not indiscipline; it was looking for a capability the suite did not have.
+
+### Fixed — browser nodes were unreachable from every surface
+
+`Runtime.from_env()` wires a store, blobs and an agent backend from the
+environment, and did not wire a browser provider. So `loom run` refused any
+workflow calling a `browser.*` node with "requires browser, which this Runtime
+does not have configured", and the only way to satisfy it was to construct the
+Runtime by hand in Python — which no CLI, MCP or HTTP caller does. The whole
+node suite was library-only by accident.
+
+It now wires `LocalBrowserProvider` when the `browser` extra is installed.
+Having a provider costs nothing until a `browser.*` node is actually called, and
+a missing extra leaves it `None` so the node's own requirement check reports it
+— the same shape `_backend_from_env` and blobs already follow.
+
+
 ### Fixed — the durability core's notion of which call is which
 
 A durable call took its journal path from a counter shared by every branch,
@@ -241,6 +409,30 @@ has to justify itself, and it caught this one. The opening line duplicated step
 naming plain Python as the only answer when no toolset matches — and the worked
 example was deleted outright, because `node_contract` renders the call from the
 node's own models and a copy in the prompt is a second source that can drift.
+
+### Added — a plan cache, and a narrower human exemption
+
+`browser.observe` remembers which control an intent meant, across runs, over
+`Runtime.cache`. Tier 0 answers an exact name for free; tier 1 costs a model
+call, and this is what stops that being paid on every run. **A hit is verified
+against the live page before it is used**, so a stale entry costs a wasted
+lookup rather than a wrong click — and it is *replaced*, so the run that finds
+it also fixes it. Keyed on the page shape (scheme, host, path, never the query)
+so two rows of one form share a plan, and scoped per workflow.
+
+The `asks_human` taint exemption is narrowed from `requires=["human_channel"]`
+to that **and** `suspends`. On `requires` alone, any third-party node could
+declare a channel it never uses and receive blanket taint exemption for whatever
+else it did; a node that also parks the run is waiting for a person. All five
+shipped `human.*` nodes declare both, so nothing legitimate changed.
+
+Its residual is now asserted rather than implied: a tainted run can still put
+what it read into an approval's `context` and name its own `assignees`. Both are
+deliberate — showing the reviewer what was read is the request's purpose — but
+it means the human channel is a delivery path a tainted run can reach, and
+whether that leaks depends on whether the host's channel honours a
+workflow-chosen recipient. LOOM has always disclaimed that; the disclaimer is
+now in the suite.
 
 ### Added — a browser session is treated as the credential it is
 

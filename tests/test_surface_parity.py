@@ -101,6 +101,95 @@ def test_every_adapter_implements_the_whole_port(adapter: type, method: str) -> 
     assert hasattr(adapter, method), f"{adapter.__name__} is missing {method}()"
 
 
+#: Port method -> the tool that exposes it, where the names differ. A rename
+#: rather than an absence: ``get`` is ``get_run_status`` because a tool name is
+#: read by a model choosing between thirty-five of them, and ``get`` says
+#: nothing.
+EXPOSED_AS: dict[str, str] = {
+    "get": "get_run_status",
+    "start": "run_workflow",
+    "journal": "get_run_journal",
+    "reports": "get_run_progress",
+    "workflows": "list_workflows",
+    "nodes": "search_nodes",
+    "node": "show_node",
+    "pending": "list_pending",
+    "respond": "respond_to_run",
+    "pause": "pause_run",
+    "unpause": "unpause_run",
+    "pin": "pin_run",
+    "cancel": "cancel_run",
+    "retry": "retry_run",
+    "replay": "replay_run",
+    "publish": "publish_workflow",
+    "author": "author_workflow",
+    "edit": "edit_workflow",
+    "schedule": "schedule_workflow",
+    "artifact_url": "get_artifact_url",
+}
+
+#: Port methods that deliberately reach no MCP client, with the reason. An
+#: entry here is a decision somebody made; the absence of one is a gap.
+NOT_EXPOSED_OVER_MCP: dict[str, str] = {
+    "close": "lifecycle, not a capability — the server owns the facade",
+    "schedules": "a listing an operator reads, not something a model acts on",
+    "unschedule": "removing a trigger is an operational act with no undo, and "
+    "`loom` is where it belongs",
+    "read_artifact": "get_artifact_url instead — bytes through a model's "
+    "context is what ResultBounds exists to prevent",
+    "upload_url": "presigned-upload plumbing a client drives over HTTP",
+    "confirm_upload": "the other half of upload_url",
+    "read_blob": "raw bytes, for the same reason read_artifact is not exposed",
+    "write_blob": "raw bytes; put_artifact is the named, versioned way in",
+}
+
+
+def _registered_tools() -> set[str]:
+    import asyncio
+
+    from loom.mcp_server import build_server
+
+    server = build_server(LocalFacade(_runtime()))
+    return {tool.name for tool in asyncio.run(server.list_tools())}
+
+
+@pytest.mark.parametrize("method", _protocol_methods())
+def test_no_port_capability_reaches_only_one_surface(method: str) -> None:
+    """A capability on the port must reach MCP, or say why it does not.
+
+    The gap this closes was thirteen methods wide and entirely silent:
+    ``RuntimeFacade`` declared them, the CLI used them, and the server
+    registered nothing — so a client could start a run and never answer the
+    human gate it parked on, or author a workflow and never change it. Nothing
+    failed, because a missing tool is not an error anywhere.
+
+    The allowlist is the point. Not exposing something is a legitimate
+    decision — bytes do not belong in a model's context — and this makes it one
+    somebody writes down rather than one that happens.
+    """
+    pytest.importorskip("mcp", reason="needs the mcp extra")
+    if method in NOT_EXPOSED_OVER_MCP:
+        return
+    tool = EXPOSED_AS.get(method, method)
+    assert tool in _registered_tools(), (
+        f"RuntimeFacade.{method}() reaches no MCP client. Register a tool in "
+        f"mcp_server/server.py (naming it in EXPOSED_AS if it differs), or add "
+        f"it to NOT_EXPOSED_OVER_MCP with the reason."
+    )
+
+
+def test_the_maps_describe_methods_that_exist() -> None:
+    """So a renamed port method leaves a stale entry behind, loudly."""
+    known = set(_protocol_methods())
+    stale = (set(NOT_EXPOSED_OVER_MCP) | set(EXPOSED_AS)) - known
+    assert not stale, f"these name methods the port no longer has: {stale}"
+
+
+def test_a_method_is_not_both_exposed_and_excused() -> None:
+    overlap = set(NOT_EXPOSED_OVER_MCP) & set(EXPOSED_AS)
+    assert not overlap, f"contradictory entries for {overlap}"
+
+
 @pytest.mark.parametrize("method", _protocol_methods())
 def test_adapter_signatures_match_the_port(method: str) -> None:
     """A parameter added to one adapter and not the other is a silent break.

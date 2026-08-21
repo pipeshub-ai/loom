@@ -16,6 +16,9 @@ found nothing, and saying so is not the same as passing.
 
 from __future__ import annotations
 
+import inspect
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, runtime_checkable
 
@@ -29,6 +32,8 @@ __all__ = [
     "PipelineReport",
 ]
 
+
+logger = logging.getLogger("workflow.coding_agent")
 
 @dataclass(frozen=True)
 class CheckContext:
@@ -160,12 +165,53 @@ class CheckPipeline:
     def names(self) -> list[str]:
         return [check.name for check in self._checks]
 
-    async def run(self, code: str, context: CheckContext) -> PipelineReport:
+    async def run(
+        self,
+        code: str,
+        context: CheckContext,
+        *,
+        on_stage: Callable[[Check, CheckResult | None], Any] | None = None,
+    ) -> PipelineReport:
+        """Run every check, cheapest first, stopping at the first blocking error.
+
+        *on_stage* is called twice per check — once with ``None`` as the stage
+        opens, once with its result as it closes. Sixteen stages including a
+        subprocess smoke run and a full replay is most of the wall clock of an
+        authoring job, and without this the whole of it was one silent pause.
+
+        It is an argument rather than a hook registry because a stage is not an
+        agent call: nothing here reaches a model, so the agent family has
+        nothing to say about it, and inventing an event for a plain loop would
+        be a mechanism where a callback is the thing.
+        """
         report = PipelineReport()
         for check in self._checks:
+            if on_stage is not None:
+                await _announce(on_stage, check, None)
             result = await check.run(code, replace(context, prior=report))
             report.results.append(result)
+            if on_stage is not None:
+                await _announce(on_stage, check, result)
             if check.blocking and result.errors:
                 # Later stages would only report consequences of this one.
                 break
         return report
+
+
+async def _announce(
+    on_stage: Callable[[Check, CheckResult | None], Any],
+    check: Check,
+    result: CheckResult | None,
+) -> None:
+    """Call the progress callback, sync or async, never fatally.
+
+    Fails open on purpose, the rule the non-deciding hook families already
+    follow: a callback cannot change what the pipeline finds, so a broken
+    renderer must not be able to turn a clean generation into a failed one.
+    """
+    try:
+        outcome = on_stage(check, result)
+        if inspect.isawaitable(outcome):
+            await outcome
+    except Exception:
+        logger.debug("progress callback failed for stage %s", check.name, exc_info=True)

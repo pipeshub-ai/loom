@@ -1135,6 +1135,11 @@ class TestAgentHooks:
         assert ctx.stop_reason == "no progress in three turns"
 
     def test_the_events_are_registered_in_firing_order(self) -> None:
+        """The tuple is the order a single turn produces them in.
+
+        ``tool_start``/``tool_end`` sit between the model answering and the turn
+        closing, because that is when the calls it asked for are dispatched.
+        """
         from loom.runtime.hooks import _AGENT_EVENTS
 
         assert _AGENT_EVENTS == (
@@ -1142,6 +1147,8 @@ class TestAgentHooks:
             "turn_start",
             "model_start",
             "model_end",
+            "tool_start",
+            "tool_end",
             "turn_end",
             "agent_end",
         )

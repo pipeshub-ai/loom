@@ -16,6 +16,14 @@ from collections.abc import Awaitable
 from pathlib import Path
 from typing import Any
 
+from loom.cli.changes import (
+    Decision,
+    FileChange,
+    apply,
+    propose,
+    render,
+    session_allowlist,
+)
 from loom.cli.output import Exit, Printer, esc, exit_for
 from loom.cli.targets import CliBackend, LocalBackend, Target, resolve
 from loom.core.exceptions import (
@@ -49,6 +57,7 @@ def with_backend(args: argparse.Namespace, target: str | None = None) -> Target:
         target,
         server=getattr(args, "server", None),
         modules=getattr(args, "module", None) or None,
+        store=getattr(args, "store", None),
     )
 
 
@@ -219,10 +228,12 @@ def _declared_default(target: Target) -> Any:
 
 
 def _ephemeral_store(target: Target) -> bool:
-    """Whether this target's journal dies with the process."""
-    runtime = getattr(target.backend, "runtime", None)
-    store = getattr(runtime, "store", None)
-    return store is not None and type(store).__name__ == "MemoryStore"
+    """Whether this target's journal dies with the process.
+
+    Read from the project that chose it rather than from the store object: the
+    two agree, and the project is also the thing that can say *why*.
+    """
+    return target.project is not None and target.project.ephemeral
 
 
 def _warn_if_ephemeral(out: Printer, target: Target) -> None:
@@ -239,7 +250,7 @@ def _warn_if_ephemeral(out: Printer, target: Target) -> None:
         "  [yellow]This store is in memory: the run above will not exist once "
         "this command exits.[/yellow]"
     )
-    out.hint("set a store, e.g. LOOM_STORE=sqlite://runs.db")
+    out.hint("run this inside a project (loom init), or pass --store sqlite://runs.db")
 
 
 def report_run(
@@ -337,6 +348,43 @@ async def follow(
 # ---------------------------------------------------------------------------
 
 
+def _watching(args: argparse.Namespace, target: Target) -> Any:
+    """Attach a progress renderer to the backend, and return it to be closed.
+
+    Set on the backend for the reason ``_asking`` sets the interaction there: a
+    renderer is an object rather than a payload, so it cannot cross
+    ``RemoteFacade`` — which refuses to author anyway.
+
+    Silent under ``--json`` and ``--quiet``, and reduced to one line per event
+    when stderr is not a terminal, so a redirected authoring run produces a log
+    rather than a file of escape codes.
+    """
+    from loom.cli.progress import ProgressRenderer
+
+    backend = target.backend
+    # Both attributes are `LocalFacade`'s; the port carries neither, for the
+    # reason `user_interaction` is not on it either. A remote backend simply
+    # gets no renderer.
+    if not (hasattr(backend, "hooks") and hasattr(backend, "on_stage")):
+        return None
+
+    quiet = getattr(args, "json", False) or getattr(args, "quiet", False)
+    renderer = ProgressRenderer.for_terminal(enabled=not quiet)
+    if not renderer.enabled:
+        return renderer
+
+    from loom.runtime.hooks import HookRegistry
+
+    # Its own registry, not the Runtime's. `HookRegistry` is per-Runtime
+    # precisely so one caller's middleware is not another's, and progress
+    # rendering is this command's business rather than the deployment's.
+    hooks = HookRegistry()
+    renderer.install(hooks)
+    backend.hooks = hooks
+    backend.on_stage = renderer
+    return renderer
+
+
 def _asking(args: argparse.Namespace, target: Target) -> None:
     """Apply ``--no-ask`` / ``--answers`` to the backend before it authors.
 
@@ -393,6 +441,7 @@ def cmd_author(args: argparse.Namespace) -> int:
         spec = _spec_text(args.spec)
         target = with_backend(args)
         _asking(args, target)
+        watching = _watching(args, target)
         try:
             result = await target.backend.author(
                 spec,
@@ -402,13 +451,38 @@ def cmd_author(args: argparse.Namespace) -> int:
                 turns=args.turns,
             )
         finally:
+            if watching is not None:
+                # Before closing the backend, so the live region is gone before
+                # anything else writes — otherwise the summary is drawn under a
+                # spinner that is still redrawing over it.
+                watching.flush_stages()
+                watching.close()
             await target.backend.close()
 
         out.json(result)
         _save_answers(args, result)
 
         if args.output and result["code"]:
-            args.output.write_text(result["code"], encoding="utf-8")
+            change = FileChange(path=args.output, after=result["code"])
+            # `-o existing.py` clobbered silently, for the same reason `edit`
+            # did: the write was the first thing either did with the path.
+            # Creating a file nothing is losing needs no ceremony, so the
+            # question is only asked when there is something to overwrite.
+            decision = (
+                Decision.APPLY
+                if change.creating
+                else propose(
+                    change,
+                    out,
+                    assume_yes=getattr(args, "yes", False),
+                    allowlist=session_allowlist(),
+                )
+            )
+            if decision is Decision.REFUSE:
+                out.line("  [dim]not written[/dim]")
+                _report_authoring(out, result, args)
+                return Exit.USAGE
+            apply(change, out)
         elif result["code"] and not args.json:
             out.verbatim(result["code"])
 
@@ -521,6 +595,7 @@ def cmd_edit(args: argparse.Namespace) -> int:
 
         target = with_backend(args)
         _asking(args, target)
+        watching = _watching(args, target)
         try:
             result = await target.backend.edit(
                 source,
@@ -530,6 +605,9 @@ def cmd_edit(args: argparse.Namespace) -> int:
                 observe=not args.no_observe,
             )
         finally:
+            if watching is not None:
+                watching.flush_stages()
+                watching.close()
             await target.backend.close()
 
         out.json(result)
@@ -546,22 +624,42 @@ def cmd_edit(args: argparse.Namespace) -> int:
             return Exit.OK
 
         destination = args.output or args.file
-        if not args.dry_run:
-            destination.write_text(result["code"], encoding="utf-8")
+        change = FileChange(
+            path=destination,
+            after=result["code"],
+            # The model's own diff, computed against the source it was handed.
+            # Preferred over one recomputed from disk, because that is the diff
+            # the *edit* is: a file changed in another window since would
+            # otherwise be described as part of this change.
+            diff=str(result.get("diff") or ""),
+            graph_changes=tuple(result.get("graph_changes") or ()),
+            explanation=str(result.get("explanation") or ""),
+        )
 
-        if not args.json:
-            if result.get("diff"):
-                out.verbatim(result["diff"])
-            if result.get("graph_changes"):
-                out.line("graph: " + " ".join(result["graph_changes"]))
-            if result.get("explanation"):
-                out.line(result["explanation"])
-            out.line(
-                f"{'would write' if args.dry_run else 'wrote'} {destination}"
-            )
+        if args.dry_run:
+            render(change, out)
+            _report_authoring(out, result, args)
+            out.line(f"  [dim]would write {esc(destination)}[/dim]")
+            return Exit.OK
 
+        # Shown, then asked, then written. The write used to come first and the
+        # diff after it, so the first answer to "what did that do to my
+        # workflow?" arrived when the answer was already the only copy.
+        decision = propose(
+            change,
+            out,
+            assume_yes=getattr(args, "yes", False),
+            allowlist=session_allowlist(),
+        )
+        if decision is Decision.REFUSE:
+            out.line("  [dim]left unchanged[/dim]")
+            _report_authoring(out, result, args)
+            # Usage, not failure: nothing broke, a person declined. The file on
+            # disk is the one that still works.
+            return Exit.USAGE
+        written = apply(change, out)
         _report_authoring(out, result, args)
-        return Exit.OK if result["code"] else Exit.FAILED
+        return written if written != Exit.OK else Exit.OK
 
     return run_async(body(), debug=getattr(args, "debug", False))
 
@@ -593,9 +691,6 @@ def _report_authoring(
         return
 
     out.line()
-    if args.output:
-        out.line(f"  wrote {esc(args.output)}")
-
     smoke = result.get("smoke") or {}
     out.line(
         f"  {result['model']}  "

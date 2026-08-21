@@ -653,8 +653,29 @@ class WorkflowCodingAgent:
         probes: Any | None = None,
         max_total_tokens: int | None = None,
         max_cost_usd: float | None = None,
+        hooks: Any | None = None,
+        on_stage: Any | None = None,
     ) -> None:
         self._model = model
+        self._on_stage = on_stage
+        """Optional ``(check, result)`` callback around each verification stage.
+
+        Sixteen stages including a subprocess smoke run and a full replay is
+        most of the wall clock of a job, and without this the whole of it was
+        one silent pause after the model stopped talking."""
+        self._hooks = hooks
+        """Optional :class:`~loom.runtime.hooks.HookRegistry`, threaded into
+        every model call this job makes.
+
+        Passed in rather than discovered, for the same reason ``probes`` is:
+        the agent layer keeps no reference to a Runtime, so an agent invoked
+        directly simply has no hooks rather than needing one to say so.
+
+        This is what makes an authoring run *visible*. Between the first prompt
+        and the final answer it can spend twenty discovery turns, sixteen
+        verification stages, three repair rounds and a subprocess smoke run,
+        and it emitted nothing at all — the seventeen ``logger.info`` lines
+        narrating it went to a logger no CLI configures."""
         self._executor = executor
         """Optional :class:`AgentExecutor` — LangGraph, Agno, Pydantic AI, or a
         host's own. ``None`` uses LOOM's built-in ReAct loop.
@@ -798,6 +819,35 @@ class WorkflowCodingAgent:
 
     # Keep old private name as alias
     _build_system_prompt = build_system_prompt
+
+    @property
+    def _progress(self) -> Any:
+        """The surface's progress callback, if this agent was given one.
+
+        A property, and defensive, because ``_repair_from`` is deliberately
+        usable on a **minimally constructed** agent: ``test_hardening_p2``
+        builds one with ``__new__`` and two attributes so the repair loop stays
+        testable without a model, a budget or a transcript. A rendering
+        concern must not add a required attribute to that path — the
+        dependency has to be able to *not exist*, rather than be defaulted at
+        each of the five call sites.
+        """
+        return getattr(self, "_on_stage", None)
+
+    def _narrate(self, text: str) -> None:
+        """Say something a stage callback cannot: a repair round, a decline.
+
+        Beside ``on_stage`` on the same object rather than a second seam
+        through the constructor. Optional, and failure is swallowed, because a
+        renderer must never be able to change what a generation produces.
+        """
+        writer = getattr(self._progress, "note", None)
+        if writer is None:
+            return
+        try:
+            writer(text)
+        except Exception:
+            logger.debug("progress note failed", exc_info=True)
 
     async def _repair_until_it_runs(
         self, session: Asking, code: str
@@ -984,6 +1034,10 @@ class WorkflowCodingAgent:
             if _is_unrepairable(report):
                 break
             rounds += 1
+            self._narrate(
+                f"repair {rounds}/{self._max_repair} — "
+                + "; ".join(issue.message for issue in report.errors[:2])[:120]
+            )
             try:
                 retry = await session.ask(
                     _repair_prompt(report, code, context.spec)
@@ -1007,9 +1061,12 @@ class WorkflowCodingAgent:
             # spend a repair round doing it.
             if not candidate or candidate.strip() == code.strip():
                 declined = True
+                self._narrate("unchanged — the model judged the finding wrong")
                 break
 
-            attempt = await self._pipeline.run(candidate, context)
+            attempt = await self._pipeline.run(
+                candidate, context, on_stage=self._progress
+            )
             if len(attempt.errors) >= len(report.errors) and not attempt.ok:
                 # No better, and possibly prose where code should be. Keep what
                 # we had: a repair round that regresses is worse than none.
@@ -1068,7 +1125,7 @@ class WorkflowCodingAgent:
             model_settings=ModelSettings(temperature=0.2),
             executor=self._executor,
         )
-        session = CodingSession(agent, budget)
+        session = CodingSession(agent, budget, hooks=self._hooks)
 
         try:
             reply = await session.ask(_edit_prompt(source, instruction))
@@ -1113,12 +1170,12 @@ class WorkflowCodingAgent:
         code = tidy(code).code
 
         context = self._check_context(instruction, getattr(reply, "tool_calls", None))
-        report = await self._pipeline.run(code, context)
+        report = await self._pipeline.run(code, context, on_stage=self._progress)
         code, rounds, declined = await self._repair_from(
             session, code, report, context
         )
         if rounds:
-            report = await self._pipeline.run(code, context)
+            report = await self._pipeline.run(code, context, on_stage=self._progress)
 
         return EditResult(
             code=code,
@@ -1198,7 +1255,7 @@ class WorkflowCodingAgent:
             model_settings=ModelSettings(temperature=0.2),
             executor=self._executor,
         )
-        session = CodingSession(agent, budget)
+        session = CodingSession(agent, budget, hooks=self._hooks)
 
         try:
             result = await session.ask(spec)
@@ -1320,11 +1377,14 @@ class WorkflowCodingAgent:
         # failure. Repair is driven by whatever it reports, so a type error and
         # a traceback reach the model by the same path.
         context = self._check_context(spec, getattr(result, "tool_calls", None))
-        report = await self._pipeline.run(code, context)
+        report = await self._pipeline.run(code, context, on_stage=self._progress)
         code, rounds, declined = await self._repair_from(
             session, code, report, context
         )
-        report = await self._pipeline.run(code, context) if rounds else report
+        if rounds:
+            report = await self._pipeline.run(
+                code, context, on_stage=self._progress
+            )
 
         issues = _settle_advisories(list(report.issues), declined=declined)
         errors = [issue for issue in issues if issue.severity == "error"]

@@ -113,8 +113,12 @@ api = [
     "uvicorn[standard]>=0.30",
 ]
 
-# Nicer CLI output. Without it every command still works, in plain text.
-cli = ["rich>=13.0"]
+# Nicer CLI output, and the interactive session `loom` opens with no
+# subcommand. Without either, every command still works in plain text and
+# `loom` prints help — the session refuses with the install line rather than
+# degrading into a worse version of itself, because a line editor without line
+# editing is not a smaller feature, it is a broken one.
+cli = ["rich>=13.0", "prompt_toolkit>=3.0"]
 
 # MCP server (`loom mcp`) — the official SDK's high-level `MCPServer` API.
 #
@@ -291,6 +295,11 @@ module = [
     "pymongo.*",
     "pypdf.*",
     "redis.*",
+    # The interactive session's line editor, from `[cli]`. Same standing as
+    # `rich` and `textual`: optional, imported inside a function, and the
+    # module deciding whether a session is possible checks for it by spec
+    # rather than by importing it.
+    "prompt_toolkit.*",
     "rich.*",
     "textual.*",
     "uvicorn.*",

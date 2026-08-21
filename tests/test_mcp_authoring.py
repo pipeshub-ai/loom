@@ -658,7 +658,9 @@ def authoring_server(authoring_facade):
 
 
 class TestServerRegistration:
-    async def test_all_25_tools_are_registered_when_enabled(self, authoring_server) -> None:
+    async def test_every_authoring_tool_is_registered_when_enabled(
+        self, authoring_server
+    ) -> None:
         names = {t.name for t in await authoring_server.list_tools()}
         authoring_names = {
             "get_tool_contract",
@@ -667,16 +669,17 @@ class TestServerRegistration:
             "validate_workflow_code",
             "smoke_test_workflow",
             "save_workflow",
-            # The one-shot counterpart: those hand the model the pieces,
-            # this runs loom's own coding agent end to end. Behind the same
-            # flag, because "authoring off" cannot mean "except the tool
-            # that does all of it at once".
+            # The one-shot counterparts: those hand the model the pieces,
+            # these run loom's own coding agent end to end. Behind the same
+            # flag, because "authoring off" cannot mean "except the tools
+            # that do all of it at once".
             "author_workflow",
+            "edit_workflow",
         }
         assert authoring_names <= names
-        assert len(names) == 25
+        assert len(names) == 35
 
-    async def test_disabled_via_config_drops_to_18(self, authoring_facade) -> None:
+    async def test_disabled_drops_the_authoring_tools(self, authoring_facade) -> None:
         from loom.mcp_server import build_server
         from loom.mcp_server.authoring_config import AuthoringConfig
 
@@ -684,9 +687,10 @@ class TestServerRegistration:
             authoring_facade, name="off", authoring=AuthoringConfig(enabled=False)
         )
         names = {t.name for t in await server.list_tools()}
-        assert len(names) == 18
+        assert len(names) == 27
         assert "get_tool_contract" not in names
         assert "save_workflow" not in names
+        assert "edit_workflow" not in names
 
     async def test_disabled_via_env_var(
         self, authoring_facade, monkeypatch: pytest.MonkeyPatch
@@ -696,7 +700,7 @@ class TestServerRegistration:
         monkeypatch.setenv("LOOM_MCP_AUTHORING", "0")
         server = build_server(authoring_facade, name="off-env")
         names = {t.name for t in await server.list_tools()}
-        assert len(names) == 18
+        assert len(names) == 27
 
     async def test_every_authoring_tool_has_annotations(self, authoring_server) -> None:
         authoring_names = {
@@ -728,13 +732,24 @@ class TestServerRegistration:
         by_name = {t.name: t for t in await authoring_server.list_tools()}
         assert by_name["save_workflow"].annotations.destructive_hint is False
 
-    async def test_schema_budget_stays_within_the_raised_limit(self, authoring_server) -> None:
+    async def test_schema_budget_stays_within_the_limit(self, authoring_server) -> None:
+        """Deferred to ``test_mcp_server.TestSchemaBudget``, which owns it.
+
+        The number used to be written out here as well, so raising the budget
+        for a larger surface left this copy asserting the old one — a failure
+        in a file that has nothing to say about the decision. One authority,
+        read rather than restated.
+        """
+        from test_mcp_server import TestSchemaBudget
+
         registered = await authoring_server.list_tools()
         total = sum(
             len(t.name) + len(t.description or "") + len(json.dumps(t.input_schema))
             for t in registered
         )
-        assert total <= 18_000, f"25 tools' schemas total {total} chars"
+        assert total <= TestSchemaBudget.MAX_TOTAL_SCHEMA_CHARS, (
+            f"{len(registered)} tools' schemas total {total} chars"
+        )
 
     async def test_instructions_mention_authoring_when_enabled(self, authoring_server) -> None:
         assert "save_workflow" in (authoring_server.instructions or "")

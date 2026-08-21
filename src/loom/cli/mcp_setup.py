@@ -63,8 +63,26 @@ def _claude_desktop_path() -> Path:
 
 
 CLIENTS: dict[str, ClientSpec] = {
-    "claude": ClientSpec(
-        id="claude",
+    # Claude *Code* — the terminal agent — reads `.mcp.json` at the project
+    # root, and had no target at all. `loom setup claude` wrote Claude
+    # Desktop's config, so anyone running Claude Code got a successful-looking
+    # command and no tools; `CLAUDE.md` worked around it by telling the reader
+    # to type `claude mcp add` by hand. It is first in the mapping because it
+    # is the client this project is most often driven from.
+    "claude-code": ClientSpec(
+        id="claude-code",
+        display_name="Claude Code",
+        format="json",
+        servers_key="mcpServers",
+        # `~/.claude.json` is Claude Code's user-scope file, but it holds much
+        # more than server definitions and its shape is the client's business.
+        # Project scope is both the safe default and the right one: which
+        # workflows a server can see is a property of the project.
+        global_path=Path.home() / ".claude.json",
+        project_relative=".mcp.json",
+    ),
+    "claude-desktop": ClientSpec(
+        id="claude-desktop",
         display_name="Claude Desktop",
         format="json",
         servers_key="mcpServers",
@@ -88,6 +106,17 @@ CLIENTS: dict[str, ClientSpec] = {
         project_relative=None,
     ),
 }
+
+#: Names that used to mean something else. ``claude`` configured Claude
+#: *Desktop* while reading as the whole family, which is the ambiguity the
+#: split above removes — so it keeps working and says which one it picked,
+#: rather than silently continuing to mean the less likely of the two.
+ALIASES: dict[str, str] = {"claude": "claude-desktop"}
+
+
+def client_named(name: str) -> ClientSpec | None:
+    """The client *name* refers to, following aliases."""
+    return CLIENTS.get(ALIASES.get(name, name))
 
 
 def config_path(spec: ClientSpec, *, use_global: bool, project_dir: Path) -> Path:
@@ -229,7 +258,24 @@ def _write(path: Path, text: str) -> None:
 def cmd_setup(args: argparse.Namespace) -> int:
     """Write (or update) an MCP client's config to launch this install."""
     out = printer_for(args)
-    requested = list(CLIENTS) if args.client == "all" else [args.client]
+    if args.client == "all":
+        requested = list(CLIENTS)
+    else:
+        spec = client_named(args.client)
+        if spec is None:
+            known = ", ".join(sorted(CLIENTS))
+            out.error(f"unknown client '{args.client}' (known: {known})")
+            return Exit.USAGE
+        if spec.id != args.client:
+            # `claude` used to mean Claude Desktop while reading as the whole
+            # family. It still resolves, and says which one it picked, because
+            # silently continuing to mean the less likely of the two is what
+            # made this worth splitting.
+            out.line(
+                f"  [dim]'{args.client}' means {spec.display_name}; "
+                f"Claude Code is 'claude-code'[/dim]"
+            )
+        requested = [spec.id]
 
     if args.path and args.client == "all":
         out.error("--path names one file; pick a single client, not 'all'")

@@ -559,6 +559,156 @@ def _register_tools(
         return await tools.replay_run(_principal_facade(base_facade, auth_enabled), run_id)
 
     @tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True, idempotentHint=True, openWorldHint=False
+        )
+    )
+    async def list_pending(run_id: str | None = None) -> str:
+        """Runs parked on a person, and what each is being asked.
+
+        Each carries the JSON Schema of the accepted answer, for
+        respond_to_run. `delivered: false` means nobody was notified.
+
+        Args:
+            run_id: Only this run, instead of every parked one.
+        """
+        return await tools.list_pending(
+            _principal_facade(base_facade, auth_enabled), run_id
+        )
+
+    @tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False, idempotentHint=False, openWorldHint=False
+        )
+    )
+    async def respond_to_run(run_id: str, subject: str, answer_json: str) -> str:
+        """Answer a parked human request with a typed payload.
+
+        Use approve_run for a plain yes/no; use this for a choice, a form, or
+        an edited draft. list_pending gives the accepted shape.
+
+        Args:
+            run_id: The run identifier.
+            subject: The request subject, e.g. "refund".
+            answer_json: JSON object, e.g. '{"choice": "b"}'.
+        """
+        return await tools.respond_to_run(
+            _principal_facade(base_facade, auth_enabled), run_id, subject, answer_json
+        )
+
+    @tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False, idempotentHint=True, openWorldHint=False
+        )
+    )
+    async def pause_run(run_id: str) -> str:
+        """Hold a run at its next durable step.
+
+        Reversible with unpause_run. Prefer it over cancel_run, which is
+        terminal and unwinds compensations.
+
+        Args:
+            run_id: The run identifier.
+        """
+        return await tools.pause_run(_principal_facade(base_facade, auth_enabled), run_id)
+
+    @tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False, idempotentHint=True, openWorldHint=False
+        )
+    )
+    async def unpause_run(run_id: str) -> str:
+        """Release a run held by pause_run.
+
+        Args:
+            run_id: The run identifier.
+        """
+        return await tools.unpause_run(
+            _principal_facade(base_facade, auth_enabled), run_id
+        )
+
+    @tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True, idempotentHint=True, openWorldHint=False
+        )
+    )
+    async def pin_run(run_id: str, module: str = "") -> str:
+        """Turn a run into a pytest file that reproduces it, from its journal.
+
+        Returns the source; writes nothing.
+
+        Args:
+            run_id: The run to pin.
+            module: Import path for the workflow, e.g. "flows.digest".
+                Omitted, the file carries a TODO instead of an import.
+        """
+        return await tools.pin_run(
+            _principal_facade(base_facade, auth_enabled), run_id, module
+        )
+
+    @tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True, idempotentHint=True, openWorldHint=False
+        )
+    )
+    async def search_nodes(query: str = "", category: str | None = None) -> str:
+        """Search the node catalogue — typed, versioned units of workflow work.
+
+        Args:
+            query: Keywords, e.g. "approval". Empty with a category lists it.
+            category: human | guard | control | transform | io | browser |
+                agent | custom.
+        """
+        return await tools.search_nodes(
+            _principal_facade(base_facade, auth_enabled), query, category
+        )
+
+    @tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True, idempotentHint=True, openWorldHint=False
+        )
+    )
+    async def show_node(node_id: str) -> str:
+        """One node's contract: the exact code to write to call it.
+
+        Args:
+            node_id: A node id, e.g. "human.approval".
+        """
+        return await tools.show_node(
+            _principal_facade(base_facade, auth_enabled), node_id
+        )
+
+    @tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False, idempotentHint=True, openWorldHint=False
+        )
+    )
+    async def publish_workflow(workflow: str) -> str:
+        """Record a workflow in the durable catalog.
+
+        Args:
+            workflow: The workflow name.
+        """
+        return await tools.publish_workflow(
+            _principal_facade(base_facade, auth_enabled), workflow
+        )
+
+    @tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True, idempotentHint=True, openWorldHint=False
+        )
+    )
+    async def artifact_history(name: str) -> str:
+        """Every version of one named artifact, newest first.
+
+        Args:
+            name: The artifact name.
+        """
+        return await tools.artifact_history(
+            _principal_facade(base_facade, auth_enabled), name
+        )
+
+    @tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
     )
     async def search_toolsets(query: str) -> str:
@@ -683,6 +833,54 @@ def _register_tools(
             return await tools.author_workflow(
                 _principal_facade(base_facade, auth_enabled),
                 spec,
+                packages_json,
+                workflow_input_json,
+                observe,
+                interaction=ElicitationUserInteraction(ctx),
+            )
+
+        @tool(
+            annotations=ToolAnnotations(
+                readOnlyHint=False,
+                destructiveHint=False,
+                idempotentHint=False,
+                openWorldHint=True,
+            )
+        )
+        async def edit_workflow(
+            ctx: Context,
+            source: str,
+            instruction: str,
+            packages_json: str = "[]",
+            workflow_input_json: str = "",
+            observe: bool = True,
+        ) -> str:
+            """Change an existing workflow by describing the change.
+
+            Prefer this over author_workflow whenever a file already exists.
+            The result is verified by the same checks a new workflow gets.
+
+            Returns the whole file, a unified diff, and `graph_changes`
+            (`+summarise -fetch`). `changed: false` means the model declined
+            rather than guess — the file you passed is still correct. Writes
+            nothing.
+
+            Args:
+                source: Current contents of the workflow file.
+                instruction: What to change. Steps are never renamed: a name is
+                    what the journal records, so changing one strands runs in
+                    flight.
+                packages_json: JSON array of packages the target environment
+                    has, e.g. '["httpx"]'.
+                workflow_input_json: Input for the verification run.
+                observe: Let it look at the systems the instruction names.
+            """
+            from loom.agents.interaction import ElicitationUserInteraction
+
+            return await tools.edit_workflow(
+                _principal_facade(base_facade, auth_enabled),
+                source,
+                instruction,
                 packages_json,
                 workflow_input_json,
                 observe,
