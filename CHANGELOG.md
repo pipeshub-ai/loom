@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — an authored workflow could not be run by name
+
+`loom author -o flows/digest.py` wrote a file and `loom run digest` then
+reported an unknown workflow: a name resolves through `[tool.loom] modules`
+and nothing had added it, so the last step of the loop failed in a way that
+reads as the authoring having failed. The module is registered now — the line
+the scaffolded `pyproject.toml` already tells you to add — and the hint names
+the workflow rather than printing `loom run <workflow>` literally, since a
+name comes from `@workflow(name=...)` and is routinely not the filename.
+
+### Fixed — the progress clock froze between events
+
+`rich.live.Live` re-renders whatever object it holds, and it was handed a
+finished `Text`, so the elapsed seconds moved only when an event called
+`_redraw`. Twenty frames drawn over two and a half seconds of silence, every
+one reading "0s" — during a model call, which is most of the wall clock and
+exactly when somebody is wondering whether it has hung.
+
 ### Added — `loom` is an interactive session
 
 `loom` with no subcommand, at a terminal, opens one (`[cli]` extra). Type what
