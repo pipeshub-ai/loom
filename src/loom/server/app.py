@@ -428,10 +428,13 @@ def create_app(
             raise _fail(exc) from exc
 
     @app.get("/runs/{run_id}/journal")
-    async def get_journal(run_id: str, facade: RuntimeFacade = injected) -> list[dict[str, Any]]:
+    async def get_journal(
+        run_id: str, offset: int = 0, facade: RuntimeFacade = injected
+    ) -> list[dict[str, Any]]:
+        """Durable operations, in order. *offset* skips what the caller has seen."""
         await _require(facade, run_id)
         try:
-            return await facade.journal(run_id)
+            return await facade.journal(run_id, offset)
         except Exception as exc:
             raise _fail(exc) from exc
 

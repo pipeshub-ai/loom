@@ -144,8 +144,25 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _add_output(parser: argparse.ArgumentParser) -> None:
+    """Flags that decide how a command reports, shared by every subcommand.
+
+    Registered per-subparser rather than on the root, because argparse only
+    accepts a root-level flag *before* the subcommand — and ``loom run x
+    --json`` is how everyone types it.
+    """
     parser.add_argument(
         "--json", action="store_true", help="Emit machine-readable JSON only"
+    )
+    parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Suppress human output; exit code and errors only",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print the traceback when something fails unexpectedly",
     )
 
 
@@ -262,6 +279,14 @@ def _authoring(sub: _Subparsers) -> None:
         action="store_true",
         help="Never ask. An ambiguity is resolved at run time by ctx.agent() "
         "instead, exactly as it is when nobody is at the terminal.",
+    )
+    author.add_argument(
+        "--turns",
+        type=int,
+        metavar="N",
+        help="Turns the agent may spend before writing code (default 20). "
+        "Raise it for a spec naming several systems; a run that ends "
+        "'exceeded its budget' produced nothing and spent everything.",
     )
     author.add_argument(
         "--no-observe",

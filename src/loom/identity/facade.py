@@ -123,6 +123,7 @@ class AuthorizedFacade:
         packages: list[str] | None = None,
         smoke_input: Any = None,
         observe: bool = True,
+        turns: int | None = None,
     ) -> dict[str, Any]:
         """Its own scope, not folded into publishing.
 
@@ -132,7 +133,11 @@ class AuthorizedFacade:
         """
         self.principal.requires(Scope.WORKFLOWS_AUTHOR.value)
         return await self.inner.author(
-            spec, packages=packages, smoke_input=smoke_input, observe=observe
+            spec,
+            packages=packages,
+            smoke_input=smoke_input,
+            observe=observe,
+            turns=turns,
         )
 
     async def edit(
@@ -192,10 +197,10 @@ class AuthorizedFacade:
         results = await self.inner.list_runs(workflow=workflow, status=status, limit=limit)
         return [self._redacted(run) for run in results]
 
-    async def journal(self, run_id: str) -> list[dict[str, Any]]:
+    async def journal(self, run_id: str, offset: int = 0) -> list[dict[str, Any]]:
         self.principal.requires(Scope.RUNS_READ.value)
         await self._require_owned(run_id)
-        return await self.inner.journal(run_id)
+        return await self.inner.journal(run_id, offset)
 
     async def reports(self, run_id: str, offset: int = 0) -> list[dict[str, Any]]:
         self.principal.requires(Scope.RUNS_READ.value)

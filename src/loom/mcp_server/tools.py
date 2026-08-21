@@ -344,6 +344,7 @@ async def author_workflow(
     packages_json: str = "[]",
     workflow_input_json: str = "",
     observe: bool = True,
+    turns: int = 0,
     interaction: Any = None,
 ) -> str:
     """Write a whole workflow from a description, using loom's own agent.
@@ -382,6 +383,7 @@ async def author_workflow(
             packages=[str(p) for p in packages] or None,
             smoke_input=workflow_input,
             observe=observe,
+            turns=turns or None,
         )
     except Exception as exc:
         return _json({"error": str(exc), "authored": False})

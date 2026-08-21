@@ -16,7 +16,7 @@ from collections.abc import Awaitable
 from pathlib import Path
 from typing import Any
 
-from loom.cli.output import Exit, Printer, exit_for
+from loom.cli.output import Exit, Printer, esc, exit_for
 from loom.cli.targets import CliBackend, LocalBackend, Target, resolve
 from loom.core.exceptions import (
     ConfigurationError,
@@ -36,7 +36,11 @@ POLL_INTERVAL = 0.4
 
 
 def printer_for(args: argparse.Namespace) -> Printer:
-    return Printer(as_json=getattr(args, "json", False))
+    return Printer(
+        as_json=getattr(args, "json", False),
+        quiet=getattr(args, "quiet", False),
+        debug=getattr(args, "debug", False),
+    )
 
 
 def with_backend(args: argparse.Namespace, target: str | None = None) -> Target:
@@ -48,7 +52,7 @@ def with_backend(args: argparse.Namespace, target: str | None = None) -> Target:
     )
 
 
-def run_async(coro: Awaitable[int]) -> int:
+def run_async(coro: Awaitable[int], *, debug: bool = False) -> int:
     """Drive a command coroutine, turning known errors into exit codes.
 
     ``guarded`` is what makes Ctrl+C and ``docker stop`` behave the same: both
@@ -75,6 +79,26 @@ def run_async(coro: Awaitable[int]) -> int:
         # lands in the window before guarded() has installed anything.
         interrupted(Exit.INTERRUPTED)
         return Exit.INTERRUPTED
+    except Exception as exc:
+        # Everything the three arms above do not name: a store refusing a
+        # connection, a vendor SDK's 401, a rendering fault. Those reached the
+        # user as forty frames, which says nothing about which of them is the
+        # user's to fix. The traceback is kept behind --debug rather than
+        # discarded, because the one case where it is the only useful output is
+        # a defect in this repository.
+        unexpected(exc, debug=debug)
+        return Exit.FAILED
+
+
+def unexpected(exc: BaseException, *, debug: bool = False) -> None:
+    """Report a failure no command anticipated, without a wall of frames."""
+    import traceback
+
+    if debug:
+        traceback.print_exc()
+    print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+    if not debug:
+        print("  re-run with --debug for the traceback", file=sys.stderr)
 
 
 def interrupted(code: int) -> None:
@@ -125,14 +149,19 @@ def close_backend(backend: CliBackend) -> None:
         asyncio.run(backend.close())
 
 
-def parse_input(raw: str | None) -> Any:
+def parse_input(raw: str | None, *, default: Any = None) -> Any:
     """Decode ``--input``: JSON, ``@file.json``, or a bare string.
 
     Falling back to a bare string matters — most workflows take one, and
     demanding ``'"text"'`` for that case would be hostile.
+
+    *default* is what an **absent** flag means, which is not the same as
+    ``--input null``. The engine passes the input positionally, so an absent
+    flag used to override a body's own declared default with ``None`` — see
+    :attr:`WorkflowDefinition.input_default`, which is what callers pass here.
     """
     if raw is None:
-        return None
+        return default
     if raw.startswith("@"):
         path = Path(raw[1:])
         if not path.exists():
@@ -171,6 +200,48 @@ def parse_env(pairs: list[str] | None, env_file: str | None) -> dict[str, str]:
     return result
 
 
+def _declared_default(target: Target) -> Any:
+    """The workflow's own default for its input parameter, when it has one.
+
+    Only answerable where the definition is in this process. Against
+    ``--server`` the CLI has a name and a schema and no signature, so an absent
+    ``--input`` stays ``None`` there — the server is the layer that would have
+    to apply it.
+    """
+    runtime = getattr(target.backend, "runtime", None)
+    if runtime is None or not target.workflow:
+        return None
+    try:
+        return runtime.resolve_workflow(target.workflow).input_default
+    except Exception:
+        # Resolution already failed loudly in `resolve()` if it was going to.
+        return None
+
+
+def _ephemeral_store(target: Target) -> bool:
+    """Whether this target's journal dies with the process."""
+    runtime = getattr(target.backend, "runtime", None)
+    store = getattr(runtime, "store", None)
+    return store is not None and type(store).__name__ == "MemoryStore"
+
+
+def _warn_if_ephemeral(out: Printer, target: Target) -> None:
+    """Say so when a run id names something that will not outlive this command.
+
+    ``--detach`` against an in-memory store prints an identifier for a run that
+    ceases to exist the moment the process ends — so ``loom watch`` on it
+    reports no such run, which reads as the run having vanished rather than as
+    never having been kept.
+    """
+    if not _ephemeral_store(target):
+        return
+    out.line(
+        "  [yellow]This store is in memory: the run above will not exist once "
+        "this command exits.[/yellow]"
+    )
+    out.hint("set a store, e.g. LOOM_STORE=sqlite://runs.db")
+
+
 def report_run(
     out: Printer,
     run: dict[str, Any],
@@ -196,56 +267,69 @@ def suspended_hint(out: Printer, run: dict[str, Any]) -> None:
     if awaiting.startswith("approval:"):
         subject = awaiting.split(":", 1)[1]
         out.line(
-            f"  [yellow]Waiting for approval '{subject}'. "
+            f"  [yellow]Waiting for approval '{esc(subject)}'. "
             "This run costs nothing while parked.[/yellow]"
         )
         out.hint(f"loom approve {run_id} {subject}")
     elif awaiting:
-        out.line(f"  [yellow]Waiting for event '{awaiting}'.[/yellow]")
+        out.line(f"  [yellow]Waiting for event '{esc(awaiting)}'.[/yellow]")
         out.hint(f"loom send {run_id} {awaiting}")
     else:
         out.line("  [yellow]Parked on a timer.[/yellow]")
     out.hint(f"loom watch {run_id}")
 
 
+#: Statuses at which a run has stopped moving and there is nothing left to
+#: follow. ``suspended`` belongs here: a parked run costs nothing and may sit
+#: for weeks, so waiting on it is a different command.
+SETTLED = ("completed", "failed", "cancelled", "suspended")
+
+
 async def follow(
     backend: CliBackend, run_id: str, out: Printer, *, timeout: float = 3600.0
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], bool]:
     """Stream journal entries until the run stops moving.
 
     Polls rather than subscribes: it is the one approach that works identically
     against an in-process Runtime and a remote server, and a durable run's
     granularity is steps rather than tokens.
+
+    Returns the run and whether it **settled**. A caller cannot infer that from
+    the status alone — a run still ``running`` when the deadline expired looks
+    exactly like one being reported mid-flight — and conflating the two is how
+    ``loom watch --timeout`` exited 0 on a run that was still going.
     """
     seen = 0
     said = 0
     waited = 0.0
     run: dict[str, Any] = {}
 
-    while waited < timeout:
+    while True:
         run = await backend.get(run_id) or {}
-        entries = await backend.journal(run_id)
-        for entry in entries[seen:]:
-            status = entry.get("status", "")
-            name = entry.get("step_id", "")
+        # Only what has landed since the last poll. Refetching the whole
+        # journal each tick is quadratic in the length of the run, and pays for
+        # it twice against a remote Runtime.
+        entries = await backend.journal(run_id, seen)
+        for entry in entries:
+            status = esc(entry.get("status", ""))
+            name = esc(entry.get("step_id", ""))
             out.line(f"  [dim]{entry.get('seq', ''):>3}[/dim]  {name:<24} {status}")
-        seen = len(entries)
+        seen += len(entries)
 
         # Anything the run narrated since the last poll. A step that takes four
         # minutes is one journal line and no news; this is where it says what it
         # is actually doing.
         fresh = await backend.reports(run_id, said)
         for report in fresh:
-            out.line(f"       [dim]{report.get('message', '')}[/dim]")
+            out.line(f"       [dim]{esc(report.get('message', ''))}[/dim]")
         said += len(fresh)
 
-        status = str(run.get("status", ""))
-        if status in ("completed", "failed", "cancelled", "suspended"):
-            return run
+        if str(run.get("status", "")) in SETTLED:
+            return run, True
+        if waited >= timeout:
+            return run, False
         await asyncio.sleep(POLL_INTERVAL)
         waited += POLL_INTERVAL
-
-    return run
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +399,7 @@ def cmd_author(args: argparse.Namespace) -> int:
                 packages=args.package or None,
                 smoke_input=parse_input(args.input),
                 observe=not args.no_observe,
+                turns=args.turns,
             )
         finally:
             await target.backend.close()
@@ -332,7 +417,7 @@ def cmd_author(args: argparse.Namespace) -> int:
         # is unresolved, which is a review, not a failure to produce anything.
         return Exit.OK if result["code"] else Exit.FAILED
 
-    return run_async(body())
+    return run_async(body(), debug=getattr(args, "debug", False))
 
 
 def cmd_pause(args: argparse.Namespace) -> int:
@@ -355,7 +440,7 @@ def cmd_pause(args: argparse.Namespace) -> int:
             out.line(f"release it with: loom unpause {args.run}")
         return Exit.OK
 
-    return run_async(body())
+    return run_async(body(), debug=getattr(args, "debug", False))
 
 
 def cmd_unpause(args: argparse.Namespace) -> int:
@@ -373,7 +458,7 @@ def cmd_unpause(args: argparse.Namespace) -> int:
             out.line(f"{args.run} released")
         return Exit.OK
 
-    return run_async(body())
+    return run_async(body(), debug=getattr(args, "debug", False))
 
 
 def cmd_pin(args: argparse.Namespace) -> int:
@@ -404,14 +489,14 @@ def cmd_pin(args: argparse.Namespace) -> int:
         elif destination is not None:
             destination.write_text(pinned["source"], encoding="utf-8")
             if not args.json:
-                out.line(f"wrote {destination} ({pinned['seeded']} entries seeded)")
+                out.line(f"wrote {esc(destination)} ({pinned['seeded']} entries seeded)")
 
         if not args.json:
             for note in pinned["notes"]:
-                out.line(f"note: {note}")
+                out.line(f"note: {esc(note)}")
         return Exit.OK
 
-    return run_async(body())
+    return run_async(body(), debug=getattr(args, "debug", False))
 
 
 def cmd_edit(args: argparse.Namespace) -> int:
@@ -478,7 +563,7 @@ def cmd_edit(args: argparse.Namespace) -> int:
         _report_authoring(out, result, args)
         return Exit.OK if result["code"] else Exit.FAILED
 
-    return run_async(body())
+    return run_async(body(), debug=getattr(args, "debug", False))
 
 
 def _spec_text(spec: str) -> str:
@@ -509,7 +594,7 @@ def _report_authoring(
 
     out.line()
     if args.output:
-        out.line(f"  wrote {args.output}")
+        out.line(f"  wrote {esc(args.output)}")
 
     smoke = result.get("smoke") or {}
     out.line(
@@ -519,21 +604,21 @@ def _report_authoring(
         f"ran={'yes' if smoke.get('ok') else 'no'}"
     )
     if result.get("tools_used"):
-        out.line(f"  looked at: {', '.join(result['tools_used'])}")
+        out.line(f"  looked at: {esc(', '.join(result['tools_used']))}")
 
     for node in result.get("plan", []):
         # Columns, not `[kind]`: `line` renders through rich, which reads a
         # bracketed word as a style tag and removes it. `verbatim` says so in
         # its own docstring, and this printed a bare list of nodes until it
         # was read.
-        out.line(f"  {node['kind']:<9} {node['node']}")
+        out.line(f"  {esc(node['kind']):<9} {esc(node['node'])}")
 
     for issue in result.get("issues", []):
         line = f"{issue['category']}: {issue['message']}"
         if issue["severity"] == "error":
             out.error(f"  {line}")
         else:
-            out.line(f"  warning: {line}")
+            out.line(f"  warning: {esc(line)}")
 
     if result["clean"]:
         out.hint("loom check <file> && loom run <workflow>")
@@ -583,9 +668,9 @@ def cmd_check(args: argparse.Namespace) -> int:
                 f"{report.flow_id}: {report.node_count} nodes, {report.edge_count} edges"
             )
             for path in report.written:
-                out.line(f"  wrote {path}")
+                out.line(f"  wrote {esc(path)}")
             for path in report.unchanged:
-                out.line(f"  [dim]unchanged {path}[/dim]")
+                out.line(f"  [dim]unchanged {esc(path)}[/dim]")
     for problem in problems:
         out.error(f"warning: {problem}")
 
@@ -647,9 +732,14 @@ def cmd_init(args: argparse.Namespace) -> int:
     written = write_project(str(args.directory))
     out.json({"created": written})
     for path in written:
-        out.line(f"created {path}")
+        out.line(f"created {esc(path)}")
     out.line()
-    out.line(f"Next: cd {args.directory} && pip install -e '.[dev]' && pytest")
+    # `verbatim`, not `line`: this is a command to copy, and rich reads the
+    # `[dev]` extra as a style tag and deletes it — handing a new user an
+    # install that leaves them without the pytest the same line tells them to
+    # run. `cd .` is skipped when the target is already where they are.
+    prefix = "" if str(args.directory) in (".", "") else f"cd {args.directory} && "
+    out.verbatim(f"Next: {prefix}pip install -e '.[dev]' && pytest")
     return Exit.OK
 
 
@@ -669,35 +759,46 @@ def cmd_run(args: argparse.Namespace) -> int:
             return Exit.USAGE
 
         try:
-            payload = parse_input(args.input)
+            payload = parse_input(args.input, default=_declared_default(target))
             env = parse_env(getattr(args, "env", None), getattr(args, "env_file", None))
+            # `--follow` has to *not* wait. It did, so `start` drove the run to
+            # completion and `follow` then polled a run that had already
+            # finished — every journal line arriving at once, after the fact,
+            # from the one flag whose whole purpose is that they do not.
+            # `submit` spawns the drive on this same loop, so the poll below
+            # and the run make progress together.
+            streaming = args.follow and not args.detach
             run = await target.backend.start(
                 target.workflow,
                 payload,
                 idempotency_key=args.idempotency_key,
-                wait=not args.detach,
+                wait=not (args.detach or streaming),
                 env=env or None,
             )
             run_id = run["run_id"]
 
-            if args.follow and not args.detach:
+            settled = True
+            if streaming:
                 out.line()
-                run = await follow(target.backend, run_id, out)
+                run, settled = await follow(target.backend, run_id, out)
             elif args.detach:
                 out.json(run)
                 out.status(run, prefix="  ")
+                if not args.json:
+                    _warn_if_ephemeral(out, target)
+                    out.hint(f"loom watch {run_id}")
                 return Exit.OK
 
-            journal = None if args.follow else await target.backend.journal(run_id)
+            journal = None if streaming else await target.backend.journal(run_id)
             out.json(run)
             report_run(out, run, journal=journal)
             if run.get("status") == "suspended":
                 suspended_hint(out, run)
-            return exit_for(run)
+            return exit_for(run, settled=settled)
         finally:
             await target.backend.close()
 
-    return run_async(body())
+    return run_async(body(), debug=getattr(args, "debug", False))
 
 
 def cmd_runs(args: argparse.Namespace) -> int:
@@ -728,7 +829,7 @@ def cmd_runs(args: argparse.Namespace) -> int:
         finally:
             await target.backend.close()
 
-    return run_async(body())
+    return run_async(body(), debug=getattr(args, "debug", False))
 
 
 def cmd_show(args: argparse.Namespace) -> int:
@@ -751,7 +852,7 @@ def cmd_show(args: argparse.Namespace) -> int:
         finally:
             await target.backend.close()
 
-    return run_async(body())
+    return run_async(body(), debug=getattr(args, "debug", False))
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
@@ -765,7 +866,9 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 out.error(f"no run '{args.run_id}'")
                 return Exit.USAGE
             out.line()
-            run = await follow(target.backend, args.run_id, out, timeout=args.timeout)
+            run, settled = await follow(
+                target.backend, args.run_id, out, timeout=args.timeout
+            )
             out.json(run)
             out.line()
             out.status(run, prefix="  ")
@@ -773,11 +876,19 @@ def cmd_watch(args: argparse.Namespace) -> int:
             out.value("error", run.get("error"))
             if run.get("status") == "suspended":
                 suspended_hint(out, run)
-            return exit_for(run)
+            elif not settled:
+                # Still going when we stopped looking. Exit 3, not 0: this
+                # command reported nothing about whether the run succeeds.
+                out.line(
+                    f"  [yellow]still running after {args.timeout:g}s — "
+                    "stopped watching, not stopped.[/yellow]"
+                )
+                out.hint(f"loom watch {args.run_id}")
+            return exit_for(run, settled=settled)
         finally:
             await target.backend.close()
 
-    return run_async(body())
+    return run_async(body(), debug=getattr(args, "debug", False))
 
 
 # ---------------------------------------------------------------------------
@@ -801,14 +912,14 @@ def cmd_approve(args: argparse.Namespace) -> int:
             run = await target.backend.get(args.run_id) or {}
             out.json(run)
             verb = "approved" if approved else "rejected"
-            out.line(f"  {verb} '{args.subject}'")
+            out.line(f"  {verb} '{esc(args.subject)}'")
             out.status(run, prefix="  ")
             out.value("output", run.get("output"))
             return exit_for(run)
         finally:
             await target.backend.close()
 
-    return run_async(body())
+    return run_async(body(), debug=getattr(args, "debug", False))
 
 
 def cmd_send(args: argparse.Namespace) -> int:
@@ -825,13 +936,13 @@ def cmd_send(args: argparse.Namespace) -> int:
             )
             run = await target.backend.get(args.run_id) or {}
             out.json(run)
-            out.line(f"  delivered '{args.event}'")
+            out.line(f"  delivered '{esc(args.event)}'")
             out.status(run, prefix="  ")
             return exit_for(run)
         finally:
             await target.backend.close()
 
-    return run_async(body())
+    return run_async(body(), debug=getattr(args, "debug", False))
 
 
 def _confirm(args: argparse.Namespace, out: Printer, action: str, run_id: str) -> bool:
@@ -866,7 +977,7 @@ def _act(args: argparse.Namespace, action: str) -> int:
         finally:
             await target.backend.close()
 
-    return run_async(body())
+    return run_async(body(), debug=getattr(args, "debug", False))
 
 
 def cmd_cancel(args: argparse.Namespace) -> int:
@@ -914,7 +1025,7 @@ def cmd_workflows(args: argparse.Namespace) -> int:
         finally:
             await target.backend.close()
 
-    return run_async(body())
+    return run_async(body(), debug=getattr(args, "debug", False))
 
 
 def cmd_versions(args: argparse.Namespace) -> int:
@@ -967,7 +1078,7 @@ def cmd_versions(args: argparse.Namespace) -> int:
         finally:
             await target.backend.close()
 
-    return run_async(body())
+    return run_async(body(), debug=getattr(args, "debug", False))
 
 
 def cmd_pending(args: argparse.Namespace) -> int:
@@ -1002,12 +1113,12 @@ def cmd_pending(args: argparse.Namespace) -> int:
                 ],
             )
             for row in waiting:
-                out.line(f"  {row['next_action']}")
+                out.line(f"  {esc(row['next_action'])}")
             return Exit.OK
         finally:
             await target.backend.close()
 
-    return run_async(body())
+    return run_async(body(), debug=getattr(args, "debug", False))
 
 
 def cmd_respond(args: argparse.Namespace) -> int:
@@ -1026,14 +1137,14 @@ def cmd_respond(args: argparse.Namespace) -> int:
             answer = _answer_from(args)
             run = await target.backend.respond(args.run_id, args.subject, answer)
             out.json(run)
-            out.line(f"  answered '{args.subject}' with {answer}")
+            out.line(f"  answered '{esc(args.subject)}' with {esc(answer)}")
             out.status(run, prefix="  ")
             out.value("output", run.get("output"))
             return exit_for(run)
         finally:
             await target.backend.close()
 
-    return run_async(body())
+    return run_async(body(), debug=getattr(args, "debug", False))
 
 
 def _answer_from(args: argparse.Namespace) -> dict[str, Any]:
@@ -1172,13 +1283,13 @@ def cmd_toolset(args: argparse.Namespace) -> int:
             "operations": operations,
         }
     )
-    out.line(f"{manifest.id} v{manifest.version} — {manifest.summary}")
+    out.line(f"{esc(manifest.id)} v{esc(manifest.version)} — {esc(manifest.summary)}")
     if manifest.auth:
         fields = ", ".join((manifest.auth or {}).get("fields", []))
-        out.line(f"  auth: {manifest.auth.get('type', '')} ({fields})")
+        out.line(f"  auth: {esc(manifest.auth.get('type', ''))} ({esc(fields)})")
     # The one line that stops a generated import being invented.
     if manifest.import_line():
-        out.line(f"  {manifest.import_line()}")
+        out.line(f"  {esc(manifest.import_line())}")
     out.table(["operation", "effect", "pages", "resolves", "summary"], table)
     return Exit.OK
 
@@ -1213,7 +1324,7 @@ def cmd_nodes(args: argparse.Namespace) -> int:
         finally:
             await target.backend.close()
 
-    return run_async(body())
+    return run_async(body(), debug=getattr(args, "debug", False))
 
 
 def cmd_node(args: argparse.Namespace) -> int:
@@ -1232,7 +1343,7 @@ def cmd_node(args: argparse.Namespace) -> int:
         finally:
             await target.backend.close()
 
-    return run_async(body())
+    return run_async(body(), debug=getattr(args, "debug", False))
 
 
 def cmd_artifacts(args: argparse.Namespace) -> int:
@@ -1285,12 +1396,12 @@ def cmd_artifacts(args: argparse.Namespace) -> int:
             dest = Path(args.output) if args.output else Path(payload.get("name") or args.name)
             dest.write_bytes(data)
             out.json({"path": str(dest), "size": len(data), "mime": payload.get("mime")})
-            out.line(f"wrote {dest} ({len(data)} bytes)")
+            out.line(f"wrote {esc(dest)} ({len(data)} bytes)")
             return Exit.OK
         finally:
             await target.backend.close()
 
-    return run_async(body())
+    return run_async(body(), debug=getattr(args, "debug", False))
 
 
 def cmd_publish(args: argparse.Namespace) -> int:
@@ -1305,14 +1416,14 @@ def cmd_publish(args: argparse.Namespace) -> int:
         try:
             record = await target.backend.publish(target.workflow)
             out.json(record)
-            out.line(f"  published {record.get('name')}@{record.get('version')}")
+            out.line(f"  published {esc(record.get('name'))}@{esc(record.get('version'))}")
             out.value("hash", (record.get("code_hash") or "")[:16])
             out.value("source", record.get("source_file"))
             return Exit.OK
         finally:
             await target.backend.close()
 
-    return run_async(body())
+    return run_async(body(), debug=getattr(args, "debug", False))
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
@@ -1370,7 +1481,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     registered = sorted(runtime.workflows)
     out.line(f"  serving {len(registered)} workflow(s) on http://{args.host}:{args.port}")
     for name in registered:
-        out.line(f"    [dim]{name}[/dim]")
+        out.line(f"    [dim]{esc(name)}[/dim]")
     if not registered:
         out.line(
             "  [yellow]no workflows imported — list them under "
@@ -1457,7 +1568,7 @@ def cmd_mcp(args: argparse.Namespace) -> int:
             f"on {args.host}:{args.port}"
         )
         for name in workflows:
-            out.line(f"    [dim]{name}[/dim]")
+            out.line(f"    [dim]{esc(name)}[/dim]")
         out.line(f"  authoring tools: {'on' if authoring.enabled else 'off'}")
 
     try:

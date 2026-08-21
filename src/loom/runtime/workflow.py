@@ -141,6 +141,28 @@ class WorkflowDefinition(Generic[InputT, OutputT, DepsT]):
         params = list(inspect.signature(self.fn).parameters)
         return params[1] if len(params) > 1 else "input"
 
+    @property
+    def input_default(self) -> Any:
+        """The input parameter's declared default, or ``None`` if it has none.
+
+        :meth:`invoke` passes the input positionally whenever the body takes
+        one, so a declared default is unreachable to anything that supplies a
+        value — and a caller with nothing to supply had only ``None`` to pass.
+        ``loom run flow.py::flow`` against ``async def flow(ctx, x: str = "a")``
+        therefore ran the body with ``None`` and failed inside the first step
+        with a ``TypeError``, which reads as a broken workflow rather than as a
+        missing argument.
+
+        Exposed rather than applied in :meth:`invoke`: an explicit ``None`` and
+        an absent argument are different things, and only the caller knows
+        which it has.
+        """
+        if not self.takes_input:
+            return None
+        params = list(inspect.signature(self.fn).parameters.values())
+        default = params[1].default
+        return None if default is inspect.Parameter.empty else default
+
     def describe(self) -> dict[str, Any]:
         """Serializable manifest, used by the CLI, deploy tooling, and the dev UI."""
         return {

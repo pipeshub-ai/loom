@@ -95,8 +95,15 @@ class RuntimeFacade(Protocol):
         self, *, workflow: str | None = None, status: str | None = None, limit: int = 50
     ) -> list[dict[str, Any]]: ...
 
-    async def journal(self, run_id: str) -> list[dict[str, Any]]:
-        """The run's durable operations, in order, keyed by ``step_id``."""
+    async def journal(self, run_id: str, offset: int = 0) -> list[dict[str, Any]]:
+        """The run's durable operations, in order, keyed by ``step_id``.
+
+        *offset* skips entries a caller has already seen — the shape
+        :meth:`reports` already has, and for the same reason. A follower that
+        refetches the whole journal every poll does quadratic work over the
+        length of the run, and pays for it again in transfer against a remote
+        Runtime.
+        """
         ...
 
     async def reports(self, run_id: str, offset: int = 0) -> list[dict[str, Any]]:
@@ -171,6 +178,7 @@ class RuntimeFacade(Protocol):
         packages: list[str] | None = None,
         smoke_input: Any = None,
         observe: bool = True,
+        turns: int | None = None,
     ) -> dict[str, Any]:
         """Write a workflow from a natural-language *spec*.
 
@@ -202,7 +210,7 @@ class RuntimeFacade(Protocol):
         packages: list[str] | None = None,
         smoke_input: Any = None,
         observe: bool = True,
-    ) -> dict[str, Any]:
+        ) -> dict[str, Any]:
         """Change a workflow that already exists, and verify the result.
 
         The half of authoring the product did not have. ``author`` was the only
@@ -604,9 +612,9 @@ class LocalFacade:
             describe_record(record, self.runtime.redact_keys) for record in records
         ]
 
-    async def journal(self, run_id: str) -> list[dict[str, Any]]:
+    async def journal(self, run_id: str, offset: int = 0) -> list[dict[str, Any]]:
         entries = await self.runtime.history(run_id)
-        return [describe_entry(entry) for entry in entries]
+        return [describe_entry(entry) for entry in entries[max(offset, 0) :]]
 
     # -- graph projection (GraphProjection) -----------------------------------
 
@@ -833,9 +841,10 @@ class LocalFacade:
         packages: list[str] | None = None,
         smoke_input: Any = None,
         observe: bool = True,
+        turns: int | None = None,
     ) -> dict[str, Any]:
         agent = self._coding_agent(
-            packages=packages, smoke_input=smoke_input, observe=observe
+            packages=packages, smoke_input=smoke_input, observe=observe, turns=turns
         )
         result = await agent.generate(spec)
 
@@ -885,7 +894,7 @@ class LocalFacade:
         packages: list[str] | None = None,
         smoke_input: Any = None,
         observe: bool = True,
-    ) -> dict[str, Any]:
+        ) -> dict[str, Any]:
         agent = self._coding_agent(
             packages=packages, smoke_input=smoke_input, observe=observe
         )
@@ -956,6 +965,7 @@ class LocalFacade:
         packages: list[str] | None,
         smoke_input: Any,
         observe: bool,
+        turns: int | None = None,
     ) -> Any:
         """One place that builds the agent, for authoring and for editing.
 
@@ -980,6 +990,10 @@ class LocalFacade:
 
             probes = default_probes()
 
+        # Typed `Any` because a `**dict[str, int]` splat makes mypy check that
+        # value against every keyword the constructor has.
+        extra: dict[str, Any] = {"max_discovery_turns": turns} if turns else {}
+
         return WorkflowCodingAgent(
             model,
             tool_registry=self.runtime.toolsets,
@@ -988,6 +1002,10 @@ class LocalFacade:
             allowed_packages=set(packages) if packages else None,
             smoke_input=smoke_input,
             user_interaction=self.user_interaction,
+            # Only when asked. A spec naming several systems needs more turns
+            # than the default, and a run that ends "exceeded its budget"
+            # produced nothing having spent everything.
+            **extra,
         )
 
 
@@ -1297,11 +1315,23 @@ class RemoteFacade:
             workflow=workflow, status=status, limit=limit
         )
 
-    async def journal(self, run_id: str) -> list[dict[str, Any]]:
+    async def journal(self, run_id: str, offset: int = 0) -> list[dict[str, Any]]:
         # An older server may predate ``describe_entry`` and send only "name".
+        # It may also predate ``offset``, and would then ignore the parameter
+        # and send the whole journal — so the slice is applied here as well.
+        # Belt and braces on purpose: silently replaying entries the caller has
+        # already rendered is worse than one redundant slice.
+        entries = await self.client.journal(run_id, offset=offset)
+        # Whether the server honoured *offset* is readable from the answer: a
+        # server that did starts at the entry we asked for, one that predates
+        # the parameter starts at zero. Re-slicing on that is what keeps an
+        # older server from replaying entries the caller has already rendered.
+        first = entries[0].get("seq") if entries else None
+        if offset > 0 and isinstance(first, int) and first < offset:
+            entries = entries[offset:]
         return [
             {**entry, "step_id": entry.get("step_id") or entry.get("name", "")}
-            for entry in await self.client.journal(run_id)
+            for entry in entries
         ]
 
     async def versions(self, workflow: str, *, limit: int = 50) -> list[dict[str, Any]]:
@@ -1371,6 +1401,7 @@ class RemoteFacade:
         packages: list[str] | None = None,
         smoke_input: Any = None,
         observe: bool = True,
+        turns: int | None = None,
     ) -> dict[str, Any]:
         raise ConfigurationError(_NO_REMOTE_AUTHORING)
 
@@ -1404,7 +1435,7 @@ class RemoteFacade:
         packages: list[str] | None = None,
         smoke_input: Any = None,
         observe: bool = True,
-    ) -> dict[str, Any]:
+        ) -> dict[str, Any]:
         # Refused for the reason authoring is: editing reads *this* process's
         # toolsets, nodes and probes to decide what the workflow may call, and
         # spends model tokens doing it. A server's key would be spending

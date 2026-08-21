@@ -260,9 +260,15 @@ class LoomClient:
             params["status"] = status.value if isinstance(status, ExecutionStatus) else status
         return await self._array("GET", "/runs", params=params)
 
-    async def journal(self, run_id: str) -> list[dict[str, Any]]:
-        """Durable operations recorded for a run, in order."""
-        return await self._array("GET", f"/runs/{run_id}/journal")
+    async def journal(self, run_id: str, offset: int = 0) -> list[dict[str, Any]]:
+        """Durable operations recorded for a run, in order.
+
+        *offset* skips entries the caller has already seen. A server that
+        predates the parameter ignores it and returns the whole journal, which
+        the facade above re-slices.
+        """
+        params = {"offset": offset} if offset else None
+        return await self._array("GET", f"/runs/{run_id}/journal", params=params)
 
     async def versions(self, workflow: str, *, limit: int = 50) -> list[dict[str, Any]]:
         """A workflow's committed version chain, newest first."""
