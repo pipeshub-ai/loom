@@ -599,6 +599,23 @@ class EditResult:
         return not any(issue.severity == "error" for issue in self.issues)
 
 
+def _without_generic_advice(reason: str) -> str:
+    """The *fact* of a failure, without the library's own suggestion.
+
+    ``UsageLimitExceeded`` reads "exceeded its budget of 22 turns without
+    producing a final answer; raise max_turns or narrow the task" — correct
+    advice for somebody holding the constructor, and unusable for somebody who
+    ran ``loom author``, whose flag is ``--turns``. Left in, the caller reads
+    two remedies in one sentence naming two things they do not have.
+
+    Cut at the semicolon, and only there. A reworded message keeps its advice
+    rather than being silently truncated: degrading to redundancy is better
+    than degrading to a lost explanation.
+    """
+    head, marker, _ = reason.partition("; raise ")
+    return head if marker else reason
+
+
 def _session_id_for(store: Any, resume: Any) -> str:
     """The id an authoring job runs under. Empty when nothing is stored.
 
@@ -653,7 +670,7 @@ class WorkflowCodingAgent:
         model: ModelProvider,
         *,
         max_repair_attempts: int = 2,
-        max_discovery_turns: int = 20,
+        max_discovery_turns: int = 28,
         tool_docs: list[str] | None = None,
         tool_registry: ToolsetRegistry | None = None,
         node_registry: NodeCatalog | None = None,
@@ -1361,6 +1378,12 @@ class WorkflowCodingAgent:
                     "key (ANTHROPIC_API_KEY, OPENAI_API_KEY, …); a shell does "
                     "not read .env the way the cookbooks do."
                 )
+            elif "turns" in reason and "budget" in reason:
+                remedy = (
+                    "It ran out of turns. Raise --turns (or "
+                    "max_discovery_turns), or narrow the spec — every entity "
+                    "it has to resolve costs one."
+                )
             elif "max_total_tokens" in reason or "max_cost" in reason:
                 # Naming the wrong dial is the same defect as naming none:
                 # a job stopped by a token ceiling was told to raise its *turn*
@@ -1382,7 +1405,8 @@ class WorkflowCodingAgent:
                 issues=[
                     CodeIssue(
                         "unsupported",
-                        f"The agent did not produce code: {exc}. {remedy}",
+                        f"The agent did not produce code: "
+                        f"{_without_generic_advice(reason)}. {remedy}",
                         "error",
                     )
                 ],

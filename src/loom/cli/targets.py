@@ -92,6 +92,18 @@ def load_module(spec: str) -> Any:
     return importlib.import_module(spec)
 
 
+def _is_a_missing_file(spec: str) -> bool:
+    """Whether *spec* names a file that is not there.
+
+    Only a path is judged. A dotted name is a module the import system
+    resolves however it likes — against site-packages, a namespace package, an
+    editable install — and second-guessing that here would refuse imports that
+    work.
+    """
+    path = Path(spec)
+    return path.suffix == ".py" and not path.exists()
+
+
 def collect_workflows(module: Any) -> list[Any]:
     """Every ``WorkflowDefinition`` a module declares."""
     from loom.runtime.workflow import WorkflowDefinition
@@ -192,7 +204,22 @@ def resolve(
     else:
         explicit_name = target
 
+    missing: list[str] = []
     for spec in dict.fromkeys(to_import):
+        if _is_a_missing_file(spec):
+            # A *declared* file that is not there is a stale declaration, not
+            # a broken workflow — somebody moved or deleted it and did not
+            # update `[tool.loom] modules`. Aborting on it took down every
+            # command in the project, including the ones that never needed a
+            # module: `loom runs` and `loom pending` read the store and import
+            # nothing. And the message was actively misleading, reporting "No
+            # module named 'flows/x.py'" for something that is a path.
+            #
+            # A file that *does* exist and raises on import is a different
+            # thing and still aborts: that is a real error in code somebody is
+            # working on, and running against half a registry would hide it.
+            missing.append(spec)
+            continue
         try:
             module = load_module(spec)
         except ConfigurationError:
@@ -202,6 +229,15 @@ def resolve(
         loaded.append(spec)
         for definition in collect_workflows(module):
             runtime.register(definition)
+
+    if missing:
+        # stderr, so it cannot corrupt `--json` on stdout.
+        print(
+            f"warning: [tool.loom] modules names {', '.join(missing)}, which "
+            "does not exist — skipping. Remove it from pyproject.toml, or run "
+            "`loom doctor`.",
+            file=sys.stderr,
+        )
 
     # The CLI is the one surface with a person at the other end of stdin, so
     # it is the one that composes an interaction in. Both implementations

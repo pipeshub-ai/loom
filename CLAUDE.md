@@ -2463,7 +2463,11 @@ proving nothing. `ToolsetManifest.fakes_module` overrides them where the shape
 of an answer is not enough.
 
 `generate()` never raises for an agent-loop failure; the reason comes back as an
-`unsupported` issue. Turn budgets are separate: `max_discovery_turns` for
+`unsupported` issue. The **job budget is 30 turns** — `max_discovery_turns`
+(28) plus `max_repair_attempts` (2) — and a failure names `--turns`, the flag
+the caller has, rather than the constructor argument it has behind it.
+
+Turn budgets are separate: `max_discovery_turns` for
 search/inspect/resolve/write, `max_repair_attempts` for repair.
 
 ### Generated Code Verification

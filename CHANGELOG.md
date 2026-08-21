@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — the authoring job gets 30 turns, not 22
+
+`max_discovery_turns` was 20 and repair adds 2, so a spec naming several
+systems ran out at 22 having produced nothing and spent everything. Discovery
+is now 28, for a job budget of 30.
+
+The message it fails with also named two things a caller does not have:
+`UsageLimitExceeded` appends "raise max_turns or narrow the task", and the
+agent appended "raise max_discovery_turns or narrow the spec" after it — two
+remedies in one sentence, both constructor arguments, for somebody who ran
+`loom author` and holds `--turns`. The library's own advice is trimmed when
+there is a better one, and the surface's names the flag.
+
+
 ### Added — an interrupted authoring job can be picked up
 
 `CodingSession` held its transcript in a list and its budget in a dataclass,

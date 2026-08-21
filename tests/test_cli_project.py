@@ -501,3 +501,75 @@ class TestScaffoldProducesAWorkingProject:
         started = json.loads(loom(tmp_path, "run", "quickstart", "-i", "alice", "--json").stdout)
         listed = json.loads(loom(tmp_path, "runs", "--json").stdout)
         assert [row["run_id"] for row in listed] == [started["run_id"]]
+
+
+class TestAStaleModuleDeclaration:
+    """A declared file that is not there is a stale declaration, not a broken
+    workflow — and it used to take down every command in the project.
+
+    Found the hard way: auto-registration put a path into this repository's own
+    ``pyproject.toml``, the file was later removed, and afterwards every
+    ``loom`` command failed with "No module named 'flows/x.py'" — a *module*
+    name reported for something that is a path.
+    """
+
+    def test_it_warns_and_carries_on(self, project: Path) -> None:
+        (project / "pyproject.toml").write_text(
+            PYPROJECT.replace(
+                'modules = ["flows.py"]', 'modules = ["flows.py", "gone.py"]'
+            )
+        )
+        done = loom(project, "workflows", "--json")
+        assert done.returncode == Exit.OK, done.stderr
+        assert "does not exist" in done.stderr
+        # And the module that *is* there still registered.
+        assert json.loads(done.stdout)
+
+    def test_the_warning_stays_off_stdout(self, project: Path) -> None:
+        """`--json` has to remain parseable, which is the whole reason the
+        warning goes to stderr."""
+        (project / "pyproject.toml").write_text(
+            PYPROJECT.replace(
+                'modules = ["flows.py"]', 'modules = ["flows.py", "gone.py"]'
+            )
+        )
+        json.loads(loom(project, "workflows", "--json").stdout)
+
+    def test_a_file_that_exists_but_raises_still_aborts(
+        self, project: Path
+    ) -> None:
+        """A different thing: real code somebody is working on. Running
+        against half a registry would hide it."""
+        (project / "flows.py").write_text("import nonexistent_module_xyz\n")
+        done = loom(project, "workflows")
+        assert done.returncode == Exit.USAGE
+        assert "could not import" in done.stderr
+
+    def test_a_dotted_name_is_never_second_guessed(self) -> None:
+        """The import system resolves those however it likes — site-packages, a
+        namespace package, an editable install."""
+        from loom.cli.targets import _is_a_missing_file
+
+        assert _is_a_missing_file("flows/gone.py") is True
+        assert _is_a_missing_file("my_package.flows") is False
+
+
+class TestRegistrationRefusesWhatIsNotThere:
+    """`[tool.loom] modules` is a promise every command depends on."""
+
+    def test_a_missing_file_is_never_declared(self, project: Path) -> None:
+        from loom.cli.config import ProjectConfig, register_module
+
+        (project / "pyproject.toml").write_text(PYPROJECT)
+        assert register_module(project, project / "flows" / "never.py") == "unchanged"
+        assert "never.py" not in str(ProjectConfig.discover(project).modules)
+
+    def test_a_real_file_still_is(self, project: Path) -> None:
+        from loom.cli.config import ProjectConfig, register_module
+
+        (project / "pyproject.toml").write_text(PYPROJECT)
+        module = project / "flows" / "real.py"
+        module.parent.mkdir(exist_ok=True)
+        module.write_text("")
+        assert register_module(project, module) == "added"
+        assert "flows/real.py" in ProjectConfig.discover(project).modules

@@ -163,6 +163,12 @@ def register_module(root: Path | None, module: Path) -> str:
     except OSError:
         return "unchanged"
 
+    if not module.exists():
+        # Never declare a file that is not there. `[tool.loom] modules` is a
+        # promise every command in the project then depends on, and a broken
+        # entry is worth more than the convenience of adding one eagerly.
+        return "unchanged"
+
     try:
         relative = module.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:

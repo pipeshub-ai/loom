@@ -390,9 +390,10 @@ def _authoring(sub: _Subparsers) -> None:
         "--turns",
         type=int,
         metavar="N",
-        help="Turns the agent may spend before writing code (default 20). "
-        "Raise it for a spec naming several systems; a run that ends "
-        "'exceeded its budget' produced nothing and spent everything.",
+        help="Turns the agent may spend before writing code (default 28, "
+        "plus 2 repair rounds for a job budget of 30). Raise it for a spec "
+        "naming several systems; a run that ends 'exceeded its budget' "
+        "produced nothing and spent everything.",
     )
     author.add_argument(
         "--resume",

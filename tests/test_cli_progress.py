@@ -434,3 +434,68 @@ class TestBudgetsReachTheCli:
         )
         message = (await agent.generate("do a thing")).issues[0].message
         assert "max_discovery_turns" in message
+
+
+class TestTurnBudget:
+    """The job budget is discovery + repair, and the message names the flag."""
+
+    def test_the_default_job_budget_is_thirty(self) -> None:
+        import inspect
+
+        params = inspect.signature(WorkflowCodingAgent.__init__).parameters
+        discovery = params["max_discovery_turns"].default
+        repair = params["max_repair_attempts"].default
+        assert discovery + repair == 30
+
+    def test_the_help_states_the_real_number(self) -> None:
+        """A default in the help that disagrees with the code sends people to
+        raise a limit they had already cleared."""
+        import inspect
+
+        from loom.cli import build_parser
+
+        params = inspect.signature(WorkflowCodingAgent.__init__).parameters
+        discovery = params["max_discovery_turns"].default
+        for action in build_parser()._subparsers._group_actions:
+            author = (action.choices or {}).get("author")
+            if author is None:
+                continue
+            turns = next(a for a in author._actions if "--turns" in a.option_strings)
+            assert f"default {discovery}" in (turns.help or "")
+
+    async def test_running_out_of_turns_names_the_flag(self) -> None:
+        """Not `max_turns`, which is a constructor argument nobody running
+        `loom author` is holding."""
+        looping = MockModelProvider(
+            responses=[
+                mock_response(
+                    tool_calls=[
+                        ToolCall(
+                            id=str(n), name="search_toolsets", arguments={"query": "x"}
+                        )
+                    ]
+                )
+                for n in range(40)
+            ]
+        )
+        agent = WorkflowCodingAgent(
+            looping, smoke_test=False, max_discovery_turns=3, max_repair_attempts=1
+        )
+        message = (await agent.generate("x")).issues[0].message
+        assert "--turns" in message
+        assert "max_turns" not in message
+        # And exactly one remedy, not the library's plus ours.
+        assert message.count("narrow the") == 1
+
+    def test_the_fact_survives_a_reworded_library_message(self) -> None:
+        """Cutting is narrow on purpose: degrading to redundancy is better
+        than degrading to a lost explanation."""
+        from loom.agents.coding_agent import _without_generic_advice
+
+        assert (
+            _without_generic_advice("ran out of turns; raise max_turns or narrow")
+            == "ran out of turns"
+        )
+        assert _without_generic_advice("something else entirely") == (
+            "something else entirely"
+        )
