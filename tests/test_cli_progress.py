@@ -383,3 +383,54 @@ class TestTheCommandStillBehaves:
         """``loom author "spec" > flow.py`` has to put the *code* in the file."""
         done = loom(project, "author", "anything")
         assert "⏺" not in done.stdout
+
+
+class TestBudgetsReachTheCli:
+    """`max_total_tokens` and `max_cost_usd` existed on the agent and reached
+    no surface, so `--max-cost` bounded nothing anybody could set."""
+
+    def test_the_flags_exist(self, project: Path) -> None:
+        help_text = loom(project, "author", "--help").stdout
+        assert "--max-tokens" in help_text
+        assert "--max-cost" in help_text
+
+    def test_they_cross_the_port(self) -> None:
+        import inspect
+
+        from loom.facade import LocalFacade, RemoteFacade, RuntimeFacade
+        from loom.identity.facade import AuthorizedFacade
+
+        for adapter in (RuntimeFacade, LocalFacade, RemoteFacade, AuthorizedFacade):
+            params = inspect.signature(adapter.author).parameters
+            assert "max_tokens" in params, adapter.__name__
+            assert "max_cost" in params, adapter.__name__
+
+    async def test_a_token_ceiling_stops_the_job(self) -> None:
+        """And reports what it spent, so the number that says whether to raise
+        it is the one that was thrown away before."""
+        agent = WorkflowCodingAgent(
+            scripted(tool="search_toolsets"), smoke_test=False, max_total_tokens=1
+        )
+        result = await agent.generate("do a thing")
+        assert result.code == ""
+        assert result.issues and result.issues[0].category == "unsupported"
+
+    async def test_it_names_the_dial_that_stopped_it(self) -> None:
+        """Naming the wrong one is the same defect as naming none: a job
+        stopped by a token ceiling was told to raise its *turn* budget."""
+        agent = WorkflowCodingAgent(
+            scripted(tool="search_toolsets"), smoke_test=False, max_total_tokens=1
+        )
+        message = (await agent.generate("do a thing")).issues[0].message
+        assert "--max-tokens" in message
+        assert "max_discovery_turns" not in message
+
+    async def test_a_turn_limit_still_names_turns(self) -> None:
+        agent = WorkflowCodingAgent(
+            scripted(tool="search_toolsets"),
+            smoke_test=False,
+            max_discovery_turns=1,
+            max_repair_attempts=0,
+        )
+        message = (await agent.generate("do a thing")).issues[0].message
+        assert "max_discovery_turns" in message

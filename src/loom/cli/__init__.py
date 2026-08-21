@@ -27,7 +27,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from loom import __version__
-from loom.cli import auth_commands, commands, doctor, event_commands, mcp_setup
+from loom.cli import (
+    auth_commands,
+    commands,
+    completion,
+    doctor,
+    event_commands,
+    mcp_setup,
+)
 from loom.cli.output import Exit
 
 if TYPE_CHECKING:
@@ -73,6 +80,7 @@ _HANDLERS = {
     "ui": commands.cmd_ui,
     "artifacts": commands.cmd_artifacts,
     "doctor": doctor.cmd_doctor,
+    "completion": completion.cmd_completion,
     "events": event_commands.cmd_events,
     "login": auth_commands.cmd_login,
     "logout": auth_commands.cmd_logout,
@@ -184,7 +192,10 @@ _GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("pending", "approve", "respond", "send", "pause", "unpause",
          "cancel", "retry", "replay", "pin"),
     ),
-    ("See what is available", ("workflows", "toolsets", "toolset", "nodes", "node", "doctor")),
+    (
+        "See what is available",
+        ("workflows", "toolsets", "toolset", "nodes", "node", "doctor", "completion"),
+    ),
     ("Serve it", ("serve", "mcp", "ui", "publish", "versions", "events", "setup")),
     (
         "Credentials",
@@ -382,6 +393,29 @@ def _authoring(sub: _Subparsers) -> None:
         help="Turns the agent may spend before writing code (default 20). "
         "Raise it for a spec naming several systems; a run that ends "
         "'exceeded its budget' produced nothing and spent everything.",
+    )
+    author.add_argument(
+        "--resume",
+        metavar="ID",
+        help="Continue an authoring job that was interrupted, keeping the "
+        "toolset schemas it fetched, the entities it resolved and what it had "
+        "already spent. The id is printed when a job is interrupted, and "
+        "'--resume list' shows the recent ones",
+    )
+    author.add_argument(
+        "--max-tokens",
+        type=int,
+        metavar="N",
+        help="Stop the job after this many tokens, across every call it makes "
+        "— discovery, repair and review together, not each",
+    )
+    author.add_argument(
+        "--max-cost",
+        type=float,
+        metavar="USD",
+        help="Stop the job after this many dollars. Refused for a model with "
+        "no price on file, because a ceiling that can never be reached is not "
+        "a ceiling",
     )
     author.add_argument(
         "--no-observe",
@@ -735,6 +769,17 @@ def _serving(sub: _Subparsers) -> None:
     )
     _add_backend(doctor)
     _add_output(doctor)
+
+    shell = sub.add_parser(
+        "completion", help="Print a shell completion script"
+    )
+    shell.add_argument(
+        "shell",
+        choices=completion.SHELLS,
+        help="Which shell. The script goes to stdout; where it lives is yours "
+        "to decide",
+    )
+    _add_output(shell)
 
     setup = sub.add_parser(
         "setup",

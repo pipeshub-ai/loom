@@ -15,8 +15,6 @@ The layering is deliberate:
 ``server``
     The only module that imports ``mcp``. Binds those functions to
     ``MCPServer`` (the SDK's high-level API, called ``FastMCP`` before 2.0).
-``bridge``
-    Deprecated. The old ``RuntimeBridge``, now a shim over the shared facade.
 """
 
 from __future__ import annotations

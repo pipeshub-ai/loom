@@ -195,10 +195,26 @@ class CodingSession:
     """
 
     def __init__(
-        self, agent: Any, budget: GenerationBudget, *, hooks: Any | None = None
+        self,
+        agent: Any,
+        budget: GenerationBudget,
+        *,
+        hooks: Any | None = None,
+        store: Any | None = None,
+        session_id: str = "",
+        spec: str = "",
     ) -> None:
         self._agent = agent
         self._budget = budget
+        self._store = store
+        """Optional :class:`~loom.agents.session_store.SessionStore`.
+
+        Where a snapshot goes after each turn, so an interrupted job can be
+        picked up. Absent, this class behaves exactly as it did — nothing is
+        written and nothing is slower."""
+        self._session_id = session_id
+        self._spec = spec
+        self._persisted = False
         self._hooks = hooks
         """Carried on every call rather than passed at one of them.
 
@@ -209,6 +225,45 @@ class CodingSession:
         arrive; the field was simply never filled, which is why an authoring
         run had no observable progress at all."""
         self._history: list[Message] = []
+        # Last, because it reads `_hooks`, `_store` and `_session_id`. It ran
+        # first, and so registered on a registry it had just created itself —
+        # one the runner never sees, because only `_hooks` reaches
+        # `AgentContext`.
+        self._watch_turns()
+
+    def _watch_turns(self) -> None:
+        """Snapshot after every *model turn*, not only when the loop returns.
+
+        ``ask()`` is one whole ReAct loop — twenty turns of discovery come back
+        as a single call — so persisting around it saves nothing until all of
+        discovery is done, which is precisely the window an interruption lands
+        in. ``on_turn_end`` fires per turn, and its ``ctx.messages`` is the
+        running conversation, so this is where a resumable transcript actually
+        exists.
+
+        Registered on the caller's own registry when there is one, because a
+        second registry would mean a second ``AgentContext.hooks`` and only one
+        can be passed. Nothing is registered without a store to write to, so an
+        agent with no session store runs the chain it ran before.
+        """
+        if self._store is None or not self._session_id:
+            return
+        if self._hooks is None:
+            from loom.runtime.hooks import HookRegistry
+
+            self._hooks = HookRegistry()
+
+        async def remember(ctx: Any) -> None:
+            messages = [
+                message
+                for message in (getattr(ctx, "messages", None) or [])
+                if getattr(message, "role", None) is not Role.SYSTEM
+            ]
+            if messages:
+                self._history = list(messages)
+            await self.persist()
+
+        self._hooks.on_turn_end(remember)
 
     @property
     def budget(self) -> GenerationBudget:
@@ -260,7 +315,66 @@ class CodingSession:
         self._budget.charge(result)
         self._remember(result)
         logger.info("session | %s", self._budget.describe())
+        # After the turn, never before: a snapshot taken up front would promise
+        # a conversation that had not happened. Failure to write one is logged
+        # and swallowed, because losing the ability to resume is worse than
+        # losing the whole job, and that is what raising here would do.
+        await self.persist()
         return result
+
+    @property
+    def session_id(self) -> str:
+        """The id ``--resume`` takes. Empty when nothing is being stored."""
+        return self._session_id
+
+    @property
+    def persisted(self) -> bool:
+        """Whether a snapshot exists to resume from.
+
+        ``False`` until the first turn completes — a job interrupted before
+        then has no transcript, and offering to resume one would be a promise
+        about work that never happened.
+        """
+        return self._persisted
+
+    def snapshot(self, *, code: str = "") -> Any:
+        """This job, as of the last completed turn."""
+        from loom.agents.session_store import CodingSnapshot
+
+        return CodingSnapshot(
+            session_id=self._session_id,
+            spec=self._spec,
+            history=list(self._history),
+            spent=self._budget.spent,
+            turns_used=self._budget.turns_used,
+            code=code,
+        )
+
+    async def persist(self, *, code: str = "") -> None:
+        """Write the snapshot, if there is anywhere to write it."""
+        if self._store is None or not self._session_id:
+            return
+        try:
+            await self._store.save(self.snapshot(code=code))
+        except Exception:
+            logger.debug("could not save authoring session", exc_info=True)
+        else:
+            self._persisted = True
+
+    def restore(self, snapshot: Any) -> None:
+        """Continue a job somebody started.
+
+        The transcript comes back and so does what it *cost*: a resumed job
+        that were handed a fresh budget would let an interrupted run be
+        restarted indefinitely under a ceiling that was supposed to bound it.
+        """
+        self._history = list(getattr(snapshot, "history", []) or [])
+        spent = getattr(snapshot, "spent", None)
+        if spent is not None:
+            self._budget.spent = _as_usage(spent)
+        self._budget.turns_used = int(getattr(snapshot, "turns_used", 0) or 0)
+        if not self._spec:
+            self._spec = str(getattr(snapshot, "spec", "") or "")
 
     def _remember(self, result: AgentResult[Any]) -> None:
         """Carry this call's turns forward, minus the system prompt.

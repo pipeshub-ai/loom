@@ -599,6 +599,22 @@ class EditResult:
         return not any(issue.severity == "error" for issue in self.issues)
 
 
+def _session_id_for(store: Any, resume: Any) -> str:
+    """The id an authoring job runs under. Empty when nothing is stored.
+
+    Minted at construction so a caller can print it before the job starts,
+    which is what makes an interruption recoverable — the id is useless to
+    somebody who only learns it from a result they never got.
+    """
+    if store is None:
+        return ""
+    if resume is not None:
+        return str(getattr(resume, "session_id", "") or "")
+    from loom.agents.session_store import new_session_id
+
+    return new_session_id()
+
+
 class WorkflowCodingAgent:
     """LLM-powered agent that authors LOOM workflow code.
 
@@ -655,8 +671,22 @@ class WorkflowCodingAgent:
         max_cost_usd: float | None = None,
         hooks: Any | None = None,
         on_stage: Any | None = None,
+        session_store: Any | None = None,
+        resume: Any | None = None,
     ) -> None:
         self._model = model
+        self._session_store = session_store
+        """Optional :class:`~loom.agents.session_store.SessionStore`.
+
+        Where an authoring job is snapshotted after each turn. Its absence is
+        the behaviour that shipped: nothing is written, and an interrupted job
+        loses the toolset schemas it fetched, the entities it resolved against
+        real services, its plan, and every token paid for."""
+        self._resume = resume
+        """A :class:`CodingSnapshot` to continue from, if any."""
+        self._session_id = _session_id_for(session_store, resume)
+        self._session: Any = None
+        """The running job, so a caller can ask whether it can be resumed."""
         self._on_stage = on_stage
         """Optional ``(check, result)`` callback around each verification stage.
 
@@ -819,6 +849,36 @@ class WorkflowCodingAgent:
 
     # Keep old private name as alias
     _build_system_prompt = build_system_prompt
+
+    @property
+    def session_id(self) -> str:
+        """The id ``--resume`` takes for the job this agent last started."""
+        return self._session_id
+
+    @property
+    def resumable(self) -> bool:
+        """Whether there is a snapshot to come back to.
+
+        Only after a turn has completed. Offering ``--resume`` for a job that
+        was interrupted before its first model call returned would name an id
+        that resolves to nothing — advice that cannot help, which is worse
+        than none.
+        """
+        return bool(getattr(self._session, "persisted", False))
+
+    def _session_key(self) -> str:
+        """The id this job is stored under: the resumed one, or a new one.
+
+        Reusing the id is what makes a second interruption resumable too — a
+        fresh id per attempt would leave a trail of half-finished snapshots and
+        no way to tell which one continues which.
+
+        Minted once per agent, at construction, so a caller can print it
+        *before* the job runs. Minting it here on each call would mean the id
+        did not exist until the first turn had already completed, which is not
+        the case anyone needs it for.
+        """
+        return self._session_id
 
     @property
     def _progress(self) -> Any:
@@ -1125,7 +1185,17 @@ class WorkflowCodingAgent:
             model_settings=ModelSettings(temperature=0.2),
             executor=self._executor,
         )
-        session = CodingSession(agent, budget, hooks=self._hooks)
+        session = CodingSession(
+            agent,
+            budget,
+            hooks=self._hooks,
+            store=self._session_store,
+            session_id=self._session_key(),
+            spec=instruction,
+        )
+        if self._resume is not None:
+            session.restore(self._resume)
+        self._session = session
 
         try:
             reply = await session.ask(_edit_prompt(source, instruction))
@@ -1255,7 +1325,17 @@ class WorkflowCodingAgent:
             model_settings=ModelSettings(temperature=0.2),
             executor=self._executor,
         )
-        session = CodingSession(agent, budget, hooks=self._hooks)
+        session = CodingSession(
+            agent,
+            budget,
+            hooks=self._hooks,
+            store=self._session_store,
+            session_id=self._session_key(),
+            spec=spec,
+        )
+        if self._resume is not None:
+            session.restore(self._resume)
+        self._session = session
 
         try:
             result = await session.ask(spec)
@@ -1273,12 +1353,23 @@ class WorkflowCodingAgent:
             # narrow their spec sends them to rewrite a spec that was fine.
             from loom.agents.smoke import is_environmental
 
-            if is_environmental(str(exc)):
+            reason = str(exc)
+            if is_environmental(reason):
                 remedy = (
                     "This is about the environment, not the spec — a missing "
                     "credential, service, or network. Set the provider's API "
                     "key (ANTHROPIC_API_KEY, OPENAI_API_KEY, …); a shell does "
                     "not read .env the way the cookbooks do."
+                )
+            elif "max_total_tokens" in reason or "max_cost" in reason:
+                # Naming the wrong dial is the same defect as naming none:
+                # a job stopped by a token ceiling was told to raise its *turn*
+                # budget, which cannot help and reads as advice that was not
+                # looked at.
+                remedy = (
+                    "It hit the ceiling you set, not a turn limit. Raise "
+                    "--max-tokens / --max-cost, or narrow the spec — the "
+                    "figures above are what it had spent when it stopped."
                 )
             else:
                 remedy = (

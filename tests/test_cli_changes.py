@@ -290,3 +290,41 @@ class TestTheFlagsExist:
         done = loom(project, "edit", "flow.py", "change it")
         assert done.returncode == Exit.USAGE
         assert project.joinpath("flow.py").read_text() == FLOW
+
+
+class TestInterruptAdviceIsTrue:
+    """Advice that cannot help is worse than none.
+
+    ``author`` and ``edit`` start no run, and their interrupt pointed at
+    ``loom runs --status running`` — sending someone to look for a run that
+    never existed.
+    """
+
+    def test_a_command_that_drives_runs_names_the_recovery(self, capsys) -> None:
+        from loom.cli.commands import interrupted
+
+        interrupted(130)
+        assert "loom runs --status running" in capsys.readouterr().err
+
+    def test_a_command_that_starts_none_says_so(self, capsys) -> None:
+        from loom.cli.commands import interrupted
+
+        interrupted(130, drives_runs=False)
+        err = capsys.readouterr().err
+        assert "loom runs --status running" not in err
+        assert "Nothing to clean up" in err
+
+    def test_authoring_opts_out(self) -> None:
+        """Asserted on the source, because the alternative is interrupting a
+        real authoring run in a test to read one line of stderr."""
+        source = (
+            Path(__file__).resolve().parent.parent
+            / "src"
+            / "loom"
+            / "cli"
+            / "commands.py"
+        ).read_text()
+        for command in ("cmd_author", "cmd_edit"):
+            start = source.index(f"def {command}(")
+            end = source.index("\ndef ", start + 1)
+            assert "drives_runs=False" in source[start:end], command

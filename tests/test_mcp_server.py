@@ -1006,29 +1006,3 @@ class TestStdioEndToEnd:
         assert "serving" not in done.stdout
 
 
-# ---------------------------------------------------------------------------
-# The deprecated shim
-# ---------------------------------------------------------------------------
-
-
-class TestDeprecatedBridge:
-    def test_it_warns(self) -> None:
-        from loom.mcp_server.bridge import RuntimeBridge
-
-        with pytest.warns(DeprecationWarning, match="LocalFacade"):
-            RuntimeBridge()
-
-    async def test_it_delegates_to_the_shared_facade(self) -> None:
-        """One port underneath, so a fix in the facade reaches both callers."""
-        from loom.mcp_server.bridge import RuntimeBridge
-
-        with pytest.warns(DeprecationWarning):
-            bridge = RuntimeBridge()
-
-        assert isinstance(bridge.facade, LocalFacade)
-
-        bridge.register_workflow(doubler)
-        run = await bridge.run_workflow("doubler", 4)
-        assert run["status"] == "completed"
-        # The shim keeps its historical key name.
-        assert run["workflow_id"] == "doubler"

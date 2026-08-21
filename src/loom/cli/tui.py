@@ -33,7 +33,6 @@ in-process Runtime or a remote server with no change.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any, ClassVar
 
 from textual import work
@@ -291,10 +290,3 @@ def run_tui(backend: Any) -> int:
 
 
 __all__ = ["LoomApp", "run_tui"]
-
-
-if __name__ == "__main__":  # pragma: no cover
-    from loom.cli.targets import resolve
-
-    asyncio.run(asyncio.sleep(0))
-    raise SystemExit(run_tui(resolve(None).backend))

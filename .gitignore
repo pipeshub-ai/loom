@@ -96,3 +96,7 @@ temp/
 # cookbook example writes here on every run, so committing it stores generated
 # test data that nothing reads back.
 .loom-blobs/
+
+# Running `loom` in this repo now creates a project store beside
+# pyproject.toml. Derived state, the same standing as .pytest_cache.
+.loom/

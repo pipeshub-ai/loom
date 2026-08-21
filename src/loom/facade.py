@@ -179,6 +179,9 @@ class RuntimeFacade(Protocol):
         smoke_input: Any = None,
         observe: bool = True,
         turns: int | None = None,
+        max_tokens: int | None = None,
+        max_cost: float | None = None,
+        resume: str = "",
     ) -> dict[str, Any]:
         """Write a workflow from a natural-language *spec*.
 
@@ -210,7 +213,7 @@ class RuntimeFacade(Protocol):
         packages: list[str] | None = None,
         smoke_input: Any = None,
         observe: bool = True,
-        ) -> dict[str, Any]:
+    ) -> dict[str, Any]:
         """Change a workflow that already exists, and verify the result.
 
         The half of authoring the product did not have. ``author`` was the only
@@ -539,6 +542,15 @@ class LocalFacade:
     stage. Not a hook: a stage reaches no model, so the agent family has
     nothing to say about it, and inventing an event for a plain loop would be a
     mechanism where a callback is the thing."""
+    _authoring: Any = field(default=None, repr=False, compare=False)
+    last_session_id: str = ""
+    """The authoring job this facade last opened.
+
+    Recorded as the agent is built rather than returned with the result,
+    because the moment it is needed is the moment there *is* no result: a
+    caller interrupted four minutes in has lost the id along with everything
+    else, and reading it back out of the store during a cancellation is the
+    least reliable thing that could be done at that point."""
     async def workflows(self, *, published: bool = True) -> list[dict[str, Any]]:
         available = {
             definition.name: {
@@ -859,9 +871,18 @@ class LocalFacade:
         smoke_input: Any = None,
         observe: bool = True,
         turns: int | None = None,
+        max_tokens: int | None = None,
+        max_cost: float | None = None,
+        resume: str = "",
     ) -> dict[str, Any]:
-        agent = self._coding_agent(
-            packages=packages, smoke_input=smoke_input, observe=observe, turns=turns
+        agent = await self._coding_agent(
+            packages=packages,
+            smoke_input=smoke_input,
+            observe=observe,
+            turns=turns,
+            max_tokens=max_tokens,
+            max_cost=max_cost,
+            resume=resume,
         )
         result = await agent.generate(spec)
 
@@ -892,6 +913,9 @@ class LocalFacade:
             # output: `loom author --answers` replays them, and the same spec
             # and the same answers reproduce the same file.
             "questions": [asked.model_dump(mode="json") for asked in result.questions],
+            # The id `--resume` takes. Reported on every job, not only a failed
+            # one: whoever is going to be interrupted does not know it yet.
+            "session_id": agent.session_id,
             "smoke": None
             if result.smoke is None
             else {
@@ -911,8 +935,8 @@ class LocalFacade:
         packages: list[str] | None = None,
         smoke_input: Any = None,
         observe: bool = True,
-        ) -> dict[str, Any]:
-        agent = self._coding_agent(
+    ) -> dict[str, Any]:
+        agent = await self._coding_agent(
             packages=packages, smoke_input=smoke_input, observe=observe
         )
         result = await agent.edit(source, instruction)
@@ -924,6 +948,9 @@ class LocalFacade:
             "diff": result.diff,
             "graph_changes": result.graph_changes,
             "questions": [asked.model_dump(mode="json") for asked in result.questions],
+            # The id `--resume` takes. Reported on every job, not only a failed
+            # one: whoever is going to be interrupted does not know it yet.
+            "session_id": agent.session_id,
             "repairs": result.repair_attempts,
             "model": result.model_used,
             "input_tokens": result.input_tokens,
@@ -976,13 +1003,16 @@ class LocalFacade:
             raise RegistryError(f"no run {run_id}")
         return describe_record(record)
 
-    def _coding_agent(
+    async def _coding_agent(
         self,
         *,
         packages: list[str] | None,
         smoke_input: Any,
         observe: bool,
         turns: int | None = None,
+        max_tokens: int | None = None,
+        max_cost: float | None = None,
+        resume: str = "",
     ) -> Any:
         """One place that builds the agent, for authoring and for editing.
 
@@ -1009,12 +1039,37 @@ class LocalFacade:
 
         # Typed `Any` because a `**dict[str, int]` splat makes mypy check that
         # value against every keyword the constructor has.
-        extra: dict[str, Any] = {"max_discovery_turns": turns} if turns else {}
+        extra: dict[str, Any] = {}
+        if turns:
+            extra["max_discovery_turns"] = turns
+        # Ceilings on the *job*, not on one call. They existed on the agent and
+        # reached no surface, so `max_cost_usd` bounded nothing anybody could
+        # set. A dollar ceiling on a model with no price on file is refused at
+        # construction, which is the right place for it.
+        if max_tokens:
+            extra["max_total_tokens"] = max_tokens
+        if max_cost:
+            extra["max_cost_usd"] = max_cost
 
-        return WorkflowCodingAgent(
+        # Snapshots live in the same store the runs do, so an interrupted
+        # authoring job is recoverable from the project you were standing in
+        # — the same place `loom runs` looks.
+        from loom.agents.session_store import StoreBackedSessionStore
+
+        sessions = StoreBackedSessionStore(self.runtime.store)
+        snapshot = await sessions.load(resume) if resume else None
+        if resume and snapshot is None:
+            raise RegistryError(
+                f"no authoring session {resume!r}. It may have expired — they "
+                "are kept for a week."
+            )
+
+        agent = WorkflowCodingAgent(
             model,
             hooks=self.hooks,
             on_stage=self.on_stage,
+            session_store=sessions,
+            resume=snapshot,
             tool_registry=self.runtime.toolsets,
             node_registry=self.runtime.nodes,
             probes=probes,
@@ -1026,7 +1081,16 @@ class LocalFacade:
             # produced nothing having spent everything.
             **extra,
         )
+        # Read back rather than predicted: the agent mints the id, and a second
+        # opinion about what it is would be a second implementation of it.
+        self.last_session_id = agent.session_id
+        self._authoring = agent
+        return agent
 
+    @property
+    def resumable(self) -> bool:
+        """Whether the last authoring job left something to resume."""
+        return bool(getattr(getattr(self, "_authoring", None), "resumable", False))
 
     async def nodes(
         self, query: str = "", *, category: str | None = None
@@ -1421,6 +1485,9 @@ class RemoteFacade:
         smoke_input: Any = None,
         observe: bool = True,
         turns: int | None = None,
+        max_tokens: int | None = None,
+        max_cost: float | None = None,
+        resume: str = "",
     ) -> dict[str, Any]:
         raise ConfigurationError(_NO_REMOTE_AUTHORING)
 
@@ -1454,7 +1521,7 @@ class RemoteFacade:
         packages: list[str] | None = None,
         smoke_input: Any = None,
         observe: bool = True,
-        ) -> dict[str, Any]:
+    ) -> dict[str, Any]:
         # Refused for the reason authoring is: editing reads *this* process's
         # toolsets, nodes and probes to decide what the workflow may call, and
         # spends model tokens doing it. A server's key would be spending

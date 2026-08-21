@@ -61,7 +61,9 @@ def with_backend(args: argparse.Namespace, target: str | None = None) -> Target:
     )
 
 
-def run_async(coro: Awaitable[int], *, debug: bool = False) -> int:
+def run_async(
+    coro: Awaitable[int], *, debug: bool = False, drives_runs: bool = True
+) -> int:
     """Drive a command coroutine, turning known errors into exit codes.
 
     ``guarded`` is what makes Ctrl+C and ``docker stop`` behave the same: both
@@ -81,12 +83,12 @@ def run_async(coro: Awaitable[int], *, debug: bool = False) -> int:
         print(str(exc), file=sys.stderr)
         return Exit.USAGE
     except Interrupted as stop:
-        interrupted(stop.exit_code)
+        interrupted(stop.exit_code, drives_runs=drives_runs)
         return stop.exit_code
     except KeyboardInterrupt:
         # Reachable where add_signal_handler is not (Windows), and if a signal
         # lands in the window before guarded() has installed anything.
-        interrupted(Exit.INTERRUPTED)
+        interrupted(Exit.INTERRUPTED, drives_runs=drives_runs)
         return Exit.INTERRUPTED
     except Exception as exc:
         # Everything the three arms above do not name: a store refusing a
@@ -110,18 +112,26 @@ def unexpected(exc: BaseException, *, debug: bool = False) -> None:
         print("  re-run with --debug for the traceback", file=sys.stderr)
 
 
-def interrupted(code: int) -> None:
+def interrupted(code: int, *, drives_runs: bool = True) -> None:
     """Say what an interrupt left behind, and how to find it.
 
-    A run that was mid-step is still RUNNING in the store with an expired lease.
-    That is recoverable rather than lost, but only if whoever pressed Ctrl+C
-    knows to go looking — otherwise it reads as a run that vanished.
+    A run that was mid-step is still RUNNING in the store with an expired
+    lease. That is recoverable rather than lost, but only if whoever pressed
+    Ctrl+C knows to go looking — otherwise it reads as a run that vanished.
+
+    *drives_runs* is ``False`` for the commands that start none. ``author`` and
+    ``edit`` spend model tokens and write a file; pointing their interrupt at
+    ``loom runs --status running`` sent people to look for a run that never
+    existed, which is worse than saying nothing.
     """
     print(f"interrupted (exit {code})", file=sys.stderr)
-    print(
-        "  Any run that was in flight is recoverable: loom runs --status running",
-        file=sys.stderr,
-    )
+    if drives_runs:
+        print(
+            "  Any run that was in flight is recoverable: loom runs --status running",
+            file=sys.stderr,
+        )
+    else:
+        print("  Nothing was written. Nothing to clean up.", file=sys.stderr)
 
 
 def missing_run(run_id: str, out: Printer) -> Exit:
@@ -438,8 +448,11 @@ def cmd_author(args: argparse.Namespace) -> int:
 
     async def body() -> int:
         out = printer_for(args)
-        spec = _spec_text(args.spec)
+        resume = str(getattr(args, "resume", "") or "")
         target = with_backend(args)
+        if resume == "list":
+            return await _list_sessions(out, target)
+        spec = _spec_text(args.spec)
         _asking(args, target)
         watching = _watching(args, target)
         try:
@@ -449,7 +462,16 @@ def cmd_author(args: argparse.Namespace) -> int:
                 smoke_input=parse_input(args.input),
                 observe=not args.no_observe,
                 turns=args.turns,
+                max_tokens=getattr(args, "max_tokens", None),
+                max_cost=getattr(args, "max_cost", None),
+                resume=resume,
             )
+        except BaseException:
+            # Includes the Ctrl+C that `run_async` turns into an exit code: the
+            # id is only useful to somebody who has just lost four minutes, and
+            # that is the one moment they do not have it.
+            _say_resume(out, target)
+            raise
         finally:
             if watching is not None:
                 # Before closing the backend, so the live region is gone before
@@ -492,7 +514,9 @@ def cmd_author(args: argparse.Namespace) -> int:
         # is unresolved, which is a review, not a failure to produce anything.
         return Exit.OK if result["code"] else Exit.FAILED
 
-    return run_async(body(), debug=getattr(args, "debug", False))
+    return run_async(
+        body(), debug=getattr(args, "debug", False), drives_runs=False
+    )
 
 
 def cmd_pause(args: argparse.Namespace) -> int:
@@ -662,7 +686,61 @@ def cmd_edit(args: argparse.Namespace) -> int:
         _report_authoring(out, result, args)
         return written if written != Exit.OK else Exit.OK
 
-    return run_async(body(), debug=getattr(args, "debug", False))
+    return run_async(
+        body(), debug=getattr(args, "debug", False), drives_runs=False
+    )
+
+
+def _say_resume(out: Printer, target: Target) -> None:
+    """Name the job that was interrupted, so it can be picked up.
+
+    Read off the facade, which records the id as the agent is built. A caller
+    four minutes into a generation has lost the transcript, the resolved
+    entities and the tokens along with it — the id is the only thing that gets
+    any of it back, and it is the one thing they never saw.
+    """
+    session_id = str(getattr(target.backend, "last_session_id", "") or "")
+    if not session_id or not getattr(target.backend, "resumable", False):
+        # Nothing completed, so there is nothing to come back to. Naming an id
+        # that resolves to nothing is the advice-that-cannot-help failure this
+        # file has already fixed twice.
+        return
+    out.error(f"  pick it up with: loom author --resume {session_id}")
+
+
+async def _list_sessions(out: Printer, target: Target) -> int:
+    """``--resume list``: authoring jobs that can still be picked up.
+
+    Its own listing rather than a `loom sessions` command, because it answers
+    one question — "what can I pass to --resume?" — and belongs beside the flag
+    that takes the answer.
+    """
+    runtime = getattr(target.backend, "runtime", None)
+    if runtime is None:
+        out.error("authoring sessions are local; --server keeps none")
+        return Exit.USAGE
+
+    from loom.agents.session_store import StoreBackedSessionStore
+
+    found = await StoreBackedSessionStore(runtime.store).recent()
+    out.json([snapshot.as_json() for snapshot in found])
+    if not found:
+        out.line("  no authoring sessions to resume")
+        out.hint("they are kept for a week after the last turn")
+        return Exit.OK
+    out.table(
+        ["session", "turns", "tokens", "spec"],
+        [
+            [
+                snapshot.session_id,
+                str(snapshot.turns_used),
+                str(snapshot.spent.total_tokens),
+                snapshot.spec.replace("\n", " ")[:48],
+            ]
+            for snapshot in found
+        ],
+    )
+    return Exit.OK
 
 
 def _register(out: Printer, target: Target, module: Path) -> None:

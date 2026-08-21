@@ -41,7 +41,6 @@ import sys
 import webbrowser
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
@@ -163,27 +162,21 @@ def server_token_provider(server: str) -> Callable[[bool], Awaitable[str | None]
 
 
 def _dotenv_get(name: str) -> str | None:
-    """``name`` from ``.env`` in the current directory, if present.
+    """``name`` from the project's ``.env``, if there is one.
 
-    Does not override a real environment variable — exporting a port for one
-    run still wins over the file. Quoted values and comments match the
-    cookbook loader so a ``.env`` written for examples works here too.
+    Loads through :func:`loom.cli.config.load_dotenv`, which reads the file
+    beside the nearest ``pyproject.toml``. This used to read ``Path.cwd()/.env``
+    with its own parser, so ``loom connect`` run from a subdirectory read a
+    different file — or none — than ``loom run`` did from the same project. Two
+    readers for one file is one too many; two *answers* is a bug.
+
+    Never overrides a real environment variable, so exporting a port for one
+    command still wins.
     """
-    path = Path.cwd() / ".env"
-    if not path.is_file():
-        return None
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        if key.strip() == name:
-            return value.strip().strip("'\"") or None
-    return None
+    from loom.cli.config import ProjectConfig, load_dotenv
+
+    load_dotenv(ProjectConfig.discover(load_env=False).root)
+    return os.environ.get(name) or None
 
 
 def resolve_redirect_port(explicit: int | None = None) -> int:

@@ -79,7 +79,7 @@ class TestTheCliWiresIt:
         assert isinstance(target.backend.user_interaction, CLIUserInteraction)
         assert isinstance(target.backend.user_interaction, UserInteraction)
 
-    def test_the_agent_it_builds_receives_it(self) -> None:
+    async def test_the_agent_it_builds_receives_it(self) -> None:
         """The field is inert unless ``_coding_agent`` passes it on, which is
         the exact link that was missing."""
         pytest.importorskip("anthropic", reason="needs a provider to build an agent")
@@ -96,11 +96,13 @@ class TestTheCliWiresIt:
                 lambda q: Answer(action="accept", other="x")
             ),
         )
-        agent = facade._coding_agent(packages=None, observe=False, smoke_input=None)
+        agent = await facade._coding_agent(
+            packages=None, observe=False, smoke_input=None
+        )
 
         assert agent._ask_gate is not None
 
-    def test_a_cli_interaction_with_no_tty_is_dropped(self) -> None:
+    async def test_a_cli_interaction_with_no_tty_is_dropped(self) -> None:
         """The capability check, at the seam where it matters.
 
         Under pytest — and under any pipe, and in CI — stdin is not a terminal,
@@ -116,7 +118,9 @@ class TestTheCliWiresIt:
             pytest.skip("no provider key configured")
 
         facade = LocalFacade(Runtime(), [], user_interaction=CLIUserInteraction())
-        agent = facade._coding_agent(packages=None, observe=False, smoke_input=None)
+        agent = await facade._coding_agent(
+            packages=None, observe=False, smoke_input=None
+        )
 
         assert CLIUserInteraction().available() is False
         assert agent._ask_gate is None
@@ -128,12 +132,14 @@ class TestAServerDoesNotWireIt:
     --transport stdio`` that file descriptor *is* the protocol channel."""
 
     def test_the_mcp_facade_cannot_ask(self) -> None:
-        from loom.mcp_server.bridge import RuntimeBridge
+        """A facade built without one has none.
 
-        with pytest.warns(DeprecationWarning):
-            bridge = RuntimeBridge(store_url="memory://")
-
-        assert bridge._facade.user_interaction is None
+        This used to go through ``RuntimeBridge``, which is gone; the claim was
+        never about the bridge, it was that nothing gives a server an
+        interaction unless somebody composes one in — which is the CLI's job
+        and not a library's.
+        """
+        assert LocalFacade(Runtime()).user_interaction is None
 
     def test_the_remote_facade_has_no_such_field(self) -> None:
         """An interaction is an object, not a payload, so it could not cross

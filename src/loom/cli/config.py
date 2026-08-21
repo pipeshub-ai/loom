@@ -222,20 +222,23 @@ def _with_module(source: str, relative: str) -> str | None:
 
 
 def load_dotenv(root: Path | None) -> Path | None:
-    """Load ``<root>/.env`` into the environment. Returns the file, if any.
+    """Load ``.env`` into the environment. Returns the file, if any.
+
+    Read from the project root, or from the working directory when there is no
+    project — the store deliberately has no such fallback, because a *file* the
+    CLI writes needs somewhere it was invited to write, while a file it merely
+    *reads* is one the user put there on purpose.
 
     A real environment variable always wins, so exporting a key for one command
     still overrides the file.
 
     The cookbooks have read ``.env`` since they existed and the CLI did not —
-    only ``auth_commands``, only for one OAuth port — so a project with
-    ``ANTHROPIC_API_KEY`` in ``.env`` ran under ``python examples/…`` and failed
-    under ``loom author``. ``coding_agent`` even ships an error string
-    acknowledging it: *"a shell does not read .env the way the cookbooks do."*
+    only ``auth_commands``, only for one OAuth port, and with its own parser
+    pointed at a different directory. ``coding_agent`` even ships an error
+    string acknowledging it: *"a shell does not read .env the way the cookbooks
+    do."*
     """
-    if root is None:
-        return None
-    path = root / ".env"
+    path = (root or Path.cwd()) / ".env"
     if not path.exists():
         return None
     try:

@@ -13,6 +13,9 @@ Installed as both `loom` and `loomsdk`.
 ```bash
 # authoring
 loom author "watch a folder and summarise new PDFs" -o flows/digest.py
+loom author --resume <id>              # pick up an interrupted job
+loom author "" --resume list           # what can be picked up
+loom completion zsh                    # shell completion, from the parser
 loom edit flows/digest.py "also skip PDFs under one page"   # NL edit, verified
 loom check flows/order.py              # write order.graph.json + order.description.md
 loom check flows/order.py --fail-on-change   # CI: fail if the committed graph is stale
@@ -2160,6 +2163,42 @@ construct the thing themselves.
 and the coding agent's model were reading the same three keys from two places.
 No key set is reported as which keys to set, rather than as a stack trace from
 inside a vendor SDK.
+
+### An authoring job that outlives the process
+
+`agents/session_store.py`. `CodingSession` held its transcript in a list and
+its budget in a dataclass, and both died with the process — Ctrl+C four minutes
+into a generation discarded the toolset schemas the model had fetched, the
+entity ids it had resolved through real API calls, its plan, and every token
+paid for.
+
+A **snapshot**, not a durable workflow. Re-entering an authoring job is not the
+problem the engine solves: there is no journal to serve and nothing has been
+made deterministic. What is worth keeping is precisely the part that is *not*
+reproducible — a conversation with a model — so that is what is stored, on
+`CacheStore`, which every backend implements and which its own docstring
+already names as the substrate for agent sessions.
+
+**Snapshotted per model turn, not per `ask()`.** That distinction is the whole
+feature: `ask()` is one entire ReAct loop, so twenty turns of discovery come
+back as a single call, and persisting around it saves nothing until discovery
+has *finished* — which is exactly the window an interruption lands in. The
+first version did that, passed its tests, and saved nothing when actually
+interrupted at eleven seconds. `on_turn_end` is where a resumable transcript
+exists, and `ctx.messages` there is the running conversation.
+
+`--resume` restores the transcript **and what it cost**: a resumed job handed a
+fresh budget would let an interrupted run be restarted indefinitely under a
+ceiling meant to bound it. The id is minted at construction rather than
+returned with the result, because the moment it is needed is the moment there
+*is* no result. And it is offered only when a turn has actually completed —
+naming an id that resolves to nothing is the advice-that-cannot-help failure
+this CLI has fixed three times now (`loom runs --status running` after an
+interrupted *authoring* run, and `raise max_discovery_turns` after a *token*
+ceiling).
+
+`--max-tokens` and `--max-cost` bound the job. They existed on the agent and
+reached no surface, so `max_cost_usd` bounded nothing anybody could set.
 
 ### Nothing is written before it has been shown
 

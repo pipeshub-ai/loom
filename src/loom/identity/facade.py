@@ -124,6 +124,9 @@ class AuthorizedFacade:
         smoke_input: Any = None,
         observe: bool = True,
         turns: int | None = None,
+        max_tokens: int | None = None,
+        max_cost: float | None = None,
+        resume: str = "",
     ) -> dict[str, Any]:
         """Its own scope, not folded into publishing.
 
@@ -138,6 +141,9 @@ class AuthorizedFacade:
             smoke_input=smoke_input,
             observe=observe,
             turns=turns,
+            max_tokens=max_tokens,
+            max_cost=max_cost,
+            resume=resume,
         )
 
     async def edit(

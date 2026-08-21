@@ -164,3 +164,65 @@ def test_every_setup_client_it_names_exists() -> None:
         assert name == "all" or mcp_setup.client_named(name) is not None, (
             f"the guide shows `loom setup {name}`, which is not a client"
         )
+
+
+class TestCompletionIsGeneratedFromTheParser:
+    """Forty commands restated in three shell dialects is three copies to
+    forget, and the failure is silent: completion offers a flag the CLI
+    rejects, which reads as the shell being broken."""
+
+    def test_every_command_is_offered(self) -> None:
+        from loom.cli import _HANDLERS
+        from loom.cli.completion import commands
+
+        assert set(commands()) == set(_HANDLERS)
+
+    def test_flags_come_from_the_subparser(self) -> None:
+        from loom.cli.completion import flags_of
+
+        assert "--follow" in flags_of("run")
+        assert "--detach" in flags_of("run")
+        # And not from some other command's.
+        assert "--reject" not in flags_of("run")
+
+    def test_an_unknown_subcommand_has_no_flags(self) -> None:
+        from loom.cli.completion import flags_of
+
+        assert flags_of("no-such-command") == []
+
+    @pytest.mark.parametrize("shell", ["bash", "zsh", "fish"])
+    def test_each_script_mentions_every_command(self, shell: str) -> None:
+        from loom.cli import _HANDLERS
+        from loom.cli.completion import script_for
+
+        script = script_for(shell)
+        missing = [name for name in _HANDLERS if name not in script]
+        assert not missing, f"{shell} completion omits {missing}"
+
+    @pytest.mark.parametrize("shell", ["bash", "zsh"])
+    def test_the_script_parses_in_its_own_shell(self, shell: str) -> None:
+        """A completion script that does not parse is worse than none: it
+        breaks the shell's completion for everything, not only for loom."""
+        import shutil
+        import subprocess
+        import tempfile
+
+        binary = shutil.which(shell)
+        if binary is None:  # pragma: no cover - depends on the machine
+            pytest.skip(f"{shell} is not installed")
+
+        from loom.cli.completion import script_for
+
+        with tempfile.NamedTemporaryFile("w", suffix=f".{shell}") as handle:
+            handle.write(script_for(shell))
+            handle.flush()
+            done = subprocess.run(
+                [binary, "-n", handle.name], capture_output=True, text=True
+            )
+        assert done.returncode == 0, done.stderr
+
+    def test_an_unknown_shell_is_refused(self) -> None:
+        from loom.cli.completion import script_for
+
+        with pytest.raises(ValueError, match="unknown shell"):
+            script_for("csh")

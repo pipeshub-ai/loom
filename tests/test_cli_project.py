@@ -384,7 +384,22 @@ class TestDotenv:
 
     def test_no_env_file_is_not_an_error(self, tmp_path: Path) -> None:
         assert load_dotenv(tmp_path) is None
-        assert load_dotenv(None) is None
+
+    def test_no_project_reads_the_working_directory(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A file the CLI *reads* is one the user put there on purpose.
+
+        The store has no such fallback, because a file the CLI *writes* needs a
+        directory it was invited to write in. `loom connect` in a scratch
+        directory with a `.env` should still find it.
+        """
+        monkeypatch.delenv("LOOM_DOCTEST_BARE", raising=False)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text("LOOM_DOCTEST_BARE=found\n")
+        assert load_dotenv(None) == tmp_path / ".env"
+        assert os.environ["LOOM_DOCTEST_BARE"] == "found"
+        monkeypatch.delenv("LOOM_DOCTEST_BARE", raising=False)
 
     def test_the_store_can_come_from_it(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — an interrupted authoring job can be picked up
+
+`CodingSession` held its transcript in a list and its budget in a dataclass,
+and both died with the process: Ctrl+C four minutes in discarded the toolset
+schemas the model had fetched, the entity ids it had resolved against real
+services, its plan, and every token paid for.
+
+Snapshots go to `CacheStore`, which every backend already implements, and are
+taken **per model turn** rather than per `ask()` — `ask()` is one whole ReAct
+loop, so persisting around it saves nothing until discovery is over, which is
+the window an interruption actually lands in. `loom author --resume <id>`
+restores the transcript and what it cost; `--resume list` shows what is
+available. The id is offered only once a turn has completed, because naming one
+that resolves to nothing helps nobody.
+
+### Added — `loom completion bash|zsh|fish`
+
+Generated from `build_parser()`, so a renamed flag cannot leave three shell
+dialects promising the old one. Workflow names and run ids are completed by
+calling back into `loom --json`, since both change while the shell is open.
+
+### Added — `--max-tokens` and `--max-cost` on `author`
+
+They existed on the agent and reached no surface, so `max_cost_usd` bounded
+nothing anybody could set.
+
+### Fixed — advice that could not help
+
+Three of them, all the same shape. An interrupted `author` pointed at
+`loom runs --status running`, sending people to look for a run that never
+existed. A job stopped by a *token* ceiling was told to raise its *turn*
+budget. And a resume was offered for jobs that had no snapshot to resume.
+
+### Removed — `RuntimeBridge`
+
+The deprecated shim over `LocalFacade`, whose only remaining callers were its
+own tests — 176 of the 318 lines of `tests/test_phase9.py`, plus five workflow
+fixtures that `@workflow` was registering process-globally into every other
+test in the session.
+
+### Fixed — two `.env` readers that read different files
+
+`auth_commands` had its own parser pointed at `Path.cwd()/.env` while the rest
+of the CLI read the project root's, so `loom connect` from a subdirectory saw a
+different file — or none — than `loom run` did. One reader now, which falls
+back to the working directory when there is no project: a file the CLI *reads*
+is one the user put there on purpose, unlike a file it writes.
+
+
 ### Fixed — an authored workflow could not be run by name
 
 `loom author -o flows/digest.py` wrote a file and `loom run digest` then

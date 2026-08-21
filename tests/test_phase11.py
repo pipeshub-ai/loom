@@ -249,11 +249,12 @@ class TestCrossPhaseIntegration:
         assert all([detect_tier, CodeValidator])
 
     def test_phase9_mcp(self) -> None:
-        from loom.mcp_server.bridge import (
-            RuntimeBridge,
-        )
+        # `build_server` rather than the old `RuntimeBridge`, which is gone:
+        # both the CLI and the MCP server go through `RuntimeFacade`, so the
+        # thing worth asserting exists is the server they build over it.
+        from loom.mcp_server import build_server
 
-        assert RuntimeBridge is not None
+        assert build_server is not None
 
     def test_phase10_integrations(self) -> None:
         from loom.integrations.base import (

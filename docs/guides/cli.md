@@ -106,6 +106,24 @@ Worth knowing:
 Progress goes to stderr, so `loom author "…" > flow.py` puts the code in the
 file.
 
+### If it is interrupted
+
+Ctrl+C keeps what the job had learned — the toolsets it looked up, the entities
+it resolved against real services, and what it had spent — and prints the id to
+come back to:
+
+```bash
+loom author --resume auth_01M0J2VSPYDPBG8RTDT7XGBNCJ
+loom author "" --resume list         # what is available
+```
+
+Snapshots are kept for a week. The id is only offered once a turn has actually
+completed; interrupted sooner than that, there is nothing to come back to and
+it says nothing.
+
+`--max-tokens N` and `--max-cost USD` bound the whole job — discovery, repair
+and review together, not each.
+
 ## Changing one
 
 ```bash
@@ -310,6 +328,18 @@ servers already listed there survive.
 
 `claude` is kept as an alias for `claude-desktop`, which is what it has always
 configured. Claude Code is `claude-code`.
+
+## Shell completion
+
+```bash
+loom completion zsh  >> ~/.zshrc
+loom completion bash >> ~/.bashrc
+loom completion fish  > ~/.config/fish/completions/loom.fish
+```
+
+Printed to stdout, so where it goes is your decision. Commands and flags come
+from the parser itself; workflow names and run ids are looked up as you type,
+since both change while the shell is open.
 
 ## Output for programs
 
