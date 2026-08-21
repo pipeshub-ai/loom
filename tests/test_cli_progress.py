@@ -251,6 +251,48 @@ async def _noop(_: Any) -> None:
     """Stand-in for an event this renderer does not draw."""
 
 
+class TestTheClockMoves:
+    """The longest gap between events is a model call.
+
+    ``Live`` re-renders whatever object it holds, so it was handed a finished
+    ``Text`` and redrew the same frame eight times a second — twenty frames
+    over two and a half seconds of silence, every one of them reading "0s".
+    Which is exactly the stretch during which somebody is wondering whether it
+    has hung, and the reason the live region exists at all.
+    """
+
+    def _rendered(self, seconds: float) -> str:
+        import io
+        import time
+
+        pytest.importorskip("rich")
+        from rich.console import Console
+
+        buffer = io.StringIO()
+        renderer = ProgressRenderer(
+            enabled=True,
+            live_capable=True,
+            _console=Console(file=buffer, force_terminal=True, width=80),
+        )
+        renderer._begin("thinking")
+        time.sleep(seconds)
+        renderer.close()
+        return buffer.getvalue()
+
+    def test_elapsed_advances_with_no_events_at_all(self) -> None:
+        import re
+
+        shown = set(re.findall(r"· (\d+)s", self._rendered(2.2)))
+        assert len(shown) >= 2, (
+            f"the live region drew only {shown or {'nothing'}} across 2.2s of "
+            "silence — the clock is frozen between events"
+        )
+
+    def test_it_draws_more_than_once(self) -> None:
+        """Guards the test above: one frame would trivially show one value."""
+        assert self._rendered(1.2).count("thinking") > 1
+
+
 class TestRendererIsSafe:
     """It observes. It must not be able to change anything."""
 

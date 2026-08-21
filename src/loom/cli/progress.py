@@ -121,6 +121,23 @@ class _Spend:
         return f"turn {self.turns} · {tokens} tok{money}"
 
 
+class _Ticking:
+    """A renderable that recomputes every time ``Live`` draws it.
+
+    ``rich`` re-renders whatever object it holds on each refresh, so the
+    object has to be the *renderer*, not a snapshot of it. Passing a finished
+    ``Text`` is what froze the clock between events.
+    """
+
+    __slots__ = ("_owner",)
+
+    def __init__(self, owner: ProgressRenderer) -> None:
+        self._owner = owner
+
+    def __rich__(self) -> Any:
+        return self._owner._status()
+
+
 @dataclass
 class ProgressRenderer:
     """Draws an authoring run as it happens.
@@ -304,8 +321,15 @@ class ProgressRenderer:
         try:
             from rich.live import Live
 
+            # `_Ticking`, not `self._status()`. `Live` re-renders whatever it
+            # was handed on every refresh, so handing it a finished `Text`
+            # meant the elapsed seconds only moved when an *event* called
+            # `_redraw` — and the longest gap between events is a model call,
+            # which is most of the wall clock and precisely when somebody is
+            # wondering whether it has hung. Twenty frames drawn over 2.5s of
+            # silence, all of them reading "0s".
             self._live = Live(
-                self._status(),
+                _Ticking(self),
                 console=self._console,
                 refresh_per_second=8,
                 transient=True,
@@ -328,12 +352,18 @@ class ProgressRenderer:
         return f"{seconds:.0f}s" if seconds < 60 else f"{seconds // 60:.0f}m{seconds % 60:02.0f}s"
 
     def _redraw(self) -> None:
+        """Ask for a frame now, rather than waiting for the next refresh.
+
+        The live region re-renders on its own timer, so this is only about
+        latency: a tool call should appear the moment it is dispatched, not up
+        to an eighth of a second later.
+        """
         if self._live is None:
             self._begin(self._label)
         if self._live is None:
             return
         try:
-            self._live.update(self._status())
+            self._live.refresh()
         except Exception:
             self.close()
 

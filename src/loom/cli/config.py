@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-__all__ = ["ProjectConfig", "load_dotenv"]
+__all__ = ["ProjectConfig", "load_dotenv", "register_module"]
 
 #: Where a project's own journal goes, relative to the directory holding
 #: ``pyproject.toml``. A dot-directory because it is derived state — the same
@@ -135,6 +135,90 @@ class ProjectConfig:
         expected = f"sqlite://{self.root / LOOM_DIR / DEFAULT_DB}"
         if self.store_url == expected:
             (self.root / LOOM_DIR).mkdir(parents=True, exist_ok=True)
+
+
+def register_module(root: Path | None, module: Path) -> str:
+    """Add *module* to ``[tool.loom] modules``. Returns what happened.
+
+    Authoring a workflow and then being told it does not exist is the last
+    step of the loop failing: ``loom author -o flows/digest.py`` wrote a file
+    that ``loom run digest`` could not find, because the name resolves through
+    this key and nothing had added it. The scaffolded ``pyproject.toml`` even
+    says "add a line per file as the project grows" — this is that line, added
+    by whoever grew the project.
+
+    Additive only, and **verified by re-parsing**: this edits TOML as text,
+    which is fine for a list of strings and wrong in general, so the result is
+    read back with ``tomllib`` and reverted if the module is not in it. A
+    caller that gets ``"unchanged"`` is told the line to add by hand — better
+    than a silently mangled ``pyproject.toml``.
+
+    Returns ``"added"``, ``"present"``, or ``"unchanged"``.
+    """
+    if root is None:
+        return "unchanged"
+    path = root / "pyproject.toml"
+    try:
+        original = path.read_text(encoding="utf-8")
+    except OSError:
+        return "unchanged"
+
+    try:
+        relative = module.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        # Outside the project. Its own business where it lives.
+        return "unchanged"
+
+    if relative in _declared_modules(_loom_table(root)):
+        return "present"
+
+    updated = _with_module(original, relative)
+    if updated is None:
+        return "unchanged"
+
+    path.write_text(updated, encoding="utf-8")
+    if relative in _declared_modules(_loom_table(root)):
+        return "added"
+    # The text edit produced something that does not parse the way it should.
+    path.write_text(original, encoding="utf-8")
+    return "unchanged"
+
+
+def _with_module(source: str, relative: str) -> str | None:
+    """*source* with *relative* added to ``modules``, or ``None`` if unsure.
+
+    Two shapes, because those are the two the scaffold and a hand-edited file
+    produce. Anything else returns ``None`` rather than guessing — a caller
+    that cannot be sure prints the line instead of writing it.
+    """
+    import re
+
+    entry = f'"{relative}"'
+
+    # `modules = [...]` on one line, the scaffold's shape.
+    single = re.search(r"^(\s*modules\s*=\s*\[)([^\]\n]*)(\])", source, re.M)
+    if single is not None:
+        inner = single.group(2).strip()
+        joined = f"{inner}, {entry}" if inner else entry
+        rebuilt = single.group(1) + joined + single.group(3)
+        return source[: single.start()] + rebuilt + source[single.end() :]
+
+    # `modules = [` … `]` across lines.
+    multi = re.search(r"^(\s*)modules\s*=\s*\[\s*$", source, re.M)
+    if multi is not None:
+        indent = multi.group(1)
+        insert = multi.end() + 1
+        return source[:insert] + f"{indent}    {entry},\n" + source[insert:]
+
+    # No `modules` key at all. Add one under an existing `[tool.loom]`.
+    section = re.search(r"^\[tool\.loom\]\s*$", source, re.M)
+    if section is not None:
+        insert = section.end() + 1
+        return source[:insert] + f"modules = [{entry}]\n" + source[insert:]
+
+    # No section either — append one. Safe because it is the last thing in the
+    # file, so it cannot land inside somebody else's table.
+    return source.rstrip("\n") + f"\n\n[tool.loom]\nmodules = [{entry}]\n"
 
 
 def load_dotenv(root: Path | None) -> Path | None:

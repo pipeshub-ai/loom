@@ -483,6 +483,7 @@ def cmd_author(args: argparse.Namespace) -> int:
                 _report_authoring(out, result, args)
                 return Exit.USAGE
             apply(change, out)
+            _register(out, target, args.output)
         elif result["code"] and not args.json:
             out.verbatim(result["code"])
 
@@ -664,6 +665,39 @@ def cmd_edit(args: argparse.Namespace) -> int:
     return run_async(body(), debug=getattr(args, "debug", False))
 
 
+def _register(out: Printer, target: Target, module: Path) -> None:
+    """Make the workflow just written findable by name.
+
+    Authoring a file and then being told the workflow does not exist is the
+    last step of the loop failing: a name resolves through ``[tool.loom]
+    modules``, and nothing added the file to it — so ``loom run digest`` after
+    ``loom author -o flows/digest.py`` reported an unknown workflow, which
+    reads as the authoring having failed.
+
+    Additive, verified, and *said out loud*: this edits the project's own
+    ``pyproject.toml``, so it is not something to do quietly. When the edit
+    cannot be made safely the line to add is printed instead.
+    """
+    from loom.cli.config import register_module
+
+    project = target.project
+    if project is None or project.root is None:
+        return
+    outcome = register_module(project.root, module)
+    if outcome == "added":
+        try:
+            shown = module.resolve().relative_to(project.root.resolve()).as_posix()
+        except ValueError:  # pragma: no cover - register_module already refused
+            return
+        out.line(f"  [dim]registered {esc(shown)} in [[dim]tool.loom[/dim]] modules[/dim]")
+    elif outcome == "unchanged":
+        out.line(
+            "  [yellow]could not add it to [[dim]tool.loom[/dim]] modules — "
+            "add it by hand so 'loom run' can find it by name:[/yellow]"
+        )
+        out.hint(f'modules = [..., "{module.name}"]')
+
+
 def _spec_text(spec: str) -> str:
     """The spec itself, or the contents of ``@file``.
 
@@ -715,8 +749,56 @@ def _report_authoring(
         else:
             out.line(f"  warning: {esc(line)}")
 
-    if result["clean"]:
+    if not result["clean"]:
+        return
+    # The exact command, not a shape to fill in. A workflow's name comes from
+    # `@workflow(name=...)` and is routinely not the filename — the hint used
+    # to read `loom run <workflow>` literally, leaving the one thing the reader
+    # needs as the one thing it did not say.
+    written = getattr(args, "output", None)
+    names = declared_workflows(written) if written else []
+    if names:
+        for name in names:
+            out.hint(f"loom run {name}")
+    else:
         out.hint("loom check <file> && loom run <workflow>")
+
+
+def declared_workflows(path: Path) -> list[str]:
+    """Workflow names declared in *path*, read without importing it.
+
+    An AST walk rather than an import: this is a *reporting* path, and running
+    a freshly generated module's top level to find out what to call it is a
+    side effect nobody asked for. The name is whatever ``@workflow(name=...)``
+    says, falling back to the function's own name, which is the rule
+    ``WorkflowDefinition`` applies.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return []
+
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
+            continue
+        for decorator in node.decorator_list:
+            call = decorator if isinstance(decorator, ast.Call) else None
+            target = call.func if call is not None else decorator
+            if getattr(target, "id", getattr(target, "attr", "")) != "workflow":
+                continue
+            named = next(
+                (
+                    kw.value.value
+                    for kw in (call.keywords if call else [])
+                    if kw.arg == "name" and isinstance(kw.value, ast.Constant)
+                ),
+                None,
+            )
+            found.append(str(named) if named else node.name)
+    return found
 
 
 def cmd_check(args: argparse.Namespace) -> int:

@@ -194,6 +194,154 @@ class TestRunsSurviveTheProcess:
         assert "in memory" not in loom(project, "run", "keeper", "--detach").stdout
 
 
+class TestAuthoredWorkflowsAreFindable:
+    """The last step of the loop, which used to fail.
+
+    ``loom author -o flows/digest.py`` wrote a file and ``loom run digest``
+    then reported an unknown workflow, because a name resolves through
+    ``[tool.loom] modules`` and nothing had added it — which reads as the
+    authoring having failed rather than as a missing registration.
+    """
+
+    def _pyproject(self, project: Path, body: str) -> Path:
+        (project / "pyproject.toml").write_text(body)
+        module = project / "flows" / "new.py"
+        module.parent.mkdir(exist_ok=True)
+        module.write_text("")
+        return module
+
+    def test_a_single_line_list(self, project: Path) -> None:
+        from loom.cli.config import ProjectConfig, register_module
+
+        module = self._pyproject(project, PYPROJECT)
+        assert register_module(project, module) == "added"
+        assert "flows/new.py" in ProjectConfig.discover(project).modules
+
+    def test_an_empty_list(self, project: Path) -> None:
+        from loom.cli.config import ProjectConfig, register_module
+
+        module = self._pyproject(
+            project, '[project]\nname="x"\nversion="0.1"\n\n[tool.loom]\nmodules = []\n'
+        )
+        assert register_module(project, module) == "added"
+        assert ProjectConfig.discover(project).modules == ["flows/new.py"]
+
+    def test_a_multi_line_list(self, project: Path) -> None:
+        from loom.cli.config import ProjectConfig, register_module
+
+        module = self._pyproject(
+            project,
+            '[project]\nname="x"\nversion="0.1"\n\n[tool.loom]\nmodules = [\n    "a.py",\n]\n',
+        )
+        assert register_module(project, module) == "added"
+        assert set(ProjectConfig.discover(project).modules) == {"a.py", "flows/new.py"}
+
+    def test_a_section_with_no_modules_key(self, project: Path) -> None:
+        from loom.cli.config import ProjectConfig, register_module
+
+        module = self._pyproject(
+            project,
+            '[project]\nname="x"\nversion="0.1"\n\n[tool.loom]\nstore = "memory://"\n',
+        )
+        assert register_module(project, module) == "added"
+        assert ProjectConfig.discover(project).modules == ["flows/new.py"]
+        # The other key it found there survives.
+        assert ProjectConfig.discover(project).store_url == "memory://"
+
+    def test_no_section_at_all(self, project: Path) -> None:
+        from loom.cli.config import ProjectConfig, register_module
+
+        module = self._pyproject(project, '[project]\nname="x"\nversion="0.1"\n')
+        assert register_module(project, module) == "added"
+        assert ProjectConfig.discover(project).modules == ["flows/new.py"]
+
+    def test_it_is_idempotent(self, project: Path) -> None:
+        from loom.cli.config import register_module
+
+        module = self._pyproject(project, PYPROJECT)
+        assert register_module(project, module) == "added"
+        assert register_module(project, module) == "present"
+
+    def test_a_file_outside_the_project_is_left_alone(self, project: Path) -> None:
+        """Where it lives is its own business, and a path that is not under the
+        project has no relative form to record."""
+        from loom.cli.config import register_module
+
+        self._pyproject(project, PYPROJECT)
+        assert register_module(project, Path("/tmp/elsewhere.py")) == "unchanged"
+
+    def test_the_rest_of_the_file_survives(self, project: Path) -> None:
+        from loom.cli.config import register_module
+
+        body = PYPROJECT + '\n[tool.ruff]\nline-length = 100\n'
+        module = self._pyproject(project, body)
+        register_module(project, module)
+        after = (project / "pyproject.toml").read_text()
+        assert "[tool.ruff]" in after
+        assert "line-length = 100" in after
+
+    def test_a_mangled_edit_is_reverted(self, project: Path, monkeypatch) -> None:
+        """This edits TOML as text. When the result does not parse the way it
+        should, the file goes back rather than being left broken."""
+        from loom.cli import config
+
+        module = self._pyproject(project, PYPROJECT)
+        before = (project / "pyproject.toml").read_text()
+        monkeypatch.setattr(config, "_with_module", lambda *_: "this is not [ toml")
+        assert config.register_module(project, module) == "unchanged"
+        assert (project / "pyproject.toml").read_text() == before
+
+
+class TestTheRunCommandIsSpelledOut:
+    """A workflow's name comes from ``@workflow(name=...)`` and is routinely
+    not the filename, so the hint used to read ``loom run <workflow>``
+    literally — leaving the one thing the reader needs as the one thing it did
+    not say."""
+
+    def test_it_reads_the_declared_name(self, tmp_path: Path) -> None:
+        from loom.cli.commands import declared_workflows
+
+        path = tmp_path / "x.py"
+        path.write_text(
+            "from loom import Context, workflow\n\n"
+            '@workflow(name="reverse_string_workflow")\n'
+            "async def reverse_string(ctx: Context, s: str) -> str:\n"
+            "    return s[::-1]\n"
+        )
+        assert declared_workflows(path) == ["reverse_string_workflow"]
+
+    def test_a_bare_decorator_falls_back_to_the_function(self, tmp_path: Path) -> None:
+        from loom.cli.commands import declared_workflows
+
+        path = tmp_path / "x.py"
+        path.write_text(
+            "from loom import Context, workflow\n\n"
+            "@workflow\n"
+            "async def plain(ctx: Context) -> str:\n    return 'x'\n"
+        )
+        assert declared_workflows(path) == ["plain"]
+
+    def test_it_never_imports_the_module(self, tmp_path: Path) -> None:
+        """Running a freshly generated module's top level to find out what to
+        call it is a side effect nobody asked for."""
+        from loom.cli.commands import declared_workflows
+
+        path = tmp_path / "x.py"
+        path.write_text(
+            "raise SystemExit('this module must never be executed')\n"
+            "from loom import workflow\n"
+        )
+        assert declared_workflows(path) == []
+
+    def test_unreadable_and_unparseable_are_empty(self, tmp_path: Path) -> None:
+        from loom.cli.commands import declared_workflows
+
+        broken = tmp_path / "broken.py"
+        broken.write_text("def (:\n")
+        assert declared_workflows(broken) == []
+        assert declared_workflows(tmp_path / "absent.py") == []
+
+
 class TestDotenv:
     """The CLI reads ``.env``; it used to be the cookbooks that did.
 
