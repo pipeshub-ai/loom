@@ -25,7 +25,6 @@ from loom.toolsets.microsoft.auth import (
     GRAPH_BASE_URL,
     MicrosoftAuth,
     get_default_auth,
-    graph_base_url,
 )
 from loom.toolsets.microsoft.errors import GraphPermanentError
 from loom.toolsets.microsoft.http import GraphSession
@@ -43,7 +42,7 @@ from loom.toolsets.pagination import Results
 if TYPE_CHECKING:
     import httpx
 
-__all__ = ["MESSAGE_PAGE_MAX", "TeamsClient", "get_default_client", "reset_default_client"]
+__all__ = ["MESSAGE_PAGE_MAX", "TeamsClient"]
 
 #: Graph caps a page of channel messages and of chats at 50, and defaults to 20.
 #: Asking for more is not an error — it is clamped — so the ceiling lives here
@@ -307,25 +306,4 @@ def _message_body(
 # Process-wide default
 # ---------------------------------------------------------------------------
 
-_default: TeamsClient | None = None
 
-
-def get_default_client() -> TeamsClient:
-    """Return the process-wide client, building it on first use.
-
-    Reads ``MS_TEAMS_USER`` so an app-only deployment can name whose teams and
-    chats to act on once, rather than on every call.
-    """
-    global _default
-    if _default is None:
-        import os
-
-        _default = TeamsClient(            base_url=graph_base_url(),
-user_id=os.environ.get("MS_TEAMS_USER", ""))
-    return _default
-
-
-def reset_default_client() -> None:
-    """Drop the process-wide client. For tests, and for a credential rotation."""
-    global _default
-    _default = None

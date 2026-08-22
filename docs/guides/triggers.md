@@ -11,6 +11,7 @@ whatever real work a workflow does:
 from loom import Context, Runtime, step, workflow
 from loom.stores.memory import MemoryStore
 from loom.triggers.specs import (
+    After,
     Chat,
     EmailInbox,
     Form,
@@ -83,6 +84,31 @@ async def health_check(ctx: Context) -> str:
 ```
 
 `every` accepts seconds (int/float) or a duration string.
+
+### After
+
+Fire **once**, a fixed delay from now, and never again:
+
+```python
+from loom.triggers.specs import After
+
+@workflow(name="tell_joke", triggers=[After(minutes=2)])
+async def tell_joke(ctx: Context) -> str:
+    ...
+```
+
+`seconds`, `minutes`, `hours` and `days` add up, so `After(hours=1, minutes=30)`
+is ninety minutes. A delay of zero is refused — a workflow meant to start
+straight away declares `Manual()`, or no trigger at all.
+
+The delay is measured from when a dispatcher first **registers** the trigger,
+not from each process start, so restarting does not push it further out. Once
+it has fired, the trigger retires: re-registering the same declaration does not
+resurrect it.
+
+Use this for a delay the request states up front. A wait that arrives *mid-flow*
+— poll, back off, let a build finish — is `await ctx.sleep(...)` inside the
+body, where the run has already done work worth keeping across the park.
 
 ### Manual
 

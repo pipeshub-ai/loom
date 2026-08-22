@@ -14,9 +14,11 @@ from __future__ import annotations
 import pytest
 
 from loom.agents.checks import CheckContext
+from loom.agents.probes.base import ObservedPage
 from loom.agents.stages import (
     _SELECTOR_PATTERNS,
     BrowserEffectStage,
+    ObservedTargetsStage,
     SelectorStage,
     default_stages,
 )
@@ -305,7 +307,12 @@ class TestThePromptSaysTheRules:
         "ordinal",
         "matches nothing, silently",
         "cannot be inferred from the target",
-        'scope="durable"',
+        # Not `scope="durable"`. The prompt used to prescribe it for a flow that
+        # parks on a person, and no provider LOOM ships advertises `reattach` —
+        # so the advice had no working implementation behind it and produced
+        # code that died at the first `browser.navigate` of a real run. Two
+        # step-scoped sessions either side of the approval is what does work.
+        'two `scope="step"` sessions',
         "human.approval",
         "browser.close",
     ])
@@ -336,3 +343,199 @@ class TestThePromptSaysTheRules:
         # says — and breaks the moment anyone rewraps the paragraph.
         flat = " ".join(DEFAULT_SYSTEM_PROMPT.split())
         assert "plain Python in a `@step`, or drive the page" in flat
+
+
+# ---------------------------------------------------------------------------
+# Targets weighed against what was actually observed
+# ---------------------------------------------------------------------------
+
+INTERSTITIAL = ObservedPage(
+    target="https://book.test/reserve",
+    landed="https://book.test/reserve/message",
+    names=("TopNav Sidenav Button", "Confirm and continue"),
+)
+FORM = ObservedPage(
+    target="https://book.test/reserve",
+    landed="https://book.test/reserve",
+    names=("2 Guests", "Select a time", "Find availability"),
+)
+
+BOOKING = """
+from loom import Context, workflow
+from loom.nodes.browser import ActIn, NavigateIn, TargetIn
+
+@workflow
+async def book(ctx: Context, n: int) -> str:
+    await ctx.node("browser.navigate", NavigateIn(url="https://book.test/reserve"))
+    await ctx.node("browser.act", ActIn(
+        target=TargetIn(role="button", name="2 Guests"), method="click", effect="read"))
+    await ctx.node("browser.act", ActIn(
+        target=TargetIn(role="button", name="Select a time"), method="click", effect="read"))
+    return "done"
+"""
+
+
+class TestTargetsAreWeighedAgainstWhatWasSeen:
+    """The check that was missing: the census was produced and discarded.
+
+    A workflow addressing controls that demonstrably were not on the page the
+    agent looked at passed all sixteen stages, because nothing compared the two.
+    """
+
+    async def test_none_confirmed_is_called_out_as_a_different_page(self) -> None:
+        result = await ObservedTargetsStage().run(
+            BOOKING, CheckContext(observed=[INTERSTITIAL])
+        )
+        assert result.issues
+        joined = " ".join(i.message for i in result.issues)
+        assert "different pages" in joined
+        # The redirect is named, because it is the likeliest explanation and the
+        # agent has no other way to find it from here.
+        assert "reserve/message" in joined
+
+    async def test_it_never_errors(self) -> None:
+        """Severity is the whole safety argument. `report.errors` drives the
+        repair loop, and a control that only appears after an interaction is
+        legitimately absent from a single-shot census — so an error here would
+        set the model rewriting correct code."""
+        result = await ObservedTargetsStage().run(
+            BOOKING, CheckContext(observed=[INTERSTITIAL])
+        )
+        assert {i.severity for i in result.issues} == {"warning"}
+        assert not [i for i in result.issues if i.severity == "error"]
+
+    async def test_confirmed_targets_say_nothing(self) -> None:
+        result = await ObservedTargetsStage().run(
+            BOOKING, CheckContext(observed=[FORM])
+        )
+        assert not result.issues
+        assert "2/2" in result.reason
+
+    async def test_partial_coverage_is_reported_as_coverage(self) -> None:
+        partial = ObservedPage(target="https://book.test/reserve",
+                               landed="https://book.test/reserve",
+                               names=("2 Guests",))
+        result = await ObservedTargetsStage().run(
+            BOOKING, CheckContext(observed=[partial])
+        )
+        assert result.issues
+        joined = " ".join(i.message for i in result.issues)
+        assert "only appears after an interaction" in joined
+        assert "different pages" not in joined
+
+    async def test_nothing_observed_is_a_skip_not_a_pass(self) -> None:
+        """A check that could not run has found nothing — and must not be
+        readable as having found nothing wrong."""
+        result = await ObservedTargetsStage().run(BOOKING, CheckContext())
+        assert result.skipped
+        assert not result.issues
+
+    async def test_a_non_browser_workflow_is_skipped(self) -> None:
+        result = await ObservedTargetsStage().run(
+            "from loom import workflow\n", CheckContext(observed=[INTERSTITIAL])
+        )
+        assert result.skipped
+
+    async def test_a_dynamic_name_is_not_guessed_at(self) -> None:
+        """An f-string target cannot be checked. Skipping it is correct;
+        treating it as absent would be a finding invented out of ignorance."""
+        code = BOOKING.replace('name="2 Guests"', 'name=f"{n} Guests"')
+        result = await ObservedTargetsStage().run(
+            code, CheckContext(observed=[FORM])
+        )
+        assert not result.issues
+
+    async def test_a_redirect_is_reported_even_when_every_target_matches(self) -> None:
+        """The case the real run produced: an agent that could not see the page
+        stops using literal names at all and resolves everything from an intent,
+        so target coverage comes back clean while the census still describes the
+        wrong page. The hop is a fact, and it is reported on its own footing."""
+        code = BOOKING.replace('name="2 Guests"', 'name="Confirm and continue"').replace(
+            'name="Select a time"', 'name="TopNav Sidenav Button"')
+        result = await ObservedTargetsStage().run(
+            code, CheckContext(observed=[INTERSTITIAL])
+        )
+        joined = " ".join(i.message for i in result.issues)
+        assert "redirected to" in joined
+        assert "2/2" in result.reason
+
+    async def test_navigating_straight_to_the_destination_is_silent(self) -> None:
+        """A workflow that already accounts for the hop has nothing to learn
+        from it, and repeating the warning would train the reader past it."""
+        code = BOOKING.replace("https://book.test/reserve", "https://book.test/reserve/message")
+        result = await ObservedTargetsStage().run(
+            code, CheckContext(observed=[INTERSTITIAL, FORM])
+        )
+        assert "redirected to" not in " ".join(i.message for i in result.issues)
+
+
+# ---------------------------------------------------------------------------
+# Two stages that fired on correct code
+# ---------------------------------------------------------------------------
+
+MODEL_PAYLOAD = '''
+from loom import Context, workflow
+from loom.nodes.browser import ActIn, NavigateIn, TargetIn
+
+@workflow
+async def book(ctx: Context, n: int) -> str:
+    """Click past the interstitial notice.
+
+    Observed live: /reserve redirects to /reserve/message, a page carrying a
+    policy notice with a #urgent .banner > button in front of the real form.
+    """
+    page = await ctx.node("browser.navigate", NavigateIn(url="https://b.test/x"))
+    await ctx.node("browser.act", ActIn(
+        session=page.session, method="click",
+        target=TargetIn(role="button", name="Next"), effect="read"))
+    return "done"
+'''
+
+
+class TestStagesDoNotFireOnCorrectCode:
+    """The failure both of these had, and the one a stage must never have.
+
+    `report.errors` drives the repair loop and unchanged code is how a model
+    disagrees with a finding — so a stage that reports on correct code sets the
+    loop rewriting working code to silence it.
+    """
+
+    async def test_an_effect_declared_on_a_model_payload_is_seen(self) -> None:
+        """A node payload is written either as a dict literal or as its own
+        input model. Reading only the dict reported every model-built call as
+        undeclared — the same defect `_effect_arguments` carried one layer
+        down, where it made `effect_by` dead for every node."""
+        result = await BrowserEffectStage().run(MODEL_PAYLOAD, CheckContext())
+
+        assert not [i for i in result.issues if "declare no `effect`" in i.message]
+
+    async def test_a_dict_payload_still_works(self) -> None:
+        """The shape that always worked, pinned so the new branch cannot
+        replace it rather than join it."""
+        code = MODEL_PAYLOAD.replace(
+            'ActIn(\n        session=page.session, method="click",\n'
+            '        target=TargetIn(role="button", name="Next"), effect="read")',
+            '{"session": page.session, "method": "click", "effect": "read"}')
+        result = await BrowserEffectStage().run(code, CheckContext())
+
+        assert not [i for i in result.issues if "declare no `effect`" in i.message]
+
+    async def test_an_undeclared_effect_is_still_caught(self) -> None:
+        code = MODEL_PAYLOAD.replace(', effect="read"', "")
+        result = await BrowserEffectStage().run(code, CheckContext())
+
+        assert [i for i in result.issues if "declare no `effect`" in i.message]
+
+    async def test_a_selector_in_a_docstring_is_not_a_selector(self) -> None:
+        """`_string_literals` claimed to exclude docstrings and included every
+        one, so a module explaining that a page redirects was reported as a CSS
+        selector — the stage reading its own prose as data."""
+        result = await SelectorStage().run(MODEL_PAYLOAD, CheckContext())
+
+        assert not result.issues
+
+    async def test_a_selector_in_real_code_is_still_caught(self) -> None:
+        code = MODEL_PAYLOAD.replace('name="Next"', 'name="#urgent .banner > button"')
+        result = await SelectorStage().run(code, CheckContext())
+
+        assert result.issues

@@ -7,6 +7,8 @@ reads and the contract the client honours cannot drift apart.
 from __future__ import annotations
 
 from loom.toolsets.manifest import (
+    AuthField,
+    AuthSpec,
     EffectClass,
     OperationSpec,
     ToolsetManifest,
@@ -54,13 +56,19 @@ SLACK_MANIFEST = ToolsetManifest(
         "post-delivery timeout posts the message twice, visibly."
     ),
     base_url="https://slack.com/api",
-    auth={
-        "type": "oauth2",
-        "fields": ["SLACK_BOT_TOKEN", "SLACK_TOKEN"],
-        "credential": "slack",
-        "authorization_url": "https://slack.com/oauth/v2/authorize",
-        "token_url": "https://slack.com/api/oauth.v2.access",
-    },
+    auth=AuthSpec(
+        client="loom.toolsets.slack.client:SlackClient",
+        kind="oauth2",
+        credential="slack",
+        provider="slack",
+        fields=(
+            AuthField(name="SLACK_BOT_TOKEN", arg="token", label="Bot user OAuth token",
+                      example="xoxb-…"),
+            AuthField(name="SLACK_TOKEN", arg="token", label="OAuth token", required=False),
+        ),
+        setup_url="https://api.slack.com/apps",
+        docs_url="https://api.slack.com/authentication/oauth-v2",
+    ),
     tools_module="loom.toolsets.slack.tools",
     opaque_ids={
         # C024BE91L, U023BECGF — everything in Slack takes one of these and

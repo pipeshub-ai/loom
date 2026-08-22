@@ -23,7 +23,6 @@ from loom.toolsets.microsoft.auth import (
     GRAPH_BASE_URL,
     MicrosoftAuth,
     get_default_auth,
-    graph_base_url,
 )
 from loom.toolsets.microsoft.errors import GraphPermanentError
 from loom.toolsets.microsoft.http import GraphSession
@@ -41,7 +40,7 @@ if TYPE_CHECKING:
 
     from loom.blobs.attachment import Attachment
 
-__all__ = ["SharePointClient", "get_default_client", "reset_default_client"]
+__all__ = ["SharePointClient"]
 
 
 class SharePointClient:
@@ -440,27 +439,4 @@ def _guess_type(filename: str) -> str:
 # Process-wide default
 # ---------------------------------------------------------------------------
 
-_default: SharePointClient | None = None
 
-
-def get_default_client() -> SharePointClient:
-    """Return the process-wide client, building it on first use.
-
-    Reads ``MS_SHAREPOINT_SITE`` so a deployment that works in one site can
-    name it once rather than on every call.
-    """
-    global _default
-    if _default is None:
-        import os
-
-        _default = SharePointClient(
-            base_url=graph_base_url(),
-            default_site=os.environ.get("MS_SHAREPOINT_SITE", "")
-        )
-    return _default
-
-
-def reset_default_client() -> None:
-    """Drop the process-wide client. For tests, and for a credential rotation."""
-    global _default
-    _default = None

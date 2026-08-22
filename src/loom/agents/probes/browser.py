@@ -18,7 +18,7 @@ import contextlib
 import json
 from typing import Any
 
-from loom.agents.probes.base import Observation, ProbeError
+from loom.agents.probes.base import Observation, ProbeError, redirect_note
 from loom.blobs.attachment import Attachment
 
 __all__ = ["BrowserProbe"]
@@ -158,6 +158,10 @@ class BrowserProbe:
                     await page.wait_for_timeout(self._settle_ms)
 
                     census: dict[str, Any] = await page.evaluate(_CENSUS)
+                    # Read after the settle, so a client-side route change is
+                    # caught as well as an HTTP redirect. The census records
+                    # this too; what was missing was anyone saying it out loud.
+                    landed = page.url
                     shot = await page.screenshot(full_page=True)
                 finally:
                     await browser.close()
@@ -166,9 +170,11 @@ class BrowserProbe:
         except Exception as exc:
             raise ProbeError(f"could not render {target}: {exc}") from exc
 
+        note = redirect_note(target, landed)
         return Observation(
             target=target,
-            summary=_summarise(census),
+            landed=landed,
+            summary=f"{note} {_summarise(census)}" if note else _summarise(census),
             detail=json.dumps(census, indent=2),
             evidence=(_screenshot(shot),),
             probe=self.id,

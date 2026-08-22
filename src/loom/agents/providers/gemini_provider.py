@@ -83,7 +83,7 @@ class GeminiProvider:
         model_name: str = "gemini-2.5-pro",
         *,
         api_key: str | None = None,
-        max_tokens: int = 4096,
+        max_tokens: int = 16384,
         client: Any | None = None,
     ) -> None:
         self.model_name = model_name
@@ -103,6 +103,17 @@ class GeminiProvider:
             or os.environ.get("GEMINI_API_KEY")
             or os.environ.get("GOOGLE_API_KEY", "")
         )
+
+    @property
+    def max_tokens(self) -> int:
+        """This provider's default output ceiling.
+
+        Public so a caller whose deliverable is large — the coding agent, whose
+        answer is a whole source file — can defer to the model's real limit
+        instead of imposing a flat number that is too low for one model and
+        rejected outright by another.
+        """
+        return self._max_tokens
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         """Send *request* to Gemini and return a normalised response."""

@@ -41,6 +41,14 @@ ENVIRONMENTAL_MARKERS: tuple[str, ...] = (
                 "connection refused", "connecterror", "connecttimeout",
                 "getaddrinfo", "name or service not known",
                 "temporary failure in name resolution", "ssl", "timed out",
+                # The provider's own failures. An authoring job that died on a
+                # 500 was told to narrow its spec — advice aimed at the one
+                # thing that was not the problem, and the reason this list
+                # exists at all. "overloaded" and "rate limit" are the same
+                # class: somebody else's capacity, nothing here to repair.
+                "internal server error", "api_error", "overloaded",
+                "rate limit", "rate_limit", "service unavailable",
+                "502", "503", "529",
             )
 
 
@@ -49,6 +57,10 @@ def is_environmental(text: str) -> bool:
 
     A missing import or a bad signature is deliberately **not** environmental:
     those are the failures the checks exist to catch, and they stay repairable.
+
+    A provider outage *is*, and used to fall through to the generic remedy —
+    so a job killed by a 500 was told to narrow its spec, sending somebody to
+    rewrite an input that was working.
     """
     haystack = text.lower()
     if "no module named" in haystack or "cannot import name" in haystack:
@@ -252,6 +264,7 @@ def smoke_run(
     python: str | None = None,
     fakes: list[tuple[str, str]] | None = None,
     isolation: SmokeIsolation | None = None,
+    recording: dict[str, Any] | None = None,
 ) -> SmokeResult:
     """Compile, import, and execute *code* once in a subprocess.
 
@@ -290,6 +303,12 @@ def smoke_run(
         workspace = Path(tmp)
         (workspace / "generated_flow.py").write_text(code, encoding="utf-8")
         (workspace / "_runner.py").write_text(_RUNNER, encoding="utf-8")
+        # A file rather than another argv entry: a census of a real page runs to
+        # tens of kilobytes, and argv has a limit that a long flow would find.
+        if recording:
+            (workspace / "_recording.json").write_text(
+                json.dumps(recording), encoding="utf-8"
+            )
 
         try:
             # Fixed argv, no shell — the generated code is a file argument,
@@ -460,15 +479,64 @@ _RUNNER = textwrap.dedent('''\
         # delete the browser work or the approval, shipping code that passes
         # every check having removed the thing the spec asked for.
         #
+        def _load_recording():
+            """What authoring saw, when it looked. ``None`` when it did not.
+
+            Read from a file because everything here crosses a process
+            boundary and a page census is far too wide for argv. Any failure
+            degrades to no recording — a smoke run that cannot read its
+            fixture must still run, since the fixture is evidence and its
+            absence is not a finding.
+            """
+            import json as _json
+            import pathlib as _pathlib
+
+            source = _pathlib.Path("_recording.json")
+            if not source.exists():
+                return None
+            try:
+                from loom.agents.probes.exploration import recording_from_dict
+
+                return recording_from_dict(_json.loads(source.read_text()))
+            except Exception:
+                return None
+
         # Permissive by default: the fake answers any navigation and any
         # action, and says so in the result. It proves the flow is *wired*, not
         # that a selector is right — nothing here can prove that, which is what
         # `tests/corpus` is for.
+        #
+        # Deliberately *not* durable, though a correct browser workflow that
+        # parks on a human wants a durable session and will fail here for it.
+        #
+        # Making the fake durable is the tempting fix and it is the wrong one:
+        # no provider LOOM ships advertises `reattach`, so a workflow smoke
+        # certified that way still dies at the first `browser.navigate` of a
+        # real run. A fake more capable than the provider it stands in for
+        # turns a false failure into a false pass, which is strictly worse —
+        # the failure is at least visible.
+        #
+        # So the fake keeps the shipped provider's capabilities and the fix
+        # belongs upstream, in what the agent is told to write: two
+        # step-scoped sessions either side of the approval, rather than one
+        # session spanning it. `BrowserUnavailable` says so, in terms a
+        # workflow author can act on.
         browser = None
         try:
             from loom.browser import FakeBrowserProvider
 
-            browser = FakeBrowserProvider(permissive=True)
+            # Recorded pages where authoring saw them, permissive everywhere
+            # else. Both halves are load-bearing: the recording is what turns
+            # "the flow is wired" into "these controls exist", and the
+            # permissive fallback is what keeps a page nobody explored from
+            # failing a workflow that is perfectly correct.
+            recorded = _load_recording()
+            browser = FakeBrowserProvider(
+                pages=recorded.pages if recorded else None,
+                transitions=recorded.transitions if recorded else None,
+                known_names=recorded.names if recorded else None,
+                permissive=True,
+            )
         except Exception:
             pass
 

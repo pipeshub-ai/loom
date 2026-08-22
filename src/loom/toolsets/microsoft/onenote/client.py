@@ -32,7 +32,6 @@ from loom.toolsets.microsoft.auth import (
     GRAPH_BASE_URL,
     MicrosoftAuth,
     get_default_auth,
-    graph_base_url,
 )
 from loom.toolsets.microsoft.errors import GraphPermanentError
 from loom.toolsets.microsoft.http import GraphSession
@@ -48,7 +47,7 @@ from loom.toolsets.pagination import Results
 if TYPE_CHECKING:
     import httpx
 
-__all__ = ["OneNoteClient", "get_default_client", "reset_default_client"]
+__all__ = ["OneNoteClient"]
 
 #: Actions ``PATCH /pages/{id}/content`` accepts. Validated rather than passed
 #: through: an unrecognised action is a 400 whose message names the enum and not
@@ -329,29 +328,4 @@ def _escape(value: str) -> str:
 # Process-wide default
 # ---------------------------------------------------------------------------
 
-_default: OneNoteClient | None = None
 
-
-def get_default_client() -> OneNoteClient:
-    """Return the process-wide client, building it on first use.
-
-    Reads ``MS_ONENOTE_USER``, ``MS_ONENOTE_SITE`` and ``MS_ONENOTE_GROUP`` so a
-    deployment can name its notebook container once.
-    """
-    global _default
-    if _default is None:
-        import os
-
-        _default = OneNoteClient(
-            base_url=graph_base_url(),
-            user_id=os.environ.get("MS_ONENOTE_USER", ""),
-            site_id=os.environ.get("MS_ONENOTE_SITE", ""),
-            group_id=os.environ.get("MS_ONENOTE_GROUP", ""),
-        )
-    return _default
-
-
-def reset_default_client() -> None:
-    """Drop the process-wide client. For tests, and for a credential rotation."""
-    global _default
-    _default = None

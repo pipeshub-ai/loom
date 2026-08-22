@@ -15,6 +15,8 @@ from loom.toolsets.confluence.models import (
     SearchResult,
 )
 from loom.toolsets.manifest import (
+    AuthField,
+    AuthSpec,
     EffectClass,
     OperationSpec,
     ToolsetManifest,
@@ -39,14 +41,23 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
         "and authenticated user profile."
     ),
     base_url="https://<org>.atlassian.net",
-    auth={
-        "type": "basic",
-        "fields": [
-            "CONFLUENCE_URL",
-            "CONFLUENCE_EMAIL",
-            "CONFLUENCE_API_TOKEN",
-        ],
-    },
+    auth=AuthSpec(
+        kind="oauth2",
+        credential="confluence",
+        provider="atlassian",
+        scopes=("offline_access",),
+        fields=(
+            AuthField(name="CONFLUENCE_URL", label="Site URL", secret=False,
+                      example="https://acme.atlassian.net/wiki", arg="base_url"),
+            AuthField(name="CONFLUENCE_EMAIL", label="Atlassian account email",
+                      secret=False, arg="email"),
+            AuthField(name="CONFLUENCE_API_TOKEN", label="API token",
+                      arg="api_token"),
+        ),
+        client="loom.toolsets.confluence.client:ConfluenceClient",
+        setup_url="https://developer.atlassian.com/console/myapps/",
+        docs_url="https://developer.atlassian.com/cloud/confluence/oauth-2-3lo-apps/",
+    ),
     tools_module="loom.toolsets.confluence.tools",
     egress_hosts=["*.atlassian.net"],
     rate_limits={
@@ -68,6 +79,7 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
                 function="confluence_search_pages",
                 summary="Search content with a CQL query.",
                 effect=EffectClass.READ,
+                scopes=["read:confluence-content.all"],
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -85,6 +97,7 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
                 function="confluence_get_page",
                 summary="Fetch a page by ID.",
                 effect=EffectClass.READ,
+                scopes=["read:confluence-content.all"],
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -152,6 +165,7 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
                 function="confluence_get_page_body",
                 summary="Fetch the body content of a page.",
                 effect=EffectClass.READ,
+                scopes=["read:confluence-content.all"],
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -167,6 +181,7 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
                 function="confluence_get_page_comments",
                 summary="Fetch comments on a page.",
                 effect=EffectClass.READ,
+                scopes=["read:confluence-content.all"],
                 pagination=True,
                 input_schema={
                     "type": "object",
@@ -205,6 +220,7 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
                 function="confluence_list_spaces",
                 summary="List all accessible spaces.",
                 effect=EffectClass.READ,
+                scopes=["read:confluence-content.all"],
                 pagination=True,
                 output_schema={
                     "type": "array",
@@ -217,6 +233,7 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
                 function="confluence_get_space",
                 summary="Get a space by ID.",
                 effect=EffectClass.READ,
+                scopes=["read:confluence-content.all"],
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -234,6 +251,7 @@ CONFLUENCE_MANIFEST = ToolsetManifest(
                 function="confluence_get_myself",
                 summary="Get the authenticated user's profile.",
                 effect=EffectClass.READ,
+                scopes=["read:confluence-content.all"],
                 output_schema=ConfluenceUser.model_json_schema(),
                 idempotent=True,
             ),

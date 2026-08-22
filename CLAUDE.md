@@ -40,8 +40,10 @@ loom cancel / retry / replay <run>
 loom artifacts <run>                   # what the run produced
 
 # credentials
+loom connections                       # which integrations are usable, and what the rest need
+loom connections jira --missing        # one of them, or only what is unusable
 loom providers                         # OAuth providers with endpoints built in
-loom connect gmail                     # OAuth a credential a workflow can read
+loom connect jira                      # the *credential* name, not the provider
 loom whoami                            # what is stored, and whether it is ok/due/expired
 loom refresh [names...] [--force]      # renew what is near expiry; exit 1 if any failed
 loom disconnect gmail / loom logout    # drop one credential, or all of them
@@ -451,7 +453,7 @@ a clean journal, linked by `root_run_id` and `metadata["continued_as"]`.
 | **Steps** | `steps/definition.py` | `@step` decorator — wraps async functions with retry, timeout, fallback |
 | **Stores** | `stores/` | Pluggable persistence: `ExecutionStore` protocol, `MemoryStore`, `SQLiteStore`, `MongoStore`, `PostgresStore` |
 | **Agents** | `agents/` | `ModelProvider` protocol, `Tool` abstraction (steps/workflows-as-tools), guardrails, memory |
-| **Triggers** | `triggers/` | Entry points: `Webhook`, `Schedule`, `Manual`, `Poll`, `Event`, `Chat`, `Email`, `SubWorkflow` |
+| **Triggers** | `triggers/` | Entry points: `Webhook`, `Schedule`, `After`, `Manual`, `Poll`, `Event`, `Chat`, `Email`, `SubWorkflow` |
 | **Observability** | `observability/tracing.py` | `Tracer` protocol + `NoopTracer`; plug in OTel/Datadog/Honeycomb |
 
 ### Where things live
@@ -513,12 +515,12 @@ The agent is the primary user-facing feature. It takes a natural-language descri
 | Provider | Extra | Default model |
 |---|---|---|
 | `AnthropicProvider` | `[anthropic]` | `claude-sonnet-5` |
-| `OpenAIProvider` | `[openai]` | `gpt-5.6-terra` |
+| `OpenAIProvider` | `[openai]` | `gpt-5.6-luna` |
 | `GeminiProvider` | `[gemini]` | `gemini-2.5-pro` |
 
 ```python
 from loom.agents.providers import OpenAIProvider
-agent = Agent(name="x", model=OpenAIProvider())          # gpt-5.6-terra
+agent = Agent(name="x", model=OpenAIProvider())          # gpt-5.6-luna
 agent = Agent(name="x", model=OpenAIProvider("gpt-4.1")) # or name one
 ```
 
@@ -815,6 +817,61 @@ generating correct code against a toolset the runtime cannot call.
 `register_toolset()` and `loom_toolset` entry points reach every Runtime, while
 `rt.toolsets.register(...)` stays local to that Runtime.
 
+**Two jobs, two scopes, and the difference is the whole of why
+`search_toolsets("jira")` used to answer nothing.**
+
+| Question | Method | Reaches |
+|---|---|---|
+| what may an unscoped `ctx.agent()` sweep? | `list_toolsets()` | local + parent |
+| what may be *named* — imported, browsed, validated against? | `catalogue_ids()` | + the toolsets LOOM ships |
+| what is this step's effect class? | `effect_of` / `profile_of` | local + parent |
+
+`get_toolset` had drawn exactly this line since the built-in fallback existed —
+*asking for one by name gets it; asking for "everything" does not* — and nothing
+drew it for discovery. So `loom mcp` (which calls `register_available_toolsets()`)
+saw 27 toolsets and `loom author` saw **zero**, on one authoring implementation:
+`Runtime().toolsets.list_toolsets()` was `[]`, `describe()` returned `""`, and
+`CodeValidator` then rejected `from loom.toolsets.jira.tools import …` as an
+integration this environment does not have — at error severity, on a blocking
+stage, with `_is_unrepairable` ending the job rather than repairing it.
+
+`BuiltinToolsetCatalog` is the discovery half of `builtin_toolset`: manifests
+only, **loaded on the first read of any kind** via a `_manifests` property, so a
+Runtime that never browses a catalogue never imports the 27 manifest modules.
+It is deliberately not the process-global registry — registering it there would
+put every toolset in `resolve_tools`'s no-ids sweep, which is how a prompt-only
+`ctx.agent("summarise this")` acquires `jira_delete_issue`.
+
+**Chaining is structural, not per-method.** It used to be an override per
+method, which loses one every time a method is added — and had lost two.
+`search_operations` returned `[]` through any `Runtime`, and `profile_of`
+returned `None`, which is read on **every `ctx.step`**
+(`runtime/context.py::_declared_effect` prefers it over `effect_of` and falls
+back only when the attribute is *absent*, which it never is). So under `loom mcp`
+every toolset step reached the broker as an unclassified **write** — defeating,
+one layer up, the lookup that exists to prevent exactly that. `_first`, `_owner`
+and `_merged` resolve across an ordered tier list instead, and a meta-test
+enumerates every public read on `ToolsetCatalog` and fails when one is added
+without a chaining case.
+
+`_owner` resolves the *toolset* first and then asks that tier, rather than
+trying each until one does not raise: a host that deliberately registered a
+narrower `jira` would otherwise find `jira.issues.delete` answered out of
+LOOM's. Shadowing has to be total to mean anything.
+
+**The prompt carries a roster, not index cards.** `ToolsetRegistry.prompt_block()`
+is one line per toolset over the catalogue — the counterpart of
+`NodeRegistry.prompt_block()`, and never empty (with nothing registered it says
+"None", because `DEFAULT_SYSTEM_PROMPT` goes on to say *"Only the toolsets
+listed above exist"* and with `""` that sentence pointed at nothing). An index
+card names every operation id: **1 738 characters per toolset**, so the shipped
+27 render to ~8 400 tokens against ~1 270 for a roster. What matters is the
+growth rate — ~430 tokens per integration installed against ~20, paid on every
+turn. Each line carries the **module**, because `google_calendar` lives at
+`loom.toolsets.google.calendar` and an import built from the id resolves as a
+plausible path and fails at run time. `describe()` is untouched: execution
+scope, `""` when empty, for a host asking for its own docs.
+
 **Toolset identity.** A manifest carries `kind` (`app`/`mcp`/`knowledge`/`memory`/
 `skill`) and `provider`, combining into `qualified_id` = `<kind>:<provider>:<id>`.
 Registering two executable toolsets under one `id` with different qualified ids
@@ -846,6 +903,15 @@ namespace — and a model asked to write code against that invents an import to
 match. An operation id names a capability; only a function name is something
 anyone can write. `tests/test_manifest_imports.py` executes every declared
 import, so the docs cannot promise a symbol that is not there.
+
+`ToolsetManifest.find_operation` accepts **either spelling** — the operation id
+or the function name — because this codebase teaches both and used to accept
+one. `describe` renders *"Resolve a project with jira_resolve_project"* and
+`OpMatch.import_line` the same, since that is what generated *code* writes,
+while lookup matched only `projects.resolve`: so
+`call_read_operation("jira.jira_resolve_project")` answered "no operation" for
+the exact name the model had just been handed. Ids win where a toolset somehow
+declares both.
 
 ### Per-vendor toolset detail
 
@@ -1216,6 +1282,261 @@ and `ctx.step` attaches it. Without that every call reached the broker as a
 rule was unreachable in practice. A plain local `@step` stays unclassified;
 inventing a class for it would guess at the declaration a manifest exists to
 make.
+
+### What a toolset needs, and whether this machine has it
+
+`loom connections` answers *"is Jira usable here?"* — the question nothing
+could answer. `loom toolsets` said what a process can reach and `loom whoami`
+said what it has stored, and `loom doctor` printed both on adjacent lines
+without joining them, because the credential a client reads was a keyword
+default inside one file (`jira/client.py` defaults `credential_name="jira"`)
+and nothing outside it could learn the name.
+
+**`ToolsetManifest.auth` is a typed `AuthSpec`**, replacing a free-form
+`dict[str, Any]` whose shape varied per toolset — some declared `credential`,
+most only `fields`, one a `header`, one a `grant`. A legacy dict is still
+promoted, keyed on `"type"` and never on `"kind"`: keying on the latter (also
+the *new* field's name) made every typed construction take the promotion path,
+stringify each `AuthField` into a `name`, and reset `secret` to true.
+
+**Declared, never inferred**, the position `OperationSpec.effect` takes.
+`jira` → `atlassian`, `gmail` → `google_gmail`, and all six Graph toolsets →
+`microsoft`: thirteen of the seventeen OAuth toolsets do not share their
+provider's name, so a rule built from the id is right for a minority. That
+mapping is why `loom connect jira` refused with *"'jira' is not a known
+provider"*.
+
+- **`credential=""` is a statement.** 12 of the 27 read environment variables
+  and no `CredentialStore`, so naming a key they never look up would make
+  `loom connect` report success and change nothing. The other 15 share **6**
+  names, because the five Google toolsets share one token and the six Graph
+  ones share another.
+- **`provider` without `credential` is refused at construction.** The flow
+  would open a browser, store a token, print "Connected", and every call would
+  still 401. `github` and `hubspot` are exactly that shape — a provider in the
+  registry, a client that reads no store — so both declare neither.
+- **`AuthField.mode` groups alternatives.** Google takes an access token **or**
+  a client-id/secret/refresh trio **or** a service account file; Microsoft takes
+  `MS_*` **or** the `AZURE_*` names the Azure SDKs already set **or** a Graph
+  token. Requiring every field reports a working deployment as missing five
+  variables; requiring any reports an empty one as configured.
+  `AuthSpec.satisfied_by` names the **nearest** mode — fewest missing, then
+  *most already present*, because two thirds through Google's trio every mode is
+  one short and counting alone answers "set `GOOGLE_ACCESS_TOKEN`" to somebody
+  plainly mid-way through the other one.
+- **Scopes are derived**, not declared twice: `required_scopes()` is the union
+  of the operations' own scopes and the flow-only extras (`offline_access`,
+  which no single call implies). Writing that found Jira and Confluence
+  declaring **no scope on any of their 21 reads** — alone among the 17 — so a
+  connect flow would have requested a write-only token.
+
+`ConnectionInspector` reads it. Six states, because the four in the middle lead
+somewhere different: `connected`, `due` (works, and renewal is imminent —
+repeated `due` is renewal failing, hours before anything breaks), `expired`,
+`env` (satisfied by the environment; nothing to renew or disconnect, so
+offering a flow is advice for a state the machine is not in), `missing`, `none`.
+It `peek`s rather than resolving, so **reporting a state cannot change it** —
+`get()` renews a due credential and raises on an expired one — which is what
+makes it safe to call while building a prompt. No toolset module is imported
+and no socket opened; `tests/test_connections.py` proves that in a subprocess.
+
+`how` is empty for a toolset with no store path. `loom connect stripe` would
+write a token `StripeClient` never reads, and advice with no move behind it is
+the failure `loom refresh --all` was fixed for.
+
+### Obtaining one
+
+`loom/connectors/flows.py`. Every line of this used to live inside
+`cli/auth_commands.py` and take an `argparse.Namespace`, so nothing but the CLI
+could connect anything — while the session, the MCP server and the coding agent
+each need to.
+
+**A flow reports a `ConnectEvent`, never a rendered line.** `_run_pkce_flow`
+took a `loom.cli.output.Printer`; lifting that as-is would have put a
+`[cli]`-flavoured renderer inside `loom/connectors/` and made the second
+library-to-CLI import edge in the codebase. Turning an event into a line is the
+CLI's job — the arrangement `LocalFacade.on_stage` and `ProgressRenderer`
+already use. It fails open: a renderer that raises must not lose a credential
+already obtained.
+
+**The redirect URI is reported before anything is asked for.** Registering it
+on the provider is the one step nobody can do for you, and finding out
+afterwards means doing the whole flow again — n8n shows the callback URL as a
+read-only field for the same reason. PKCE by default, over a loopback redirect,
+which is RFC 8252's shape for a native client.
+
+`AppRegistrationStore` keeps `client_id`/`client_secret` per **provider** (one
+Atlassian app serves `jira` and `confluence`) under the reserved key
+`oauth-app:<provider>`, in the same `CredentialStore` as the tokens so it
+inherits the encryption at rest. RFC 8252 is explicit that a native client
+cannot treat a distributed secret as confidential — this keeps it out of a
+git-tracked file and out of `ps`, nothing more. Asked once, through
+`SecretPrompt`; **never through `ask_user`**, which records question *and*
+answer on `CodingResult.questions` and writes them to disk under
+`--save-answers`.
+
+`ApiKeyFlow` **does not prompt**: it reads `request.fields` and reports what is
+missing as `ConnectOutcome.needs`. Collecting is the caller's job, which keeps
+the flow a pure function of its request and the terminal in the tier that owns
+one.
+
+`loom.testing.conformance.verify_connect_flow` is the kit — an outcome that
+never carries a token, a listener that cannot fail a connection, a refusal that
+says why. Its own first version failed a *correct* flow: it looked for the token
+inside `repr(outcome)`, and a one-character test token is inside the word
+"connected". It requires eight characters now, because a kit that fails correct
+code is one people switch off.
+
+**Adapters are constructor seams on `LocalFacade`** — `connect_flow=`,
+`secret_prompt=`, `on_connect_event=` — all defaulting to `None`, composed by
+`cli/targets.py` right where it already composes `_interaction()`. A host
+embedding `LocalFacade` gets no browser and no `getpass` unless it asks:
+*"a library that reads stdin because it was imported is the ambient behaviour
+`Runtime` avoids everywhere else."* Absence degrades rather than blocking —
+`facade.connect()` returns what is missing instead of prompting, which is what
+makes `--json`, a pipe and CI correct with no `isatty` check written anywhere.
+
+`RemoteFacade.connect` refuses with the reason: a connection is a browser on
+*this* machine writing *this* machine's store. `AuthorizedFacade` gates it on
+`credentials:connect` — its own scope, because authoring spends tokens and
+reaches out and neither implies being trusted to mint a credential every later
+run acts under. Reading status is `workflows:read`; it carries names and states
+and no secret.
+
+### Where a stored credential actually lives
+
+**The master key goes in the OS keyring; the encrypted payload goes in a file**
+(`~/.loom/credentials.enc`, `0600`, in a `0700` directory; Fernet, via
+`MultiFernet`). Split because Windows Credential Manager caps a stored value
+near 2.5 KB and a real access-token-plus-refresh-token-plus-metadata set clears
+that, while a 32-byte key never will.
+
+Where the *key* comes from is `default_key_provider`'s decision and nobody
+else's — `KeyringCredentialStore` built its own for a while, which is how
+`LOOM_CREDENTIAL_KEY` came to be documented as rung 1 and honoured by no CLI
+command: `loom connect`, `loom whoami` and `loom doctor` all build that class.
+It also went round `tests/conftest.py::never_touch_the_real_keychain`, whose
+entire purpose is that a test *cannot forget* to stay off a developer's
+keychain.
+
+| `LOOM_CREDENTIAL_BACKEND` | key from | on failure |
+|---|---|---|
+| unset / `auto` | `LOOM_CREDENTIAL_KEY` if set, else the OS keyring | falls back to a generated `0600` file, loudly |
+| `env` | `LOOM_CREDENTIAL_KEY` | raises |
+| `keyring` | the OS keyring | **raises** — no fallback |
+| `file` | a generated `0600` key file | never touches the keyring |
+
+**A pinned backend never degrades to another**, the rule `SandboxPolicy`
+follows for a limit it cannot enforce. Under `auto` the fallback is right —
+nobody stated a preference, and a working store beats a failed command. Stated
+explicitly, it is wrong: the key would land somewhere the operator ruled out.
+An unrecognised value is refused by name rather than treated as `auto`.
+
+**`file` is the answer to a keychain that prompts.** macOS binds an item's ACL
+to the binary that created it, so a different interpreter or venv re-asks for
+the login password — and a modal dialog is not an exception this code can
+catch, it simply blocks, which is why `loom doctor` reports the *selection*
+without opening the store. The trade is real and stated rather than buried: the
+key then sits beside the ciphertext, so encryption at rest stops anyone who has
+neither file and nobody who has both. It is the right trade only when the
+prompt is the bigger problem.
+
+**`LOOM_CREDENTIAL_KEY` takes one key or a comma-separated list** — the first
+encrypts, any of them decrypts. Without that, pinning a key is a one-way door:
+every credential already stored becomes unreadable and each integration has to
+be re-connected by hand, which is the cost that stops anyone adopting the
+setting. `<new>,<old>` reads a store written under the old key and re-encrypts
+it under the new one on the next write, after which the old one can be dropped.
+Keys are validated at construction and a bad one in a list is named **by
+position**, because "could not decrypt with any known key" reads as a corrupt
+store rather than a typo. No message anywhere carries key material.
+
+### The library / CLI boundary
+
+`loom` and `loomsdk` are two console scripts on **one wheel**, so this is not a
+boundary pip enforces — it is a property, and properties creep back one import
+at a time. Three tiers, and the middle one is the part that is easy to get
+wrong:
+
+| Tier | May depend on |
+|---|---|
+| **library** | stdlib + declared deps. Never `loom.cli`, never a `[cli]` extra, never `argparse` |
+| **library adapters** | stdlib only, **opted into by a host rather than installed by import** — `CLIUserInteraction` reads stdin from `agents/interaction.py`; `OAuthBrowserFlow` opens a browser from `connectors/flows.py` |
+| **CLI** | everything, `rich`/`prompt_toolkit`/`argparse` included |
+
+The dividing line is **the extra, not the terminal**: `PromptUserInteraction`
+needs `prompt_toolkit`, so it lives in `cli/repl/`.
+`tests/test_layering.py` is the ratchet, and it distinguishes a *dependency*
+from an *optional upgrade* — a `[cli]` import guarded by `except ImportError`
+with a stdlib fallback is not a dependency, which is exactly what
+`CLIUserInteraction` does with `rich`. It also asserts in a subprocess that
+importing `loom.connectors.flows` opens no browser and reads no stdin.
+
+One trap worth remembering: `OAuthBrowserFlow.open_browser` defaulted to
+`webbrowser.open`, and a **dataclass field default is evaluated at import** — so
+it froze whatever that was, and a test patching it afterwards would have opened
+a real browser on somebody's machine. `open_in_browser()` looks the attribute up
+when called.
+
+### A toolset call that cannot authenticate says so
+
+`ctx.step(jira_search_issues, …)` with nothing connected used to fail with
+
+```
+ValueError: JIRA_URL is required (env var or base_url argument)
+```
+
+— an environment variable name, raised deep inside the client, naming neither
+the toolset nor the thing that fixes it. It now fails with
+
+```
+MissingCredentials: jira is not connected (provider: atlassian) —
+jira_search_issues needs JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN.
+Run: loom connect jira  (original: JIRA_URL is required …)
+```
+
+**Wrapped after the failure, not checked before the call — and that is the
+design decision, not an implementation detail.** A preflight was written first
+and it was wrong: it cannot see an *injected* client. A host that constructs
+its own `SlackClient`, or resolves through a `ConnectionBroker`, or threads a
+token through `deps`, has a working setup with nothing in the environment and
+nothing in the store — indistinguishable from a deployment that forgot to
+connect. The preflight refused **nineteen working calls** in this repository's
+own suite, which is the failure that matters more than the message it was
+replacing: reporting a working thing as broken stops a workflow that would
+have run. Once a call has *already* failed with an auth-shaped error there is
+no such doubt.
+
+`DurableCall._credential_failure` runs in the exception arm **before the retry
+decision**, so the failure is non-retryable from the first attempt: a
+credential does not appear between two of them, and retried, a three-attempt
+policy prints the same impossible failure three times and reports
+`RetriesExhausted`, which reads as a flaky service.
+
+`MissingCredentials` is `CredentialNotFound` **and** `NonRetryableError`, two
+levels deep because a flat `(WorkflowError, NonRetryableError)` has no
+consistent MRO and fails at import — the shape `JiraPermanentError` already
+uses. Deliberately not `AuthExpired`, which *parks* the run for `loom connect`
+to fix: right for a token that died mid-flight, wrong for a workflow started
+where nothing was ever going to be connected, since it turns an exit code of 1
+into a run waiting forever for somebody who is not coming.
+
+`looks_like_missing_credentials` is narrow on purpose — an `*AuthError` name,
+or the `ValueError` shape every toolset constructor takes (an environment
+variable name and the word "required"). A `TimeoutError` from the same call
+stays a real failure: reporting a broken thing as merely unconfigured is worse
+than the reverse, because nobody looks.
+
+It needs `ToolsetCatalog.manifest_of` — the reverse of `effect_of` one level
+up, answering *whose* an operation is rather than what it does — chained at
+**catalogue** scope, because unlike `effect_of` it decides only what a
+*message* says about a call that has already failed.
+
+`Runtime(explain_credentials=False)` restores the client's own error.
+**Replay never reaches it**: `DurableCall._resolve` serves a completed entry
+from the journal first. And `ctx.agent(toolsets=…)` is covered for free —
+`tool_from_step` dispatches through `ctx.workflow_ctx.step`, so an agent's tool
+call is an ordinary durable call.
 
 ### Credential resolution
 
@@ -1975,6 +2296,34 @@ while authoring, so a name in the spec is resolved once and baked in rather than
 looked up on every run. Writes and destructive operations are refused —
 authoring must not change the system it writes code about.
 
+It runs inside `credential_store_scope(credentials)`, which was bound at
+exactly one site — `runtime/context.py::_attempt_loop` — and authoring never
+went through it. So `loom connect jira` stored a credential the *runtime* could
+use and the agent could not, every lookup fell back to environment variables,
+and rung 2 of the ladder was unreachable for every connected toolset.
+
+**A missing credential is a state, not an error**, and the two want opposite
+responses. Reported as a failure it reads as *"this toolset is broken"*, and
+the cheapest repair a model can find for a broken toolset is to stop importing
+it — so a request comes back having quietly dropped the integration it was
+about, with every remaining stage green. It returns `{"error":
+"not_connected", "toolset", "needs": {provider, credential, variables},
+"next": "connect_toolset(\"jira\")", "note": "…the operation and your code
+are fine … Never drop the integration"}`. The instruction travels with the
+finding rather than sitting in the system prompt, where it would be paid for on
+every turn of every job and read on the one where it matters —
+`node_contract`'s worked example was removed for the same reason.
+
+`connect_toolset` is offered **only when the surface composed something that
+can connect**, the rule `ask_user` and `observe_target` follow: a tool that is
+present and always answers "not configured" costs a turn every time a model
+reaches for it. `ConnectGate` bounds it to two *attempts* and is switched off
+before repair and smoke, so a model cannot deadlock CI by opening a browser
+nobody is sitting in front of. Widening the catch is narrow on purpose — a
+`TimeoutError` is still a real failure, because a stage that reports a broken
+thing as merely unconfigured is worse than one that reports a working thing as
+broken: nobody looks.
+
 The ladder in `DEFAULT_SYSTEM_PROMPT`: named in the spec → resolve now, bake the
 id with the human name in a comment; comes from input → resolve at runtime;
 ambiguous → report it for a read, `ctx.wait_for_approval()` for a write; nothing
@@ -2104,6 +2453,71 @@ reachable from a workflow body. A workflow reaches the world through `@step`,
 `ctx.node` and toolsets, which is what makes its graph a graph; a probe is the
 agent looking before it writes, and looking is not something the workflow later
 does.
+
+### Describe a task, and have it happen
+
+`loom author` wrote a file, registered it in `[tool.loom] modules`, printed a
+summary and stopped — so *"find my jira tickets"*, a question whose answer is
+the tickets, produced Python and the sentence `loom run my_jira_tickets`. The
+task **was** the query.
+
+**It was the same defect as the empty catalogue, twice more.** A grep across
+`src/loom/agents/` for `triggers=`, `Schedule`, `OnAppEvent` or `@pure`
+returned **nothing**: `@workflow(triggers=[...])` and the four step classes had
+shipped long ago and the model had never been told either existed. So every
+generated workflow was implicitly `Manual` and every helper implicitly an
+effect.
+
+**Two decisions, deliberately independent.**
+
+| Question | Answered by |
+|---|---|
+| what gets *wired* | the triggers the workflow declares, from the spec's own words |
+| whether an immediate run *asks first* | `agents/impact.py`, from the effect classes the **manifests** declare |
+
+A declared schedule does not suppress the first run: seeing it work once is most
+of the reason to have asked for it, and a workflow whose first execution is at
+9am tomorrow is one nobody has tested.
+
+`impact_of` never asks the model what its own code does — it reads durable
+calls out of the AST and effect classes out of the manifest, the position
+`IdentifierStage` takes about resolved ids. Four rules:
+
+- **Undeclared is an effect, not a read**, for `OperationSpec.effect`'s own
+  reason: guessing "read" wrong issues a refund nobody was asked about, and
+  guessing "write" wrong costs one keystroke. `@pure` is how a step says it
+  reaches nothing — a declaration, not an inference from a function body. It is
+  what makes "reads run" ever run: every read-only workflow ends in a
+  formatting step.
+- **It sees one level through a wrapper.** The prompt tells the agent to put
+  I/O inside a step, so it writes `resolve_project` around
+  `jira_resolve_project` and the durable call names the wrapper — which made
+  *every* generated workflow unclassified. Resolved only when every toolset
+  call inside is declared and they **agree**; a wrapper doing a read and a
+  write is the write.
+- **An approval is not a write, and neither is `ctx.agent`.** Counting the
+  first would mean a workflow with a human gate needs a second gate to reach
+  the first.
+- **It reads the catalogue, not `effect_of`** — which is execution scope and
+  answers `None` for Jira on a bare Runtime. This is a declaration being read
+  back to a person before they press a key, so it resolves through the file's
+  own imports.
+
+`--run` is on in the session and off in `loom author`: a line typed at the
+prompt is a task, while `loom author "spec" > flow.py` is documented and a run
+would put its output in the file. Non-interactive refuses, the rule `before`
+hooks and `propose` already follow; `--yes` is the override and the refusal
+names it.
+
+**Acting is awaited, never driven.** The first version called `run_async` from
+inside `_act_on` — already inside the loop `run_async` opened for `cmd_author`
+— so every invocation raised *"asyncio.run() cannot be called from a running
+event loop"* **after** the file was written and the summary printed. Every unit
+test passed, because they called the pieces and nothing called the command;
+`tests/test_author_and_act.py` drives `cmd_author` itself. Awaiting also keeps
+the run inside the same `guarded` scope, so Ctrl+C settles its lease as it does
+for `loom run`, and the confirmation reads stdin through `asyncio.to_thread`
+because `input()` on the loop blocks every timer behind it.
 
 ### Asking for a workflow
 
@@ -2372,6 +2786,7 @@ the stages. They run cheapest-first and stop at the first blocking error:
 | `compile` | 0 | yes | `compile()` — everything after assumes it |
 | `static` | 10 | yes | the AST rules, toolset availability, store choice |
 | `grants` | 12 | no | a `GrantSet` entry that names nothing, so permits nothing |
+| `connections` | 14 | no | imports a toolset this machine has no credential for — **warning, always** |
 | `coverage` | 15 | no | the spec asked for *all* and the code caps a fetch |
 | `resolution` | 16 | no | a fuzzy match on a word the spec supplied — **errors** |
 | `placement` | 17 | no | filtered after fetching everything, not server-side |
@@ -2421,6 +2836,21 @@ same correct code, with `ResolutionStage` instructing precisely what this one
 refused, and the repair loop had no move satisfying both. De-tainting is per
 *name*, not per workflow: a body that acts on one model decision and returns
 another is still the defect in the half it returns.
+
+**A third condition: the workflow must be holding something.** The stage's own
+claim is that *rows the code already holds* are turned into an answer by a
+model that did not need to — so a workflow that reads nothing has no other
+source for its answer, and reporting the model call there asks for the one
+thing the file cannot contain. `can you tell me a joke after 2 minutes` came
+back correct, with a comment saying the joke was judgement, and the stage
+errored on it: `_holds_data` is what closes that. Data in hand is a
+`ctx.step`/`ctx.node` in the body — the pair `is_laundered` already recognises
+— or a workflow parameter the body actually **references**, since a declared
+but unused `input_data` is what a model writes when the spec supplies no input,
+and counting it puts every such workflow straight back on this path. The
+vocabulary gained the generative-content words beside it (`joke`, `poem`,
+`story`, `caption`, `brainstorm`), but the structural rule is the one that
+holds when a spec uses none of them.
 
 **Consumption follows the same bindings taint does**, and the first version
 did not — it read only the names appearing directly in a durable call's
@@ -2750,6 +3180,62 @@ client. Errors map to status codes: 403 authorization, 404 unknown workflow/run,
 This is the realistic path to other languages — workflow authoring stays Python
 because durability depends on re-entering a Python function body, but starting
 runs and delivering approvals are ordinary HTTP requests.
+
+### A delay stated up front
+
+`@workflow(triggers=[After(minutes=2)])`. The gap `Schedule` and `Interval`
+leave between them: one is a grid the workflow sits on for ever, the other a
+cycle that never stops, and *"tell me a joke in two minutes"* is neither.
+
+Written as `ctx.sleep(timedelta(minutes=2))` at the top of a body — which is
+what the coding agent wrote, because nothing told it otherwise — the run parks
+before it has done anything and waits for something to wake it. **Nothing in
+the CLI has ever ticked a scheduler**, so nothing did: `loom run` reported
+`suspended` and exit 3, and the joke never arrived. That reads as a broken
+workflow rather than as a missing driver, which is why it was worth fixing at
+both ends.
+
+`ctx.sleep` stays right for a wait that arrives **mid-flow** — poll, back off,
+let a build finish — where the run has already done work worth keeping across
+the park. A delay the request states up front has no such work.
+
+Three properties, each the fix for a specific way this goes wrong:
+
+- **One shot is a property of the record, not a counter.**
+  `_next_fire_from_record` rebuilds a fire time from `cron` or `seconds` in the
+  stored spec and answers `None` for anything else, and the dispatcher already
+  retires a trigger whose next fire is `None`. So the delay is published as
+  **`after_seconds`**, deliberately: naming it `seconds` would make every
+  stored one-shot indistinguishable from an `Interval` and it would repeat for
+  ever — the one behaviour this spec exists to rule out. Pinned by a test.
+- **The delay runs from registration, not from each boot.** Registration is
+  idempotent and a known trigger keeps its `next_fire_at`, so restarting does
+  not push the joke into the future for ever — the same property that stops a
+  pod restarting more often than its cron from never firing at all.
+- **A one-off delay suppresses the immediate run**, alone among triggers. A
+  cron's first run is a rehearsal of something that happens again, which is
+  most of the reason to have asked for it; `After(minutes=2)` fires exactly
+  once, so running it now *is* that firing, at the wrong time — precisely what
+  the request asked not to happen.
+
+**Something has to drive it, and now something can.** `RuntimeFacade` grew
+`wire_triggers(workflow)` — register what the *file* declares, as against the
+cron `schedule()` attaches — and `tick_schedules()`, one turn of the loop
+`rt.start_scheduler()` runs for ever. The CLI wires the trigger and stays until
+it fires, then follows the run it started; past `_MAX_WAIT_SECONDS` (15
+minutes) it reports the trigger and points at `loom serve`, because a terminal
+held open for a week is not a scheduler. Ctrl+C leaves it wired: the record is
+in the store with its fire time already fixed.
+
+Driven through the port rather than by sleeping and then calling `_run_now`:
+waiting out the delay and running it by hand produces the right answer at the
+right time while leaving the trigger itself untested, so the one thing the
+command exists to prove would be the one thing unproven.
+
+`tick()` advances the engine's own timers on its way through, so **the same
+call fixes both halves** — a body that parks on `ctx.sleep` mid-flow is woken
+by it too. Neither is exposed over MCP: a model's turn ends, and somebody has
+to stay for the loop.
 
 ### Scheduling and cron
 

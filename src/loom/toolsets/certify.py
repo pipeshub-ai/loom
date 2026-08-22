@@ -123,7 +123,7 @@ async def check_scope_mapping(manifest: ToolsetManifest) -> None:
     the old ``READ`` default this check silently skipped exactly the operations
     CERT-04 was also failing to catch.
     """
-    auth_model = str((manifest.auth or {}).get("type", "")).lower()
+    auth_model = manifest.auth.kind
     if auth_model not in SCOPED_AUTH_MODELS:
         return
     for op in manifest.all_operations():
@@ -136,17 +136,38 @@ async def check_scope_mapping(manifest: ToolsetManifest) -> None:
 
 
 async def check_no_credentials(manifest: ToolsetManifest) -> None:
-    """CERT-06: Auth config does not embed raw credentials."""
-    auth = manifest.auth
-    suspicious = {"password", "secret", "token", "api_key", "private_key"}
-    for key in auth:
-        if key.lower() in suspicious:
-            val = auth[key]
-            if isinstance(val, str) and len(val) > 8:
+    """CERT-06: the auth spec names credentials, and never carries one.
+
+    `AuthSpec` is typed now, so the shape this used to guard against — an
+    arbitrary key holding an arbitrary string — is mostly unreachable. What is
+    still reachable is a *value* pasted where a name belongs:
+    ``AuthField(name="sk_live_…")`` or an example that is a real key rather
+    than a shape. Both are checked, because a manifest is published and a
+    docstring is not a control.
+    """
+    for field in manifest.auth.fields:
+        for label, value in (("name", field.name), ("example", field.example)):
+            if _looks_like_a_secret(value):
                 raise CertFailure(
-                    f"Auth config key '{key}' appears to contain "
-                    "a raw credential"
+                    f"auth field {field.name!r} has a {label} that looks like a "
+                    "real credential rather than a variable name or a shape"
                 )
+
+
+#: Prefixes vendors use for live credentials. A manifest may show the *shape*
+#: of a key (``sk_live_…``, ``xoxb-…``) and must not carry one, so the test is
+#: a known prefix followed by enough characters to be the real thing.
+_SECRET_PREFIXES = ("sk_live_", "sk_test_", "xoxb-", "xoxp-", "pat", "pk_", "tvly-")
+
+
+def _looks_like_a_secret(value: str) -> bool:
+    if len(value) < 20:
+        return False
+    lowered = value.lower()
+    if not any(lowered.startswith(p) for p in _SECRET_PREFIXES):
+        return False
+    # An ellipsis is how every manifest here writes a shape rather than a value.
+    return "…" not in value and "..." not in value
 
 
 async def check_egress_hosts(manifest: ToolsetManifest) -> None:

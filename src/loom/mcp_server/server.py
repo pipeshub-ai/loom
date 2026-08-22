@@ -665,6 +665,60 @@ def _register_tools(
 
     @tool(
         annotations=ToolAnnotations(
+            readOnlyHint=False, idempotentHint=False, openWorldHint=True
+        )
+    )
+    async def connect_credential(
+        credential: str,
+        client_id: str = "",
+        client_secret: str = "",
+        device: bool = False,
+    ) -> str:
+        """Obtain a credential so this deployment's toolsets can be called.
+
+        Args:
+            credential: The name from list_connections, e.g. "jira".
+            client_id: The OAuth app's client id, when one is needed.
+            client_secret: Its secret, for a confidential client.
+            device: Use the device-code flow, for a host with no browser.
+        """
+        return await tools.connect_credential(
+            _principal_facade(base_facade, auth_enabled),
+            credential, client_id, client_secret, device,
+        )
+
+    @tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False, idempotentHint=True, openWorldHint=False
+        )
+    )
+    async def disconnect_credential(credential: str) -> str:
+        """Forget a stored credential.
+
+        Args:
+            credential: The name to forget, e.g. "jira".
+        """
+        return await tools.disconnect_credential(
+            _principal_facade(base_facade, auth_enabled), credential
+        )
+
+    @tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True, idempotentHint=True, openWorldHint=False
+        )
+    )
+    async def list_connections(toolset: str = "") -> str:
+        """Which integrations are configured here, and what the rest need.
+
+        Args:
+            toolset: One toolset id, e.g. "jira". Empty lists every one.
+        """
+        return await tools.list_connections(
+            _principal_facade(base_facade, auth_enabled), toolset
+        )
+
+    @tool(
+        annotations=ToolAnnotations(
             readOnlyHint=True, idempotentHint=True, openWorldHint=False
         )
     )

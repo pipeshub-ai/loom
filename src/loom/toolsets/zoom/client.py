@@ -41,7 +41,6 @@ __all__ = [
     "ZoomSession",
     "encode_uuid",
     "flatten_meeting",
-    "get_default_client",
 ]
 
 API_BASE = "https://api.zoom.us/v2"
@@ -542,18 +541,4 @@ def _body(response: Any) -> Any:
 # Process-wide default
 # ---------------------------------------------------------------------------
 
-_default_client: ZoomClient | None = None
 
-
-def get_default_client() -> ZoomClient:
-    """Return (or build) the module-level client from environment credentials."""
-    global _default_client
-    if _default_client is None:
-        _default_client = ZoomClient()
-    return _default_client
-
-
-def reset_default_client() -> None:
-    """Drop the cached client. For tests, and after a credential change."""
-    global _default_client
-    _default_client = None

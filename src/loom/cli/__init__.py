@@ -64,6 +64,7 @@ _HANDLERS = {
     "approve": commands.cmd_approve,
     "pending": commands.cmd_pending,
     "respond": commands.cmd_respond,
+    "connections": commands.cmd_connections,
     "toolsets": commands.cmd_toolsets,
     "toolset": commands.cmd_toolset,
     "nodes": commands.cmd_nodes,
@@ -199,7 +200,8 @@ _GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Serve it", ("serve", "mcp", "ui", "publish", "versions", "events", "setup")),
     (
         "Credentials",
-        ("login", "logout", "whoami", "connect", "disconnect", "refresh", "providers"),
+        ("connections", "login", "logout", "whoami", "connect", "disconnect",
+         "refresh", "providers"),
     ),
 )
 
@@ -429,6 +431,14 @@ def _authoring(sub: _Subparsers) -> None:
         "-y",
         action="store_true",
         help="Write without showing the change and asking first",
+    )
+    author.add_argument(
+        "--run",
+        action="store_true",
+        help="Run it once when it is written. A workflow whose every call is "
+        "a declared read runs straight away; one that writes or deletes names "
+        "what it would do and asks first. On by default in the session, "
+        "because a question typed there is a task and the answer is the point",
     )
     _add_output(author)
 
@@ -684,6 +694,18 @@ def _serving(sub: _Subparsers) -> None:
     )
     _add_backend(versions)
     _add_output(versions)
+
+    connections = sub.add_parser(
+        "connections",
+        help="Show which integrations are configured, and what the rest need",
+    )
+    connections.add_argument("toolset", nargs="?", help="One toolset id, e.g. jira")
+    connections.add_argument(
+        "--missing",
+        action="store_true",
+        help="Only the ones that are not usable",
+    )
+    _add_output(connections)
 
     toolsets = sub.add_parser(
         "toolsets", help="List integrations a workflow or agent can call"

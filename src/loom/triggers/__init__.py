@@ -5,6 +5,7 @@ from __future__ import annotations
 from loom.triggers.base import TriggerBinding, TriggerEvent, TriggerSpec
 from loom.triggers.cron import CronError, CronSchedule
 from loom.triggers.specs import (
+    After,
     AuthMode,
     CalledByWorkflow,
     Chat,
@@ -23,6 +24,7 @@ from loom.triggers.specs import (
 )
 
 __all__ = [
+    "After",
     "AuthMode",
     "CalledByWorkflow",
     "Chat",

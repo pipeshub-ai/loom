@@ -15,6 +15,8 @@ from loom.toolsets.google.gmail.models import (
     SentMessage,
 )
 from loom.toolsets.manifest import (
+    AuthField,
+    AuthSpec,
     EffectClass,
     OperationSpec,
     ToolsetManifest,
@@ -74,16 +76,45 @@ GMAIL_MANIFEST = ToolsetManifest(
         "so a retry after a post-delivery timeout would send twice."
     ),
     base_url="https://gmail.googleapis.com/gmail/v1",
-    auth={
-        "type": "oauth2",
-        "fields": [
-            "GOOGLE_ACCESS_TOKEN",
-            "GOOGLE_CLIENT_ID",
-            "GOOGLE_CLIENT_SECRET",
-            "GOOGLE_REFRESH_TOKEN",
-        ],
-        "token_url": "https://oauth2.googleapis.com/token",
-    },
+    auth=AuthSpec(
+        # What *this* toolset needs, which is narrower than the account's.
+        # Read from the client's own SCOPES until now, where nothing outside
+        # that module could see it — and `build_client` has to, because a
+        # service account bakes scopes into the assertion it signs.
+        scopes=(
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.send",
+            "https://www.googleapis.com/auth/gmail.modify",
+        ),
+        client="loom.toolsets.google.gmail.client:GmailClient",
+        credentials="loom.toolsets.google.auth:GoogleAuth",
+        # One credential across the five Google toolsets: `GoogleAuth`
+        # caches a single token and merges each toolset's scopes into it,
+        # so connecting once serves the set — and a second credential
+        # would be a second token with a narrower scope set, which is the
+        # 403 that reads as a broken credential.
+        kind="oauth2",
+        credential="google",
+        provider="google_gmail",
+        fields=(
+            # Three alternatives, mirroring `GoogleCredentials.mode`. The
+            # refresh trio wins over a ready-made access token when both are
+            # set — an access token lives about an hour and a refresh token
+            # mints them indefinitely.
+            AuthField(name="GOOGLE_ACCESS_TOKEN", label="Access token", mode="token"),
+            AuthField(name="GOOGLE_CLIENT_ID", label="OAuth client id", secret=False,
+                      mode="refresh"),
+            AuthField(name="GOOGLE_CLIENT_SECRET", label="OAuth client secret",
+                      mode="refresh"),
+            AuthField(name="GOOGLE_REFRESH_TOKEN", label="Refresh token", mode="refresh"),
+            AuthField(name="GOOGLE_SERVICE_ACCOUNT_FILE", label="Service account JSON",
+                      secret=False, mode="service_account"),
+            AuthField(name="GOOGLE_IMPERSONATE_SUBJECT", label="User to impersonate",
+                      secret=False, required=False),
+        ),
+        setup_url="https://console.cloud.google.com/apis/credentials",
+        docs_url="https://developers.google.com/gmail/api/auth/scopes",
+    ),
     tools_module="loom.toolsets.google.gmail.tools",
     egress_hosts=["gmail.googleapis.com", "oauth2.googleapis.com"],
     rate_limits={"quota_units_per_user_per_second": 250},

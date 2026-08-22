@@ -27,7 +27,6 @@ header as zero would report the largest result sets as empty.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 from urllib.parse import quote
 
@@ -95,17 +94,17 @@ class GitLabClient:
 
     def __init__(
         self,
-        token: str | None = None,
+        token: str = "",
         *,
-        oauth_token: str | None = None,
+        oauth_token: str = "",
         base_url: str | None = None,
         api_version: str = DEFAULT_API_VERSION,
         timeout: float = 30.0,
     ) -> None:
-        self._token = token or os.environ.get("GITLAB_TOKEN", "")
-        self._oauth = oauth_token or os.environ.get("GITLAB_OAUTH_TOKEN", "")
+        self._token = token
+        self._oauth = oauth_token
         self._base_url = (
-            base_url or os.environ.get("GITLAB_URL", DEFAULT_URL)
+            base_url or DEFAULT_URL
         ).rstrip("/")
         self._api_version = api_version
         self._timeout = timeout
@@ -434,12 +433,3 @@ def _classify(response: Any) -> GitLabError:
     return GitLabError(message, status=status)
 
 
-_default_client: GitLabClient | None = None
-
-
-def get_default_client() -> GitLabClient:
-    """Return (or create) the module-level client from the environment."""
-    global _default_client
-    if _default_client is None:
-        _default_client = GitLabClient()
-    return _default_client

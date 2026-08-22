@@ -28,6 +28,7 @@ leaves two pages.
 from __future__ import annotations
 
 from loom import Retry, step
+from loom.toolsets.microsoft.onenote.client import OneNoteClient
 from loom.toolsets.microsoft.onenote.models import (
     Notebook,
     OneNotePage,
@@ -56,9 +57,9 @@ async def onenote_list_notebooks(limit: int = 100) -> Results[Notebook]:
     Returns:
         Results of Notebook, with ``web_url`` to open each in the browser.
     """
-    from loom.toolsets.microsoft.onenote.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_notebooks(limit=limit)
+    return await (await client_for("onenote", OneNoteClient)).list_notebooks(limit=limit)
 
 
 @step(retry=_READ)
@@ -71,9 +72,9 @@ async def onenote_get_notebook(notebook_id: str) -> Notebook:
     Returns:
         Notebook with display name, timestamps, and open-in links.
     """
-    from loom.toolsets.microsoft.onenote.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_notebook(notebook_id)
+    return await (await client_for("onenote", OneNoteClient)).get_notebook(notebook_id)
 
 
 @step(retry=_READ)
@@ -94,9 +95,10 @@ async def onenote_list_sections(
         Results of OneNoteSection, each carrying ``notebook_name`` — without it
         two same-named sections in different notebooks are indistinguishable.
     """
-    from loom.toolsets.microsoft.onenote.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_sections(notebook_id, limit=limit)
+    client = await client_for("onenote", OneNoteClient)
+    return await client.list_sections(notebook_id, limit=limit)
 
 
 @step(retry=_READ)
@@ -116,9 +118,10 @@ async def onenote_list_section_groups(
         Results of SectionGroup. They nest, so ``section_groups_url`` is how to
         walk further down.
     """
-    from loom.toolsets.microsoft.onenote.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_section_groups(notebook_id, limit=limit)
+    client = await client_for("onenote", OneNoteClient)
+    return await client.list_section_groups(notebook_id, limit=limit)
 
 
 @step(retry=_UNSAFE_WRITE)
@@ -135,9 +138,10 @@ async def onenote_create_section(notebook_id: str, section_name: str) -> OneNote
     Returns:
         The created OneNoteSection, including the id pages are written to.
     """
-    from loom.toolsets.microsoft.onenote.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_section(notebook_id, section_name)
+    client = await client_for("onenote", OneNoteClient)
+    return await client.create_section(notebook_id, section_name)
 
 
 # -- pages -------------------------------------------------------------------
@@ -158,9 +162,9 @@ async def onenote_list_pages(
         Results of OneNotePage — metadata only. Fetch the HTML separately with
         ``onenote_get_page_content``.
     """
-    from loom.toolsets.microsoft.onenote.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_pages(
+    return await (await client_for("onenote", OneNoteClient)).list_pages(
         section_id, limit=limit, order_by=order_by
     )
 
@@ -176,9 +180,9 @@ async def onenote_search_pages(query: str, limit: int = 50) -> Results[OneNotePa
     Returns:
         Results of OneNotePage, each with its section and notebook named.
     """
-    from loom.toolsets.microsoft.onenote.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().search_pages(query, limit=limit)
+    return await (await client_for("onenote", OneNoteClient)).search_pages(query, limit=limit)
 
 
 @step(retry=_READ)
@@ -192,9 +196,9 @@ async def onenote_get_page(page_id: str) -> OneNotePage:
         OneNotePage with title, timestamps, and its section and notebook. The
         content is not included — use ``onenote_get_page_content``.
     """
-    from loom.toolsets.microsoft.onenote.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_page(page_id)
+    return await (await client_for("onenote", OneNoteClient)).get_page(page_id)
 
 
 @step(retry=_READ)
@@ -211,9 +215,9 @@ async def onenote_get_page_content(page_id: str, include_ids: bool = False) -> s
     Returns:
         The page as an HTML document string.
     """
-    from loom.toolsets.microsoft.onenote.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_page_content(
+    return await (await client_for("onenote", OneNoteClient)).get_page_content(
         page_id, include_ids=include_ids
     )
 
@@ -247,9 +251,9 @@ async def onenote_create_page(
     Returns:
         The created OneNotePage, including its id and web URL.
     """
-    from loom.toolsets.microsoft.onenote.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_page(
+    return await (await client_for("onenote", OneNoteClient)).create_page(
         section_id, title, body_html, full_html=full_html, created=created
     )
 
@@ -280,9 +284,9 @@ async def onenote_append_to_page(
     Returns:
         True when the change was accepted.
     """
-    from loom.toolsets.microsoft.onenote.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().patch_page(
+    return await (await client_for("onenote", OneNoteClient)).patch_page(
         page_id, content, target=target, action=action, position=position
     )
 
@@ -300,6 +304,6 @@ async def onenote_delete_page(page_id: str) -> bool:
     Returns:
         True when the delete was accepted.
     """
-    from loom.toolsets.microsoft.onenote.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().delete_page(page_id)
+    return await (await client_for("onenote", OneNoteClient)).delete_page(page_id)

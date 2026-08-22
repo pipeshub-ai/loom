@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -149,6 +150,26 @@ class MicrosoftAuth:
         # this raises only when nothing could possibly save it.
         if not self._credentials.mode and current_credential_store() is None:
             raise GraphAuthError(_missing_message(credential_name))
+
+
+    @classmethod
+    def from_values(
+        cls, values: Mapping[str, str], *, scopes: Sequence[str] = ()
+    ) -> MicrosoftAuth:
+        """Build from resolved configuration, reading nothing here.
+
+        The single construction path :func:`loom.toolsets.factory.build_client`
+        uses. It exists because the factory previously named the *credentials
+        holder* and handed that to the client as its ``auth``: that constructs
+        without complaint, since nothing checks the type, and raises
+        ``AttributeError: no attribute 'headers'`` on the first request.
+
+        *scopes* is accepted and unused — this provider carries them in the
+        grant rather than the token request. Taking the argument anyway is what
+        lets one factory build all three auth layers without asking which kind
+        each one is.
+        """
+        return cls(credentials=MicrosoftCredentials.from_env(dict(values)))
 
     @property
     def mode(self) -> str:

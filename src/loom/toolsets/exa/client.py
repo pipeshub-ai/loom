@@ -26,7 +26,6 @@ from "your account is empty".
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from loom.core.exceptions import NonRetryableError, WorkflowError
@@ -92,12 +91,12 @@ class ExaClient:
 
     def __init__(
         self,
-        api_key: str | None = None,
+        api_key: str = "",
         *,
         base_url: str = BASE_URL,
         timeout: float = 30.0,
     ) -> None:
-        self._key = api_key or os.environ.get("EXA_API_KEY", "")
+        self._key = api_key
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
 
@@ -313,12 +312,3 @@ def _classify(response: Any) -> ExaError:
     return ExaError(message, status=status)
 
 
-_default_client: ExaClient | None = None
-
-
-def get_default_client() -> ExaClient:
-    """Return (or create) the module-level client from the environment."""
-    global _default_client
-    if _default_client is None:
-        _default_client = ExaClient()
-    return _default_client

@@ -361,12 +361,20 @@ class TestCorruptStore:
 
 class TestKeyringPayloadSplit:
     async def test_a_large_credential_set_never_touches_the_keyring_size_limit(
-        self, tmp_path, fake_keyring
+        self, tmp_path, fake_keyring, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Regression guard for the Windows Credential Manager ~2.5KB cap:
-        the payload always goes to the file, however large it gets."""
+        the payload always goes to the file, however large it gets.
+
+        The `delenv` is what keeps this test about the keyring. The session
+        fixture in `conftest.py` pins `LOOM_CREDENTIAL_KEY` so nothing reaches
+        a developer's real keychain, and `KeyringCredentialStore` now honours
+        it — so without this line the store would take the env branch and the
+        assertion below would be about a keyring nothing had written to.
+        """
         import keyring
 
+        monkeypatch.delenv("LOOM_CREDENTIAL_KEY", raising=False)
         store = KeyringCredentialStore(tmp_path / "creds.enc")
         large_metadata = {"blob": "x" * 10_000}
         for i in range(20):
@@ -380,3 +388,194 @@ class TestKeyringPayloadSplit:
         assert stored_key is not None
         assert len(stored_key) < 100
         assert (tmp_path / "creds.enc").stat().st_size > 10_000 * 20 * 0.5
+
+
+# ---------------------------------------------------------------------------
+# Which key source the CLI's own store uses
+# ---------------------------------------------------------------------------
+
+
+class TestTheStoreTheCliBuildsFollowsTheKeyOrder:
+    """`KeyringCredentialStore` used to pick its provider by hand.
+
+    So `LOOM_CREDENTIAL_KEY` — rung 1 of the documented order, and the thing
+    `default_key_provider`'s own docstring calls "what CI and containers use" —
+    reached `EncryptedFileCredentialStore` and nothing else. Every CLI path
+    (`loom connect`, `loom whoami`, `loom doctor`, `oauth_client`) builds this
+    class, so the escape hatch was documented and unreachable.
+    """
+
+    def test_the_default_is_exactly_what_shipped_before(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The property that matters most: with neither variable set, nothing
+        about a deployment changes — same provider, same service, same
+        fallback path."""
+        monkeypatch.delenv("LOOM_CREDENTIAL_KEY", raising=False)
+        monkeypatch.delenv("LOOM_CREDENTIAL_BACKEND", raising=False)
+
+        store = KeyringCredentialStore(tmp_path / "creds.enc", service="svc")
+        provider = store._envelope._key_provider
+
+        assert isinstance(provider, KeyringKeyProvider)
+        assert provider._service == "svc"
+        assert isinstance(provider._fallback, GeneratedFileKeyProvider)
+        assert provider._fallback._path == tmp_path / "credentials.key"
+
+    async def test_an_explicit_key_never_consults_the_keyring(
+        self, tmp_path, broken_keyring, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The fix for the macOS password prompt.
+
+        A keyring that raises on every call stands in for one that would put a
+        modal dialog on screen — which is not an exception anything can catch,
+        so the only safe answer is never to reach for it. A round-trip that
+        succeeds here, with no generated key file left behind, is what says the
+        keychain was not on the path at all.
+        """
+        monkeypatch.setenv("LOOM_CREDENTIAL_KEY", Fernet.generate_key().decode("ascii"))
+
+        store = KeyringCredentialStore(tmp_path / "creds.enc")
+        await store.put("acme", _cred("tok-a"))
+
+        assert (await store.get("acme")).reveal() == "tok-a"
+        assert not (tmp_path / "credentials.key").exists()
+
+    def test_a_malformed_key_is_refused_rather_than_fallen_back_from(
+        self, tmp_path, fake_keyring, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An operator who names a key has said where the key comes from.
+
+        Quietly using a different one because theirs did not parse is the
+        silent downgrade this ordering exists to prevent — and it would encrypt
+        the next write under a key they do not have.
+        """
+        monkeypatch.setenv("LOOM_CREDENTIAL_KEY", "not-a-fernet-key")
+
+        with pytest.raises(DecryptionError):
+            KeyringCredentialStore(tmp_path / "creds.enc")._envelope.encrypt(b"x")
+        assert not (tmp_path / "credentials.key").exists()
+
+    def test_the_refusal_never_carries_the_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """This message reaches logs and CI output."""
+        secret = "totally-not-valid-but-secret-looking"
+        monkeypatch.setenv("LOOM_CREDENTIAL_KEY", secret)
+
+        with pytest.raises(DecryptionError) as caught:
+            EnvKeyProvider().keys()
+        assert secret not in str(caught.value)
+        assert secret not in repr(EnvKeyProvider())
+
+    def test_a_bad_key_in_a_list_is_named_by_position(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        good = Fernet.generate_key().decode("ascii")
+        monkeypatch.setenv("LOOM_CREDENTIAL_KEY", f"{good},rubbish")
+
+        with pytest.raises(DecryptionError, match="key 2"):
+            EnvKeyProvider().keys()
+
+
+class TestTheBackendCanBePinned:
+    """`LOOM_CREDENTIAL_BACKEND`, and the rule that a pinned one never degrades."""
+
+    def test_file_never_touches_the_keyring(
+        self, tmp_path, broken_keyring, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("LOOM_CREDENTIAL_BACKEND", "file")
+        monkeypatch.delenv("LOOM_CREDENTIAL_KEY", raising=False)
+
+        store = KeyringCredentialStore(tmp_path / "creds.enc")
+        store._envelope.encrypt(b"x")  # a broken keyring would raise
+
+        assert (tmp_path / "credentials.key").exists()
+        assert stat.S_IMODE((tmp_path / "credentials.key").stat().st_mode) == 0o600
+
+    def test_keyring_raises_rather_than_writing_a_key_file(
+        self, tmp_path, broken_keyring, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Asking for the keyring and getting a file is the silent downgrade.
+
+        Under `auto` the fallback is right — nobody stated a preference, and a
+        working store beats a failed command. Stated explicitly, it is wrong:
+        the key would land somewhere the operator ruled out.
+        """
+        monkeypatch.setenv("LOOM_CREDENTIAL_BACKEND", "keyring")
+        monkeypatch.delenv("LOOM_CREDENTIAL_KEY", raising=False)
+
+        with pytest.raises(LookupError):
+            KeyringCredentialStore(tmp_path / "creds.enc")._envelope.encrypt(b"x")
+        assert not (tmp_path / "credentials.key").exists()
+
+    def test_env_requires_the_variable(
+        self, tmp_path, fake_keyring, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("LOOM_CREDENTIAL_BACKEND", "env")
+        monkeypatch.delenv("LOOM_CREDENTIAL_KEY", raising=False)
+
+        with pytest.raises(LookupError):
+            KeyringCredentialStore(tmp_path / "creds.enc")._envelope.encrypt(b"x")
+
+    def test_an_unknown_backend_is_refused_by_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from loom.connectors.encryption import CREDENTIAL_BACKENDS, selected_backend
+        from loom.core.exceptions import ConfigurationError
+
+        monkeypatch.setenv("LOOM_CREDENTIAL_BACKEND", "kechain")
+        with pytest.raises(ConfigurationError) as caught:
+            selected_backend()
+        for name in CREDENTIAL_BACKENDS:
+            assert name in str(caught.value)
+
+
+class TestRotatingTheKey:
+    """A comma-separated `LOOM_CREDENTIAL_KEY`: first encrypts, any decrypts.
+
+    Without this, pinning a key is a one-way door — every credential already
+    stored becomes unreadable, and the only way forward is re-connecting each
+    integration by hand. That cost is what stops people adopting the setting
+    at all.
+    """
+
+    async def test_an_old_key_still_reads_and_the_new_one_takes_over(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        old = Fernet.generate_key().decode("ascii")
+        new = Fernet.generate_key().decode("ascii")
+        path = tmp_path / "creds.enc"
+
+        monkeypatch.setenv("LOOM_CREDENTIAL_KEY", old)
+        await KeyringCredentialStore(path).put("acme", _cred("tok-old"))
+
+        # Both keys: the store written under `old` is readable again.
+        monkeypatch.setenv("LOOM_CREDENTIAL_KEY", f"{new},{old}")
+        rotating = KeyringCredentialStore(path)
+        assert (await rotating.get("acme")).reveal() == "tok-old"
+
+        # A write re-encrypts the whole file under the first key.
+        await rotating.put("beta", _cred("tok-new"))
+
+        monkeypatch.setenv("LOOM_CREDENTIAL_KEY", new)
+        settled = KeyringCredentialStore(path)
+        assert (await settled.get("acme")).reveal() == "tok-old"
+        assert (await settled.get("beta")).reveal() == "tok-new"
+
+    async def test_the_old_key_alone_no_longer_opens_it(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        old = Fernet.generate_key().decode("ascii")
+        new = Fernet.generate_key().decode("ascii")
+        path = tmp_path / "creds.enc"
+
+        monkeypatch.setenv("LOOM_CREDENTIAL_KEY", old)
+        await KeyringCredentialStore(path).put("acme", _cred("tok"))
+
+        monkeypatch.setenv("LOOM_CREDENTIAL_KEY", f"{new},{old}")
+        await KeyringCredentialStore(path).put("acme", _cred("tok"))
+
+        monkeypatch.setenv("LOOM_CREDENTIAL_KEY", old)
+        with pytest.raises(DecryptionError, match="LOOM_CREDENTIAL_KEY"):
+            await KeyringCredentialStore(path).names()

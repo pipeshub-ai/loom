@@ -264,6 +264,18 @@ class AuthorizedFacade:
         self.principal.requires(Scope.SCHEDULES_WRITE.value)
         return await self.inner.unschedule(trigger_id)
 
+    async def wire_triggers(self, workflow: str) -> list[dict[str, Any]]:
+        self.principal.requires(Scope.SCHEDULES_WRITE.value)
+        return await self.inner.wire_triggers(workflow)
+
+    async def tick_schedules(self) -> list[dict[str, Any]]:
+        """Firing a due trigger *starts runs*, so it is the write scope.
+
+        Reading what is due would be ``schedules``; this is the act.
+        """
+        self.principal.requires(Scope.SCHEDULES_WRITE.value)
+        return await self.inner.tick_schedules()
+
     async def pending(self, run_id: str | None = None) -> list[dict[str, Any]]:
         """What is parked on a person, narrowed to runs this principal owns.
 
@@ -288,6 +300,47 @@ class AuthorizedFacade:
         return await self.inner.respond(
             run_id, subject, attest(answer, self.principal.subject)
         )
+
+    async def connect(
+        self,
+        credential: str,
+        *,
+        client_id: str = "",
+        client_secret: str = "",
+        fields: dict[str, str] | None = None,
+        device: bool = False,
+        scopes: list[str] | None = None,
+    ) -> dict[str, Any]:
+        # Its own scope. Authoring spends tokens and reaches out; neither
+        # implies being trusted to mint a credential every later run acts
+        # under, and this one ends with a third party's token in the
+        # deployment's store.
+        self.principal.requires(Scope.CREDENTIALS_CONNECT.value)
+        return await self.inner.connect(
+            credential,
+            client_id=client_id,
+            client_secret=client_secret,
+            fields=fields,
+            device=device,
+            scopes=scopes,
+        )
+
+    async def disconnect(self, credential: str) -> dict[str, Any]:
+        self.principal.requires(Scope.CREDENTIALS_CONNECT.value)
+        return await self.inner.disconnect(credential)
+
+    async def connections(self, toolset: str = "") -> list[dict[str, Any]]:
+        # Which integrations this deployment can reach, and whether each is
+        # configured — a property of the deployment rather than of anybody's
+        # data, so it reads under the same scope as listing workflows.
+        #
+        # No secret crosses this boundary by construction rather than by
+        # filtering here: `ConnectionStatus` carries states, variable *names*
+        # and expiries, and never a value. Anything that mints or reveals a
+        # credential is `credentials:connect`, which is a different scope on a
+        # different method.
+        self.principal.requires(Scope.WORKFLOWS_READ.value)
+        return await self.inner.connections(toolset)
 
     async def nodes(
         self, query: str = "", *, category: str | None = None

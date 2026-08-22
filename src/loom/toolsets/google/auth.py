@@ -24,6 +24,7 @@ import asyncio
 import json
 import os
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -118,6 +119,34 @@ class GoogleAuth:
                 "GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET + GOOGLE_REFRESH_TOKEN, "
                 "or GOOGLE_SERVICE_ACCOUNT_FILE."
             )
+
+    @classmethod
+    def from_values(
+        cls, values: Mapping[str, str], *, scopes: Sequence[str] = ()
+    ) -> GoogleAuth:
+        """Build from resolved configuration, reading nothing here.
+
+        The single construction path :func:`loom.toolsets.factory.build_client`
+        uses, so a manifest names this class and needs to know nothing else
+        about how one is assembled.
+
+        It exists because the factory previously named the *credentials holder*
+        and handed that to the client as its ``auth``. That constructs without
+        complaint — nothing checks the type — and raises ``AttributeError:
+        'GoogleCredentials' object has no attribute 'headers'`` on the first
+        request. A client that looks built and is not is the worst of the
+        available failures, and the test that let it through asserted only that
+        construction returned something.
+
+        *scopes* is what **this toolset** needs, from ``AuthSpec.scopes``, and
+        it is not optional detail: the service-account flow bakes them into the
+        assertion it signs, so a token minted without them is a 403 that reads
+        as a broken credential.
+        """
+        return cls(
+            credentials=GoogleCredentials.from_env(dict(values)),
+            scopes=list(scopes),
+        )
 
     @property
     def mode(self) -> str:

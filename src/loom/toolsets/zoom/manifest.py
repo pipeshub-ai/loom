@@ -7,6 +7,8 @@ reads and the contract the client honours cannot drift apart.
 from __future__ import annotations
 
 from loom.toolsets.manifest import (
+    AuthField,
+    AuthSpec,
     EffectClass,
     OperationSpec,
     ToolsetManifest,
@@ -56,18 +58,34 @@ ZOOM_MANIFEST = ToolsetManifest(
         "meeting with a different join link."
     ),
     base_url="https://api.zoom.us/v2",
-    auth={
-        "type": "oauth2",
-        "fields": [
-            "ZOOM_ACCOUNT_ID",
-            "ZOOM_CLIENT_ID",
-            "ZOOM_CLIENT_SECRET",
-            "ZOOM_ACCESS_TOKEN",
-        ],
-        "credential": "zoom",
-        "token_url": "https://zoom.us/oauth/token",
-        "grant": "account_credentials",
-    },
+    auth=AuthSpec(
+        client="loom.toolsets.zoom.client:ZoomClient",
+        credentials="loom.toolsets.zoom.auth:ZoomAuth",
+        # The default grant is Server-to-Server, which has **no refresh
+        # token**: the client id and secret are the durable credential and an
+        # hourly token is minted from them. The `zoom` provider covers the
+        # user-delegated case, which is the one a browser flow can do.
+        kind="oauth2",
+        credential="zoom",
+        provider="zoom",
+        fields=(
+            # Two flows, and `ZoomCredentials.mode` has always known it:
+            # Server-to-Server mints hourly tokens from the trio, or a
+            # ready-made access token is used as-is. Declared flatly required
+            # with no mode, the trio made a token-only deployment report as
+            # missing three variables — which was merely a wrong message until
+            # `build_client` began refusing to construct on it.
+            AuthField(name="ZOOM_ACCOUNT_ID", label="Account id", secret=False,
+                      mode="server_to_server"),
+            AuthField(name="ZOOM_CLIENT_ID", label="Client id", secret=False,
+                      mode="server_to_server"),
+            AuthField(name="ZOOM_CLIENT_SECRET", label="Client secret",
+                      mode="server_to_server"),
+            AuthField(name="ZOOM_ACCESS_TOKEN", label="Access token",
+                      mode="token"),
+        ),
+        docs_url="https://developers.zoom.us/docs/integrations/oauth/",
+    ),
     tools_module="loom.toolsets.zoom.tools",
     egress_hosts=["api.zoom.us", "zoom.us"],
     rate_limits={"per_second_and_daily": "tiered by endpoint weight"},

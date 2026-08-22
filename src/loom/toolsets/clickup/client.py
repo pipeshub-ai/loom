@@ -17,7 +17,6 @@ style Jira uses. ClickUp caps a page at 100 whatever you ask for.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from loom.core.exceptions import NonRetryableError, WorkflowError
@@ -101,8 +100,8 @@ class ClickUpClient:
         base_url: str = BASE_URL,
         timeout: float = 30.0,
     ) -> None:
-        self._token = api_token or os.environ.get("CLICKUP_API_TOKEN", "")
-        self._oauth = oauth_token or os.environ.get("CLICKUP_OAUTH_TOKEN", "")
+        self._token = api_token
+        self._oauth = oauth_token
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
 
@@ -424,12 +423,3 @@ def _classify(response: Any) -> ClickUpError:
     return ClickUpError(message, status=status, code=code)
 
 
-_default_client: ClickUpClient | None = None
-
-
-def get_default_client() -> ClickUpClient:
-    """Return (or create) the module-level client from the environment."""
-    global _default_client
-    if _default_client is None:
-        _default_client = ClickUpClient()
-    return _default_client

@@ -145,17 +145,30 @@ class TestAuthoringMayOnlyRead:
     async def test_a_credentials_failure_is_explained_not_blamed(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Missing credentials while authoring is normal, not a broken operation."""
+        """Missing credentials while authoring is normal, not a broken operation.
+
+        It is now a *state* rather than an error, and it says which: reported
+        as a failure it reads as "this toolset is broken", and the cheapest
+        repair a model can find for a broken toolset is to stop using it — so
+        a request comes back having quietly dropped the integration it was
+        about, with every remaining stage green.
+        """
+        # No singleton to reset: a client is built per call now, so clearing
+        # the environment is the whole of "nothing is configured".
         monkeypatch.delenv("JIRA_URL", raising=False)
+        monkeypatch.delenv("JIRA_EMAIL", raising=False)
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
 
-        import loom.toolsets.jira.client as client_module
-
-        monkeypatch.setattr(client_module, "_default_client", None)
-
         result = json.loads(await call("jira.users.resolve", '{"name": "x"}'))
-        assert "error" in result
-        assert "resolves it at runtime" in result["note"]
+        assert result["error"] == "not_connected"
+        assert result["toolset"] == "jira"
+        # The instruction travels with the finding rather than sitting in the
+        # system prompt, where it would be paid for on every turn of every job
+        # and read on the one where it matters.
+        assert "Never drop the integration" in result["note"]
+        # And what would fix it, which is the half a generic note cannot carry.
+        assert result["needs"]["provider"] == "atlassian"
+        assert result["next"] == 'connect_toolset("jira")'
 
 
 def prompt_text() -> str:
@@ -669,10 +682,67 @@ class TestMarkdownByDefault:
 
         The margin above the current length is about one sentence wide on
         purpose, so the next addition has to run this search too.
+
+        It moved a fifth time, from 11100 to 11900, and this one paid for two
+        *declarations the prompt had never mentioned at all*: a grep across
+        ``src/loom/agents/`` for ``triggers=``, ``Schedule``, ``OnAppEvent`` or
+        ``@pure`` returned nothing. ``@workflow(triggers=[...])`` and the four
+        step classes had shipped long ago and the model had no way to know they
+        existed, so every generated workflow was implicitly ``Manual`` and
+        every helper implicitly an effect. That is what made *"find my jira
+        tickets"* produce a file instead of the tickets.
+
+        The search found one real thing and it was structural rather than
+        textual: both additions had written themselves new ``###`` sections
+        when they belonged in sections that already existed. ``@pure`` is a
+        step class, so it is a bullet under "Step functions" beside ``@step``;
+        ``triggers=`` is written on the decorator, so it is a bullet under
+        "Workflow function" beside ``@workflow(name=...)``. Folding them in
+        removed two headings and the sentence each needed to reintroduce its
+        subject — 55 characters, which is the honest size of the redundancy
+        that was there.
+
+        The rest is new information with nothing to merge it into. The trigger
+        vocabulary is three constructor shapes and the one rule that is not
+        derivable from them (a cron with no timezone fires at whatever UTC
+        happens to be); the purity note is one sentence saying the declaration
+        is *read* rather than decorative, which is what makes an author bother.
+        The one deliberate cut was the "do not invent a schedule" warning, kept
+        because it prevents the failure the addition itself creates: a model
+        newly told about schedules will reach for one whenever a spec sounds
+        periodic, and a workflow that runs hourly because it sounded that way
+        is one nobody asked to run at all.
+
+        It moved a sixth time, from 11900 to 12200, for one more declaration
+        the prompt had never mentioned: ``After(minutes=2)``, a trigger that
+        fires once after a stated delay. Asked for a joke in two minutes, the
+        agent wrote ``ctx.sleep(timedelta(minutes=2))`` at the top of a body
+        that had done nothing yet — so the run parked before it had started,
+        waiting for a scheduler no CLI command has ever run. The model could
+        not have chosen otherwise: the spec did not exist.
+
+        The search found the same structural redundancy the fifth move did.
+        The rule arrived as its own bullet in the trigger list, at 470
+        characters, where it had to reintroduce ``ctx.sleep`` in order to say
+        anything about it — and ``ctx.sleep`` already had a bullet twelve
+        lines below, in the ctx-API list. Folding the rule onto that bullet
+        took it to 181 and gave it a subject it no longer had to name twice.
+        What is left is one constructor line and the one distinction not
+        derivable from it: a delay the spec states up front is a trigger, a
+        wait that arrives mid-flow is a sleep.
+
+        The rest of the search found nothing new. The passes above have taken
+        the restatement out, and the two candidates re-examined here — "filter
+        in the query" against the paging window, and the demo block against
+        the workflow-function list — remain what they were judged to be the
+        last two times.
+
+        The margin stays about one sentence wide, so the next addition has to
+        run this search too.
         """
         from loom.agents.coding_agent import DEFAULT_SYSTEM_PROMPT
 
-        assert len(DEFAULT_SYSTEM_PROMPT) < 11100, "the prompt is drifting long"
+        assert len(DEFAULT_SYSTEM_PROMPT) < 12200, "the prompt is drifting long"
 
 
 class TestRepeatedLookupsAreStopped:
@@ -868,8 +938,14 @@ class TestInventedModulePaths:
         registry.register(GOOGLE_CALENDAR_MANIFEST)
         agent = WorkflowCodingAgent(FakeModel(), tool_registry=registry)
 
-        assert agent._validator.toolset_modules == self.MODULES
-        assert agent._check_context("spec").toolset_modules == self.MODULES
+        # A superset: the map is catalogue scope now, so it also carries the
+        # toolsets LOOM ships — which is the point, since generated code may
+        # import any of them. What this test is about is that the paths are the
+        # manifests' real ones and never built from the toolset id.
+        for source in (agent._validator.toolset_modules,
+                       agent._check_context("spec").toolset_modules):
+            assert self.MODULES.items() <= source.items()
+            assert "loom.toolsets.google_calendar" not in source.values()
 
 
 class TestToolsetModulesOutsideLoom:

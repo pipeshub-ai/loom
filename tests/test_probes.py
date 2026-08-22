@@ -42,6 +42,14 @@ PAGE = b"""<!doctype html><title>Booking</title>
 <button>Next</button>
 """
 
+#: What a redirect lands on: a page that is perfectly healthy and is not the one
+#: that was asked for. Modelled on the observed failure — a policy notice in
+#: front of the booking form, carrying nothing but a way past itself.
+INTERSTITIAL = b"""<!doctype html><title>Please note</title>
+<p>Thank you for your reservation.</p>
+<button>Confirm and continue</button>
+"""
+
 
 class _Recorder(BaseHTTPRequestHandler):
     methods: ClassVar[list[str]] = []
@@ -54,8 +62,19 @@ class _Recorder(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _redirect(self, to: str) -> None:
+        type(self).methods.append(self.command)
+        self.send_response(302)
+        self.send_header("Location", to)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_GET(self) -> None:  # dispatched on by name
-        if self.path == "/api":
+        if self.path == "/moved":
+            self._redirect("/landed")
+        elif self.path == "/landed":
+            self._respond(INTERSTITIAL, "text/html")
+        elif self.path == "/api":
             self._respond(json.dumps({"rows": [{"id": 1, "name": "a"}] * 40}).encode(),
                           "application/json")
         else:
@@ -84,6 +103,59 @@ def site():
     finally:
         server.shutdown()
         server.server_close()
+
+
+# ---------------------------------------------------------------------------
+# Saying where the look actually went
+# ---------------------------------------------------------------------------
+
+
+class TestARedirectIsReported:
+    """The failure this exists for: a clean census of the wrong page.
+
+    A redirect produces a healthy-looking observation — a title, controls, a
+    confident "N/N addressable by name" — describing somewhere the caller never
+    asked about. Nothing in a healthy census separates *this page is simple*
+    from *this is not your page*, so the one signal that does has to be carried
+    explicitly and has to lead, not trail.
+    """
+
+    async def test_the_summary_leads_with_the_redirect(self, site) -> None:
+        observation = await HttpProbe().observe(f"{site}/moved")
+
+        assert observation.summary.startswith("REDIRECTED")
+        assert observation.landed.endswith("/landed")
+        assert observation.target.endswith("/moved")
+        # Named, not merely flagged: "you were redirected" without the
+        # destination leaves the reader where they started.
+        assert observation.landed in observation.summary
+
+    async def test_staying_put_says_nothing(self, site) -> None:
+        """The overwhelming majority of looks, and they must be unchanged —
+        a probe that announces a redirect on every observation has taught the
+        reader to skip the sentence by the time one matters."""
+        observation = await HttpProbe().observe(f"{site}/api")
+
+        assert "REDIRECTED" not in observation.summary
+        assert observation.landed == observation.target
+
+    async def test_the_model_gets_it_as_a_field_too(self, site) -> None:
+        """`landed` is what a caller branches on; the summary is what gets
+        read. Making a consumer parse the prose for it would be the same
+        mistake one layer along."""
+        registry = ProbeRegistry()
+        registry.register(HttpProbe())
+        payload = json.loads(await make_observe_tool(registry).fn(f"{site}/moved"))
+
+        assert payload["landed"].endswith("/landed")
+        assert payload["target"].endswith("/moved")
+
+    async def test_an_unredirected_look_carries_no_landed_key(self, site) -> None:
+        registry = ProbeRegistry()
+        registry.register(HttpProbe())
+        payload = json.loads(await make_observe_tool(registry).fn(f"{site}/api"))
+
+        assert "landed" not in payload
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +275,7 @@ class TestTheAgentSurface:
         names = {t.name for t in build_coding_tools()}
 
         assert "observe_target" not in names
-        assert len(names) == 10
+        assert len(names) == 11
 
     def test_an_empty_registry_means_no_tool(self) -> None:
         """Present-and-always-failing is worse than absent: it spends context

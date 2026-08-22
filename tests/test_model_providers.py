@@ -92,7 +92,7 @@ class TestPricing:
         model = OpenAIProvider(api_key="x").model_name
         usage = Usage(input_tokens=1_000_000, output_tokens=1_000_000)
 
-        assert estimate_cost(model, usage) == pytest.approx(14.00)  # 2.00 + 12.00
+        assert estimate_cost(model, usage) == pytest.approx(2.00)  # 0.20 + 1.80
 
     def test_sibling_models_are_not_given_lunas_price(self) -> None:
         """A sibling is priced from its own published rate or not at all —
@@ -820,3 +820,91 @@ class TestAgentResultsSurviveReplay:
 
         # 60 + 40, not 200.
         assert journal.total_usage().input_tokens == 100
+
+
+class TestOutputCeilingsAreNotFlat:
+    """4096 was a legacy floor, and exceeding it does not fail loudly.
+
+    A model emitting a long tool call spends the ceiling on one argument, never
+    closes the JSON, and the provider drops the unterminated block — so the
+    response arrives empty and a turn loop reads it as nothing to say. Whole
+    authoring jobs died that way, reporting a turn budget that was not the
+    cause.
+    """
+
+    def test_a_current_model_gets_more_than_the_legacy_floor(self) -> None:
+        from loom.agents.providers.anthropic_provider import default_max_tokens
+
+        assert default_max_tokens("claude-sonnet-5") > 4096
+        assert default_max_tokens("claude-opus-5") > 4096
+
+    def test_longest_prefix_wins(self) -> None:
+        from loom.agents.providers.anthropic_provider import default_max_tokens
+
+        assert default_max_tokens("claude-haiku-4-5-20251001") == 16_000
+
+    def test_an_unknown_model_keeps_the_old_default(self) -> None:
+        """Guessing high for a model with no entry gets the request rejected
+        outright rather than truncated, which is a worse failure than the one
+        this table exists to fix."""
+        from loom.agents.providers.anthropic_provider import default_max_tokens
+
+        assert default_max_tokens("some-future-model") == 4096
+
+
+class TestTheAuthoringCeilingDefersToTheModel:
+    """A flat number is right for neither end of the range.
+
+    Too low for a current model and the whole workflow truncates — silently, as
+    an empty response, reported as a turn budget. Too high for an older one and
+    the request is rejected outright. Only the provider knows which it is.
+    """
+
+    def test_a_provider_that_declares_one_wins(self) -> None:
+        import os
+
+        os.environ.setdefault("ANTHROPIC_API_KEY", "test")
+        from loom.agents.coding_agent import authoring_max_tokens
+        from loom.agents.providers.anthropic_provider import NON_STREAMING_LIMIT, AnthropicProvider
+
+        assert authoring_max_tokens(
+            AnthropicProvider("claude-sonnet-5")) == NON_STREAMING_LIMIT
+        # Its real hard limit — raising this would turn a truncation into a 400.
+        assert authoring_max_tokens(AnthropicProvider("claude-3-opus-20240229")) == 8192
+
+    def test_a_provider_that_declares_none_gets_the_floor(self) -> None:
+        """A host's own provider, written before any of this, still gets room
+        for a source file rather than a chat reply."""
+        from loom.agents.coding_agent import AUTHORING_MAX_TOKENS, authoring_max_tokens
+
+        class Bare:
+            model_name = "custom"
+
+        assert authoring_max_tokens(Bare()) == AUTHORING_MAX_TOKENS
+
+
+class TestTheCeilingRespectsTheTransport:
+    """A ceiling above what can be *asked for* is not a bigger budget.
+
+    The SDK refuses a non-streaming request whose `max_tokens` implies a
+    generation that could run past ten minutes — a ValueError raised before
+    anything is sent, so it fails the whole job at turn zero rather than
+    degrading. Measured: 21,333 is accepted and 24,000 is not.
+    """
+
+    def test_a_large_model_is_clamped(self) -> None:
+        from loom.agents.providers.anthropic_provider import (
+            MAX_OUTPUT_TOKENS,
+            NON_STREAMING_LIMIT,
+            default_max_tokens,
+        )
+
+        assert MAX_OUTPUT_TOKENS["claude-sonnet"] > NON_STREAMING_LIMIT
+        assert default_max_tokens("claude-sonnet-5") == NON_STREAMING_LIMIT
+
+    def test_a_model_below_the_limit_is_untouched(self) -> None:
+        """The clamp is a ceiling, not a floor — it must never *raise* a model
+        past its own hard limit, which would turn a truncation into a 400."""
+        from loom.agents.providers.anthropic_provider import default_max_tokens
+
+        assert default_max_tokens("claude-3-opus-20240229") == 8192

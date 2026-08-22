@@ -93,6 +93,8 @@ class ToolsetCatalog:
         self._by_function: dict[str, EffectClass] | None = None
         """Lazy ``@step`` function name → declared effect class. ``None`` means
         not built yet; invalidated on every registration."""
+        self._by_function_manifest: dict[str, ToolsetManifest] | None = None
+        """Lazy ``@step`` function name → the manifest that declares it."""
         self._by_function_op: dict[str, OperationSpec] | None = None
         """Lazy ``@step`` function name → its whole :class:`OperationSpec`,
         which is what :meth:`profile_of` needs. Kept beside ``_by_function``
@@ -103,14 +105,28 @@ class ToolsetCatalog:
     def register(self, manifest: ToolsetManifest, /) -> None:
         """Register a toolset manifest."""
         self._manifests[manifest.id] = manifest
-        self._by_function = None
-        self._by_function_op = None
+        self.invalidate()
 
     def unregister(self, toolset_id: str) -> None:
         """Remove a toolset from the catalog."""
         self._manifests.pop(toolset_id, None)
+        self.invalidate()
+
+    def invalidate(self) -> None:
+        """Drop the derived function indexes. Call after touching ``_manifests``.
+
+        One method rather than the pair of assignments repeated at each write,
+        so a third index cannot be added and forgotten at one of them — and so
+        anything that manipulates the store directly has a supported way to say
+        so. ``tests/conftest.py`` snapshots and restores the process-global
+        catalogue between tests and did exactly that: it put ``_manifests``
+        back and left ``_by_function_op`` holding 358 entries, so a test that
+        registered toolsets leaked their effect classification into every test
+        that ran after it.
+        """
         self._by_function = None
         self._by_function_op = None
+        self._by_function_manifest = None
 
     def effect_of(self, function: str) -> EffectClass | None:
         """Whether a ``@step`` function reads, writes, or destroys.
@@ -160,6 +176,26 @@ class ToolsetCatalog:
         if operation is None:
             return None
         return derive_effect_profile(operation)
+
+    def manifest_of(self, function: str) -> ToolsetManifest | None:
+        """The toolset a ``@step`` function belongs to, or ``None``.
+
+        The reverse of :meth:`effect_of`, one level up: that answers *what* an
+        operation does, this answers *whose* it is — which is what a caller
+        needs to say "jira is not connected" rather than "JIRA_URL is
+        required". Shares the same lazy index, so it costs one dict lookup
+        after the first call.
+
+        Manifest metadata only; no toolset is imported to answer.
+        """
+        if self._by_function_manifest is None:
+            self._by_function_manifest = {
+                operation.function: manifest
+                for manifest in self._manifests.values()
+                for operation in manifest.all_operations()
+                if operation.function
+            }
+        return self._by_function_manifest.get(function)
 
     def get(self, toolset_id: str) -> ToolsetManifest | None:
         """Retrieve a manifest by id."""

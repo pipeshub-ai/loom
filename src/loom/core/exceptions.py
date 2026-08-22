@@ -264,6 +264,31 @@ class OutputValidationError(AgentError):
     """The model's final output failed validation after exhausting output retries."""
 
 
+class OutputTruncated(AgentError):  # noqa: N818 - names the output, not an error class
+    """The model hit its output ceiling before it finished a single response.
+
+    Distinct from :class:`UsageLimitExceeded`, which says a *job* spent what it
+    was allowed. This says one **response** did not fit, and the difference is
+    the whole reason it is a separate class: a turn budget cannot be raised
+    into a fix, and telling somebody to narrow their task sends them to rewrite
+    an input that was never the problem.
+
+    Raised only when the truncated response carried *nothing* — no text and no
+    tool call. A response cut off partway through prose can be continued, and
+    the turn loop still does that. One cut off partway through a tool call
+    cannot: the provider drops the unterminated block, so what arrives is an
+    empty message, and asking the model to "continue" restarts a generation
+    that truncates in exactly the same place. That loop is invisible from
+    outside — it burns turns producing no tokens and surfaces as a turn budget
+    that ran out, which is the one diagnosis that rules out the actual cause.
+    """
+
+    def __init__(self, message: str, *, max_tokens: int | None = None) -> None:
+        super().__init__(message)
+        self.max_tokens = max_tokens
+        """The ceiling that was hit, when the provider reported one."""
+
+
 class ToolNotFound(AgentError):  # noqa: N818
     """The model called a tool that is not registered on the agent."""
 
@@ -329,6 +354,23 @@ class TriggerError(WorkflowError):
 
 class CredentialNotFound(WorkflowError):  # noqa: N818
     """No credential is registered under the requested name."""
+
+
+class MissingCredentials(CredentialNotFound, NonRetryableError):  # noqa: N818
+    """A toolset call failed for want of a credential, said in those terms.
+
+    Raised in place of whatever the client complained about — usually the name
+    of an environment variable, from inside its own constructor — so the
+    failure names the toolset, the provider that issues its credential, and the
+    command that supplies one.
+
+    Two levels rather than a flat ``(WorkflowError, NonRetryableError)``, which
+    has no consistent MRO and fails at import; ``JiraPermanentError`` takes the
+    same shape. Non-retryable because a credential does not appear between two
+    attempts: retried, a three-attempt policy prints the same impossible
+    failure three times and reports ``RetriesExhausted``, which reads as a
+    flaky service rather than an unconfigured one.
+    """
 
 
 class AuthExpired(WorkflowError):  # noqa: N818

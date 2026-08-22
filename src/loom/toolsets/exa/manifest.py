@@ -18,6 +18,8 @@ from pydantic import BaseModel
 
 from loom.toolsets.exa.models import ExaAnswer, ExaContents, ExaResult
 from loom.toolsets.manifest import (
+    AuthField,
+    AuthSpec,
     EffectClass,
     OperationSpec,
     ToolsetManifest,
@@ -44,7 +46,17 @@ EXA_MANIFEST = ToolsetManifest(
         "Narrow the query or use include/exclude domains instead."
     ),
     base_url="https://api.exa.ai",
-    auth={"type": "api_key", "fields": ["EXA_API_KEY"], "header": "x-api-key"},
+    auth=AuthSpec(
+        client="loom.toolsets.exa.client:ExaClient",
+        # This client reads environment variables and no CredentialStore, so
+        # `credential` is empty and no `provider` is declared: an OAuth flow
+        # here would store a token the client never looks up. Adding a store
+        # path is a change to the client, not to this manifest.
+        kind="api_key",
+        fields=(
+            AuthField(name="EXA_API_KEY", arg="api_key", label="API key"),
+        ),
+    ),
     tools_module="loom.toolsets.exa.tools",
     egress_hosts=["api.exa.ai"],
     rate_limits={

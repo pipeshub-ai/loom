@@ -29,6 +29,8 @@ from typing import Any, Protocol, runtime_checkable
 from loom.core.exceptions import WorkflowError
 
 __all__ = [
+    "BACKEND_VAR",
+    "CREDENTIAL_BACKENDS",
     "DecryptionError",
     "EnvKeyProvider",
     "Envelope",
@@ -37,6 +39,7 @@ __all__ = [
     "KeyringKeyProvider",
     "atomic_write_bytes",
     "default_key_provider",
+    "selected_backend",
 ]
 
 
@@ -84,10 +87,23 @@ class KeyProvider(Protocol):
 
 
 class EnvKeyProvider:
-    """Reads a base64 Fernet key from an environment variable.
+    """Reads base64 Fernet key(s) from an environment variable.
 
     The escape hatch for CI and containers: no keyring, no local file, one
     key supplied by whatever already manages secrets there.
+
+    **One key, or a comma-separated list for rotation.** :class:`Envelope`
+    builds a ``MultiFernet``, which encrypts with the first key and decrypts
+    with any of them, so ``LOOM_CREDENTIAL_KEY=<new>,<old>`` reads a store
+    written under the old key and re-encrypts it under the new one on the next
+    write. That is what makes moving *off* another key source possible at all:
+    the alternative is reaching for the previous source to decrypt, which for
+    the keyring means the modal prompt an explicit key was set to avoid.
+
+    Keys are validated here rather than at first decrypt. A malformed one
+    otherwise surfaces as "could not decrypt with any known key", which reads
+    as a corrupt store rather than as a typo in a variable — and with a list,
+    says nothing about *which* entry is wrong.
     """
 
     def __init__(self, var: str = "LOOM_CREDENTIAL_KEY") -> None:
@@ -97,7 +113,24 @@ class EnvKeyProvider:
         value = os.environ.get(self._var)
         if not value:
             raise LookupError(f"{self._var} is not set")
-        return [value.encode("ascii")]
+
+        found = [part.strip().encode("ascii") for part in value.split(",") if part.strip()]
+        if not found:
+            raise LookupError(f"{self._var} is set but names no key")
+
+        fernet = _fernet_module()
+        for position, key in enumerate(found, 1):
+            try:
+                fernet.Fernet(key)
+            except Exception as exc:
+                # Never the key itself: this message reaches logs and CI output.
+                where = f"key {position} of {self._var}" if len(found) > 1 else self._var
+                raise DecryptionError(
+                    f"{where} is not a valid Fernet key. Generate one with "
+                    "`python -c \"from cryptography.fernet import Fernet; "
+                    'print(Fernet.generate_key().decode())"`.'
+                ) from exc
+        return found
 
     def __repr__(self) -> str:
         return f"<EnvKeyProvider {self._var}>"
@@ -213,27 +246,92 @@ class Envelope:
         try:
             return self._cipher().decrypt(ciphertext)  # type: ignore[no-any-return]
         except _fernet_module().InvalidToken as exc:
+            # Naming the key *source* rather than only "the key changed": the
+            # common cause is a deployment that has just pinned one, and the
+            # store in front of it was written under the previous source. That
+            # is recoverable without losing anything, but only if the message
+            # says how — so it does, before suggesting the lossy path.
             raise DecryptionError(
                 "could not decrypt the credential store with any known key. "
-                "The encryption key may have changed, or the file is "
-                "corrupt. Re-run 'loom login'."
+                f"The key source may have changed (see {BACKEND_VAR} and "
+                "LOOM_CREDENTIAL_KEY), or the file is corrupt. If you still "
+                "have the previous key, set LOOM_CREDENTIAL_KEY=<new>,<old> "
+                "to read it and re-encrypt on the next write. Otherwise the "
+                "store has to be rebuilt: 'loom connect <name>'."
             ) from exc
 
     def __repr__(self) -> str:
         return f"<Envelope {self._key_provider!r}>"
 
 
-def default_key_provider(*, app_dir: Path | str) -> KeyProvider:
+#: What ``LOOM_CREDENTIAL_BACKEND`` accepts. Named here so the refusal can list
+#: them and a test can assert the refusal lists all of them.
+CREDENTIAL_BACKENDS = ("auto", "env", "keyring", "file")
+
+#: The variable that pins one. Unset means :data:`auto`.
+BACKEND_VAR = "LOOM_CREDENTIAL_BACKEND"
+
+
+def selected_backend() -> str:
+    """Which backend :func:`default_key_provider` will use, without building it.
+
+    Split out so a reporter — ``loom doctor`` — can say where the key comes
+    from without *opening the store*. Reading it is what may raise a keychain
+    dialog, and a diagnostic that hangs on a modal is worse than no diagnostic.
+    """
+    value = (os.environ.get(BACKEND_VAR) or "auto").strip().lower()
+    if value not in CREDENTIAL_BACKENDS:
+        from loom.core.exceptions import ConfigurationError
+
+        raise ConfigurationError(
+            f"{BACKEND_VAR}={value!r} is not a credential backend. "
+            f"Use one of: {', '.join(CREDENTIAL_BACKENDS)}."
+        )
+    return value
+
+
+def default_key_provider(
+    *, app_dir: Path | str, service: str = "loom-credential-store"
+) -> KeyProvider:
     """The priority order from the plan's corner cases, in one place.
+
+    Under ``auto`` — the default, and what every deployment that sets nothing
+    gets:
 
     1. ``LOOM_CREDENTIAL_KEY`` — explicit, portable, what CI and containers use.
     2. The OS keyring — the default for an interactive ``loom login``.
     3. A generated file under *app_dir*, machine-local, with a loud warning.
+
+    ``LOOM_CREDENTIAL_BACKEND`` pins one instead, and a pinned backend **never
+    degrades to another** — the rule ``SandboxPolicy`` follows for a limit it
+    cannot enforce. ``keyring`` on a locked machine raises rather than quietly
+    writing a key file, because an operator who named a backend has said where
+    the key may live, and silently putting it somewhere else is the failure the
+    setting exists to prevent.
+
+    ``file`` is the answer to a keychain that prompts. macOS binds an item's
+    ACL to the binary that created it, so a different interpreter re-asks for
+    the login password — and a modal dialog is not an exception this code can
+    catch, it simply blocks. The trade is real and
+    :class:`GeneratedFileKeyProvider` warns about it: the key then sits beside
+    the ciphertext, so encryption at rest stops anyone who has neither file and
+    nobody who has both.
     """
+    backend = selected_backend()
+    directory = Path(app_dir)
+
+    if backend == "env":
+        return EnvKeyProvider()
+    if backend == "file":
+        return GeneratedFileKeyProvider(directory / "credentials.key")
+    if backend == "keyring":
+        # No fallback, deliberately — see the docstring.
+        return KeyringKeyProvider(service=service)
+
     if os.environ.get("LOOM_CREDENTIAL_KEY"):
         return EnvKeyProvider()
-    fallback = GeneratedFileKeyProvider(Path(app_dir) / "credentials.key")
-    return KeyringKeyProvider(fallback=fallback)
+    fallback = GeneratedFileKeyProvider(directory / "credentials.key")
+    return KeyringKeyProvider(service=service, fallback=fallback)
 
 
 def atomic_write_bytes(path: Path | str, data: bytes, *, mode: int = 0o600) -> None:

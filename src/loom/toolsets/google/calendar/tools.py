@@ -19,6 +19,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from loom import Retry, step
+from loom.toolsets.google.calendar.client import CalendarClient
 from loom.toolsets.google.calendar.models import (
     BusyPeriod,
     CalendarAccessRule,
@@ -74,9 +75,9 @@ async def calendar_list_calendars() -> Results[CalendarSummary]:
         List of CalendarSummary with id, summary, time_zone, primary,
         access_role. The id is what every other tool takes as calendar_id.
     """
-    from loom.toolsets.google.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_calendars()
+    return await (await client_for("google_calendar", CalendarClient)).list_calendars()
 
 
 @step(retry=_READ)
@@ -100,9 +101,9 @@ async def calendar_list_events(
         List of CalendarEvent ordered by start time, with id, summary, start,
         end, all_day, location, attendees, organizer, url.
     """
-    from loom.toolsets.google.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_events(
+    return await (await client_for("google_calendar", CalendarClient)).list_events(
         calendar_id, time_min, time_max, query, max_results
     )
 
@@ -120,9 +121,10 @@ async def calendar_get_event(
     Returns:
         CalendarEvent.
     """
-    from loom.toolsets.google.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_event(event_id, calendar_id)
+    client = await client_for("google_calendar", CalendarClient)
+    return await client.get_event(event_id, calendar_id)
 
 
 @step(retry=_CREATE)
@@ -168,9 +170,9 @@ async def calendar_create_event(
         The created CalendarEvent, including its id, url, and hangout_link when
         add_meet was set.
     """
-    from loom.toolsets.google.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_event(
+    return await (await client_for("google_calendar", CalendarClient)).create_event(
         summary,
         start,
         end,
@@ -200,9 +202,9 @@ async def calendar_add_meet_link(
         The updated CalendarEvent, with hangout_link populated. A second call
         reuses the same conference rather than provisioning another.
     """
-    from loom.toolsets.google.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().add_meet_link(
+    return await (await client_for("google_calendar", CalendarClient)).add_meet_link(
         event_id, calendar_id=calendar_id
     )
 
@@ -231,9 +233,9 @@ async def calendar_list_event_instances(
         Results[CalendarEvent], one per occurrence. Each has its own id, which
         is what update and delete take.
     """
-    from loom.toolsets.google.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_event_instances(
+    return await (await client_for("google_calendar", CalendarClient)).list_event_instances(
         event_id,
         calendar_id=calendar_id,
         time_min=time_min,
@@ -261,9 +263,9 @@ async def calendar_move_event(
         The moved CalendarEvent. Deleting and recreating instead would drop
         every RSVP and re-invite everyone.
     """
-    from loom.toolsets.google.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().move_event(
+    return await (await client_for("google_calendar", CalendarClient)).move_event(
         event_id,
         destination_calendar_id,
         calendar_id=calendar_id,
@@ -291,9 +293,9 @@ async def calendar_respond_to_event(
         The updated CalendarEvent. Raises if this account is not an attendee —
         an organiser edits the event with calendar_update_event instead.
     """
-    from loom.toolsets.google.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().respond_to_event(
+    return await (await client_for("google_calendar", CalendarClient)).respond_to_event(
         event_id, response, calendar_id=calendar_id, comment=comment
     )
 
@@ -318,9 +320,9 @@ async def calendar_update_event(
     Returns:
         The updated CalendarEvent.
     """
-    from loom.toolsets.google.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().update_event(
+    return await (await client_for("google_calendar", CalendarClient)).update_event(
         event_id, fields, calendar_id=calendar_id, send_updates=send_updates
     )
 
@@ -341,9 +343,9 @@ async def calendar_delete_event(
     Returns:
         The deleted event id, so the journal records what was removed.
     """
-    from loom.toolsets.google.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    await get_default_client().delete_event(
+    await (await client_for("google_calendar", CalendarClient)).delete_event(
         event_id, calendar_id=calendar_id, send_updates=send_updates
     )
     return event_id
@@ -363,9 +365,10 @@ async def calendar_quick_add_event(
         The created CalendarEvent — check its start/end, since the parse is
         Google's and is not always what the phrase implied.
     """
-    from loom.toolsets.google.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().quick_add_event(text, calendar_id)
+    client = await client_for("google_calendar", CalendarClient)
+    return await client.quick_add_event(text, calendar_id)
 
 
 @step(retry=_READ)
@@ -385,9 +388,10 @@ async def calendar_find_busy_periods(
         List of BusyPeriod with calendar_id, start, end. Free time is the gaps
         between them; compute that in the workflow body, which is deterministic.
     """
-    from loom.toolsets.google.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().free_busy(time_min, time_max, calendar_ids)
+    client = await client_for("google_calendar", CalendarClient)
+    return await client.free_busy(time_min, time_max, calendar_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -407,9 +411,9 @@ async def calendar_get_calendar(calendar_id: str = "primary") -> CalendarSummary
         event created without an explicit one is interpreted in, so read it
         before scheduling "9am".
     """
-    from loom.toolsets.google.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_calendar(calendar_id)
+    return await (await client_for("google_calendar", CalendarClient)).get_calendar(calendar_id)
 
 
 @step(retry=_READ)
@@ -428,9 +432,9 @@ async def calendar_find_calendar(calendar_name: str) -> CalendarSummary | None:
         The CalendarSummary, or None when nothing matches. ``"primary"`` needs
         no resolution — it is accepted everywhere as-is.
     """
-    from loom.toolsets.google.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().find_calendar(calendar_name)
+    return await (await client_for("google_calendar", CalendarClient)).find_calendar(calendar_name)
 
 
 @step(retry=_CREATE)
@@ -447,9 +451,9 @@ async def calendar_create_calendar(
     Returns:
         The created CalendarSummary, including the id other tools take.
     """
-    from loom.toolsets.google.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_calendar(
+    return await (await client_for("google_calendar", CalendarClient)).create_calendar(
         summary, time_zone=time_zone, description=description
     )
 
@@ -468,9 +472,9 @@ async def calendar_delete_calendar(calendar_id: str) -> str:
     Returns:
         The deleted calendar id, so the journal records what was removed.
     """
-    from loom.toolsets.google.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    await get_default_client().delete_calendar(calendar_id)
+    await (await client_for("google_calendar", CalendarClient)).delete_calendar(calendar_id)
     return calendar_id
 
 
@@ -488,9 +492,10 @@ async def calendar_list_acl(
         Results[CalendarAccessRule] with id, scope_type, scope_value, role.
         The id is what ``calendar_unshare_calendar`` takes.
     """
-    from loom.toolsets.google.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_acl(calendar_id, max_results)
+    client = await client_for("google_calendar", CalendarClient)
+    return await client.list_acl(calendar_id, max_results)
 
 
 @step(retry=_WRITE)
@@ -518,9 +523,9 @@ async def calendar_share_calendar(
     Returns:
         The created CalendarAccessRule, including its id.
     """
-    from loom.toolsets.google.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().share_calendar(
+    return await (await client_for("google_calendar", CalendarClient)).share_calendar(
         calendar_id, email=email, role=role, scope_type=scope_type, domain=domain
     )
 
@@ -537,9 +542,10 @@ async def calendar_unshare_calendar(calendar_id: str, rule_id: str) -> str:
     Returns:
         The revoked rule id.
     """
-    from loom.toolsets.google.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    await get_default_client().unshare_calendar(calendar_id, rule_id)
+    client = await client_for("google_calendar", CalendarClient)
+    await client.unshare_calendar(calendar_id, rule_id)
     return rule_id
 
 

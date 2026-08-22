@@ -1272,7 +1272,7 @@ class TestManifestsDeclareWhatTheyRead:
     def test_every_microsoft_manifest_declares_the_shared_credentials(self) -> None:
         missing = {}
         for manifest in self._microsoft_manifests():
-            absent = self.SHARED - set(manifest.auth.get("fields", []))
+            absent = self.SHARED - set(manifest.auth.field_names)
             if absent:
                 missing[manifest.id] = sorted(absent)
         assert not missing, f"manifests omit credentials the auth layer reads: {missing}"

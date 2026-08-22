@@ -969,7 +969,10 @@ class TestMechanicalFixesCostNoModelCall:
 
         from loom.agents.coding_agent import WorkflowCodingAgent
 
-        source = inspect.getsource(WorkflowCodingAgent.generate)
+        # `_generate` rather than `generate`: the latter is now a wrapper whose
+        # only job is a `finally` that closes the authoring browser however the
+        # job returns. The body — and the ordering this asserts — moved with it.
+        source = inspect.getsource(WorkflowCodingAgent._generate)
 
         assert source.index("tidy(code)") < source.index("self._pipeline.run")
 
@@ -1427,6 +1430,7 @@ class TestCostAccounting:
             "claude-opus-5",
             "claude-sonnet-5",
             "claude-haiku-4-5",
+            "gpt-5.6-luna",
             "gpt-5.6-terra",
             "gemini-2.5-pro",
         ):

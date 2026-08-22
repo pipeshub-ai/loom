@@ -19,7 +19,7 @@ point of the phase:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -40,6 +40,7 @@ from loom.identity.principal import ServicePrincipal
 from loom.runtime.dispatcher import TriggerDispatcher
 from loom.stores.memory import MemoryStore
 from loom.toolsets.confluence.client import ConfluenceClient
+from loom.toolsets.factory import StoreTokenSource
 from loom.toolsets.google.auth import GoogleAuth, GoogleCredentials
 from loom.toolsets.google.errors import GoogleAuthError
 from loom.toolsets.jira.client import JiraClient
@@ -139,24 +140,54 @@ class TestJiraClientCredentials:
         assert headers["Authorization"].startswith("Basic ")
 
     async def test_prefers_a_stored_credential_over_basic_auth(self) -> None:
-        client = JiraClient(base_url="https://x.atlassian.net", email="a@b.c", api_token="t")
+        """The token source is now passed in — `client_for` supplies exactly
+        this one, built from `AuthSpec.credential`. The client no longer reaches
+        a process-wide contextvar from inside its own request path."""
+        client = JiraClient(
+            base_url="https://x.atlassian.net", email="a@b.c", api_token="t",
+            token_source=StoreTokenSource("jira"),
+        )
         store = MemoryCredentialStore()
         await store.put("jira", _cred("bearer-tok"))
         with credential_store_scope(store):
             headers = await client._headers()
         assert headers["Authorization"] == "Bearer bearer-tok"
 
-    async def test_construction_defers_when_a_store_might_cover_it(self) -> None:
-        """No email/token, but a store is bound — construction must not raise
-        eagerly, since whether it actually has 'jira' can only be known with
-        an await, at first real call."""
-        with credential_store_scope(MemoryCredentialStore()):
-            client = JiraClient(base_url="https://x.atlassian.net")
-        assert client._credential_name == "jira"
+    async def test_it_is_read_per_request_not_cached(self) -> None:
+        """The property that kept the store out of the resolution chain: a run
+        parked two hours on an approval, whose token was refreshed meanwhile,
+        must not still be sending the one current when it was built."""
+        client = JiraClient(
+            base_url="https://x.atlassian.net",
+            token_source=StoreTokenSource("jira"),
+        )
+        store = MemoryCredentialStore()
+        await store.put("jira", _cred("first"))
+        with credential_store_scope(store):
+            first = await client._headers()
+            await store.put("jira", _cred("second"))
+            second = await client._headers()
 
-    async def test_construction_still_raises_with_nothing_configured_at_all(self) -> None:
-        with pytest.raises(ValueError, match="JIRA_EMAIL"):
-            JiraClient(base_url="https://x.atlassian.net")
+        assert first["Authorization"] == "Bearer first"
+        assert second["Authorization"] == "Bearer second"
+
+    async def test_construction_defers_when_a_token_source_might_cover_it(self) -> None:
+        """No email/token, but a source is supplied — whether it actually holds
+        anything can only be known with an await, so construction cannot decide
+        and does not try."""
+        client = JiraClient(
+            base_url="https://x.atlassian.net",
+            token_source=StoreTokenSource("jira"),
+        )
+        assert client._token_source is not None
+
+    async def test_the_first_request_raises_with_nothing_configured_at_all(self) -> None:
+        """Moved from construction to first use, because that is where the
+        answer becomes knowable. Still local, still naming the fix."""
+        client = JiraClient(base_url="https://x.atlassian.net")
+
+        with pytest.raises(ValueError, match="loom connect jira"):
+            await client._headers()
 
     async def test_headers_raise_when_the_deferred_store_has_nothing_either(self) -> None:
         with credential_store_scope(MemoryCredentialStore()):
@@ -164,12 +195,14 @@ class TestJiraClientCredentials:
             with pytest.raises(ValueError, match="JIRA_EMAIL"):
                 await client._headers()
 
-    async def test_custom_credential_name_is_respected(self) -> None:
+    async def test_a_different_store_key_is_respected(self) -> None:
+        """`credential_name=` was a constructor argument the client used to
+        resolve for itself. Naming the key is the *source's* job now."""
         client = JiraClient(
             base_url="https://x.atlassian.net",
             email="a@b.c",
             api_token="t",
-            credential_name="jira-prod",
+            token_source=StoreTokenSource("jira-prod"),
         )
         store = MemoryCredentialStore()
         await store.put("jira-prod", _cred("prod-tok"))
@@ -599,3 +632,167 @@ class TestServiceIdentity:
         record = await rt.get(run_id)
         assert record is not None
         assert PRINCIPAL_KEY not in record.metadata
+
+
+class TestAnOAuthTokenGoesToAtlassiansOwnHost:
+    """The failure a green suite did not see.
+
+    Atlassian is explicit: *"Requests that use OAuth 2.0 (3LO) are made via
+    api.atlassian.com (not https://your-domain.atlassian.net)"*. Sent to the
+    site host, a perfectly good 3LO token is rejected with `401 Client must be
+    authenticated to access this resource` — which reads as a bad token, so the
+    obvious response is to connect again, get another good token, and see the
+    same 401. Observed exactly that, three `connect_toolset` calls deep.
+
+    Nothing here had ever covered it: `api.atlassian.com` appeared nowhere in
+    the client, and every test drove the request path with basic auth.
+    """
+
+    @staticmethod
+    def _client(token: str | None):
+        class Source:
+            async def token(self) -> str | None:
+                return token
+
+        return JiraClient(
+            base_url="https://acme.atlassian.net",
+            email="a@b.c", api_token="t",
+            token_source=Source() if token else None,
+        )
+
+    async def test_a_bearer_token_uses_the_cloud_id_host(self) -> None:
+        client = self._client("bearer-tok")
+        client._cloud = "cloud-123"
+        headers = await client._headers()
+
+        root = await client._api_root(headers)
+
+        assert root == "https://api.atlassian.com/ex/jira/cloud-123"
+
+    async def test_basic_auth_stays_on_the_site_host(self) -> None:
+        """The inverse, and equally load-bearing: basic auth works against the
+        site and *not* against api.atlassian.com, so the host has to follow the
+        credential rather than be configured once."""
+        client = self._client(None)
+        headers = await client._headers()
+
+        assert await client._api_root(headers) == "https://acme.atlassian.net"
+
+    async def test_the_site_is_matched_rather_than_guessed(self) -> None:
+        """A token valid for several sites must not resolve to whichever came
+        back first — writing an issue into the wrong Jira is not something a
+        retry undoes.
+
+        Tested against `loom.toolsets.atlassian` rather than through a client:
+        the rule is the provider's and is shared with Confluence, so it is one
+        implementation and belongs in one test."""
+        import httpx
+
+        from loom.toolsets.atlassian import resolve_cloud_id
+
+        sites = [
+            {"id": "other-1", "url": "https://other.atlassian.net"},
+            {"id": "acme-2", "url": "https://acme.atlassian.net"},
+        ]
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/oauth/token/accessible-resources"
+            return httpx.Response(200, json=sites)
+
+        original = httpx.AsyncClient
+        try:
+            httpx.AsyncClient = lambda **kw: original(  # type: ignore[misc]
+                transport=httpx.MockTransport(handler), **kw)
+            resolved = await resolve_cloud_id(
+                "Bearer bearer-tok", site_url="https://acme.atlassian.net"
+            )
+        finally:
+            httpx.AsyncClient = original  # type: ignore[misc]
+
+        assert resolved == "acme-2"
+
+    async def test_a_single_site_needs_no_match(self) -> None:
+        """The common case: one token, one site, nothing configured to match
+        against. Falling back to the first is right there and wrong only when
+        several exist — which is why the fallback is second, not first."""
+        import httpx
+
+        from loom.toolsets.atlassian import resolve_cloud_id
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=[{"id": "only-1", "url": "https://x.net"}])
+
+        original = httpx.AsyncClient
+        try:
+            httpx.AsyncClient = lambda **kw: original(  # type: ignore[misc]
+                transport=httpx.MockTransport(handler), **kw)
+            assert await resolve_cloud_id("Bearer t") == "only-1"
+        finally:
+            httpx.AsyncClient = original  # type: ignore[misc]
+
+    async def test_the_lookup_happens_once_per_client(self) -> None:
+        """Caching is the *client's* half — the shared resolver is stateless,
+        and the cache is per client, which is now per run rather than per
+        process."""
+        client = self._client("bearer-tok")
+        client._cloud = "already-known"
+
+        root = await client._api_root({"Authorization": "Bearer x"})
+
+        assert root.endswith("/already-known")
+
+
+class TestAnIssueLinkPointsWhereAPersonCanRead:
+    """A link built from the *request* host, which is not always the site.
+
+    Jira echoes the request host in each response's `self` field, and
+    `_flatten_issue` used to slice the browse URL out of it. That is the site
+    host under Basic auth and `api.atlassian.com/ex/jira/{cloudId}` under 3LO —
+    so every issue came back linked to an API endpoint. It read as correct for
+    as long as the two hosts were the same thing, which stopped being true the
+    moment OAuth started working.
+    """
+
+    RAW: ClassVar[dict] = {
+        "key": "PA-1786",
+        "id": "10001",
+        "self": "https://api.atlassian.com/ex/jira/cloud-123/rest/api/3/issue/10001",
+        "fields": {"summary": "User Group Permissions"},
+    }
+
+    def test_the_site_wins_over_the_response_host(self) -> None:
+        from loom.toolsets.jira.client import _flatten_issue
+
+        issue = _flatten_issue(self.RAW, (), "https://pipeshub.atlassian.net")
+
+        assert issue.url == "https://pipeshub.atlassian.net/browse/PA-1786"
+
+    def test_a_trailing_slash_does_not_double(self) -> None:
+        """`JIRA_URL` is routinely set with one — the observed value had it."""
+        from loom.toolsets.jira.client import _flatten_issue
+
+        issue = _flatten_issue(self.RAW, (), "https://pipeshub.atlassian.net/")
+
+        assert issue.url == "https://pipeshub.atlassian.net/browse/PA-1786"
+
+    def test_without_a_site_it_still_produces_a_link(self) -> None:
+        """Degrades to the old behaviour rather than to a bare path: a caller
+        that forgets should get a wrong link, not a broken one."""
+        from loom.toolsets.jira.client import _flatten_issue
+
+        issue = _flatten_issue(self.RAW)
+
+        assert issue.url.endswith("/browse/PA-1786")
+        assert issue.url.startswith("https://")
+
+    async def test_a_search_threads_the_site_through(self) -> None:
+        """The path that produced the observed output: `row=` is a lambda, and
+        an argument added to the flattener and not to the lambda is a change
+        that passes its own unit test and fixes nothing."""
+        import inspect
+
+        from loom.toolsets.jira.client import JiraClient
+
+        source = inspect.getsource(JiraClient.search_issues)
+
+        assert "_flatten_issue(data, requested, self._base_url)" in source

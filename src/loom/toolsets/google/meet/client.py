@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
     from loom.toolsets.google.auth import GoogleAuth
 
-__all__ = ["MeetClient", "flatten_space", "get_default_client"]
+__all__ = ["MeetClient", "flatten_space"]
 
 API_BASE = "https://meet.googleapis.com/v2"
 SCOPES = [
@@ -367,18 +367,4 @@ def _transcript_path(name: str) -> str:
 # Process-wide default
 # ---------------------------------------------------------------------------
 
-_default_client: MeetClient | None = None
 
-
-def get_default_client() -> MeetClient:
-    """Return (or build) the module-level client from environment credentials."""
-    global _default_client
-    if _default_client is None:
-        _default_client = MeetClient()
-    return _default_client
-
-
-def reset_default_client() -> None:
-    """Drop the cached client. For tests, and after a credential change."""
-    global _default_client
-    _default_client = None

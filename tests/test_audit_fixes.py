@@ -202,8 +202,13 @@ class TestUnifiedRegistry:
         rt = Runtime(store=MemoryStore())
         rt.toolsets.register(Toolset.from_steps("tickets", [search_tickets]))
 
+        # First, not only. Search reaches the built-in tier as well now, and
+        # "tickets" is a word HubSpot's summary uses — so what this asserts is
+        # that a Runtime's own registration is found and ranks ahead of a
+        # shipped toolset that merely mentions the term. See
+        # tests/test_toolset_discovery.py for the tier rules.
         cards = rt.toolsets.search("tickets")
-        assert [c.toolset_id for c in cards] == ["tickets"]
+        assert cards[0].toolset_id == "tickets"
 
     def test_effect_filter_can_withhold_destructive_tools(self) -> None:
         from loom.agents.tool_registry import Toolset

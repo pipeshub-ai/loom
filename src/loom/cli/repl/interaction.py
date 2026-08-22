@@ -46,9 +46,17 @@ class PromptUserInteraction:
         if not self.available():
             return await self._plain.ask(questions)
         try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(self._ask_sync, questions), self._timeout
-            )
+            # Nothing else may paint while a full-screen dialog is up.
+            # `ProgressRenderer` keeps a `rich` live region on this same stderr
+            # and redraws it on its own timer from the main thread, while the
+            # dialog runs in a worker thread — so both wrote at once, and the
+            # dialog came up with scrollback bleeding through it.
+            from loom.cli.progress import suspend
+
+            with suspend():
+                return await asyncio.wait_for(
+                    asyncio.to_thread(self._ask_sync, questions), self._timeout
+                )
         except TimeoutError:
             # Cancel, never decline: nobody chose anything. The two lead to
             # different fallbacks, and conflating them is what made a
@@ -71,12 +79,16 @@ class PromptUserInteraction:
         return answers
 
     def _one(self, question: Question, index: int, total: int) -> Answer:
-        self._headline(question, index, total)
         if question.kind == "confirm" or not question.choices:
             # A free-text or yes/no answer is a line of input, which is what
-            # the plain implementation already reads correctly.
+            # the plain implementation already reads correctly — and which
+            # shows nothing itself, so it needs the headline printed above it.
+            self._headline(question, index, total)
             return self._plain._one(question)
-        return self._choose(question)
+        # The dialog draws the question itself, over the whole screen. Printing
+        # it first put it on screen twice — once in the box and once in the
+        # scrollback showing through it.
+        return self._choose(question, index, total)
 
     def _headline(self, question: Question, index: int, total: int) -> None:
         from prompt_toolkit import HTML, print_formatted_text
@@ -98,7 +110,7 @@ class PromptUserInteraction:
                 output=output,
             )
 
-    def _choose(self, question: Question) -> Answer:
+    def _choose(self, question: Question, index: int = 1, total: int = 1) -> Answer:
         from prompt_toolkit.shortcuts import radiolist_dialog
 
         shown = question.ordered()
@@ -109,10 +121,19 @@ class PromptUserInteraction:
         if question.allow_other:
             values.append((_OTHER, "Other — type your own answer"))
 
+        # Everything the headline used to print, inside the box. The dialog
+        # covers the screen, so anything left outside it is either hidden or
+        # showing through — and the context sentence is the half that says why
+        # the question is being asked at all.
+        counter = f"[{index}/{total}] " if total > 1 else ""
+        text = counter + question.question
+        if question.context:
+            text += f"\n\n{question.context}"
+
         recommended = question.recommended()
         picked = radiolist_dialog(
-            title="loom",
-            text=question.question,
+            title=f" loom · {question.header} " if question.header else " loom ",
+            text=text,
             values=values,
             default=recommended.value if recommended is not None else values[0][0],
         ).run()

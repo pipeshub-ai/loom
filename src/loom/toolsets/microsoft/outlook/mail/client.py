@@ -26,7 +26,6 @@ from loom.toolsets.microsoft.auth import (
     GRAPH_BASE_URL,
     MicrosoftAuth,
     get_default_auth,
-    graph_base_url,
 )
 from loom.toolsets.microsoft.errors import GraphPermanentError
 from loom.toolsets.microsoft.http import GraphSession
@@ -44,7 +43,7 @@ if TYPE_CHECKING:
 
     from loom.blobs.attachment import Attachment
 
-__all__ = ["MESSAGE_FIELDS", "OutlookMailClient", "get_default_client", "reset_default_client"]
+__all__ = ["MESSAGE_FIELDS", "OutlookMailClient"]
 
 #: What every message read projects. Named explicitly rather than left to
 #: Graph's default because the reference warns that returning full payloads at a
@@ -396,21 +395,4 @@ def _compose(
 # Process-wide default
 # ---------------------------------------------------------------------------
 
-_default: OutlookMailClient | None = None
 
-
-def get_default_client() -> OutlookMailClient:
-    """Return the process-wide client, building it on first use."""
-    global _default
-    if _default is None:
-        import os
-
-        _default = OutlookMailClient(            base_url=graph_base_url(),
-user_id=os.environ.get("MS_OUTLOOK_USER", ""))
-    return _default
-
-
-def reset_default_client() -> None:
-    """Drop the process-wide client. For tests, and for a credential rotation."""
-    global _default
-    _default = None

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -90,9 +91,21 @@ def _use_memory_store(
 @pytest.fixture(autouse=True)
 def _no_real_browser(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Every test gets a browser that never actually opens — ``webbrowser.open``
-    calls are recorded here instead."""
+    calls are recorded here instead.
+
+    Patched on ``webbrowser`` itself rather than through ``auth_commands``,
+    which no longer imports it: the flows moved to
+    ``loom.connectors.flows`` so the session, the MCP server and the coding
+    agent could reach them. Patching the module is what the old line did
+    anyway — ``monkeypatch.setattr(auth_commands.webbrowser, ...)`` reached the
+    shared module object, not a copy — so this is the same patch said
+    accurately. It works because ``flows.open_in_browser`` looks the attribute
+    up when called rather than binding it at import.
+    """
+    import webbrowser
+
     opened: list[str] = []
-    monkeypatch.setattr(auth_commands.webbrowser, "open", lambda url: opened.append(url))
+    monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url))
     return opened
 
 
@@ -111,26 +124,26 @@ def _clean_redirect_port_env(monkeypatch: pytest.MonkeyPatch) -> None:
 class TestIsHeadless:
     def test_the_override_env_var_always_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("LOOM_LOGIN_HEADLESS", "1")
-        monkeypatch.setattr(auth_commands.sys, "platform", "darwin")
+        monkeypatch.setattr(sys, "platform", "darwin")
         assert auth_commands._is_headless() is True
 
     def test_macos_is_never_headless_by_detection(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("LOOM_LOGIN_HEADLESS", raising=False)
         monkeypatch.delenv("DISPLAY", raising=False)
-        monkeypatch.setattr(auth_commands.sys, "platform", "darwin")
+        monkeypatch.setattr(sys, "platform", "darwin")
         assert auth_commands._is_headless() is False
 
     def test_linux_with_no_display_is_headless(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("LOOM_LOGIN_HEADLESS", raising=False)
         monkeypatch.delenv("DISPLAY", raising=False)
         monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
-        monkeypatch.setattr(auth_commands.sys, "platform", "linux")
+        monkeypatch.setattr(sys, "platform", "linux")
         assert auth_commands._is_headless() is True
 
     def test_linux_with_a_display_is_not_headless(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("LOOM_LOGIN_HEADLESS", raising=False)
         monkeypatch.setenv("DISPLAY", ":0")
-        monkeypatch.setattr(auth_commands.sys, "platform", "linux")
+        monkeypatch.setattr(sys, "platform", "linux")
         assert auth_commands._is_headless() is False
 
 

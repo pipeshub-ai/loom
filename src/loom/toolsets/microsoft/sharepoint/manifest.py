@@ -6,7 +6,13 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from loom.toolsets.manifest import EffectClass, OperationSpec, ToolsetManifest
+from loom.toolsets.manifest import (
+    AuthField,
+    AuthSpec,
+    EffectClass,
+    OperationSpec,
+    ToolsetManifest,
+)
 from loom.toolsets.microsoft.models import Drive, DriveItem, SharingLink
 from loom.toolsets.microsoft.sharepoint.models import (
     ListColumn,
@@ -36,26 +42,44 @@ SHAREPOINT_MANIFEST = ToolsetManifest(
         "name is accepted and silently sets nothing."
     ),
     base_url="https://graph.microsoft.com/v1.0",
-    auth={
-        "type": "oauth2",
-        "fields": [
-            "MS_TENANT_ID",
-            "MS_CLIENT_ID",
-            "MS_CLIENT_SECRET",
-            "MS_REFRESH_TOKEN",
-            "MS_GRAPH_ACCESS_TOKEN",
-            # Read by the shared auth layer, so declared here: the Azure SDK
-            # trio is what a host already has in its environment, and
-            # MS_AUTHORITY_HOST is the only way to reach a national cloud.
-            # Omitting them told `loom toolset` users to set MS_* variables
-            # they did not need.
-            "AZURE_TENANT_ID",
-            "AZURE_CLIENT_ID",
-            "AZURE_CLIENT_SECRET",
-            "MS_AUTHORITY_HOST",
-            "MS_SHAREPOINT_SITE",
-        ],
-    },
+    auth=AuthSpec(
+        client="loom.toolsets.microsoft.sharepoint.client:SharePointClient",
+        credentials="loom.toolsets.microsoft.auth:MicrosoftAuth",
+        # One credential across the six Graph toolsets, for the reason the
+        # Google five share one. `MS_*_USER` exists because `/me` does not
+        # resolve under app-only credentials — see toolsets/CLAUDE.md.
+        kind="oauth2",
+        credential="microsoft",
+        provider="microsoft",
+        scopes=("offline_access",),
+        fields=(
+            # Three alternatives, mirroring `MicrosoftCredentials.mode`. The
+            # AZURE_* trio is the same credential under the names the Azure
+            # SDKs already put in an environment, so it is a mode rather than
+            # three more required variables.
+            AuthField(name="MS_TENANT_ID", label="Tenant id", secret=False, mode="app"),
+            AuthField(name="MS_CLIENT_ID", label="Application (client) id",
+                      secret=False, mode="app"),
+            AuthField(name="MS_CLIENT_SECRET", label="Client secret", mode="app"),
+            AuthField(name="AZURE_TENANT_ID", label="Tenant id (Azure SDK name)",
+                      secret=False, mode="azure"),
+            AuthField(name="AZURE_CLIENT_ID", label="Client id (Azure SDK name)",
+                      secret=False, mode="azure"),
+            AuthField(name="AZURE_CLIENT_SECRET", label="Client secret (Azure SDK name)",
+                      mode="azure"),
+            AuthField(name="MS_GRAPH_ACCESS_TOKEN", label="Graph access token",
+                      mode="token"),
+            # Adds delegated identity to the app mode rather than replacing it:
+            # without it the same three variables authenticate the application.
+            AuthField(name="MS_REFRESH_TOKEN", label="Refresh token (delegated)",
+                      required=False),
+            AuthField(name="MS_AUTHORITY_HOST", label="Authority host (sovereign cloud)",
+                      secret=False, required=False),
+            AuthField(name="MS_SHAREPOINT_SITE", arg="default_site", label="Site id or path",
+                      secret=False, required=False),
+        ),
+        docs_url="https://learn.microsoft.com/entra/identity-platform/quickstart-register-app",
+    ),
     tools_module="loom.toolsets.microsoft.sharepoint.tools",
     egress_hosts=[
         "graph.microsoft.com",

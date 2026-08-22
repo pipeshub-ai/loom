@@ -15,7 +15,6 @@ from loom.toolsets.microsoft.auth import (
     GRAPH_BASE_URL,
     MicrosoftAuth,
     get_default_auth,
-    graph_base_url,
 )
 from loom.toolsets.microsoft.errors import GraphPermanentError
 from loom.toolsets.microsoft.http import GraphSession
@@ -39,8 +38,6 @@ __all__ = [
     "CHUNK_SIZE",
     "SIMPLE_UPLOAD_MAX",
     "OneDriveClient",
-    "get_default_client",
-    "reset_default_client",
 ]
 
 #: Above this, Microsoft's own guidance is to use a resumable upload session:
@@ -495,29 +492,4 @@ def _guess_type(filename: str) -> str:
 # Process-wide default
 # ---------------------------------------------------------------------------
 
-_default: OneDriveClient | None = None
 
-
-def get_default_client() -> OneDriveClient:
-    """Return the process-wide client, building it on first use.
-
-    Reads ``MS_ONEDRIVE_USER`` and ``MS_ONEDRIVE_DRIVE_ID`` so an app-only
-    deployment can name its drive scope once in the environment rather than on
-    every call.
-    """
-    global _default
-    if _default is None:
-        import os
-
-        _default = OneDriveClient(
-            base_url=graph_base_url(),
-            user_id=os.environ.get("MS_ONEDRIVE_USER", ""),
-            drive_id=os.environ.get("MS_ONEDRIVE_DRIVE_ID", ""),
-        )
-    return _default
-
-
-def reset_default_client() -> None:
-    """Drop the process-wide client. For tests, and for a credential rotation."""
-    global _default
-    _default = None

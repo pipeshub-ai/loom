@@ -1,11 +1,9 @@
 """Lazy httpx-based Jira REST API v3 client.
 
 No ``jira`` pip package required — pure httpx over the REST API.
-Credentials are read from environment variables at first use:
-
-    JIRA_URL        https://yourorg.atlassian.net
-    JIRA_EMAIL      your@email.com
-    JIRA_API_TOKEN  your-api-token
+Credentials are passed in, never read here — see
+``loom.toolsets.factory.client_for``, which builds this from whatever the run's
+``ToolsetSession`` resolved.
 
 All public methods return typed Pydantic models from ``models.py``.
 A future iteration may auto-generate this client from the official
@@ -16,12 +14,11 @@ https://developer.atlassian.com/cloud/jira/platform/rest/v3/
 from __future__ import annotations
 
 import base64
-import os
 from collections.abc import Sequence
 from typing import Any
 
-from loom.connectors.credentials import current_credential_store, resolve_bearer_token
 from loom.core.exceptions import NonRetryableError, WorkflowError
+from loom.toolsets.atlassian import api_root, is_bearer, resolve_cloud_id
 from loom.toolsets.jira.models import (
     Comment,
     CreatedIssue,
@@ -137,28 +134,32 @@ class JiraClient:
 
     def __init__(
         self,
-        base_url: str | None = None,
-        email: str | None = None,
-        api_token: str | None = None,
+        base_url: str,
+        email: str = "",
+        api_token: str = "",
         *,
-        credential_name: str = "jira",
+        token_source: Any = None,
     ) -> None:
-        self._base_url = (base_url or os.environ.get("JIRA_URL", "")).rstrip("/")
-        self._email = email or os.environ.get("JIRA_EMAIL", "")
-        self._token = api_token or os.environ.get("JIRA_API_TOKEN", "")
-        self._credential_name = credential_name
+        """Values in, nothing read from the environment.
+
+        ``base_url`` is required because there is no sensible default: every
+        Jira site answers on its own host, and a client built without one
+        produces 404s that read as missing issues.
+
+        ``email``/``api_token`` are optional because they are one of *two* ways
+        to authenticate — a ``token_source`` supplying a bearer token is the
+        other, and a deployment that has connected one needs neither. Whether
+        either is present cannot be decided here without an await, so it is
+        decided at the first request, where the answer is knowable.
+        """
+        self._base_url = base_url.rstrip("/")
+        self._email = email
+        self._token = api_token
+        self._token_source = token_source
+        self._cloud: str | None = None
 
         if not self._base_url:
-            msg = "JIRA_URL is required (env var or base_url argument)"
-            raise ValueError(msg)
-        # A CredentialStore bound to the current run might supply what the
-        # environment did not, but that can only be checked with an await —
-        # deferred to _headers() at first actual call. Raise now only when
-        # nothing could possibly save it: no email/token *and* no store
-        # bound at all, exactly today's behaviour when neither is true.
-        if (not self._email or not self._token) and current_credential_store() is None:
-            msg = "JIRA_EMAIL and JIRA_API_TOKEN are required"
-            raise ValueError(msg)
+            raise ValueError("base_url is required")
 
     async def _headers(self) -> dict[str, str]:
         """Basic auth from email/token, or a CredentialStore-issued bearer token.
@@ -170,7 +171,7 @@ class JiraClient:
         when no store is bound or it has nothing under ``credential_name``,
         which is exactly today's only behaviour.
         """
-        token = await resolve_bearer_token(self._credential_name)
+        token = await self._token_source.token() if self._token_source else None
         if token:
             return {
                 "Authorization": f"Bearer {token}",
@@ -185,8 +186,8 @@ class JiraClient:
                 "Accept": "application/json",
             }
         raise ValueError(
-            "JIRA_EMAIL and JIRA_API_TOKEN are required, or connect a "
-            f"'{self._credential_name}' credential via a CredentialStore"
+            "jira has no credential: supply JIRA_EMAIL and JIRA_API_TOKEN, or "
+            "connect one with `loom connect jira`"
         )
 
     # ------------------------------------------------------------------
@@ -206,8 +207,8 @@ class JiraClient:
         """
         import httpx
 
-        url = f"{self._base_url}/rest/api/3/{path.lstrip('/')}"
         headers = await self._headers()
+        url = f"{await self._api_root(headers)}/rest/api/3/{path.lstrip('/')}"
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.request(
                 method, url, headers=headers, params=_clean(params), json=json
@@ -217,6 +218,23 @@ class JiraClient:
         if not resp.content:
             return {}
         return resp.json()
+
+    async def _api_root(self, headers: dict[str, str]) -> str:
+        """Where a request goes, which depends on how it is authenticated.
+
+        The rule and its reasoning live in :mod:`loom.toolsets.atlassian`,
+        shared with Confluence: it is the provider's rule rather than Jira's,
+        and a second copy is a second thing to fix the next time it changes.
+        """
+        if not is_bearer(headers):
+            return self._base_url
+        if self._cloud is None:
+            self._cloud = await resolve_cloud_id(
+                headers["Authorization"],
+                site_url=self._base_url,
+                classify=_classify,
+            )
+        return api_root("jira", self._cloud)
 
     async def _get(self, path: str, **params: Any) -> Any:
         return await self._request("GET", path, params=params)
@@ -274,7 +292,7 @@ class JiraClient:
             ),
             limit=max_results,
             page_size=JIRA_PAGE_CAP,
-            row=lambda data: _flatten_issue(data, requested),
+            row=lambda data: _flatten_issue(data, requested, self._base_url),
         )
 
     async def get_issue(
@@ -292,7 +310,7 @@ class JiraClient:
             asked += [f for f in requested if f not in asked]
             params["fields"] = ",".join(asked)
         data = await self._get(f"issue/{issue_key}", **params)
-        return _flatten_issue(data, requested)
+        return _flatten_issue(data, requested, self._base_url)
 
     async def create_issue(
         self,
@@ -1003,9 +1021,21 @@ def _field_row(
 
 
 def _flatten_issue(
-    raw: dict[str, Any], requested: Sequence[str] = ()
+    raw: dict[str, Any], requested: Sequence[str] = (), site_url: str = ""
 ) -> JiraIssue:
     """Flatten a Jira issue API response into a typed model.
+
+    ``site_url`` is where a *person* reads this issue, and it is passed in
+    rather than read out of the response. Jira echoes the request host in
+    ``self``, which is the site host under Basic auth and
+    ``api.atlassian.com/ex/jira/{cloudId}`` under OAuth — so deriving the browse
+    link from it produced ``https://api.atlassian.com/ex/jira/…/browse/PA-1786``,
+    an API endpoint rendered as a link for somebody to click. It was only ever
+    right because the two hosts happened to be the same thing, which stopped
+    being true the moment 3LO tokens started working.
+
+    ``create_issue`` already built its URL from the client's own ``base_url``
+    and was correct throughout; this brings the other two into line with it.
 
     ``requested`` is what the read named in ``custom_fields=``; each one is
     carried back on :attr:`JiraIssue.custom_fields` under the id it was asked
@@ -1016,7 +1046,9 @@ def _flatten_issue(
     an empty mapping and no error.
     """
     f = raw.get("fields", {})
-    base_url = raw.get("self", "").split("/rest/")[0]
+    # Falls back to the response only when no site was supplied, so a caller
+    # that forgets still gets a link rather than a bare path.
+    base_url = (site_url or raw.get("self", "").split("/rest/")[0]).rstrip("/")
     key = raw.get("key", "")
     return JiraIssue(
         key=key,
@@ -1047,14 +1079,3 @@ def _flatten_issue(
         },
     )
 
-
-# Module-level singleton — lazy, reads env vars on first instantiation
-_default_client: JiraClient | None = None
-
-
-def get_default_client() -> JiraClient:
-    """Return (or create) the module-level JiraClient from env vars."""
-    global _default_client
-    if _default_client is None:
-        _default_client = JiraClient()
-    return _default_client

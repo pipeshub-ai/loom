@@ -14,11 +14,10 @@ All public methods return typed Pydantic models from ``models.py``.
 from __future__ import annotations
 
 import base64
-import os
 from typing import Any
 
-from loom.connectors.credentials import current_credential_store, resolve_bearer_token
 from loom.core.exceptions import NonRetryableError, WorkflowError
+from loom.toolsets.atlassian import api_root, is_bearer, resolve_cloud_id
 from loom.toolsets.confluence.models import (
     ConfluenceComment,
     ConfluencePage,
@@ -109,34 +108,33 @@ class ConfluenceClient:
 
     def __init__(
         self,
-        base_url: str | None = None,
-        email: str | None = None,
-        api_token: str | None = None,
+        base_url: str,
+        email: str = "",
+        api_token: str = "",
         *,
-        credential_name: str = "confluence",
+        token_source: Any = None,
     ) -> None:
-        self._base_url = (
-            base_url or os.environ.get("CONFLUENCE_URL", "")
-        ).rstrip("/")
-        self._email = email or os.environ.get("CONFLUENCE_EMAIL", "")
-        self._token = api_token or os.environ.get("CONFLUENCE_API_TOKEN", "")
-        self._credential_name = credential_name
+        """Values in, nothing read from the environment. See ``JiraClient``.
+
+        ``email``/``api_token`` are optional because they are one of *two* ways
+        to authenticate; a ``token_source`` supplying a bearer token is the
+        other, and whether it holds anything can only be known with an await.
+        """
+        self._base_url = base_url.rstrip("/")
+        self._email = email
+        self._token = api_token
+        self._token_source = token_source
+        self._cloud: str | None = None
 
         if not self._base_url:
-            msg = "CONFLUENCE_URL is required (env var or base_url argument)"
-            raise ValueError(msg)
-        # See JiraClient.__init__: deferred to _headers() at first call when
-        # a CredentialStore is bound, since checking it needs an await.
-        if (not self._email or not self._token) and current_credential_store() is None:
-            msg = "CONFLUENCE_EMAIL and CONFLUENCE_API_TOKEN are required"
-            raise ValueError(msg)
+            raise ValueError("base_url is required")
 
     async def _headers(self) -> dict[str, str]:
         """Basic auth from email/token, or a CredentialStore-issued bearer token.
 
         See ``JiraClient._headers`` — same reasoning, same fallback order.
         """
-        token = await resolve_bearer_token(self._credential_name)
+        token = await self._token_source.token() if self._token_source else None
         if token:
             return {
                 "Authorization": f"Bearer {token}",
@@ -151,8 +149,8 @@ class ConfluenceClient:
                 "Accept": "application/json",
             }
         raise ValueError(
-            "CONFLUENCE_EMAIL and CONFLUENCE_API_TOKEN are required, or "
-            f"connect a '{self._credential_name}' credential via a CredentialStore"
+            "confluence has no credential: supply CONFLUENCE_EMAIL and "
+            "CONFLUENCE_API_TOKEN, or connect one with `loom connect confluence`"
         )
 
     # ------------------------------------------------------------------
@@ -173,6 +171,11 @@ class ConfluenceClient:
         import httpx
 
         headers = await self._headers()
+        # A relative path is prefixed with whichever root the credential
+        # selects; an absolute one is left alone, so a caller holding a URL
+        # from a previous response (a `_links` continuation) still works.
+        if not url.startswith(("http://", "https://")):
+            url = f"{await self._api_root(headers)}{url}"
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.request(
                 method, url, headers=headers, params=_clean(params), json=json
@@ -183,16 +186,40 @@ class ConfluenceClient:
             return {}
         return resp.json()
 
+    async def _api_root(self, headers: dict[str, str]) -> str:
+        """Where a request goes, which depends on how it is authenticated.
+
+        The rule and its reasoning live in :mod:`loom.toolsets.atlassian`,
+        shared with Jira. Confluence carries the same 401 for the same reason:
+        a 3LO token sent to the site host is rejected with a message that reads
+        as a bad token.
+        """
+        if not is_bearer(headers):
+            return self._base_url
+        if self._cloud is None:
+            self._cloud = await resolve_cloud_id(
+                headers["Authorization"],
+                site_url=self._base_url,
+                classify=_classify,
+            )
+        return api_root("confluence", self._cloud)
+
     def _v2(self, path: str) -> str:
-        return f"{self._base_url}/wiki/api/v2/{path.lstrip('/')}"
+        """Kept for callers that build a URL before a request is made.
+
+        Relative now: ``_request`` prefixes whichever root the credential
+        selects, so a path assembled here cannot pin the wrong host.
+        """
+        return f"/wiki/api/v2/{path.lstrip('/')}"
 
     async def _get(self, path: str, **params: Any) -> Any:
         return await self._request("GET", self._v2(path), params=params)
 
     async def _get_v1(self, path: str, **params: Any) -> Any:
         """GET against the v1 REST API (for search/CQL)."""
-        url = f"{self._base_url}/wiki/rest/api/{path.lstrip('/')}"
-        return await self._request("GET", url, params=params)
+        return await self._request(
+            "GET", f"/wiki/rest/api/{path.lstrip('/')}", params=params
+        )
 
     async def _post(self, path: str, json: dict[str, Any]) -> Any:
         return await self._request("POST", self._v2(path), json=json)
@@ -523,14 +550,3 @@ def _classify(response: Any) -> ConfluenceError:
         return ConfluencePermanentError(message, status=status)
     return ConfluenceError(message, status=status)
 
-
-# Module-level singleton
-_default_client: ConfluenceClient | None = None
-
-
-def get_default_client() -> ConfluenceClient:
-    """Return (or create) the module-level client from env vars."""
-    global _default_client
-    if _default_client is None:
-        _default_client = ConfluenceClient()
-    return _default_client

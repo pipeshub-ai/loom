@@ -10,7 +10,7 @@
 | 06 | `06_ai_agent_step.py` | ctx.agent() with Claude | ANTHROPIC_API_KEY |
 | 07 | `07_coding_agent.py` | NL spec -> generated workflow | ANTHROPIC_API_KEY |
 | 08 | `08_jira_agent.py` | Jira toolset + coding agent | ANTHROPIC_API_KEY, JIRA_* |
-| 09 | `09_jira_cli.py` | Interactive Jira CLI | ANTHROPIC_API_KEY, JIRA_* |
+| 09 | `09_jira_cli.py` | Interactive Jira CLI | ANTHROPIC_API_KEY or OPENAI_API_KEY, JIRA_* |
 | 10 | `10_langchain_react_agent.py` | LangChain ReAct via AgentBackend | ANTHROPIC_API_KEY |
 | 11 | `11_agno_backend.py` | Agno via AgentBackend | ANTHROPIC_API_KEY |
 | 12 | `12_pydantic_ai_backend.py` | Pydantic AI via AgentBackend | ANTHROPIC_API_KEY |

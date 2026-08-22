@@ -1,22 +1,22 @@
 """Example 6 — LLM agent as a workflow step.
 
-A research workflow that uses Claude (via the LOOM agent layer) to
+A research workflow that uses a model (via the LOOM agent layer) to
 summarise fetched content.  The agent call is durably journaled — if
 the process crashes mid-agent, the workflow replays without re-paying
 for completed LLM turns.
 
-Demonstrates: Agent, AnthropicProvider, ctx.agent(), structured output.
+Demonstrates: Agent, ctx.agent(), structured output.
 
 Requires:
-    ANTHROPIC_API_KEY environment variable
+    one model key — ANTHROPIC_API_KEY, OPENAI_API_KEY, or
+    GEMINI_API_KEY. Whichever is set is the one used.
 
 Run:
-    ANTHROPIC_API_KEY=sk-... python3 examples/cookbook/06_ai_agent_step.py
+    python3 examples/cookbook/06_ai_agent_step.py
 """
 
 from __future__ import annotations
 
-import os
 import re
 import sys
 from pathlib import Path
@@ -24,7 +24,7 @@ from pathlib import Path
 import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from utils import load_dotenv, require_env
+from utils import load_dotenv, require_model
 
 # The agent below is built at import time, so credentials must be present by
 # then — load .env before that rather than inside main().
@@ -32,7 +32,6 @@ load_dotenv()
 
 from loom import Context, Retry, Runtime, step, workflow  # noqa: E402
 from loom.agents.agent import Agent, PersistenceClass  # noqa: E402
-from loom.agents.providers.anthropic_provider import AnthropicProvider  # noqa: E402
 from loom.stores.memory import MemoryStore  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -46,10 +45,10 @@ summariser = Agent(
         "Summarise the provided text in 2-3 sentences. "
         "Be factual and avoid padding."
     ),
-    model=AnthropicProvider(
-        model_name="claude-haiku-4-5-20251001",  # fast + cheap for summarisation
-        api_key=os.environ.get("ANTHROPIC_API_KEY"),
-    ),
+    # Haiku is fast and cheap, which is what summarisation wants. Named as a
+    # preference rather than a requirement: with no Anthropic key this falls
+    # back to whichever vendor this machine can reach.
+    model=require_model("claude-haiku-4-5-20251001"),
     persistence=PersistenceClass.EPHEMERAL,
 )
 
@@ -110,7 +109,6 @@ async def ai_research(ctx: Context, query: str) -> dict:
 
 
 async def main() -> None:
-    require_env("ANTHROPIC_API_KEY")
 
     async with Runtime(store=MemoryStore()) as rt:
         query = "AI workflow automation"

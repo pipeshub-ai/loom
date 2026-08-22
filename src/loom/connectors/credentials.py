@@ -42,9 +42,7 @@ from typing import Any, Protocol, runtime_checkable
 from loom.connectors.encryption import (
     DecryptionError,
     Envelope,
-    GeneratedFileKeyProvider,
     KeyProvider,
-    KeyringKeyProvider,
     atomic_write_bytes,
     default_key_provider,
 )
@@ -703,6 +701,20 @@ class KeyringCredentialStore(EncryptedFileCredentialStore):
     keychain) — discoverable only by trying, so the fallback lives in
     :class:`~loom.connectors.encryption.KeyringKeyProvider`
     itself rather than here.
+
+    **Where the key comes from is
+    :func:`~loom.connectors.encryption.default_key_provider`'s decision, not
+    this class's.** It used to build a ``KeyringKeyProvider`` directly, which
+    read as a detail and was a hole: ``LOOM_CREDENTIAL_KEY`` is documented as
+    rung 1 of that order — "explicit, portable, what CI and containers use" —
+    and this is the store the CLI actually builds, so nothing ``loom connect``,
+    ``loom whoami`` or ``loom doctor`` did ever honoured it. It also bypassed
+    ``tests/conftest.py::never_touch_the_real_keychain``, whose whole purpose is
+    that a test *cannot forget* to stay off a developer's keychain.
+
+    The class name still describes the default, because with neither variable
+    set that is exactly what this builds — the same provider, with the same
+    fallback path, as before.
     """
 
     def __init__(
@@ -715,9 +727,8 @@ class KeyringCredentialStore(EncryptedFileCredentialStore):
         refresh_policy: RefreshPolicy | None = None,
     ) -> None:
         resolved_path = Path(path) if path else _default_store_path()
-        key_provider = KeyringKeyProvider(
-            service=service,
-            fallback=GeneratedFileKeyProvider(resolved_path.parent / "credentials.key"),
+        key_provider = default_key_provider(
+            app_dir=resolved_path.parent, service=service
         )
         super().__init__(
             resolved_path,

@@ -28,6 +28,7 @@ Wait for *seconds*, however this clock understands waiting.
 
 - `agents.now`
 - `connectors.credentials`
+- `connectors.inspect`
 - `connectors.oauth_client`
 - `connectors.refresh`
 - `events.dispatcher`

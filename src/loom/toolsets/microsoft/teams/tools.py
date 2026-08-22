@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from loom import Retry, step
 from loom.toolsets.microsoft.models import MicrosoftUser
+from loom.toolsets.microsoft.teams.client import TeamsClient
 from loom.toolsets.microsoft.teams.models import (
     Channel,
     ChatMessage,
@@ -55,9 +56,9 @@ async def teams_whoami() -> MicrosoftUser:
     Returns:
         The signed-in user's id, display name, email, and userPrincipalName.
     """
-    from loom.toolsets.microsoft.teams.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().whoami()
+    return await (await client_for("teams", TeamsClient)).whoami()
 
 
 # -- teams and channels ------------------------------------------------------
@@ -77,9 +78,9 @@ async def teams_list_joined_teams(limit: int = 100) -> Results[Team]:
         Results of Team. ``is_archived`` matters before posting: an archived
         team is read-only.
     """
-    from loom.toolsets.microsoft.teams.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_joined_teams(limit=limit)
+    return await (await client_for("teams", TeamsClient)).list_joined_teams(limit=limit)
 
 
 @step(retry=_READ)
@@ -92,9 +93,9 @@ async def teams_get_team(team_id: str) -> Team:
     Returns:
         Team with display name, description, visibility, and archived state.
     """
-    from loom.toolsets.microsoft.teams.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_team(team_id)
+    return await (await client_for("teams", TeamsClient)).get_team(team_id)
 
 
 @step(retry=_READ)
@@ -113,9 +114,9 @@ async def teams_list_channels(team_id: str, limit: int = 100) -> Results[Channel
         channel's messages are not readable through the parent team's
         permissions.
     """
-    from loom.toolsets.microsoft.teams.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_channels(team_id, limit=limit)
+    return await (await client_for("teams", TeamsClient)).list_channels(team_id, limit=limit)
 
 
 @step(retry=_READ)
@@ -129,9 +130,9 @@ async def teams_get_channel(team_id: str, channel_id: str) -> Channel:
     Returns:
         Channel with display name, description, and web URL.
     """
-    from loom.toolsets.microsoft.teams.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_channel(team_id, channel_id)
+    return await (await client_for("teams", TeamsClient)).get_channel(team_id, channel_id)
 
 
 @step(retry=_READ)
@@ -151,9 +152,9 @@ async def teams_list_team_members(
         Results of TeamsMember. ``roles`` contains ``"owner"`` for owners and
         is empty for ordinary members.
     """
-    from loom.toolsets.microsoft.teams.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_team_members(team_id, limit=limit)
+    return await (await client_for("teams", TeamsClient)).list_team_members(team_id, limit=limit)
 
 
 # -- channel messages --------------------------------------------------------
@@ -183,9 +184,9 @@ async def teams_list_channel_messages(
         much of a channel's history. Use ``teams_list_message_replies`` for a
         thread.
     """
-    from loom.toolsets.microsoft.teams.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_channel_messages(
+    return await (await client_for("teams", TeamsClient)).list_channel_messages(
         team_id, channel_id, limit=limit
     )
 
@@ -204,9 +205,9 @@ async def teams_get_channel_message(
     Returns:
         ChatMessage with ``text`` (plain) and ``body_html`` (original markup).
     """
-    from loom.toolsets.microsoft.teams.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_channel_message(
+    return await (await client_for("teams", TeamsClient)).get_channel_message(
         team_id, channel_id, message_id
     )
 
@@ -230,9 +231,9 @@ async def teams_list_message_replies(
     Returns:
         Results of ChatMessage, each with ``reply_to_id`` set.
     """
-    from loom.toolsets.microsoft.teams.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_message_replies(
+    return await (await client_for("teams", TeamsClient)).list_message_replies(
         team_id, channel_id, message_id, limit=limit
     )
 
@@ -266,9 +267,9 @@ async def teams_send_channel_message(
     Returns:
         The posted ChatMessage, including its id and web URL.
     """
-    from loom.toolsets.microsoft.teams.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().send_channel_message(
+    return await (await client_for("teams", TeamsClient)).send_channel_message(
         team_id,
         channel_id,
         content,
@@ -303,9 +304,9 @@ async def teams_reply_to_message(
     Returns:
         The posted reply as a ChatMessage.
     """
-    from loom.toolsets.microsoft.teams.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().reply_to_message(
+    return await (await client_for("teams", TeamsClient)).reply_to_message(
         team_id, channel_id, message_id, content, content_type=content_type
     )
 
@@ -327,9 +328,9 @@ async def teams_list_chats(limit: int = 50, expand_members: bool = False) -> Res
         Results of TeamsChat. ``topic`` is empty for one-on-one chats, so the
         members are what identify those.
     """
-    from loom.toolsets.microsoft.teams.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_chats(
+    return await (await client_for("teams", TeamsClient)).list_chats(
         limit=limit, expand_members=expand_members
     )
 
@@ -344,9 +345,9 @@ async def teams_get_chat(chat_id: str) -> TeamsChat:
     Returns:
         TeamsChat with topic, type, and timestamps.
     """
-    from loom.toolsets.microsoft.teams.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_chat(chat_id)
+    return await (await client_for("teams", TeamsClient)).get_chat(chat_id)
 
 
 @step(retry=_READ)
@@ -360,9 +361,9 @@ async def teams_list_chat_messages(chat_id: str, limit: int = 50) -> Results[Cha
     Returns:
         Results of ChatMessage.
     """
-    from loom.toolsets.microsoft.teams.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_chat_messages(chat_id, limit=limit)
+    return await (await client_for("teams", TeamsClient)).list_chat_messages(chat_id, limit=limit)
 
 
 @step(retry=_READ)
@@ -379,9 +380,9 @@ async def teams_list_chat_members(chat_id: str, limit: int = 100) -> Results[Tea
     Returns:
         Results of TeamsMember with directory ``user_id`` and email.
     """
-    from loom.toolsets.microsoft.teams.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_chat_members(chat_id, limit=limit)
+    return await (await client_for("teams", TeamsClient)).list_chat_members(chat_id, limit=limit)
 
 
 @step(retry=_UNSAFE_WRITE)
@@ -402,8 +403,8 @@ async def teams_send_chat_message(
     Returns:
         The sent ChatMessage.
     """
-    from loom.toolsets.microsoft.teams.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().send_chat_message(
+    return await (await client_for("teams", TeamsClient)).send_chat_message(
         chat_id, content, content_type=content_type
     )

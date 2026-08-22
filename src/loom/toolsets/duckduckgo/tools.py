@@ -27,6 +27,7 @@ off instead of treating a block as "nothing matched".
 from __future__ import annotations
 
 from loom import Retry, step
+from loom.toolsets.duckduckgo.client import DuckDuckGoClient
 from loom.toolsets.duckduckgo.models import (
     DuckDuckGoImage,
     DuckDuckGoNews,
@@ -73,9 +74,10 @@ async def ddg_search(
         rows than ``max_results`` means that really is everything, and
         ``complete=False`` means more sits behind ``.cursor``.
     """
-    from loom.toolsets.duckduckgo.client import get_default_client
 
-    return await get_default_client().search(
+    from loom.toolsets.factory import client_for
+
+    return await (await client_for("duckduckgo", DuckDuckGoClient)).search(
         query,
         max_results=max_results,
         region=region,
@@ -109,9 +111,9 @@ async def ddg_news(
         ``.complete`` is True only when the source ran out; False means
         more sits behind ``.cursor``.
     """
-    from loom.toolsets.duckduckgo.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().news(
+    return await (await client_for("duckduckgo", DuckDuckGoClient)).news(
         query,
         max_results=max_results,
         region=region,
@@ -145,9 +147,9 @@ async def ddg_images(
         appears on. ``.complete`` is True only when the source ran out; False means
         more sits behind ``.cursor``.
     """
-    from loom.toolsets.duckduckgo.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().images(
+    return await (await client_for("duckduckgo", DuckDuckGoClient)).images(
         query,
         max_results=max_results,
         region=region,

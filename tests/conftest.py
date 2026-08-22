@@ -27,6 +27,13 @@ def never_touch_the_real_keychain() -> Iterator[None]:
     rather than faking the backend also takes the priority order's own first
     branch — "explicit, portable, what CI and containers use".
 
+    That "cannot forget" was once only half true: ``KeyringCredentialStore``
+    built its key provider by hand instead of calling ``default_key_provider``,
+    so it went round this fixture entirely and the two files' fake backends
+    were the only thing holding. It routes through the order now, so this
+    covers it — and the handful of tests that mean to exercise the *keyring*
+    branch say so with an explicit ``monkeypatch.delenv``.
+
     Session-scoped and set only when absent, so a developer or CI that has
     deliberately exported one keeps it. The value is a well-formed Fernet
     key spelling out what it is — the store validates it, so a placeholder
@@ -65,6 +72,11 @@ def isolated_catalog() -> Iterator[object]:
         if hasattr(catalog, "_toolsets"):
             catalog._toolsets.clear()
             catalog._toolsets.update(saved_toolsets)
+        # The function indexes are derived from `_manifests` and cached until
+        # a registration clears them, so restoring the store is not restoring
+        # the catalogue: without this, a test that registered toolsets left
+        # `effect_of`/`profile_of` answering for them in every later test.
+        catalog.invalidate()
 
 
 @pytest.fixture

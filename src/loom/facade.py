@@ -151,6 +151,31 @@ class RuntimeFacade(Protocol):
         """Remove a schedule. ``False`` when there was no such trigger."""
         ...
 
+    async def wire_triggers(self, workflow: str) -> list[dict[str, Any]]:
+        """Register *workflow*'s declared triggers so they can fire.
+
+        ``schedule()`` attaches a cron a caller supplies; this reads the ones
+        the workflow file already declares. Without it a
+        ``@workflow(triggers=[After(minutes=2)])`` is a statement no dispatcher
+        has heard, which is indistinguishable from a trigger that does not
+        fire — the failure the whole trigger surface exists to avoid.
+
+        Idempotent, and identity comes from *when* the trigger fires: calling
+        it twice keeps one record, and keeps the fire time the first call
+        computed.
+        """
+        ...
+
+    async def tick_schedules(self) -> list[dict[str, Any]]:
+        """Fire whatever is due now. Returns the runs it started.
+
+        The one turn of the loop ``rt.start_scheduler()`` runs forever. Exposed
+        because a command that stays for a two-minute delay is a legitimate
+        host for that loop, and because a caller that has to reach past the
+        port to drive it has found a seam that is not finished.
+        """
+        ...
+
     async def pending(self, run_id: str | None = None) -> list[dict[str, Any]]:
         """Every run parked on a person, and what each is being asked.
 
@@ -202,6 +227,54 @@ class RuntimeFacade(Protocol):
         Returns the code and everything a caller needs to decide whether to
         keep it: remaining issues, the code-or-judgement plan, repair count,
         and what the verification run did.
+        """
+        ...
+
+    async def connect(
+        self,
+        credential: str,
+        *,
+        client_id: str = "",
+        client_secret: str = "",
+        fields: dict[str, str] | None = None,
+        device: bool = False,
+        scopes: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Obtain a credential and store it under *credential*.
+
+        Local only, and :class:`RemoteFacade` refuses with the reason — the
+        position ``author`` already takes. A connection is a browser on *this*
+        machine writing *this* machine's credential store; doing it against a
+        server would either spend the server's OAuth app or put the token in
+        the wrong keyring.
+
+        Needs an adapter composed in. With no :attr:`LocalFacade.connect_flow`
+        this returns what is missing rather than prompting, so a pipe, a
+        ``--json`` invocation and CI degrade the way ``ask_user`` already does
+        instead of blocking on something nobody can answer.
+
+        Returns states, names and expiries. **Never a token.**
+        """
+        ...
+
+    async def disconnect(self, credential: str) -> dict[str, Any]:
+        """Forget a stored credential. Never raises for one already absent."""
+        ...
+
+    async def connections(self, toolset: str = "") -> list[dict[str, Any]]:
+        """What each toolset needs to be callable, and how much of it is here.
+
+        The question nothing could answer. A credential requirement lived in a
+        ``credential_name`` default inside one client file, a free-form
+        ``auth`` dict on the manifest, and whatever the process had in its
+        environment — so ``loom doctor`` reported "27 toolsets reachable" and
+        "1 credential stored" and could not put the two together.
+
+        Read-only and cheap: manifest metadata, a ``peek`` at the credential
+        store, and the environment. Nothing is imported, nothing is minted, and
+        no token is ever returned — states, names and expiries only.
+
+        Names one toolset, or every toolset that may be named.
         """
         ...
 
@@ -498,6 +571,79 @@ class VersionSurface(Protocol):
         """The source a version was committed from."""
         ...
 
+def _impact(code: str, runtime: Any) -> dict[str, Any]:
+    """What running *code* would do, and what it says it runs on.
+
+    Flattened into the author payload beside `plan`, so every surface on the
+    port decides the same way. `plan` is the model's own account of its
+    choices; this is derived from the code and the manifests, which is the
+    distinction `IdentifierStage` draws about resolved ids — a self-report
+    would certify exactly the case a caller is asking about.
+    """
+    from loom.agents.impact import Verdict, impact_of
+
+    if not code:
+        return {"impact": Verdict.EMPTY.value, "writes": [], "triggers": []}
+    try:
+        found = impact_of(code, toolsets=runtime.toolsets, nodes=runtime.nodes)
+        triggers = _declared_triggers(code)
+    except Exception:
+        # Never fail an authoring run over the summary of it. Unknown is the
+        # fail-safe answer here: a caller reading `effectful` asks first.
+        return {"impact": Verdict.EFFECTFUL.value, "writes": [], "triggers": []}
+    return {
+        "impact": found.verdict.value,
+        "writes": [
+            {"target": call.target, "effect": call.effect or "unclassified",
+             "line": call.line}
+            for call in found.writes
+        ],
+        "triggers": triggers,
+    }
+
+
+def _declared_triggers(code: str) -> list[dict[str, Any]]:
+    """`triggers=[...]` as written, without importing the module.
+
+    Read from the source rather than from a registered `WorkflowDefinition`,
+    because deciding what to *do* with a freshly authored file happens before
+    anything has imported it — and importing model-written code to find out
+    whether it is safe to run has the order backwards.
+    """
+    import ast
+
+    out: list[dict[str, Any]] = []
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return out
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = getattr(node.func, "id", "") or getattr(node.func, "attr", "")
+        if name != "workflow":
+            continue
+        for keyword in node.keywords:
+            if keyword.arg != "triggers" or not isinstance(keyword.value, ast.List):
+                continue
+            for spec in keyword.value.elts:
+                if not isinstance(spec, ast.Call):
+                    continue
+                kind = getattr(spec.func, "id", "") or getattr(spec.func, "attr", "")
+                fields = {
+                    kw.arg: kw.value.value
+                    for kw in spec.keywords
+                    if kw.arg and isinstance(kw.value, ast.Constant)
+                }
+                positional = [
+                    argument.value
+                    for argument in spec.args
+                    if isinstance(argument, ast.Constant)
+                ]
+                out.append({"kind": kind, "fields": fields, "args": positional})
+    return out
+
+
 @dataclass
 class LocalFacade:
     """Drives an in-process :class:`Runtime`.
@@ -524,6 +670,33 @@ class LocalFacade:
     already refuses, because authoring runs where the code will run. And a
     library that reads stdin because it was imported is the ambient behaviour
     ``Runtime`` avoids everywhere else: the CLI opts in, a server does not.
+    """
+    connect_flow: Any = None
+    """How a credential is obtained — a
+    :class:`~loom.connectors.flows.ConnectFlow`.
+
+    Here rather than on the port for the reason ``user_interaction`` is: it is
+    an object and not a payload, so it could not cross ``RemoteFacade`` — which
+    refuses to connect anyway — and a library that opens a browser because it
+    was imported is the ambient behaviour ``Runtime`` avoids everywhere else.
+    The CLI composes one in ``cli/targets.py``, right where it already composes
+    the interaction; a host embedding ``LocalFacade`` gets no browser unless it
+    asks for one.
+    """
+    on_connect_event: Any = None
+    """Optional ``(ConnectEvent) -> None`` called while a connection runs.
+
+    The redirect URI, the authorization URL, what still has to be registered.
+    A callback rather than a `Printer`, for the reason `on_stage` is one: a
+    flow reports what happened and only a surface knows there is a terminal.
+    Without it a connect that stops at "no client id" looks like a no-op.
+    """
+    secret_prompt: Any = None
+    """How a secret field is collected — a
+    :class:`~loom.connectors.flows.SecretPrompt`.
+
+    Its own seam and never ``ask_user``: `AskedQuestion` records the question
+    *and its answer*, and ``loom author --save-answers`` writes that to disk.
     """
     hooks: Any = None
     """Optional :class:`~loom.runtime.hooks.HookRegistry` for authoring runs.
@@ -916,6 +1089,12 @@ class LocalFacade:
             # The id `--resume` takes. Reported on every job, not only a failed
             # one: whoever is going to be interrupted does not know it yet.
             "session_id": agent.session_id,
+            # What running it would do, weighed against what the manifests
+            # declare rather than against the model's account of its own code.
+            # A surface that wants to *act* on a finished workflow — which is
+            # the last step of the loop, and the one `loom author` did not
+            # have — needs this before it can decide whether to ask first.
+            **_impact(result.code, self.runtime),
             "smoke": None
             if result.smoke is None
             else {
@@ -971,6 +1150,182 @@ class LocalFacade:
                 "error": result.smoke.error,
             },
         }
+
+    async def connect(
+        self,
+        credential: str,
+        *,
+        client_id: str = "",
+        client_secret: str = "",
+        fields: dict[str, str] | None = None,
+        device: bool = False,
+        scopes: list[str] | None = None,
+    ) -> dict[str, Any]:
+        from loom.connectors.flows import (
+            ApiKeyFlow,
+            ConnectRequest,
+            OAuthDeviceFlow,
+            OAuthTarget,
+        )
+        from loom.connectors.inspect import need_for
+        from loom.toolsets.manifest import AuthSpec
+
+        store = getattr(self.runtime, "credentials", None)
+        if store is None:
+            raise ConfigurationError(
+                "connecting needs a credential store on the Runtime — pass "
+                "Runtime(credentials=...)."
+            )
+
+        need = need_for(credential, self.runtime.toolsets)
+        spec = AuthSpec(
+            kind=need.kind if need.known else "oauth2",
+            credential=credential,
+            provider=need.provider,
+            scopes=tuple(scopes or need.scopes),
+            setup_url=need.setup_url,
+        )
+        request = ConnectRequest(
+            name=credential,
+            client_id=client_id,
+            client_secret=client_secret,
+            fields=fields or {},
+            scopes=tuple(scopes or need.scopes),
+        )
+
+        flow = self.connect_flow
+        if spec.kind != "oauth2":
+            # An api-key toolset never needs a browser, so it is connectable
+            # with no adapter composed in at all.
+            flow = ApiKeyFlow()
+        elif device:
+            flow = OAuthDeviceFlow()
+        if flow is None:
+            return {
+                "connected": False,
+                "credential": credential,
+                "reason": (
+                    "this surface has no connect flow composed in, so it "
+                    "cannot open a browser. Run 'loom connect "
+                    f"{credential}' in a terminal."
+                ),
+                "needs": [f.name for f in spec.fields],
+            }
+
+        target = None
+        if spec.kind == "oauth2" and need.provider:
+            client_id, client_secret = await self._app_registration(
+                need.provider, client_id, client_secret, spec, store
+            )
+            target = OAuthTarget.from_provider(
+                credential,
+                need.provider,
+                scopes=request.scopes,
+                client_id=client_id,
+                client_secret=client_secret or None,
+            )
+        outcome = await flow.connect(
+            request, spec, target=target, on_event=self.on_connect_event
+        )
+        if outcome.connected and outcome.credential is not None:
+            await store.put(credential, outcome.credential)
+        return {
+            "connected": outcome.connected,
+            "credential": credential,
+            "provider": need.provider,
+            "toolsets": list(need.toolsets),
+            "scopes": list(outcome.scopes),
+            "expires_at": outcome.expires_at.isoformat() if outcome.expires_at else None,
+            "needs": [f.name for f in outcome.needs],
+            "redirect_uri": outcome.redirect_uri,
+            "reason": outcome.reason,
+        }
+
+    async def _app_registration(
+        self,
+        provider: str,
+        client_id: str,
+        client_secret: str,
+        spec: Any,
+        store: Any,
+    ) -> tuple[str, str]:
+        """The provider's OAuth app, remembered or asked for once.
+
+        Without this, `connect` reached `OAuthBrowserFlow` with no client id,
+        the flow correctly refused, and the caller saw a connect that returned
+        in a tenth of a second having done nothing — which reads as broken
+        rather than as "you have not registered an app yet".
+
+        Per *provider* rather than per credential: one Atlassian app serves
+        both `jira` and `confluence`. Kept in the same `CredentialStore` as the
+        tokens, so it inherits the encryption at rest — RFC 8252 is explicit
+        that a native client cannot treat a distributed secret as confidential,
+        so this is not protecting it from the provider's threat model, it is
+        keeping it out of a git-tracked file and out of `ps`.
+        """
+        from loom.connectors.flows import AppRegistrationStore, ConnectEvent
+        from loom.toolsets.manifest import AuthField
+
+        apps = AppRegistrationStore(store)
+        if not client_id:
+            client_id, remembered = await apps.get(provider)
+            client_secret = client_secret or remembered
+        if client_id:
+            return client_id, client_secret
+
+        prompt = self.secret_prompt
+        if prompt is None or not prompt.available():
+            # Nothing here can be asked. The flow reports the redirect URI and
+            # what to do with it, which is the actionable half.
+            return client_id, client_secret
+
+        # The redirect URI first, before anything is asked for: registering it
+        # on the provider is the one step nobody can do for you, and finding
+        # out afterwards means doing the whole flow again. n8n's credential
+        # dialog shows the callback URL as a read-only field for this reason.
+        if self.on_connect_event is not None:
+            self.on_connect_event(
+                ConnectEvent(
+                    kind="needs_app",
+                    setup_url=spec.setup_url,
+                    detail=f"No OAuth app is registered for '{provider}' yet.",
+                )
+            )
+        client_id = (
+            await prompt.read(
+                AuthField(name="CLIENT_ID", label=f"{provider} client id", secret=False)
+            )
+        ).strip()
+        if not client_id:
+            return "", client_secret
+        client_secret = (
+            await prompt.read(
+                AuthField(name="CLIENT_SECRET", label=f"{provider} client secret")
+            )
+        ).strip()
+        # Remembered, so the next `loom connect` against this provider — and
+        # every other toolset it serves — does not ask again.
+        await apps.put(provider, client_id, client_secret)
+        return client_id, client_secret
+
+    async def disconnect(self, credential: str) -> dict[str, Any]:
+        store = getattr(self.runtime, "credentials", None)
+        if store is None:
+            raise ConfigurationError("no credential store on this Runtime")
+        existed = credential in await store.names()
+        await store.forget(credential)
+        return {"credential": credential, "disconnected": existed}
+
+    async def connections(self, toolset: str = "") -> list[dict[str, Any]]:
+        from loom.connectors.inspect import ConnectionInspector
+
+        inspector = ConnectionInspector(
+            self.runtime.toolsets,
+            getattr(self.runtime, "credentials", None),
+            clock=self.runtime.clock,
+        )
+        found = [await inspector.status(toolset)] if toolset else await inspector.all()
+        return [status.model_dump(mode="json") for status in found]
 
     async def pause(self, run_id: str) -> dict[str, Any]:
         await self.runtime.pause(run_id)
@@ -1073,9 +1428,29 @@ class LocalFacade:
             tool_registry=self.runtime.toolsets,
             node_registry=self.runtime.nodes,
             probes=probes,
+            # The deployment's own browser, so exploration runs through whatever
+            # provider the workflow will run against — a host on Browserbase
+            # explores on Browserbase. `None` offers no exploration tool at all,
+            # which is the same degradation `probes` makes.
+            #
+            # Wired here rather than left to a caller because a capability
+            # nobody passes in is indistinguishable from one nobody wrote:
+            # `interaction.py` shipped complete, fully unit-tested, and
+            # unreachable for exactly that reason.
+            browser=self.runtime.browser if observe else None,
             allowed_packages=set(packages) if packages else None,
             smoke_input=smoke_input,
             user_interaction=self.user_interaction,
+            # What `loom connect` stored, so a lookup the agent makes while
+            # writing can actually authenticate. Without it rung 2 of the
+            # resolution ladder — resolve now, bake the id in with the human
+            # name beside it — was unreachable for every connected toolset.
+            credentials=getattr(self.runtime, "credentials", None),
+            # Given a flow, the agent can obtain a credential it finds missing
+            # rather than reporting the toolset as unusable — which is the
+            # reading that makes a model delete the integration. Absent, the
+            # tool is not offered at all, so `loom mcp` and CI are unchanged.
+            connect=self._connect_for_agent(),
             # The same "now" the runs read. A Runtime under `ManualClock` and
             # an authoring job reading the wall clock would disagree about the
             # date in the one place that has to agree with it.
@@ -1090,6 +1465,41 @@ class LocalFacade:
         self.last_session_id = agent.session_id
         self._authoring = agent
         return agent
+
+    def _connect_for_agent(self) -> Any:
+        """A one-argument `connect(toolset_id)` for the coding agent, or None.
+
+        Bound to `facade.connect` so the agent's route and `loom connect` are
+        the same code — and by *toolset* id rather than credential name,
+        because that is what the agent has: it just read `not_connected` for
+        `jira` and does not know the credential is called `jira` while the
+        provider is `atlassian`.
+        """
+        if self.connect_flow is None:
+            return None
+
+        async def connect(toolset_id: str) -> dict[str, Any]:
+            from loom.connectors.inspect import ConnectionInspector
+
+            inspector = ConnectionInspector(
+                self.runtime.toolsets,
+                getattr(self.runtime, "credentials", None),
+                clock=self.runtime.clock,
+            )
+            status = await inspector.status(toolset_id)
+            if not status.credential:
+                return {
+                    "connected": False,
+                    "toolset": toolset_id,
+                    "reason": (
+                        f"{toolset_id} reads no credential store — it is "
+                        "configured with environment variables: "
+                        + ", ".join(status.missing_fields)
+                    ),
+                }
+            return {"toolset": toolset_id, **await self.connect(status.credential)}
+
+        return connect
 
     @property
     def resumable(self) -> bool:
@@ -1157,6 +1567,18 @@ class LocalFacade:
             return False
         await store.delete_trigger(trigger_id)
         return True
+
+    async def wire_triggers(self, workflow: str) -> list[dict[str, Any]]:
+        definition = self.runtime.resolve_workflow(workflow)
+        dispatcher = self._dispatcher()
+        await dispatcher.register(definition)
+        records = await dispatcher._store.list_triggers(workflow=definition.name)
+        return [record.model_dump(mode="json") for record in records]
+
+    async def tick_schedules(self) -> list[dict[str, Any]]:
+        fired = await self._dispatcher().tick()
+        started = [await self.get(run_id) for run_id in fired]
+        return [record for record in started if record is not None]
 
     async def list_artifacts(self) -> list[dict[str, Any]]:
         service = self.runtime.require_artifacts()
@@ -1339,6 +1761,18 @@ _NO_REMOTE_AUTHORING = (
     "call, and it needs a model key — a server's would be spending someone "
     "else's budget on your behalf. Drop --server."
 )
+_NO_REMOTE_CONNECT = (
+    "connecting opens a browser on this machine and writes this machine's "
+    "credential store, so doing it against a server would either spend the "
+    "server's OAuth app or put the token in the wrong keyring. Drop --server, "
+    "or run 'loom connect' on the server itself."
+)
+_NO_REMOTE_CONNECTIONS = (
+    "a connection is a property of the process that will make the call, not of "
+    "the one asking. A server's toolsets read the server's credential store and "
+    "the server's environment, and neither is visible from here. Drop --server "
+    "to inspect this process's, or run 'loom connections' there."
+)
 _NO_REMOTE_DEDUPE = (
     "dedupe_key is not carried over HTTP yet, and dropping it would let a "
     "redelivered event resume a run twice while the caller saw success. Run "
@@ -1360,6 +1794,24 @@ class RemoteFacade:
 
     async def workflows(self, *, published: bool = True) -> list[dict[str, Any]]:
         return await self.client.workflows(published=published)
+
+    async def connect(
+        self,
+        credential: str,
+        *,
+        client_id: str = "",
+        client_secret: str = "",
+        fields: dict[str, str] | None = None,
+        device: bool = False,
+        scopes: list[str] | None = None,
+    ) -> dict[str, Any]:
+        raise ConfigurationError(_NO_REMOTE_CONNECT)
+
+    async def disconnect(self, credential: str) -> dict[str, Any]:
+        raise ConfigurationError(_NO_REMOTE_CONNECT)
+
+    async def connections(self, toolset: str = "") -> list[dict[str, Any]]:
+        raise ConfigurationError(_NO_REMOTE_CONNECTIONS)
 
     async def start(
         self,
@@ -1469,6 +1921,12 @@ class RemoteFacade:
         raise ConfigurationError(_NO_REMOTE_SCHEDULING)
 
     async def unschedule(self, trigger_id: str) -> bool:
+        raise ConfigurationError(_NO_REMOTE_SCHEDULING)
+
+    async def wire_triggers(self, workflow: str) -> list[dict[str, Any]]:
+        raise ConfigurationError(_NO_REMOTE_SCHEDULING)
+
+    async def tick_schedules(self) -> list[dict[str, Any]]:
         raise ConfigurationError(_NO_REMOTE_SCHEDULING)
 
     async def pending(self, run_id: str | None = None) -> list[dict[str, Any]]:

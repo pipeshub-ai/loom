@@ -499,3 +499,157 @@ class TestTurnBudget:
         assert _without_generic_advice("something else entirely") == (
             "something else entirely"
         )
+
+
+class TestNothingElsePaintsWhileAQuestionIsUp:
+    """Two writers, one terminal.
+
+    `ProgressRenderer` keeps a `rich` live region on stderr and redraws it on
+    its own timer from the main thread. `PromptUserInteraction` runs a
+    full-screen `prompt_toolkit` dialog on the same stderr from a worker
+    thread. Both painted at once, and the dialog came up with scrollback
+    bleeding through it and the question rendered twice — once in the box and
+    once in the line showing through it.
+
+    Neither component's own tests can see that: each is correct alone, and the
+    fault is in the pair. Same shape as `tests/test_ask_user_wiring.py`, which
+    exists because `interaction.py` shipped complete and wired by nobody.
+    """
+
+    def test_a_drawing_renderer_registers_itself(self) -> None:
+        from loom.cli import progress
+
+        renderer = progress.ProgressRenderer(enabled=True, live_capable=True)
+        renderer._console = _FakeConsole()
+        renderer._begin("thinking")
+        try:
+            assert any(active is renderer for active in progress._ACTIVE)
+        finally:
+            renderer.close()
+        assert not any(active is renderer for active in progress._ACTIVE)
+
+    def test_suspend_stops_it_and_starts_it_again(self) -> None:
+        from loom.cli import progress
+
+        renderer = progress.ProgressRenderer(enabled=True, live_capable=True)
+        renderer._console = _FakeConsole()
+        renderer._begin("thinking")
+        live = renderer._live
+        try:
+            with progress.suspend():
+                assert renderer._live is None, "the live region kept drawing"
+                assert not live.is_started, "rich.Live was detached but not stopped"
+            assert renderer._live is not None, "the live region did not come back"
+        finally:
+            renderer.close()
+
+    def test_suspend_is_a_no_op_when_nothing_is_drawing(self) -> None:
+        from loom.cli import progress
+
+        with progress.suspend():
+            pass
+
+    def test_the_interaction_actually_calls_it(self) -> None:
+        """The wiring. A `suspend()` nobody calls is the bug still shipping."""
+        import inspect
+
+        from loom.cli.repl.interaction import PromptUserInteraction
+
+        source = inspect.getsource(PromptUserInteraction.ask)
+        assert "suspend()" in source
+
+    def test_the_dialog_carries_the_question_rather_than_printing_it(self) -> None:
+        """It covers the screen, so anything printed beside it shows through."""
+        import inspect
+
+        from loom.cli.repl.interaction import PromptUserInteraction
+
+        source = inspect.getsource(PromptUserInteraction._one)
+        # The headline is for the path that renders nothing of its own.
+        assert source.index("self._headline") > source.index("question.kind ==")
+
+
+class _FakeConsole:
+    """Enough of a `rich` console for `_begin` to build a Live against."""
+
+    is_terminal = True
+
+    def __getattr__(self, name: str) -> object:
+        return lambda *a, **k: None
+
+
+class TestConnectingHoldsTheTerminalToo:
+    """The same two-writers-one-terminal fault, one subsystem over.
+
+    `connect_toolset` printed "atlassian client id:" and the progress spinner
+    kept redrawing on the same stderr on its own timer, landing between the two
+    prompts:
+
+        atlassian client id:
+        ◐ connect_toolset("jira")   turn 5 · 76.9k tok · $0.16 · 1m39s
+        atlassian client secret:
+
+    Fixed for `ask_user` and not applied here, because each was wired
+    separately — which is why this asserts the *wiring* rather than `suspend()`
+    itself, already covered above.
+    """
+
+    async def test_the_secret_prompt_holds_the_live_region(self) -> None:
+        import loom.connectors.flows as flows
+        from loom.cli import progress, targets
+        from loom.toolsets.manifest import AuthField
+
+        renderer = progress.ProgressRenderer(enabled=True, live_capable=True)
+        renderer._console = _FakeConsole()
+        renderer._begin("thinking")
+
+        during: list[object] = []
+        original = flows.ConsoleSecretPrompt.read
+
+        async def spy(self: object, field: AuthField) -> str:
+            during.append(renderer._live)
+            return "typed"
+
+        flows.ConsoleSecretPrompt.read = spy  # type: ignore[method-assign]
+        try:
+            assert await targets._secret_prompt().read(AuthField(name="CLIENT_ID"))
+        finally:
+            flows.ConsoleSecretPrompt.read = original  # type: ignore[method-assign]
+            renderer.close()
+
+        assert during == [None], "the spinner kept drawing over the prompt"
+
+    def test_the_event_renderer_holds_it_as_well(self) -> None:
+        """The printed block is overwritten just as readily as a prompt."""
+        import inspect
+
+        from loom.cli import targets
+
+        assert "suspend()" in inspect.getsource(targets._connect_renderer)
+
+    def test_the_redirect_uri_is_the_one_the_listener_will_bind(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """It was a hardcoded 8931, so anyone who had set the port was told to
+        register a URI the flow was never going to use."""
+        from loom.cli import targets
+        from loom.connectors.flows import ConnectEvent
+
+        monkeypatch.setenv("LOOM_OAUTH_REDIRECT_PORT", "9002")
+        targets._connect_renderer()(ConnectEvent(kind="needs_app", detail="x"))
+
+        assert "http://127.0.0.1:9002/callback" in capsys.readouterr().err
+
+    def test_the_heading_is_not_said_twice(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """It read: "No OAuth app is registered yet — no OAuth app is
+        registered for 'atlassian' yet"."""
+        from loom.cli import targets
+        from loom.connectors.flows import ConnectEvent
+
+        targets._connect_renderer()(
+            ConnectEvent(kind="needs_app", detail="No OAuth app for 'atlassian' yet.")
+        )
+        err = capsys.readouterr().err
+        assert err.lower().count("no oauth app") == 1

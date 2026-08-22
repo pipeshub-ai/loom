@@ -32,8 +32,9 @@ both sides are what make the difference visible.
 from __future__ import annotations
 
 from loom import Retry, step
+from loom.toolsets.factory import client_for
 from loom.toolsets.pagination import Results
-from loom.toolsets.quickbooks.client import get_default_client
+from loom.toolsets.quickbooks.client import QuickBooksClient
 from loom.toolsets.quickbooks.models import (
     QuickBooksCustomer,
     QuickBooksInvoice,
@@ -78,7 +79,7 @@ async def quickbooks_find_customer(email: str) -> QuickBooksCustomer | None:
     Args:
         email: The exact address to match.
     """
-    return await get_default_client().find_customer_by_email(email)
+    return await (await client_for("quickbooks", QuickBooksClient)).find_customer_by_email(email)
 
 
 @step(retry=_READ)
@@ -91,7 +92,7 @@ async def quickbooks_get_customer(customer_id: str) -> QuickBooksCustomer:
     Args:
         customer_id: The numeric QuickBooks id.
     """
-    return await get_default_client().get_customer(customer_id)
+    return await (await client_for("quickbooks", QuickBooksClient)).get_customer(customer_id)
 
 
 @step(retry=_NO_RETRY)
@@ -119,7 +120,7 @@ async def quickbooks_create_customer(
         given_name: First name.
         family_name: Last name.
     """
-    return await get_default_client().create_customer(
+    return await (await client_for("quickbooks", QuickBooksClient)).create_customer(
         display_name=display_name,
         email=email,
         company_name=company_name,
@@ -141,7 +142,8 @@ async def quickbooks_update_customer(
         values: QuickBooks field names to new values, e.g.
             ``{"CompanyName": "Acme"}``.
     """
-    return await get_default_client().update_customer(customer_id, sync_token, values)
+    client = await client_for("quickbooks", QuickBooksClient)
+    return await client.update_customer(customer_id, sync_token, values)
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +183,7 @@ async def quickbooks_create_sales_receipt(
         private_note: Not shown to the customer. Put an external id here — it
             is what stands in for an idempotency key on a later run.
     """
-    return await get_default_client().create_sales_receipt(
+    return await (await client_for("quickbooks", QuickBooksClient)).create_sales_receipt(
         customer_id=customer_id,
         amount=amount,
         description=description,
@@ -206,7 +208,7 @@ async def quickbooks_find_sales_receipts(
         customer_id: Narrow to one customer.
         limit: Most receipts to return, following pages as needed.
     """
-    return await get_default_client().find_sales_receipts(
+    return await (await client_for("quickbooks", QuickBooksClient)).find_sales_receipts(
         private_note=private_note, customer_id=customer_id, limit=limit
     )
 
@@ -227,7 +229,7 @@ async def quickbooks_find_invoices(
         unpaid_only: Only invoices with an outstanding balance.
         limit: Most invoices to return, following pages as needed.
     """
-    return await get_default_client().find_invoices(
+    return await (await client_for("quickbooks", QuickBooksClient)).find_invoices(
         customer_id=customer_id, unpaid_only=unpaid_only, limit=limit
     )
 
@@ -242,7 +244,8 @@ async def quickbooks_find_payments(
         customer_id: The numeric QuickBooks customer id, or empty for all.
         limit: Most payments to return, following pages as needed.
     """
-    return await get_default_client().find_payments(customer_id=customer_id, limit=limit)
+    client = await client_for("quickbooks", QuickBooksClient)
+    return await client.find_payments(customer_id=customer_id, limit=limit)
 
 
 @step(retry=_READ)
@@ -256,4 +259,5 @@ async def quickbooks_find_items(name: str = "", limit: int = 25) -> Results[Quic
         name: Exact item name to match, or empty for all.
         limit: Most items to return, following pages as needed.
     """
-    return await get_default_client().find_items(name=name, limit=limit)
+    client = await client_for("quickbooks", QuickBooksClient)
+    return await client.find_items(name=name, limit=limit)

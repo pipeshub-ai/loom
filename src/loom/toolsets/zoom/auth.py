@@ -27,6 +27,7 @@ import asyncio
 import base64
 import os
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -106,6 +107,26 @@ class ZoomAuth:
                 "ZOOM_CLIENT_ID + ZOOM_CLIENT_SECRET for a Server-to-Server "
                 "OAuth app, or ZOOM_ACCESS_TOKEN, or run 'loom connect zoom'."
             )
+
+
+    @classmethod
+    def from_values(
+        cls, values: Mapping[str, str], *, scopes: Sequence[str] = ()
+    ) -> ZoomAuth:
+        """Build from resolved configuration, reading nothing here.
+
+        The single construction path :func:`loom.toolsets.factory.build_client`
+        uses. It exists because the factory previously named the *credentials
+        holder* and handed that to the client as its ``auth``: that constructs
+        without complaint, since nothing checks the type, and raises
+        ``AttributeError: no attribute 'headers'`` on the first request.
+
+        *scopes* is accepted and unused — this provider carries them in the
+        grant rather than the token request. Taking the argument anyway is what
+        lets one factory build all three auth layers without asking which kind
+        each one is.
+        """
+        return cls(credentials=ZoomCredentials.from_env(dict(values)))
 
     @property
     def mode(self) -> str:

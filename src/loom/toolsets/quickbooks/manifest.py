@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from loom.toolsets.manifest import (
+    AuthField,
+    AuthSpec,
     EffectClass,
     OperationSpec,
     ToolsetManifest,
@@ -37,15 +39,30 @@ QUICKBOOKS_MANIFEST = ToolsetManifest(
         "with quickbooks_find_sales_receipts."
     ),
     base_url="https://quickbooks.api.intuit.com",
-    auth={
-        "type": "oauth2",
-        "fields": [
-            "QUICKBOOKS_REALM_ID",
-            "QUICKBOOKS_CLIENT_ID",
-            "QUICKBOOKS_CLIENT_SECRET",
-            "QUICKBOOKS_REFRESH_TOKEN",
-        ],
-    },
+    auth=AuthSpec(
+        client="loom.toolsets.quickbooks.client:QuickBooksClient",
+        # This client reads environment variables and no CredentialStore, so
+        # `credential` is empty and no `provider` is declared: an OAuth flow
+        # here would store a token the client never looks up. Adding a store
+        # path is a change to the client, not to this manifest.
+        # Intuit rotates the refresh token on every exchange, and a realm id names
+        # one company file, so the client owns the exchange.
+        kind="oauth2",
+        fields=(
+            AuthField(name="QUICKBOOKS_REALM_ID", arg="realm_id", label="Realm (company) id",
+                      secret=False),
+            AuthField(name="QUICKBOOKS_CLIENT_ID",
+                      arg="client_id", label="Client id", secret=False),
+            AuthField(name="QUICKBOOKS_CLIENT_SECRET", arg="client_secret", label="Client secret"),
+            AuthField(name="QUICKBOOKS_REFRESH_TOKEN", arg="refresh_token", label="Refresh token"),
+            AuthField(name="QUICKBOOKS_ACCESS_TOKEN",
+                      arg="access_token", label="Ready-made access token",
+                      required=False),
+            AuthField(name="QUICKBOOKS_ENVIRONMENT", label="Sandbox or production",
+                      arg="environment", secret=False, required=False,
+                      example="production"),
+        ),
+    ),
     tools_module="loom.toolsets.quickbooks.tools",
     egress_hosts=[
         "quickbooks.api.intuit.com",

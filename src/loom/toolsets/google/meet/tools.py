@@ -21,6 +21,7 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from loom import Retry, step
+from loom.toolsets.google.meet.client import MeetClient
 from loom.toolsets.google.meet.models import (
     ConferenceRecord,
     MeetParticipant,
@@ -80,9 +81,9 @@ async def meet_create_space(access_type: str = "") -> MeetSpace:
     Returns:
         MeetSpace with name, meeting_uri (the link to send), and meeting_code.
     """
-    from loom.toolsets.google.meet.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_space(access_type)
+    return await (await client_for("google_meet", MeetClient)).create_space(access_type)
 
 
 @step(retry=_READ)
@@ -98,9 +99,9 @@ async def meet_get_space(name: str) -> MeetSpace:
         actually happening in the room — it is the way to ask "is this meeting
         live right now".
     """
-    from loom.toolsets.google.meet.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_space(name)
+    return await (await client_for("google_meet", MeetClient)).get_space(name)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -117,9 +118,9 @@ async def meet_update_space(
     Returns:
         The updated MeetSpace. Only the settings passed are touched.
     """
-    from loom.toolsets.google.meet.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().update_space(
+    return await (await client_for("google_meet", MeetClient)).update_space(
         name, access_type=access_type, entry_point_access=entry_point_access
     )
 
@@ -138,9 +139,9 @@ async def meet_end_active_conference(name: str) -> str:
     Returns:
         The space name, so the journal records which room was cleared.
     """
-    from loom.toolsets.google.meet.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    await get_default_client().end_active_conference(name)
+    await (await client_for("google_meet", MeetClient)).end_active_conference(name)
     return name
 
 
@@ -166,9 +167,10 @@ async def meet_list_conference_records(
         Results[ConferenceRecord] with name, space, start_time, end_time.
         ``name`` is what participants, recordings, and transcripts list under.
     """
-    from loom.toolsets.google.meet.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_conference_records(filter, max_results)
+    client = await client_for("google_meet", MeetClient)
+    return await client.list_conference_records(filter, max_results)
 
 
 @step(retry=_READ)
@@ -182,9 +184,9 @@ async def meet_get_conference_record(name: str) -> ConferenceRecord:
         ConferenceRecord. ``in_progress`` is True while the call is still live,
         which is when recordings and transcripts do not exist yet.
     """
-    from loom.toolsets.google.meet.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_conference_record(name)
+    return await (await client_for("google_meet", MeetClient)).get_conference_record(name)
 
 
 @step(retry=_READ)
@@ -204,9 +206,9 @@ async def meet_list_participants(
         ``phone`` — only the first can be matched against a directory user, so
         do not assume an attendance check can identify everyone.
     """
-    from loom.toolsets.google.meet.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_participants(
+    return await (await client_for("google_meet", MeetClient)).list_participants(
         conference_record, max_results
     )
 
@@ -231,9 +233,10 @@ async def meet_list_recordings(
         ``drive_file_id``: Meet reports a recording as soon as it stops, and
         the Drive file appears only once the state is ``FILE_GENERATED``.
     """
-    from loom.toolsets.google.meet.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_recordings(conference_record, max_results)
+    client = await client_for("google_meet", MeetClient)
+    return await client.list_recordings(conference_record, max_results)
 
 
 @step(retry=_READ)
@@ -252,9 +255,10 @@ async def meet_list_transcripts(
         ``meet_list_transcript_entries`` gives the text already structured by
         speaker, which is usually what a workflow wants.
     """
-    from loom.toolsets.google.meet.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_transcripts(conference_record, max_results)
+    client = await client_for("google_meet", MeetClient)
+    return await client.list_transcripts(conference_record, max_results)
 
 
 @step(retry=_READ)
@@ -275,9 +279,10 @@ async def meet_list_transcript_entries(
         before summarising — a summary of the first page reads exactly like a
         summary of the meeting.
     """
-    from loom.toolsets.google.meet.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_transcript_entries(transcript, max_results)
+    client = await client_for("google_meet", MeetClient)
+    return await client.list_transcript_entries(transcript, max_results)
 
 
 # ---------------------------------------------------------------------------

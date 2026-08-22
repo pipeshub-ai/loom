@@ -22,6 +22,7 @@ timeout=30)`` would set the *step's* timeout and call the tool without one.
 from __future__ import annotations
 
 from loom import Retry, step
+from loom.toolsets.tavily.client import TavilyClient
 from loom.toolsets.tavily.models import TavilyExtraction, TavilySearch, TavilySiteMap
 
 #: Reads, so retrying is free. Note that a spent quota (432/433) is classified
@@ -81,9 +82,10 @@ async def tavily_search(
     Returns:
         The matching pages, plus the written answer when one was requested.
     """
-    from loom.toolsets.tavily.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().search(
+
+    return await (await client_for("tavily", TavilyClient)).search(
         query,
         max_results=max_results,
         topic=topic,
@@ -129,9 +131,9 @@ async def tavily_extract(
         was not. Check ``.failed`` before treating ``.pages`` as the whole
         request — this endpoint returns 200 when some URLs could not be read.
     """
-    from loom.toolsets.tavily.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().extract(
+    return await (await client_for("tavily", TavilyClient)).extract(
         urls,
         extract_depth=extract_depth,
         output_format=output_format,
@@ -175,9 +177,9 @@ async def tavily_map_site(
     Returns:
         The discovered URLs under ``base_url``.
     """
-    from loom.toolsets.tavily.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().map_site(
+    return await (await client_for("tavily", TavilyClient)).map_site(
         url,
         max_depth=max_depth,
         max_breadth=max_breadth,

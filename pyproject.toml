@@ -310,4 +310,4 @@ ignore_missing_imports = true
 # talk to a real service (Jira, Gmail) stay off this list so a bare server
 # does not fail at import for missing credentials.
 [tool.loom]
-modules = ["examples/cookbook/01_sequential.py", "flows/who_won_ipl_2.py"]
+modules = ["examples/cookbook/01_sequential.py"]

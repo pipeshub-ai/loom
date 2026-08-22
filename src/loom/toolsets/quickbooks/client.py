@@ -37,7 +37,6 @@ it terminates the literal — ``O'Brien`` again, exactly as in Salesforce.
 from __future__ import annotations
 
 import asyncio
-import os
 from typing import Any, TypedDict
 
 from loom.core.exceptions import NonRetryableError, WorkflowError
@@ -194,19 +193,13 @@ class QuickBooksClient:
         environment: str = "",
         timeout: float = 30.0,
     ) -> None:
-        self._realm = realm_id or os.environ.get("QUICKBOOKS_REALM_ID", "")
-        self._client_id = client_id or os.environ.get("QUICKBOOKS_CLIENT_ID", "")
-        self._client_secret = client_secret or os.environ.get(
-            "QUICKBOOKS_CLIENT_SECRET", ""
-        )
-        self._refresh_token = refresh_token or os.environ.get(
-            "QUICKBOOKS_REFRESH_TOKEN", ""
-        )
-        self._access_token = access_token or os.environ.get(
-            "QUICKBOOKS_ACCESS_TOKEN", ""
-        )
+        self._realm = realm_id
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._refresh_token = refresh_token
+        self._access_token = access_token
         self._environment = (
-            environment or os.environ.get("QUICKBOOKS_ENVIRONMENT", "production")
+            environment or "production"
         ).lower()
         self._timeout = timeout
         self._lock = asyncio.Lock()
@@ -560,18 +553,5 @@ class QuickBooksClient:
         return found.mapped(QuickBooksItem.from_api)
 
 
-_default_client: QuickBooksClient | None = None
 
 
-def get_default_client() -> QuickBooksClient:
-    """Return (or create) the module-level client from the environment."""
-    global _default_client
-    if _default_client is None:
-        _default_client = QuickBooksClient()
-    return _default_client
-
-
-def reset_default_client() -> None:
-    """Drop the cached client. For tests that swap the environment."""
-    global _default_client
-    _default_client = None

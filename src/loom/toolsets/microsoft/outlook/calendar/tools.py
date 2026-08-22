@@ -31,6 +31,7 @@ retry mails them again.
 from __future__ import annotations
 
 from loom import Retry, step
+from loom.toolsets.microsoft.outlook.calendar.client import OutlookCalendarClient
 from loom.toolsets.microsoft.outlook.models import (
     Calendar,
     CalendarEvent,
@@ -58,9 +59,10 @@ async def outlook_list_calendars(limit: int = 100) -> Results[Calendar]:
         Results of Calendar. ``can_edit`` is worth checking before writing: a
         calendar shared read-only accepts no events.
     """
-    from loom.toolsets.microsoft.outlook.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_calendars(limit=limit)
+    client = await client_for("outlook_calendar", OutlookCalendarClient)
+    return await client.list_calendars(limit=limit)
 
 
 @step(retry=_READ)
@@ -93,9 +95,9 @@ async def outlook_list_calendar_view(
         when it came from a recurring series — editing the occurrence and
         editing the series are different calls.
     """
-    from loom.toolsets.microsoft.outlook.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_calendar_view(
+    return await (await client_for("outlook_calendar", OutlookCalendarClient)).list_calendar_view(
         start, end, calendar_id=calendar_id, limit=limit, timezone=timezone
     )
 
@@ -125,9 +127,9 @@ async def outlook_list_events(
         Results of CalendarEvent, with ``event_type`` of ``"seriesMaster"`` for
         recurring ones.
     """
-    from loom.toolsets.microsoft.outlook.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_events(
+    return await (await client_for("outlook_calendar", OutlookCalendarClient)).list_events(
         calendar_id=calendar_id,
         limit=limit,
         filter_query=filter_query,
@@ -151,9 +153,9 @@ async def outlook_get_event(
         CalendarEvent with attendees, body, and the online meeting link if it
         has one.
     """
-    from loom.toolsets.microsoft.outlook.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_event(
+    return await (await client_for("outlook_calendar", OutlookCalendarClient)).get_event(
         event_id, calendar_id=calendar_id, timezone=timezone
     )
 
@@ -201,9 +203,9 @@ async def outlook_create_event(
         The created CalendarEvent, including ``online_meeting_url`` when a
         Teams meeting was requested.
     """
-    from loom.toolsets.microsoft.outlook.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_event(
+    return await (await client_for("outlook_calendar", OutlookCalendarClient)).create_event(
         subject,
         start,
         end,
@@ -249,9 +251,9 @@ async def outlook_update_event(
     Returns:
         The updated CalendarEvent.
     """
-    from loom.toolsets.microsoft.outlook.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().update_event(
+    return await (await client_for("outlook_calendar", OutlookCalendarClient)).update_event(
         event_id,
         calendar_id=calendar_id,
         subject=subject,
@@ -287,9 +289,9 @@ async def outlook_respond_to_event(
     Returns:
         True when the response was accepted.
     """
-    from loom.toolsets.microsoft.outlook.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().respond_to_event(
+    return await (await client_for("outlook_calendar", OutlookCalendarClient)).respond_to_event(
         event_id,
         response,
         calendar_id=calendar_id,
@@ -318,9 +320,9 @@ async def outlook_cancel_event(
     Returns:
         True when the cancellation was accepted.
     """
-    from loom.toolsets.microsoft.outlook.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().cancel_event(
+    return await (await client_for("outlook_calendar", OutlookCalendarClient)).cancel_event(
         event_id, calendar_id=calendar_id, comment=comment
     )
 
@@ -342,9 +344,9 @@ async def outlook_delete_event(event_id: str, calendar_id: str = "") -> bool:
     Returns:
         True when the delete was accepted.
     """
-    from loom.toolsets.microsoft.outlook.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().delete_event(
+    return await (await client_for("outlook_calendar", OutlookCalendarClient)).delete_event(
         event_id, calendar_id=calendar_id
     )
 
@@ -375,9 +377,9 @@ async def outlook_find_meeting_times(
         score, and each attendee's availability. An empty list means no slot
         satisfied the constraints — not an error.
     """
-    from loom.toolsets.microsoft.outlook.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().find_meeting_times(
+    return await (await client_for("outlook_calendar", OutlookCalendarClient)).find_meeting_times(
         attendees,
         duration_minutes=duration_minutes,
         start=start,
@@ -412,9 +414,9 @@ async def outlook_get_schedule(
         error rather than an absence, and treating it as free would schedule
         over somebody.
     """
-    from loom.toolsets.microsoft.outlook.calendar.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_schedule(
+    return await (await client_for("outlook_calendar", OutlookCalendarClient)).get_schedule(
         addresses,
         start,
         end,

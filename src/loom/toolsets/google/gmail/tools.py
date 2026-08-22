@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from loom import Retry, step
 from loom.blobs.attachment import Attachment
+from loom.toolsets.google.gmail.client import GmailClient
 from loom.toolsets.google.gmail.models import (
     AttachmentRef,
     EmailMessage,
@@ -101,9 +102,9 @@ async def gmail_search_messages(
         List of EmailMessage with id, subject, sender, to, date, body,
         label_ids, attachments, url.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().search_messages(query, max_results)
+    return await (await client_for("gmail", GmailClient)).search_messages(query, max_results)
 
 
 @step(retry=_READ)
@@ -116,9 +117,9 @@ async def gmail_get_message(message_id: str) -> EmailMessage:
     Returns:
         EmailMessage.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_message(message_id)
+    return await (await client_for("gmail", GmailClient)).get_message(message_id)
 
 
 @step(retry=_SEND)
@@ -146,9 +147,9 @@ async def gmail_send_message(
     Returns:
         SentMessage with id, thread_id, and url.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().send_message(
+    return await (await client_for("gmail", GmailClient)).send_message(
         to, subject, body, cc=cc, bcc=bcc, html=html, attachments=attachments
     )
 
@@ -175,9 +176,9 @@ async def gmail_forward_message(
     Returns:
         SentMessage.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().forward_message(
+    return await (await client_for("gmail", GmailClient)).forward_message(
         message_id, to, comment=comment, html=html
     )
 
@@ -203,9 +204,9 @@ async def gmail_reply_to_message(
     Returns:
         SentMessage.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().reply_to_message(
+    return await (await client_for("gmail", GmailClient)).reply_to_message(
         message_id, body, html=html, reply_all=reply_all
     )
 
@@ -230,9 +231,9 @@ async def gmail_modify_labels(
     Returns:
         The updated EmailMessage.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().modify_labels(message_id, add, remove)
+    return await (await client_for("gmail", GmailClient)).modify_labels(message_id, add, remove)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -245,9 +246,10 @@ async def gmail_mark_read(message_id: str) -> EmailMessage:
     Returns:
         The updated EmailMessage.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().modify_labels(message_id, None, ["UNREAD"])
+    client = await client_for("gmail", GmailClient)
+    return await client.modify_labels(message_id, None, ["UNREAD"])
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -260,9 +262,9 @@ async def gmail_archive_message(message_id: str) -> EmailMessage:
     Returns:
         The updated EmailMessage.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().modify_labels(message_id, None, ["INBOX"])
+    return await (await client_for("gmail", GmailClient)).modify_labels(message_id, None, ["INBOX"])
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -287,9 +289,10 @@ async def gmail_batch_modify_labels(
         per-id outcome, so this is the count asked for, not a confirmation
         that each one existed.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().batch_modify_labels(message_ids, add, remove)
+    client = await client_for("gmail", GmailClient)
+    return await client.batch_modify_labels(message_ids, add, remove)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -302,9 +305,9 @@ async def gmail_trash_message(message_id: str) -> EmailMessage:
     Returns:
         The trashed EmailMessage.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().trash_message(message_id)
+    return await (await client_for("gmail", GmailClient)).trash_message(message_id)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -317,9 +320,9 @@ async def gmail_untrash_message(message_id: str) -> EmailMessage:
     Returns:
         The restored EmailMessage.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().untrash_message(message_id)
+    return await (await client_for("gmail", GmailClient)).untrash_message(message_id)
 
 
 # ---------------------------------------------------------------------------
@@ -348,9 +351,10 @@ async def gmail_list_threads(
         ``message_count`` is 0 — a list response carries neither. Call
         ``gmail_get_thread`` for the conversation itself.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_threads(query, max_results, label_ids)
+    client = await client_for("gmail", GmailClient)
+    return await client.list_threads(query, max_results, label_ids)
 
 
 @step(retry=_READ)
@@ -365,9 +369,9 @@ async def gmail_get_thread(thread_id: str) -> EmailThread:
         EmailThread with messages oldest-first. ``.subject`` is the first
         message's, ``.latest`` is the one a reply would answer.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_thread(thread_id)
+    return await (await client_for("gmail", GmailClient)).get_thread(thread_id)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -389,9 +393,10 @@ async def gmail_modify_thread_labels(
     Returns:
         The updated EmailThread.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().modify_thread_labels(thread_id, add, remove)
+    client = await client_for("gmail", GmailClient)
+    return await client.modify_thread_labels(thread_id, add, remove)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -404,9 +409,9 @@ async def gmail_trash_thread(thread_id: str) -> EmailThread:
     Returns:
         The trashed EmailThread.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().trash_thread(thread_id)
+    return await (await client_for("gmail", GmailClient)).trash_thread(thread_id)
 
 
 # ---------------------------------------------------------------------------
@@ -445,9 +450,9 @@ async def gmail_create_draft(
     Returns:
         GmailDraft with the id that ``gmail_send_draft`` takes.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_draft(
+    return await (await client_for("gmail", GmailClient)).create_draft(
         to,
         subject,
         body,
@@ -470,9 +475,9 @@ async def gmail_list_drafts(max_results: int = 20) -> Results[GmailDraft]:
         Results[GmailDraft] with id and thread_id. Subject and recipients are
         empty — a draft listing carries neither.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_drafts(max_results)
+    return await (await client_for("gmail", GmailClient)).list_drafts(max_results)
 
 
 @step(retry=_SEND)
@@ -485,9 +490,9 @@ async def gmail_send_draft(draft_id: str) -> SentMessage:
     Returns:
         SentMessage with id, thread_id, and url.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().send_draft(draft_id)
+    return await (await client_for("gmail", GmailClient)).send_draft(draft_id)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -500,9 +505,9 @@ async def gmail_delete_draft(draft_id: str) -> str:
     Returns:
         The discarded draft id.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    await get_default_client().delete_draft(draft_id)
+    await (await client_for("gmail", GmailClient)).delete_draft(draft_id)
     return draft_id
 
 
@@ -525,9 +530,9 @@ async def gmail_get_attachment(
     Returns:
         Attachment with filename, mime, size, sha256, and bytes.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_attachment(
+    return await (await client_for("gmail", GmailClient)).get_attachment(
         message_id, attachment_id, filename
     )
 
@@ -540,9 +545,9 @@ async def gmail_list_labels() -> list[GmailLabel]:
         List of GmailLabel with id, name, type, messages_total,
         messages_unread.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_labels()
+    return await (await client_for("gmail", GmailClient)).list_labels()
 
 
 @step(retry=_READ)
@@ -562,9 +567,9 @@ async def gmail_find_label(label_name: str) -> GmailLabel | None:
         The GmailLabel, or None when no label has that name. None means create
         it with ``gmail_create_label``, or report it — do not guess an id.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().find_label(label_name)
+    return await (await client_for("gmail", GmailClient)).find_label(label_name)
 
 
 @step(retry=_CREATE)
@@ -578,9 +583,9 @@ async def gmail_create_label(name: str) -> GmailLabel:
     Returns:
         The created GmailLabel, including the id every labelling tool takes.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_label(name)
+    return await (await client_for("gmail", GmailClient)).create_label(name)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -594,9 +599,9 @@ async def gmail_rename_label(label_id: str, name: str) -> GmailLabel:
     Returns:
         The updated GmailLabel.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().update_label(label_id, name)
+    return await (await client_for("gmail", GmailClient)).update_label(label_id, name)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -611,9 +616,9 @@ async def gmail_delete_label(label_id: str) -> str:
     Returns:
         The deleted label id.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    await get_default_client().delete_label(label_id)
+    await (await client_for("gmail", GmailClient)).delete_label(label_id)
     return label_id
 
 
@@ -624,9 +629,9 @@ async def gmail_get_profile() -> GmailProfile:
     Returns:
         GmailProfile with email_address, messages_total, threads_total.
     """
-    from loom.toolsets.google.gmail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_profile()
+    return await (await client_for("gmail", GmailClient)).get_profile()
 
 
 # ---------------------------------------------------------------------------

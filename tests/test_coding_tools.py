@@ -156,9 +156,10 @@ class TestBuildCodingTools:
 
         tools = build_coding_tools()
         names = {t.name for t in tools}
-        # The toolset tier, the node tier, and the validator. Asserted by name
-        # rather than by count: a count says nothing about which tool went
-        # missing, and the whole set is the agent's visible surface.
+        # The toolset tier, the node tier, the SDK's own API, and the
+        # validator. Asserted by name rather than by count: a count says nothing
+        # about which tool went missing, and the whole set is the agent's
+        # visible surface.
         assert names == {
             "search_toolsets",
             "search_operations",
@@ -166,6 +167,7 @@ class TestBuildCodingTools:
             "get_tool_contract",
             "get_tool_docs",
             "call_read_operation",
+            "sdk_contract",
             "search_nodes",
             "show_node",
             "node_contract",

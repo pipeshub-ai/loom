@@ -29,7 +29,6 @@ from loom.toolsets.microsoft.auth import (
     GRAPH_BASE_URL,
     MicrosoftAuth,
     get_default_auth,
-    graph_base_url,
 )
 from loom.toolsets.microsoft.errors import GraphPermanentError
 from loom.toolsets.microsoft.http import GraphSession
@@ -48,8 +47,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     "OutlookCalendarClient",
-    "get_default_client",
-    "reset_default_client",
 ]
 
 
@@ -382,28 +379,4 @@ class OutlookCalendarClient:
 # Process-wide default
 # ---------------------------------------------------------------------------
 
-_default: OutlookCalendarClient | None = None
 
-
-def get_default_client() -> OutlookCalendarClient:
-    """Return the process-wide client, building it on first use.
-
-    Reads ``MS_OUTLOOK_USER`` and ``MS_OUTLOOK_TIMEZONE`` so a deployment can
-    name whose calendar, and which timezone to render times in, just once.
-    """
-    global _default
-    if _default is None:
-        import os
-
-        _default = OutlookCalendarClient(
-            base_url=graph_base_url(),
-            user_id=os.environ.get("MS_OUTLOOK_USER", ""),
-            timezone=os.environ.get("MS_OUTLOOK_TIMEZONE", ""),
-        )
-    return _default
-
-
-def reset_default_client() -> None:
-    """Drop the process-wide client. For tests, and for a credential rotation."""
-    global _default
-    _default = None

@@ -47,6 +47,57 @@ def _rejects_sampling_controls(model: str) -> bool:
     return model.startswith(_NO_SAMPLING_CONTROLS)
 
 
+#: Output ceilings, per model family. Longest-prefix match, then the floor.
+#:
+#: A flat 4096 was the old default and it is a legacy number: it was a real API
+#: limit once and is now well below what every shipped model will return. What
+#: made it worth changing is that exceeding it does not fail loudly. A model
+#: emitting a long tool call spends the whole ceiling on one argument, never
+#: closes the JSON, and the provider drops the unterminated block — so the
+#: response arrives with no text and no tool call, and a turn loop reads that as
+#: the model having nothing to say. The coding agent lost entire jobs to it,
+#: reporting a turn budget that had not caused the problem.
+#:
+#: Conservative on purpose: these are defaults a caller overrides, not the
+#: maximum each model supports. A ceiling nobody hits costs nothing.
+MAX_OUTPUT_TOKENS: dict[str, int] = {
+    "claude-opus": 32_000,
+    "claude-sonnet": 32_000,
+    "claude-haiku": 16_000,
+    "claude-3": 8_192,
+}
+
+#: What an unrecognised model gets. Unchanged from what shipped, because
+#: guessing high for a model with no entry is how a request gets rejected
+#: outright rather than truncated.
+DEFAULT_MAX_TOKENS = 4096
+
+#: The most this provider may ask for, because it does not stream.
+#:
+#: The SDK refuses a non-streaming request whose ``max_tokens`` implies a
+#: generation that could exceed ten minutes — a ``ValueError`` raised before
+#: anything is sent, so it fails the whole job rather than degrading. Measured
+#: rather than assumed: 21,333 is accepted and 24,000 is not.
+#:
+#: The table above is what each model *can* return; this is what can be asked
+#: for without streaming. Implementing streaming in ``complete`` is what lifts
+#: it, and until then a ceiling above this is not a bigger budget, it is a
+#: broken request.
+NON_STREAMING_LIMIT = 21_333
+
+
+def default_max_tokens(model_name: str) -> int:
+    """The output ceiling for *model_name*, by longest matching prefix.
+
+    Clamped to :data:`NON_STREAMING_LIMIT`, since this provider does not stream.
+    """
+    matches = [
+        limit for prefix, limit in MAX_OUTPUT_TOKENS.items()
+        if model_name.startswith(prefix)
+    ]
+    return min(max(matches) if matches else DEFAULT_MAX_TOKENS, NON_STREAMING_LIMIT)
+
+
 class AnthropicProvider:
     """Wraps the ``anthropic`` SDK as a LOOM ``ModelProvider``.
 
@@ -65,13 +116,13 @@ class AnthropicProvider:
         model_name: str = "claude-sonnet-5",
         *,
         api_key: str | None = None,
-        max_tokens: int = 4096,
+        max_tokens: int | None = None,
         cache: bool = True,
     ) -> None:
         import anthropic
 
         self.model_name = model_name
-        self._max_tokens = max_tokens
+        self._max_tokens = max_tokens or default_max_tokens(model_name)
         self._cache = cache
         """Reuse the unchanged prefix of a conversation across turns.
 
@@ -83,6 +134,17 @@ class AnthropicProvider:
         self._client = anthropic.AsyncAnthropic(
             api_key=api_key or os.environ.get("ANTHROPIC_API_KEY", ""),
         )
+
+    @property
+    def max_tokens(self) -> int:
+        """This provider's default output ceiling.
+
+        Public so a caller whose deliverable is large — the coding agent, whose
+        answer is a whole source file — can defer to the model's real limit
+        instead of imposing a flat number that is too low for one model and
+        rejected outright by another.
+        """
+        return self._max_tokens
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         """Send *request* to Claude and return a normalised response."""

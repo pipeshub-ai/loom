@@ -83,7 +83,7 @@ class Fire:
 #: by the fix for it. Anything not named here is either derived (``name``) or
 #: policy (``catch_up``, ``max_catch_up``, ``jitter``), and policy must be able
 #: to change without orphaning the trigger's accumulated state.
-_IDENTIFYING_SPEC_FIELDS = ("kind", "cron", "timezone", "seconds")
+_IDENTIFYING_SPEC_FIELDS = ("kind", "cron", "timezone", "seconds", "after_seconds")
 
 
 def _trigger_id(workflow: str, spec: Any) -> str:

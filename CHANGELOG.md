@@ -7,6 +7,381 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the credential key escape hatch reached no CLI command
+
+`default_key_provider` documents the order as `LOOM_CREDENTIAL_KEY`, then the
+OS keyring, then a generated file, and calls the first rung "explicit,
+portable, what CI and containers use". `KeyringCredentialStore` built a
+`KeyringKeyProvider` by hand and never called it — and that is the store
+`loom connect`, `loom login`, `loom whoami`, `loom doctor` and `oauth_client`
+all build, so nothing the CLI did honoured the variable. A container exporting
+it still reached for the keyring and landed on the warned-about local file.
+
+It also bypassed `tests/conftest.py::never_touch_the_real_keychain`, whose
+docstring names that first branch as the mechanism and whose stated purpose is
+that a test *cannot forget* to stay off a developer's keychain. Two test files
+were holding that line on their own with a fake backend.
+
+With neither variable set the provider, the service and the fallback path are
+what they were, which is the property a test now pins.
+
+
+### Added — `LOOM_CREDENTIAL_BACKEND`, and a key list for rotation
+
+macOS binds a keychain item's ACL to the binary that created it, so a different
+interpreter or venv re-asks for the login password. That is not an exception
+anything can catch — a modal dialog blocks — so the only fix is not reaching
+for the keychain at all. `LOOM_CREDENTIAL_BACKEND` pins the source: `auto`
+(the default, unchanged), `env`, `keyring`, or `file`.
+
+**A pinned backend never degrades to another.** Under `auto` the fallback to a
+generated key file is right, because nobody stated a preference. Stated
+explicitly, it is wrong: `keyring` on a locked machine raises rather than
+quietly writing the key somewhere the operator ruled out. An unrecognised value
+is refused by name. `file` puts the key beside the ciphertext and says so.
+
+`LOOM_CREDENTIAL_KEY` now takes a comma-separated list — first encrypts, any
+decrypts, which `Envelope`'s `MultiFernet` already supported. Without it,
+pinning a key is a one-way door: everything already stored becomes unreadable
+and every integration has to be re-connected, which is the cost that stops
+anyone using the setting. Keys are validated at construction and a bad one in a
+list is named by position; no message carries key material.
+
+`loom doctor` reports which source is in use, read from the *selection* rather
+than by opening the store — a diagnostic that hangs on a password prompt is
+worse than no diagnostic.
+
+
+### Fixed — OpenAI strict tool schemas were tightened at the root only
+
+`_strictify` set `additionalProperties: false` and a complete `required` list on
+the schema it was handed and stopped there. Strict mode wants both on **every**
+object, `$defs` included — so any output model that nests another was a hard
+400 before a single turn ran:
+
+```
+Invalid schema for function 'final_output':
+In context=(), 'additionalProperties' is required to be supplied and to be false.
+```
+
+`CodingOutput` nests `NodePlan`, so that was the whole OpenAI authoring path:
+`WorkflowCodingAgent` on an OpenAI model could not generate anything. The API
+reports the offending context as `()`, which names the root — the one object
+that *did* carry the keyword — and so points away from the one that did not.
+
+It now recurses through `$defs`/`definitions`/`properties`, `items`, and the
+combinators, and tightens a subschema only where one is actually an object: a
+bare `$ref` node is not, and extra keywords beside a ref are themselves
+rejected.
+
+
+### Changed — `gpt-5.6-luna` is the OpenAI default
+
+`gpt-5.6-terra` was, and remains a `--model` away. Luna is priced ($0.20 /
+$1.80 per million), which is the part that is not cosmetic: `estimate_cost`
+returns `0.0` for a model with no rate on file, so a default nobody priced
+makes every dollar budget unenforceable while looking like it is working. The
+flagship-pricing test carries both, since either can be reached by not choosing.
+
+`scripts/run_eval.py` keeps `gpt-5.6-terra` in `STRATA`: a stratum names a
+model deliberately, and moving one invalidates the committed baseline the gate
+compares against.
+
+
+### Added — `09_jira_cli.py` authors on Anthropic or OpenAI
+
+`--provider {anthropic,openai}` and `--model`, resolved narrowest-first: the
+flag, else the vendor read off the model id through
+`loom.agents.providers.vendor_of` — that mapping already exists, and a second
+copy is how the two disagree — else the first vendor whose key is set, so a
+`.env` holding one key needs no flag. The Jira variables are still required up
+front; the model key is checked by `build_model`, which is the only thing that
+knows which vendor this run needs.
+
+
+### Added — `After(minutes=2)`, a delay stated up front
+
+`@workflow(triggers=[After(minutes=2)])` fires once and never again — the gap
+`Schedule` and `Interval` leave between them, where one is a grid the workflow
+sits on for ever and the other a cycle that never stops.
+
+*"can you tell me a joke after 2 minutes"* came back as
+`ctx.sleep(timedelta(minutes=2))` at the top of a body that had done nothing
+yet, so the run parked immediately and waited for something to wake it — and
+**nothing in the CLI has ever ticked a scheduler**, so nothing did. `loom run`
+reported `suspended`, exit 3, and the joke never arrived, which reads as a
+broken workflow rather than a missing driver.
+
+`ctx.sleep` is unchanged and still right for a wait that arrives *mid-flow*,
+where the run has already done work worth keeping across the park.
+
+- **One shot is a property of the record.** The delay is published as
+  `after_seconds`, never `seconds`: `_next_fire_from_record` rebuilds a fire
+  time from `cron` or `seconds` and answers `None` for anything else, and the
+  dispatcher already retires a trigger whose next fire is `None`. Under
+  `seconds` every stored one-shot would be an `Interval` and would repeat for
+  ever. Pinned by a test.
+- **The delay runs from registration, not from each boot**, so restarting does
+  not push it into the future for ever.
+- **A one-off delay suppresses the immediate run**, alone among triggers. A
+  cron's first run is a rehearsal of something that happens again;
+  `After(minutes=2)` fires exactly once, so running it now *is* that firing, at
+  the wrong time.
+
+`RuntimeFacade` grew `wire_triggers(workflow)` — register what the *file*
+declares, as against the cron `schedule()` attaches — and `tick_schedules()`,
+one turn of the loop `rt.start_scheduler()` runs for ever. The CLI wires the
+trigger and stays until it fires, then follows the run; past fifteen minutes it
+reports it and points at `loom serve`. Driven through the port rather than by
+sleeping and calling `_run_now`, which would produce the right answer at the
+right time while leaving the trigger itself untested.
+
+`tick()` advances the engine's own timers on the way through, so the same call
+fixes both halves: a body parked on `ctx.sleep` is woken by it too.
+
+### Fixed — a body whose work is an agent or node call needs no `@step`
+
+`No @step/@pure/@effect function found`, on a joke workflow that has no step
+to write. `CodeValidator` already exempted workflows built from toolset
+operations — those are steps already — and `ctx.node`/`ctx.agent` are journaled
+units for the same reason. Naming a @step there names work that does not exist.
+Raw I/O in a body with no step still warns.
+
+### Fixed — an import error now says which module the name is in
+
+`from loom import After` — the import the rest of the prompt teaches, since
+every other symbol it shows comes from `loom` — failed with `'loom' has no
+attribute 'After'`. True, and nothing the repair loop can act on: it rewrote
+the import twice and the job ended having produced a file that does not run.
+
+`loom.__all__` is a curated 36 symbols and every trigger sits outside it, as do
+`loom.nodes` and `loom.toolsets` deliberately — so "right name, wrong module"
+is the *designed* shape here, not a typo. `_suggest` now looks for the name in
+those namespaces when it is not a misspelling, and answers `it lives in
+loom.triggers — from loom.triggers import After`. A misspelling still wins over
+a relocation, and a name that exists nowhere still promises nothing.
+
+The prompt says it too: the trigger list is now introduced as
+`triggers=[...] (from loom.triggers, not loom)`.
+
+### Fixed — a workflow that reads nothing is not misusing `ctx.agent()`
+
+`JudgementStage` reported the joke workflow as an error, on every repair round,
+and `--run` then refused to run it: *"the verification pipeline still has
+findings"*. The code was correct and said so in a comment.
+
+The stage's own claim is that *rows the code already holds* are turned into an
+answer by a model that did not need to. A workflow that reads nothing holds
+nothing, so the finding asked for the one thing the file could not contain —
+the no-passing-state failure `FuzzyMatch` was fixed for. `_holds_data` is the
+third condition: a `ctx.step`/`ctx.node` in the body, or a workflow parameter
+the body actually **references**, since a declared but unused `input_data` is
+what a model writes when the spec supplies no input. The vocabulary gained the
+generative-content words beside it (`joke`, `poem`, `story`, `caption`,
+`brainstorm`), but the structural rule is the one that holds when a spec uses
+none of them.
+
+### Fixed — a toolset call that cannot authenticate now says which, and why
+
+A workflow calling a toolset with nothing connected failed with
+`ValueError: JIRA_URL is required (env var or base_url argument)` — an
+environment variable name, raised deep inside the client, naming neither the
+toolset nor the fix. It now fails with `jira is not connected (provider:
+atlassian) — jira_search_issues needs JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN.
+Run: loom connect jira`, keeping the client's own complaint as the cause.
+
+**Wrapped after the failure rather than checked before the call.** A preflight
+was written first and was wrong: it cannot see an *injected* client. A host
+constructing its own client, or resolving through a `ConnectionBroker`, has a
+working setup with nothing in the environment and nothing in the store, and is
+indistinguishable from a deployment that forgot to connect — the preflight
+refused nineteen working calls in this repository's own suite. Reporting a
+working thing as broken is worse than the message it was replacing.
+
+The wrap runs before the retry decision, so it is non-retryable from the first
+attempt: a credential does not appear between two of them, and retried it
+printed the same impossible failure three times and reported
+`RetriesExhausted`, which reads as a flaky service.
+
+`MissingCredentials` is both `CredentialNotFound` and `NonRetryableError`.
+Deliberately not `AuthExpired`, which parks the run for `loom connect` to fix —
+right for a token that died mid-flight, wrong for a workflow started where
+nothing was ever going to be connected. `Runtime(explain_credentials=False)`
+restores the client's own error.
+
+### Fixed — the coding agent could not see the toolsets it ships with
+
+`loom` (the session), asked to *"list tickets in jira past due date"*, spent
+thirty tool calls finding nothing and wrote no code. Five independent defects
+on that one path, each reproduced before anything was written.
+
+**The process-global toolset catalogue was empty on the authoring path.**
+`register_available_toolsets()` is called by `loom mcp`, `loom toolsets` and
+`loom doctor` — and not by `cli/targets.py::resolve()`, which is every other
+command and the session. So `Runtime().toolsets.list_toolsets()` was `[]`, and
+one authoring implementation saw 27 toolsets under `loom mcp` and **zero** under
+`loom author`.
+
+Seeding it globally was never the fix: `resolve_tools()` sweeps everything
+registered, so that hands `jira_delete_issue` to any prompt-only
+`ctx.agent("summarise this")`. Discovery and execution are now two scopes.
+`get_toolset` had drawn exactly that line since the built-in fallback existed —
+*asking for one by name gets it; asking for "everything" does not* — and nothing
+had drawn it for discovery. `catalogue_ids()` is what may be *named*;
+`list_toolsets()` stays what a sweep acquires, unchanged.
+
+**`search_operations` and `profile_of` never chained to the parent registry.**
+Parent delegation was an override per method, which loses one every time a
+method is added, and had lost two. `search_operations` — the second tool the
+model reached for — returned `[]` through any `Runtime`. `profile_of` returned
+`None`, and it is read on **every `ctx.step`**: `_declared_effect` prefers it
+over `effect_of` and falls back only when the attribute is *absent*, which it
+never is. So under `loom mcp` every toolset step reached the broker as an
+unclassified **write**, defeating one layer up the lookup that exists to prevent
+exactly that. Chaining is now a tier list resolved by three helpers, and a
+meta-test fails when a read is added to `ToolsetCatalog` without a chaining case.
+
+**With an empty catalogue, correct code was rejected.** `_check_context` set
+`available_toolsets` to an empty *set* rather than `None` — `None` disables the
+check, an empty set enables it against nothing — so `from loom.toolsets.jira.tools
+import …` was reported as an integration this environment does not have, at
+error severity, on a blocking stage, with `_is_unrepairable` ending the job
+rather than repairing it.
+
+**Nothing mapped a toolset to its OAuth provider.** `loom connect jira` refused
+with *"'jira' is not a known provider"*; Jira's is `atlassian`, Gmail's is
+`google_gmail`, and all six Graph toolsets share `microsoft`. It now says which.
+
+**An authoring-time lookup could not use a connected credential.**
+`credential_store_scope` was bound at exactly one site — the engine's step
+attempt loop — and authoring never goes through it, so `loom connect jira`
+stored a credential the runtime could use and the agent could not.
+
+### Added — `loom connections`, and a typed `AuthSpec`
+
+`loom toolsets` said what a process can reach and `loom whoami` said what it has
+stored; `loom doctor` printed both on adjacent lines and could not join them,
+because the credential a client reads was a keyword default inside one file.
+
+```
+$ loom doctor
+  ● toolsets     27 reachable from this process
+  ● credentials  3 stored: atlassian, google, jira
+  ● connections  6 of 27 configured: gmail, google_calendar, …
+```
+
+`ToolsetManifest.auth` is a typed `AuthSpec` — credential, provider, scopes,
+environment fields — replacing a `dict[str, Any]` whose shape varied per
+toolset. Declared, never inferred, the position `OperationSpec.effect` takes:
+thirteen of the seventeen OAuth toolsets do not share their provider's name.
+A legacy dict is still promoted.
+
+`credential=""` is a statement: 12 of the 27 read environment variables and no
+`CredentialStore`, so naming a key they never look up would make `loom connect`
+report success and change nothing. `provider` without `credential` is refused at
+construction — the flow would open a browser, store a token, print "Connected",
+and every call would still 401. `AuthField.mode` groups alternatives, because
+Google takes an access token *or* a client-id/secret/refresh trio *or* a service
+account file, and requiring all of them reports a working deployment as missing
+five variables.
+
+`ConnectionInspector` reports six states and **cannot change one by reporting
+it**: it peeks rather than resolving, where `get()` would renew a due credential
+and raise on an expired one. Surfaced on `loom connections`, `loom doctor`, the
+`RuntimeFacade` port and the MCP `list_connections` tool.
+
+Two things writing it found: Jira and Confluence declared **no scope on any of
+their 21 read operations**, alone among the seventeen, so a connect flow would
+have requested a write-only token; and the migration itself dropped four
+`AZURE_*`/`MS_AUTHORITY_HOST` variables from all six Microsoft manifests while
+the auth layer went on reading them. `TestNothingIsReadThatIsNotDeclared` now
+compares declared fields against `os.environ` reads across all 27, and found two
+more on its first run.
+
+### Added — obtaining a credential from anywhere, not only from argparse
+
+Every line of the OAuth flow lived inside `cli/auth_commands.py` and took an
+`argparse.Namespace`, so nothing but the CLI could connect anything — while the
+session, the MCP server and the coding agent each need to. `loom/connectors/flows.py`
+is the extraction: `ConnectFlow` and `SecretPrompt` protocols, `OAuthBrowserFlow`,
+`OAuthDeviceFlow`, `ApiKeyFlow`, `ConsoleSecretPrompt`, `AppRegistrationStore`.
+
+A flow reports a **`ConnectEvent`, never a rendered line**. `_run_pkce_flow` took
+a `loom.cli.output.Printer`, and lifting that as-is would have put a
+`[cli]`-flavoured renderer inside `loom/connectors/` and made the second
+library-to-CLI import edge in the codebase. The redirect URI is reported *before*
+anything is asked for, because registering it on the provider is the one step
+nobody can do for you and finding out afterwards means doing the flow again.
+
+`AppRegistrationStore` keeps `client_id`/`client_secret` per **provider** — one
+Atlassian app serves `jira` and `confluence` — under `oauth-app:<provider>` in
+the same store as the tokens, so it inherits encryption at rest. Asked once,
+through `SecretPrompt` and never through `ask_user`, which records question *and*
+answer and writes them to disk under `--save-answers`.
+
+The adapters are constructor seams on `LocalFacade` (`connect_flow`,
+`secret_prompt`, `on_connect_event`), all defaulting to `None` and composed by
+the CLI: *a library that reads stdin because it was imported is the ambient
+behaviour `Runtime` avoids everywhere else.* `tests/test_layering.py` is the
+ratchet, and it distinguishes a dependency from an optional upgrade — a `[cli]`
+import guarded by `except ImportError` with a stdlib fallback is not a
+dependency, which is what `CLIUserInteraction` does with `rich`.
+
+### Changed — a missing credential is a state, not an error
+
+`call_read_operation` returned a generic *"generate code that resolves it at
+runtime instead"*, which reads as *"this toolset is broken"* — and the cheapest
+repair a model can find for a broken toolset is to stop importing it, so a
+request comes back having quietly dropped the integration it was about with
+every remaining stage green. It now returns `not_connected` with the provider,
+the credential, the variables, and `connect_toolset("jira")`.
+
+`connect_toolset` is offered **only when the surface composed something that can
+connect** — the rule `ask_user` and `observe_target` follow — bounded to two
+attempts and switched off before repair and smoke, so a model cannot deadlock CI
+by opening a browser nobody is sitting in front of. The new `connections`
+verification stage is a **warning, always**: an error there would ask the repair
+loop to fix a *machine*, and the cheapest fix available to it is deleting the
+import.
+
+### Added — describe a task, and have it happen
+
+`loom author` wrote a file, registered it, printed a summary and stopped. So
+*"find my jira tickets"* — a question whose answer is the tickets — produced
+Python and the sentence `loom run my_jira_tickets`. The task **was** the query.
+
+It was the same defect as the empty catalogue, twice more: a grep across
+`src/loom/agents/` for `triggers=`, `Schedule`, `OnAppEvent` or `@pure` returned
+**nothing**. `@workflow(triggers=[...])` and the four step classes had shipped
+long ago and the model had never been told either existed, so every generated
+workflow was implicitly `Manual` and every helper implicitly an effect.
+
+Two decisions, deliberately independent: the **triggers** decide what gets wired
+(a question declares none; "every weekday at 9" declares a `Schedule`), and
+`agents/impact.py` decides whether an immediate run asks first — from the effect
+classes the *manifests* declare, never from the model's account of its own code.
+Reads run; anything that writes, deletes, or is unclassified is named and asked
+about. A declared schedule does not suppress the first run: one whose first
+execution is at 9am tomorrow is one nobody has tested.
+
+`@pure` is what makes "reads run" ever run — every read-only workflow ends in a
+formatting step — and `impact_of` sees one level through the wrapper the agent
+almost always writes, but only when every toolset call inside agrees.
+
+`--run` is on in the session and off in `loom author`, because
+`loom author "spec" > flow.py` is documented and a run would put its output in
+the file.
+
+### Fixed — two renderers writing to one terminal
+
+`ask_user`'s full-screen `prompt_toolkit` dialog came up with scrollback bleeding
+through it and the question rendered twice. `ProgressRenderer` keeps a `rich`
+live region on the same stderr and redraws it on its own timer from the main
+thread, while the dialog runs in a worker thread. `progress.suspend()` stops
+every live region for the duration, and the dialog now carries the question and
+context itself instead of printing them beside it. Neither component's own tests
+could see it: each is correct alone, and the fault is in the pair.
+
 ### Added — every agent is told what day it is
 
 `loom author "who won the IPL in 2026"` wrote a refusal into the file where the

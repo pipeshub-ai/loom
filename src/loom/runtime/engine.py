@@ -203,6 +203,7 @@ class Runtime:
         compatibility: CompatibilityMode = CompatibilityMode.STRICT,
         verify: VerifyMode = VerifyMode.STRICT,
         validate_input: bool = True,
+        explain_credentials: bool = True,
         connections: Any | None = None,
         embeddings: Any | None = None,
         vectors: Any | None = None,
@@ -547,6 +548,25 @@ class Runtime:
         itself wherever it is written and is the stronger guarantee — see
         :mod:`loom.core.secrets`."""
         self.validate_input = validate_input
+        self.explain_credentials = explain_credentials
+        """Re-raise a toolset's auth complaint as one that names the fix.
+
+        On by default. A toolset call with no credential fails inside its own
+        client with the name of an environment variable — "JIRA_URL is
+        required" — naming neither the toolset nor what would supply one; this
+        replaces it with "jira is not connected (provider: atlassian) … Run:
+        loom connect jira", keeping the original as the cause.
+
+        Applied *after* the failure rather than as a check before the call,
+        which is the load-bearing part. A preflight cannot see an **injected**
+        client: a host constructing its own `SlackClient`, or resolving through
+        a `ConnectionBroker`, has a working setup with nothing in the
+        environment and nothing in the store, and is indistinguishable from a
+        deployment that forgot to connect. One was written and it refused
+        nineteen working calls.
+
+        ``False`` for a host that would rather see its client's own error.
+        """
         """Whether a payload is checked against ``input_schema()`` before a run opens.
 
         On by default, because a shape mismatch that reaches a step body

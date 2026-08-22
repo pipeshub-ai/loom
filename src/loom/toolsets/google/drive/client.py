@@ -49,7 +49,6 @@ __all__ = [
     "FILE_FIELDS",
     "DriveClient",
     "flatten_file",
-    "get_default_client",
 ]
 
 API_BASE = "https://www.googleapis.com/drive/v3"
@@ -645,18 +644,4 @@ def _quote(file_id: str, argument: str) -> str:
 # Process-wide default
 # ---------------------------------------------------------------------------
 
-_default_client: DriveClient | None = None
 
-
-def get_default_client() -> DriveClient:
-    """Return (or build) the module-level client from environment credentials."""
-    global _default_client
-    if _default_client is None:
-        _default_client = DriveClient()
-    return _default_client
-
-
-def reset_default_client() -> None:
-    """Drop the cached client. For tests, and after a credential change."""
-    global _default_client
-    _default_client = None

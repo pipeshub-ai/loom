@@ -23,8 +23,9 @@ hurt.
 from __future__ import annotations
 
 from loom import Retry, step
+from loom.toolsets.factory import client_for
 from loom.toolsets.pagination import Results
-from loom.toolsets.stripe.client import get_default_client
+from loom.toolsets.stripe.client import StripeClient
 from loom.toolsets.stripe.models import (
     StripeCharge,
     StripeCustomer,
@@ -65,7 +66,8 @@ async def stripe_find_customers(email: str, limit: int = 10) -> Results[StripeCu
         email: The exact address to match.
         limit: Most customers to return.
     """
-    return await get_default_client().find_customers_by_email(email, limit=limit)
+    client = await client_for("stripe", StripeClient)
+    return await client.find_customers_by_email(email, limit=limit)
 
 
 @step(retry=_READ)
@@ -75,7 +77,7 @@ async def stripe_get_customer(customer_id: str) -> StripeCustomer:
     Args:
         customer_id: A ``cus_…`` id.
     """
-    return await get_default_client().get_customer(customer_id)
+    return await (await client_for("stripe", StripeClient)).get_customer(customer_id)
 
 
 @step(retry=_WRITE)
@@ -98,7 +100,7 @@ async def stripe_create_customer(
         description: Free text shown in the dashboard.
         metadata: Your own key-value pairs, carried on the record.
     """
-    return await get_default_client().create_customer(
+    return await (await client_for("stripe", StripeClient)).create_customer(
         idempotency_key=idempotency_key,
         email=email,
         name=name,
@@ -120,7 +122,8 @@ async def stripe_update_customer(
         customer_id: A ``cus_…`` id.
         values: Stripe field names to new values, e.g. ``{"name": "Ada"}``.
     """
-    return await get_default_client().update_customer(customer_id, values=values)
+    client = await client_for("stripe", StripeClient)
+    return await client.update_customer(customer_id, values=values)
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +142,7 @@ async def stripe_get_payment_intent(intent_id: str) -> StripePaymentIntent:
     Args:
         intent_id: A ``pi_…`` id.
     """
-    return await get_default_client().get_payment_intent(intent_id)
+    return await (await client_for("stripe", StripeClient)).get_payment_intent(intent_id)
 
 
 @step(retry=_READ)
@@ -152,7 +155,7 @@ async def stripe_list_payment_intents(
         customer_id: A ``cus_…`` id, or empty for the whole account.
         limit: Most payments to return, following pages as needed.
     """
-    return await get_default_client().list_payment_intents(
+    return await (await client_for("stripe", StripeClient)).list_payment_intents(
         customer_id=customer_id, limit=limit
     )
 
@@ -165,7 +168,8 @@ async def stripe_list_charges(customer_id: str = "", limit: int = 25) -> Results
         customer_id: A ``cus_…`` id, or empty for the whole account.
         limit: Most charges to return, following pages as needed.
     """
-    return await get_default_client().list_charges(customer_id=customer_id, limit=limit)
+    client = await client_for("stripe", StripeClient)
+    return await client.list_charges(customer_id=customer_id, limit=limit)
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +184,7 @@ async def stripe_get_invoice(invoice_id: str) -> StripeInvoice:
     Args:
         invoice_id: An ``in_…`` id.
     """
-    return await get_default_client().get_invoice(invoice_id)
+    return await (await client_for("stripe", StripeClient)).get_invoice(invoice_id)
 
 
 @step(retry=_READ)
@@ -195,7 +199,7 @@ async def stripe_list_invoices(
             Empty returns every status.
         limit: Most invoices to return, following pages as needed.
     """
-    return await get_default_client().list_invoices(
+    return await (await client_for("stripe", StripeClient)).list_invoices(
         customer_id=customer_id, status=status, limit=limit
     )
 
@@ -225,7 +229,7 @@ async def stripe_create_refund(
             £10.00 and ¥1000 is ¥1000. Zero refunds the full amount.
         reason: ``duplicate``, ``fraudulent``, or ``requested_by_customer``.
     """
-    return await get_default_client().create_refund(
+    return await (await client_for("stripe", StripeClient)).create_refund(
         idempotency_key=idempotency_key,
         payment_intent_id=payment_intent_id,
         charge_id=charge_id,
@@ -250,7 +254,7 @@ async def stripe_get_event(event_id: str) -> StripeEvent:
     Args:
         event_id: An ``evt_…`` id.
     """
-    return await get_default_client().get_event(event_id)
+    return await (await client_for("stripe", StripeClient)).get_event(event_id)
 
 
 @step(retry=_READ)
@@ -264,4 +268,5 @@ async def stripe_list_events(event_type: str = "", limit: int = 25) -> Results[S
         event_type: e.g. ``payment_intent.succeeded``. Empty returns all types.
         limit: Most events to return, following pages as needed.
     """
-    return await get_default_client().list_events(event_type=event_type, limit=limit)
+    client = await client_for("stripe", StripeClient)
+    return await client.list_events(event_type=event_type, limit=limit)

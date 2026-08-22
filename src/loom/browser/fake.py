@@ -48,8 +48,12 @@ class FakeBrowserSession:
 
     def __init__(self, provider: str, pages: dict[str, PageSnapshot],
                  permissive: bool, session_id: str, *,
-                 reattachable: bool = False, live_view: str | None = None) -> None:
+                 reattachable: bool = False, live_view: str | None = None,
+                 transitions: dict[str, PageSnapshot] | None = None,
+                 known_names: frozenset[str] | None = None) -> None:
         self._pages = pages
+        self._transitions = transitions or {}
+        self._known_names = known_names or frozenset()
         self._permissive = permissive
         self._closed = False
         self._live_view = live_view
@@ -122,6 +126,18 @@ class FakeBrowserSession:
                              url=self._current.url, detail=_FAKED)
 
         if not found:
+            # A name seen somewhere in the recorded flow, but not here, says the
+            # replay is at a different point than the recording was — not that
+            # the control is missing. Only the second is a finding, and calling
+            # the first one a failure would fail correct workflows for the
+            # crime of taking the steps in another order.
+            if plan.target.name and plan.target.name in self._known_names:
+                self.performed.append(plan)
+                return ActResult(
+                    ok=True, method=plan.method,
+                    target=plan.target.describe(), url=self._current.url,
+                    detail="seen elsewhere in the recorded flow, not on this "
+                           "page: answered without verifying")
             raise TargetNotFound(
                 f"nothing matched {plan.target.describe()}. "
                 f"{self._current.summary()}",
@@ -132,6 +148,12 @@ class FakeBrowserSession:
                 target=plan.target.describe(), matches=len(found))
 
         self.performed.append(plan)
+        # Advance, when the recording saw what this action led to. Keyed by the
+        # target rather than by how many actions have run, so a replay follows
+        # what it clicks rather than a step count it does not share.
+        after = self._transitions.get(plan.target.describe())
+        if after is not None:
+            self._current = after
         return ActResult(ok=True, method=plan.method,
                          target=plan.target.describe(), url=self._current.url,
                          detail="recorded page", matches=1)
@@ -172,8 +194,12 @@ class FakeBrowserProvider:
     id = "fake"
 
     def __init__(self, pages: dict[str, PageSnapshot] | None = None, *,
-                 permissive: bool = True, durable: bool = False) -> None:
+                 permissive: bool = True, durable: bool = False,
+                 transitions: dict[str, PageSnapshot] | None = None,
+                 known_names: frozenset[str] | None = None) -> None:
         self._pages = dict(pages or {})
+        self._transitions = dict(transitions or {})
+        self._known_names = known_names or frozenset()
         self._permissive = permissive
         self._durable = durable
         self.sessions: list[FakeBrowserSession] = []
@@ -190,11 +216,19 @@ class FakeBrowserProvider:
     async def open(self, policy: BrowserPolicy) -> FakeBrowserSession:
         if policy.scope is SessionScope.DURABLE and not self._durable:
             raise BrowserUnavailable(
-                f"{self.id} cannot honour SessionScope.DURABLE. Construct it "
-                "with durable=True, or use SessionScope.STEP."
+                f"{self.id} cannot honour SessionScope.DURABLE, matching the "
+                "providers LOOM ships — none of them advertises 'reattach'.\n"
+                "In a workflow: use scope='step', and where a run must park on "
+                "a person mid-flow, split it into two step-scoped sessions "
+                "either side of the approval — read what you need and close, "
+                "park, then open a fresh session to act. One session cannot "
+                "span a park that a provider cannot reattach to.\n"
+                "In a test that is exercising durable sessions themselves: "
+                "construct this fake with durable=True."
             )
         session = FakeBrowserSession(
             self.id, self._pages, self._permissive, f"fake-{len(self.sessions)}",
+            transitions=self._transitions, known_names=self._known_names,
             reattachable=self._durable,
             live_view=f"https://fake.test/live/{len(self.sessions)}"
             if self._durable else None,

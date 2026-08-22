@@ -14,7 +14,13 @@ from loom.toolsets.hubspot.models import (
     HubSpotObject,
     HubSpotOwner,
 )
-from loom.toolsets.manifest import EffectClass, OperationSpec, ToolsetManifest
+from loom.toolsets.manifest import (
+    AuthField,
+    AuthSpec,
+    EffectClass,
+    OperationSpec,
+    ToolsetManifest,
+)
 
 
 def _array(model: type[BaseModel]) -> dict[str, Any]:
@@ -33,7 +39,18 @@ HUBSPOT_MANIFEST = ToolsetManifest(
         "partial rather than erroring."
     ),
     base_url="https://api.hubapi.com",
-    auth={"type": "bearer", "fields": ["HUBSPOT_ACCESS_TOKEN"]},
+    auth=AuthSpec(
+        client="loom.toolsets.hubspot.client:HubSpotClient",
+        # This client reads environment variables and no CredentialStore, so
+        # `credential` is empty and no `provider` is declared: an OAuth flow
+        # here would store a token the client never looks up. Adding a store
+        # path is a change to the client, not to this manifest.
+        kind="bearer",
+        fields=(
+            AuthField(name="HUBSPOT_ACCESS_TOKEN",
+                      arg="access_token", label="Private app access token"),
+        ),
+    ),
     tools_module="loom.toolsets.hubspot.tools",
     egress_hosts=["api.hubapi.com"],
     rate_limits={

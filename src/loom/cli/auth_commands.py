@@ -33,25 +33,38 @@ config across invocations.
 from __future__ import annotations
 
 import argparse
-import asyncio
 import os
 import re
-import secrets
-import sys
-import webbrowser
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qs, urlparse
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any, cast
 
 from loom.cli.commands import printer_for, run_async
 from loom.cli.output import Exit, Printer
-from loom.connectors.oauth_client import OAuthTokenError, generate_pkce_pair
+from loom.connectors.flows import (
+    ConnectEvent,
+    ConnectRequest,
+    LoopbackListener,
+    OAuthBrowserFlow,
+    OAuthTarget,
+    is_headless,
+    run_device_authorization,
+)
 from loom.core.exceptions import AuthExpired, ConfigurationError, CredentialNotFound
+from loom.toolsets.manifest import AuthSpec
 
 if TYPE_CHECKING:
     from loom.connectors.credentials import CredentialStore, StoredCredential
-    from loom.connectors.oauth_client import DeviceAuthorization, OAuthClient
+    from loom.connectors.oauth_client import OAuthClient
+
+#: The flow machinery moved to ``loom.connectors.flows`` so the session, the
+#: MCP server and the coding agent could reach it — none of them has an
+#: ``argparse.Namespace``, and every line of it used to require one. These names
+#: are what this module has always called them, kept so a caller (and
+#: ``tests/test_cli_auth.py``, which is the regression bar for the extraction)
+#: does not have to care that the implementation moved.
+_OAuthTarget = OAuthTarget
+_is_headless = is_headless
 
 __all__ = [
     "cmd_connect",
@@ -99,6 +112,14 @@ def _store(lock: Any | None = None, *, owner: str = "") -> CredentialStore:
     """
     from loom.connectors.credentials import KeyringCredentialStore
     from loom.connectors.oauth_client import MetadataRefresher
+
+    # Before the store is built, because which key source it uses is read at
+    # construction. `loom run` happened to work — `targets.resolve()` discovers
+    # the project (and so loads `.env`) before it asks for a store — while
+    # `loom connect` and `loom doctor` come straight here, so a project pinning
+    # `LOOM_CREDENTIAL_BACKEND` in `.env` would have been honoured by one
+    # command and ignored by the next. One reader, one answer.
+    _load_project_env()
 
     store = KeyringCredentialStore()
     # Doc'd wiring in oauth_client.py: the refresher needs the store it is
@@ -161,21 +182,27 @@ def server_token_provider(server: str) -> Callable[[bool], Awaitable[str | None]
 # ---------------------------------------------------------------------------
 
 
-def _dotenv_get(name: str) -> str | None:
-    """``name`` from the project's ``.env``, if there is one.
+def _load_project_env() -> None:
+    """Load the project's ``.env``, through the one reader that knows where it is.
 
-    Loads through :func:`loom.cli.config.load_dotenv`, which reads the file
-    beside the nearest ``pyproject.toml``. This used to read ``Path.cwd()/.env``
-    with its own parser, so ``loom connect`` run from a subdirectory read a
-    different file — or none — than ``loom run`` did from the same project. Two
-    readers for one file is one too many; two *answers* is a bug.
-
-    Never overrides a real environment variable, so exporting a port for one
-    command still wins.
+    :func:`loom.cli.config.load_dotenv` reads the file beside the nearest
+    ``pyproject.toml`` and never overrides a real environment variable, so
+    exporting a value for one command still wins.
     """
     from loom.cli.config import ProjectConfig, load_dotenv
 
     load_dotenv(ProjectConfig.discover(load_env=False).root)
+
+
+def _dotenv_get(name: str) -> str | None:
+    """``name`` from the project's ``.env``, if there is one.
+
+    This used to read ``Path.cwd()/.env`` with its own parser, so ``loom
+    connect`` run from a subdirectory read a different file — or none — than
+    ``loom run`` did from the same project. Two readers for one file is one too
+    many; two *answers* is a bug.
+    """
+    _load_project_env()
     return os.environ.get(name) or None
 
 
@@ -204,42 +231,8 @@ def resolve_redirect_port(explicit: int | None = None) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Headless detection
-# ---------------------------------------------------------------------------
-
-
-def _is_headless() -> bool:
-    """Best-effort: is there a browser to open here?
-
-    ``LOOM_LOGIN_DEVICE=1`` (or ``--device``, checked by the caller) always
-    wins; this is only the auto-detection used when neither flag is given.
-    SSH without X11 forwarding and a bare Linux console are the common
-    cases; macOS and Windows are graphical unless told otherwise.
-    """
-    if os.environ.get("LOOM_LOGIN_HEADLESS", "").lower() in ("1", "true", "yes"):
-        return True
-    if sys.platform.startswith(("darwin", "win32")):
-        return False
-    return not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
-
-
-# ---------------------------------------------------------------------------
 # Resolving what to authenticate against
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class _OAuthTarget:
-    name: str
-    authorization_endpoint: str | None
-    token_endpoint: str
-    device_authorization_endpoint: str | None
-    client_id: str
-    client_secret: str | None
-    scopes: tuple[str, ...]
-    extra_auth_params: dict[str, str] = field(default_factory=dict)
-    pkce: bool = True
-    provider_id: str = ""
 
 
 def env_prefix_for(name: str) -> str:
@@ -263,10 +256,22 @@ def _resolve_target(
         return flag(attr) or os.environ.get(f"{env_prefix}_{suffix}") or None
 
     provider = None
+    need = None
     if provider_hint:
+        from loom.connectors.inspect import need_for
         from loom.connectors.oauth_providers import get_oauth_provider
+        from loom.toolsets.registry import builtin_catalog
 
+        # The join this command did not have. `loom connect jira` looked the
+        # *credential* name up in the provider registry, found nothing, and
+        # refused with "'jira' is not a known provider" — Jira's provider is
+        # `atlassian`, Gmail's is `google_gmail`, and all six Graph toolsets
+        # share `microsoft`. A manifest declares which, so ask it.
         provider = get_oauth_provider(provider_hint)
+        if provider is None:
+            need = need_for(provider_hint, builtin_catalog())
+            if need.provider:
+                provider = get_oauth_provider(need.provider)
 
     authorization_endpoint = (
         pick("authorization_endpoint", "AUTHORIZATION_ENDPOINT")
@@ -289,6 +294,11 @@ def _resolve_target(
         scopes = scope_flags
     elif env_scopes:
         scopes = env_scopes
+    elif need is not None and need.scopes:
+        # What the toolsets reading this credential actually declare, which is
+        # narrower than the provider's defaults: a Jira-only workflow should
+        # not be made to grant Confluence.
+        scopes = need.scopes
     else:
         scopes = provider.default_scopes if provider else ()
 
@@ -298,6 +308,13 @@ def _resolve_target(
             hint = (
                 f". '{provider_hint}' is not a known provider — pass "
                 "--token-endpoint/--client-id, or see 'loom providers'"
+            )
+        elif provider is not None and need is not None and need.known:
+            # It *is* known, just not under this name. Say which, or the
+            # message reads as "unsupported" for a toolset LOOM ships.
+            hint = (
+                f". '{provider_hint}' is served by the '{provider.id}' provider"
+                f" — create an app there and pass --client-id"
             )
         raise ConfigurationError(
             f"'{name}' needs a token endpoint and a client id: pass "
@@ -350,20 +367,8 @@ def _choose_flow(args: argparse.Namespace, target: _OAuthTarget) -> str:
 
 
 def _target_metadata(target: _OAuthTarget) -> dict[str, str]:
-    """What :class:`MetadataRefresher` needs to renew this later.
-
-    Goes into the same encrypted-at-rest file as the token itself, so
-    storing a confidential client's secret here carries no more exposure
-    than the refresh token sitting right next to it.
-    """
-    meta: dict[str, str] = {"token_endpoint": target.token_endpoint, "client_id": target.client_id}
-    if target.client_secret:
-        meta["client_secret"] = target.client_secret
-    if target.device_authorization_endpoint:
-        meta["device_authorization_endpoint"] = target.device_authorization_endpoint
-    if target.provider_id:
-        meta["provider_id"] = target.provider_id
-    return meta
+    """Kept as a name; the rule lives on :meth:`OAuthTarget.metadata`."""
+    return target.metadata()
 
 
 # ---------------------------------------------------------------------------
@@ -371,81 +376,21 @@ def _target_metadata(target: _OAuthTarget) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-class _PkceListener:
-    """A one-shot local HTTP server for the OAuth redirect, pure asyncio.
+class _PkceListener(LoopbackListener):
+    """:class:`~loom.connectors.flows.LoopbackListener`, port resolved the
+    CLI's way.
 
-    No threads: :meth:`wait_for_redirect` is a plain ``asyncio.wait_for``, so
-    a login the user never finishes gives up cleanly on its own timeout
-    instead of leaving a background thread blocked in ``accept()``.
+    Where the redirect lands is a *library* concern; which port a project uses
+    is a CLI one — ``--redirect-port``, then ``$LOOM_OAUTH_REDIRECT_PORT``,
+    then the same key in the project's ``.env``. Resolving that in the library
+    would mean ``loom.connectors`` importing ``loom.cli.config`` to read a
+    dotenv, which is exactly the import edge this extraction exists to avoid.
     """
-
-    def __init__(self) -> None:
-        self._result: dict[str, str] = {}
-        self._done = asyncio.Event()
-        self._server: asyncio.Server | None = None
-        self.port = 0
 
     @classmethod
     async def start(cls, port: int | None = None) -> _PkceListener:
-        self = cls()
-        bind_port = resolve_redirect_port(port)
-        try:
-            self._server = await asyncio.start_server(
-                self._handle, "127.0.0.1", bind_port, reuse_address=False
-            )
-        except OSError as exc:
-            if bind_port:
-                raise ConfigurationError(
-                    f"OAuth redirect port {bind_port} is in use. Free it, or set "
-                    f"{REDIRECT_PORT_ENV} in .env to a free port (and register "
-                    f"http://127.0.0.1:<port>/callback on the OAuth client)."
-                ) from exc
-            raise
-        self.port = self._server.sockets[0].getsockname()[1]
-        return self
-
-    async def _handle(self, reader: Any, writer: Any) -> None:
-        try:
-            request_line = await reader.readline()
-            try:
-                _, target, _ = request_line.decode("latin-1").split(" ", 2)
-            except ValueError:
-                target = "/"
-            while True:
-                line = await reader.readline()
-                if line in (b"\r\n", b""):
-                    break
-            parsed = urlparse(target)
-            self._result = {k: v[0] for k, v in parse_qs(parsed.query).items()}
-            body = (
-                b"<html><body><p>Signed in to LOOM. "
-                b"You may close this window.</p></body></html>"
-            )
-            writer.write(
-                b"HTTP/1.1 200 OK\r\n"
-                b"Content-Type: text/html; charset=utf-8\r\n"
-                b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
-                b"Connection: close\r\n\r\n" + body
-            )
-            await writer.drain()
-        finally:
-            writer.close()
-            self._done.set()
-
-    async def wait_for_redirect(self, *, timeout: float) -> dict[str, str]:
-        try:
-            await asyncio.wait_for(self._done.wait(), timeout=timeout)
-        except TimeoutError as exc:
-            raise ConfigurationError(
-                "timed out waiting for the browser login to complete — "
-                "try 'loom login --device' instead"
-            ) from exc
-        return self._result
-
-    async def close(self) -> None:
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
+        listener = await super().start(resolve_redirect_port(port))
+        return cast("_PkceListener", listener)
 
 
 # ---------------------------------------------------------------------------
@@ -453,19 +398,44 @@ class _PkceListener:
 # ---------------------------------------------------------------------------
 
 
+def _render(out: Printer) -> Any:
+    """Turn a :class:`ConnectEvent` into lines. The CLI's whole share of a flow.
+
+    A flow reports what happened; only this knows there is a terminal, a
+    ``rich`` console, or a ``--json`` mode to stay out of the way of. Passed as
+    a callback for the reason ``LocalFacade.on_stage`` is: a renderer must not
+    be something the library depends on.
+    """
+
+    def draw(event: ConnectEvent) -> None:
+        if event.kind == "redirect_ready":
+            out.line()
+            out.line(f"  Redirect URI: [bold]{event.redirect_uri}[/bold]")
+            if event.scopes:
+                out.line("  Requesting scopes: " + " ".join(event.scopes))
+        elif event.kind == "needs_app":
+            out.line()
+            out.line("  No OAuth client is configured for this provider.")
+            out.line(f"  Register [bold]{event.redirect_uri}[/bold] as the redirect URI")
+            if event.setup_url:
+                out.line(f"  Create an app: [dim]{event.setup_url}[/dim]")
+            out.line("  Then re-run with --client-id (and --client-secret).")
+        elif event.kind == "opening_browser":
+            out.line("  Opening your browser to continue.")
+            out.line(f"  If it does not open, visit: [dim]{event.authorization_url}[/dim]")
+            out.line()
+        elif event.kind == "waiting" and event.verification_uri:
+            out.line()
+            out.line(f"  Go to [bold]{event.verification_uri}[/bold]")
+            out.line(f"  and enter code: [bold]{event.user_code}[/bold]")
+            out.line()
+            out.line("  Waiting for approval…")
+
+    return draw
+
+
 async def _run_device_flow(client: OAuthClient, out: Printer) -> StoredCredential:
-    device: DeviceAuthorization = await client.start_device_authorization()
-    out.line()
-    out.line(f"  Go to [bold]{device.verification_uri}[/bold]")
-    out.line(f"  and enter code: [bold]{device.user_code}[/bold]")
-    out.line()
-    if device.verification_uri_complete:
-        webbrowser.open(device.verification_uri_complete)
-    out.line("  Waiting for approval…")
-    try:
-        return await client.poll_device_token(device)
-    except OAuthTokenError as exc:
-        raise ConfigurationError(f"authorization failed: {exc}") from exc
+    return await run_device_authorization(client, on_event=_render(out))
 
 
 async def _run_pkce_flow(
@@ -475,56 +445,20 @@ async def _run_pkce_flow(
     timeout: float,
     redirect_port: int | None = None,
 ) -> StoredCredential:
-    from loom.connectors.oauth_client import OAuthClient
-
-    listener = await _PkceListener.start(port=redirect_port)
-    state = secrets.token_urlsafe(16)
-    try:
-        redirect_uri = f"http://127.0.0.1:{listener.port}/callback"
-        client = OAuthClient(
-            client_id=target.client_id,
-            client_secret=target.client_secret,
-            authorization_endpoint=target.authorization_endpoint or "",
-            token_endpoint=target.token_endpoint,
-            redirect_uri=redirect_uri,
-            scopes=target.scopes,
-            pkce=target.pkce,
-        )
-        extra = target.extra_auth_params or None
-        if target.pkce:
-            verifier, challenge = generate_pkce_pair()
-            url = client.authorization_url(
-                state=state, code_challenge=challenge, extra_params=extra
-            )
-        else:
-            verifier = ""
-            url = client.authorization_url(state=state, extra_params=extra)
-        out.line()
-        out.line("  Opening your browser to continue.")
-        out.line(f"  Redirect URI: [bold]{redirect_uri}[/bold]")
-        out.line(f"  If it does not open, visit: [dim]{url}[/dim]")
-        out.line()
-        webbrowser.open(url)
-        params = await listener.wait_for_redirect(timeout=timeout)
-    finally:
-        await listener.close()
-
-    if params.get("error"):
-        description = params.get("error_description", "")
-        raise ConfigurationError(f"authorization failed: {params['error']} {description}".strip())
-    if params.get("state") != state:
-        raise ConfigurationError(
-            "authorization response had an unexpected 'state' — aborting, "
-            "in case this redirect was not meant for this login"
-        )
-    code = params.get("code")
-    if not code:
-        raise ConfigurationError("authorization response carried no 'code'")
-
-    try:
-        return await client.exchange_code(code, code_verifier=verifier)
-    except OAuthTokenError as exc:
-        raise ConfigurationError(f"authorization failed: {exc}") from exc
+    outcome = await OAuthBrowserFlow().connect(
+        ConnectRequest(
+            name=target.name,
+            # Resolved here, not in the flow: see _PkceListener.
+            redirect_port=resolve_redirect_port(redirect_port),
+            timeout=timeout,
+        ),
+        AuthSpec(kind="oauth2"),
+        target=target,
+        on_event=_render(out),
+    )
+    if outcome.credential is None:
+        raise ConfigurationError(outcome.reason or "authorization did not complete")
+    return outcome.credential
 
 
 async def _connect(
@@ -546,24 +480,18 @@ async def _connect(
     timeout = float(getattr(args, "timeout", None) or 300.0)
 
     if flow == "device":
-        from loom.connectors.oauth_client import OAuthClient
-
-        client = OAuthClient(
-            client_id=target.client_id,
-            client_secret=target.client_secret,
-            authorization_endpoint=target.authorization_endpoint or "",
-            token_endpoint=target.token_endpoint,
-            device_authorization_endpoint=target.device_authorization_endpoint,
-            scopes=target.scopes,
-            pkce=target.pkce,
+        credential = replace(
+            await _run_device_flow(target.client(), out),
+            metadata=target.metadata(),
         )
-        credential = await _run_device_flow(client, out)
     else:
         credential = await _run_pkce_flow(
             target, out, timeout=timeout, redirect_port=getattr(args, "redirect_port", None)
         )
 
-    return replace(credential, metadata={**credential.metadata, **_target_metadata(target)})
+    # No re-stamping: `OAuthBrowserFlow` and `OAuthDeviceFlow` already attach
+    # what `MetadataRefresher` needs, from `OAuthTarget.metadata()`.
+    return credential
 
 
 # ---------------------------------------------------------------------------
@@ -675,6 +603,13 @@ def cmd_connect(args: argparse.Namespace) -> int:
     name = args.name
 
     async def body() -> int:
+        # OAuth only, and that is a statement about the *clients* rather than
+        # about this command. All six store-backed credentials the shipped
+        # toolsets declare are `oauth2`; the twelve api-key ones read
+        # environment variables and no `CredentialStore`, so connecting them
+        # would store a value nothing looks up. `ApiKeyFlow` exists and
+        # `facade.connect` routes to it — what is missing is a store path in
+        # those twelve clients, which is a change to them.
         try:
             credential = await _connect(args, out, name=name, env_prefix=env_prefix_for(name))
         except AuthExpired as exc:

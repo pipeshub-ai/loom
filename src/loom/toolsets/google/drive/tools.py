@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel
 
 from loom import Retry, step
+from loom.toolsets.google.drive.client import DriveClient
 from loom.toolsets.google.drive.models import (
     DriveFile,
     DrivePermission,
@@ -109,9 +110,9 @@ async def drive_list_files(
         Drive returns a page, and reporting it as a total is the bug this
         return type exists to prevent.
     """
-    from loom.toolsets.google.drive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_files(
+    return await (await client_for("google_drive", DriveClient)).list_files(
         query,
         max_results,
         order_by=order_by,
@@ -132,9 +133,9 @@ async def drive_get_file(file_id: str) -> DriveFile:
         DriveFile. ``is_folder`` and ``is_google_doc`` say what kind of thing
         it is; the second decides download versus export.
     """
-    from loom.toolsets.google.drive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_file(file_id)
+    return await (await client_for("google_drive", DriveClient)).get_file(file_id)
 
 
 @step(retry=_READ)
@@ -154,9 +155,9 @@ async def drive_find_folder(name: str, parent_id: str = "") -> DriveFile | None:
         name. None means "not found" — create it, or report it; do not fall
         back to a fuzzy match.
     """
-    from loom.toolsets.google.drive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().find_folder(name, parent_id)
+    return await (await client_for("google_drive", DriveClient)).find_folder(name, parent_id)
 
 
 @step(retry=_READ)
@@ -175,9 +176,9 @@ async def drive_download_file(file_id: str, filename: str = "") -> Attachment:
         ``ctx.put_artifact`` or ``att.offload(blobs)` to keep it out of the
         journal.
     """
-    from loom.toolsets.google.drive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().download_file(file_id, filename)
+    return await (await client_for("google_drive", DriveClient)).download_file(file_id, filename)
 
 
 @step(retry=_READ)
@@ -198,9 +199,10 @@ async def drive_export_file(
     Returns:
         Attachment holding the exported bytes.
     """
-    from loom.toolsets.google.drive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().export_file(file_id, export_mime, filename)
+    client = await client_for("google_drive", DriveClient)
+    return await client.export_file(file_id, export_mime, filename)
 
 
 @step(retry=_READ)
@@ -212,9 +214,9 @@ async def drive_get_storage_quota() -> dict[str, int]:
         an account with unlimited storage — it is absent from the API response
         rather than large.
     """
-    from loom.toolsets.google.drive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_storage_quota()
+    return await (await client_for("google_drive", DriveClient)).get_storage_quota()
 
 
 # ---------------------------------------------------------------------------
@@ -245,9 +247,9 @@ async def drive_upload_file(
     Returns:
         The created DriveFile, including its id and web_view_link.
     """
-    from loom.toolsets.google.drive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().upload_file(
+    return await (await client_for("google_drive", DriveClient)).upload_file(
         name,
         content,
         mime_type=mime_type,
@@ -271,9 +273,9 @@ async def drive_update_file_content(
         The updated DriveFile. Every existing link still resolves — which is
         the reason to update rather than upload a replacement.
     """
-    from loom.toolsets.google.drive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().update_file_content(
+    return await (await client_for("google_drive", DriveClient)).update_file_content(
         file_id, content, mime_type=mime_type
     )
 
@@ -292,9 +294,9 @@ async def drive_create_folder(name: str, parent_id: str = "") -> DriveFile:
     Returns:
         The created DriveFile, with ``is_folder`` True.
     """
-    from loom.toolsets.google.drive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_folder(name, parent_id)
+    return await (await client_for("google_drive", DriveClient)).create_folder(name, parent_id)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -308,9 +310,10 @@ async def drive_rename_file(file_id: str, name: str) -> DriveFile:
     Returns:
         The updated DriveFile.
     """
-    from loom.toolsets.google.drive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().update_file(file_id, {"name": name})
+    client = await client_for("google_drive", DriveClient)
+    return await client.update_file(file_id, {"name": name})
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -332,9 +335,9 @@ async def drive_move_file(
     Returns:
         The updated DriveFile, with ``parents`` reflecting the move.
     """
-    from loom.toolsets.google.drive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().move_file(
+    return await (await client_for("google_drive", DriveClient)).move_file(
         file_id, folder_id, remove_from=remove_from
     )
 
@@ -354,9 +357,9 @@ async def drive_copy_file(
     Returns:
         The new DriveFile.
     """
-    from loom.toolsets.google.drive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().copy_file(file_id, name, folder_id)
+    return await (await client_for("google_drive", DriveClient)).copy_file(file_id, name, folder_id)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -369,9 +372,9 @@ async def drive_trash_file(file_id: str) -> DriveFile:
     Returns:
         The updated DriveFile, with ``trashed`` True.
     """
-    from loom.toolsets.google.drive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().trash_file(file_id)
+    return await (await client_for("google_drive", DriveClient)).trash_file(file_id)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -384,9 +387,9 @@ async def drive_restore_file(file_id: str) -> DriveFile:
     Returns:
         The updated DriveFile, with ``trashed`` False.
     """
-    from loom.toolsets.google.drive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().restore_file(file_id)
+    return await (await client_for("google_drive", DriveClient)).restore_file(file_id)
 
 
 @step(retry=_PERMANENT_DELETE)
@@ -401,9 +404,9 @@ async def drive_delete_file(file_id: str) -> str:
     Returns:
         The deleted file id, so the journal records what was removed.
     """
-    from loom.toolsets.google.drive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    await get_default_client().delete_file(file_id)
+    await (await client_for("google_drive", DriveClient)).delete_file(file_id)
     return file_id
 
 
@@ -440,9 +443,9 @@ async def drive_share_file(
         The created DrivePermission, including its id — which is what
         ``drive_remove_permission`` takes.
     """
-    from loom.toolsets.google.drive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().share_file(
+    return await (await client_for("google_drive", DriveClient)).share_file(
         file_id,
         email=email,
         role=role,
@@ -466,9 +469,10 @@ async def drive_list_permissions(
     Returns:
         Results[DrivePermission] with id, type, role, email_address.
     """
-    from loom.toolsets.google.drive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_permissions(file_id, max_results)
+    client = await client_for("google_drive", DriveClient)
+    return await client.list_permissions(file_id, max_results)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -482,9 +486,9 @@ async def drive_remove_permission(file_id: str, permission_id: str) -> str:
     Returns:
         The revoked permission id.
     """
-    from loom.toolsets.google.drive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    await get_default_client().remove_permission(file_id, permission_id)
+    await (await client_for("google_drive", DriveClient)).remove_permission(file_id, permission_id)
     return permission_id
 
 
@@ -499,9 +503,9 @@ async def drive_list_shared_drives(max_results: int = 100) -> Results[SharedDriv
         Results[SharedDrive] with id, name, created_time. The id goes to
         ``drive_list_files(drive_id=...)``.
     """
-    from loom.toolsets.google.drive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_shared_drives(max_results)
+    return await (await client_for("google_drive", DriveClient)).list_shared_drives(max_results)
 
 
 # ---------------------------------------------------------------------------

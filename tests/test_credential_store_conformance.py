@@ -62,6 +62,13 @@ def store(request: pytest.FixtureRequest, tmp_path, monkeypatch: pytest.MonkeyPa
 
     import keyring
 
+    # Without this the store takes `conftest.py`'s pinned `LOOM_CREDENTIAL_KEY`
+    # — which is rung 1 of the key order and now reaches this store too — and
+    # the "keyring" parameter would exercise the env path under a keyring
+    # label. A parameter that silently tests its neighbour is worse than one
+    # that fails.
+    monkeypatch.delenv("LOOM_CREDENTIAL_KEY", raising=False)
+
     original = keyring.get_keyring()
     keyring.set_keyring(_FakeKeyring())
     try:

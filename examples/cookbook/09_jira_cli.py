@@ -2,7 +2,7 @@
 
 A developer-facing CLI that shows every layer of the pipeline:
   1. Your natural-language query
-  2. The exact prompt (system + user) sent to Claude
+  2. The exact prompt (system + user) sent to the model
   3. Live log lines as the LLM call progresses
   4. The full generated workflow code
   5. The execution output against your real Jira instance
@@ -17,8 +17,14 @@ Usage:
     # Run your own query
     python3 examples/cookbook/09_jira_cli.py --query "Show me all bugs in project PA"
 
+    # Pick the vendor, or a specific model
+    python3 examples/cookbook/09_jira_cli.py --provider openai --example 1
+    python3 examples/cookbook/09_jira_cli.py --model gpt-5.6-terra --example 1
+
 Requires env vars (add to .env):
-    ANTHROPIC_API_KEY, JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN
+    JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN, and one model key —
+    ANTHROPIC_API_KEY or OPENAI_API_KEY. With both set and no flag,
+    Anthropic wins; --provider says which explicitly.
 
 The menu is the point of this example, so it refuses an empty stdin rather than
 guessing. `scripts/run_examples.py` reads the line below and picks a preset, so
@@ -40,12 +46,80 @@ from pathlib import Path
 from typing import ClassVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from utils import require_env
+from utils import load_dotenv, require_env
 
 from loom.agents.coding_agent import WorkflowCodingAgent
 from loom.agents.interaction import CLIUserInteraction
-from loom.agents.providers.anthropic_provider import AnthropicProvider
+from loom.agents.models import ModelProvider
+from loom.agents.providers import vendor_of
 from loom.agents.tool_registry import Toolset, ToolsetRegistry
+
+# ---------------------------------------------------------------------------
+# Model selection
+# ---------------------------------------------------------------------------
+
+#: Vendor id to (environment variable, default model). Two entries because the
+#: coding agent's job is the same either way — one `complete()` call behind the
+#: `ModelProvider` protocol — so swapping vendors is a flag rather than a code
+#: change. Order matters: with both keys set and nothing asked for, the first
+#: one wins.
+PROVIDERS: dict[str, tuple[str, str]] = {
+    "anthropic": ("ANTHROPIC_API_KEY", "claude-sonnet-5"),
+    "openai": ("OPENAI_API_KEY", "gpt-5.6-luna"),
+}
+
+#: The provider class names `vendor_of` returns, mapped back to the ids above.
+_VENDOR_IDS = {"AnthropicProvider": "anthropic", "OpenAIProvider": "openai"}
+
+
+def build_model(provider: str | None, model: str | None) -> ModelProvider:
+    """The model the coding agent runs on, from ``--provider`` and ``--model``.
+
+    Three ways in, narrowest first. ``--provider`` names the vendor outright.
+    With only ``--model``, the vendor is read off the model id through
+    ``loom.agents.providers.vendor_of`` rather than guessed here — that mapping
+    already exists and having a second copy of it is how the two disagree. With
+    neither, the first vendor whose key is set wins, so a ``.env`` holding one
+    key needs no flag at all.
+
+    Both providers are imported lazily, because ``[anthropic]`` and ``[openai]``
+    are separate extras and needing one must not require the other.
+    """
+    load_dotenv()  # so auto-detection sees keys that live only in .env
+
+    if provider is None and model is not None:
+        vendor = vendor_of(model)
+        provider = _VENDOR_IDS.get(vendor[1]) if vendor else None
+        if provider is None:
+            print(f"Error: cannot tell which vendor serves --model {model}.")
+            print(f"Pass --provider {' or --provider '.join(PROVIDERS)}.")
+            sys.exit(2)
+
+    if provider is None:
+        provider = next(
+            (name for name, (variable, _) in PROVIDERS.items() if os.environ.get(variable)),
+            None,
+        )
+        if provider is None:
+            print("Error: no model key set. Set one of:")
+            for variable, _ in PROVIDERS.values():
+                print(f"  - {variable}")
+            print("In the environment, or in .env at the repo root.")
+            sys.exit(1)
+
+    variable, default_model = PROVIDERS[provider]
+    require_env(variable)
+    model_name = model or default_model
+
+    if provider == "anthropic":
+        from loom.agents.providers.anthropic_provider import AnthropicProvider
+
+        return AnthropicProvider(model_name=model_name, api_key=os.environ[variable])
+
+    from loom.agents.providers.openai_provider import OpenAIProvider
+
+    return OpenAIProvider(model_name=model_name, api_key=os.environ[variable])
+
 
 # ---------------------------------------------------------------------------
 # Preset queries
@@ -236,7 +310,7 @@ async def run_query(
     print(query)
 
     # ── Step 2: prompt sent to LLM ──────────────────────────────────────────
-    section(2, steps, "PROMPT SENT TO CLAUDE")
+    section(2, steps, "PROMPT SENT TO THE MODEL")
     system_prompt = agent.build_system_prompt()
     print("\n[ SYSTEM PROMPT ]\n")
     box(system_prompt, "system")
@@ -339,6 +413,17 @@ def build_parser() -> argparse.ArgumentParser:
         "writing code, or guessed at them.",
     )
     p.add_argument(
+        "--provider",
+        choices=sorted(PROVIDERS),
+        help="Which vendor to author with. Defaults to the model's own vendor "
+        "when --model is given, otherwise the first key that is set.",
+    )
+    p.add_argument(
+        "--model", "-m",
+        help="Model id, e.g. claude-sonnet-5 or gpt-5.6-luna. Defaults to "
+        "the chosen provider's own default.",
+    )
+    p.add_argument(
         "--example", "-e",
         type=int,
         choices=list(PRESETS),
@@ -382,8 +467,10 @@ async def main() -> None:
     args = build_parser().parse_args()
 
     # require_env reads .env at the repo root, so keys already committed there
-    # work without exporting anything.
-    require_env("ANTHROPIC_API_KEY", "JIRA_URL", "JIRA_EMAIL", "JIRA_API_TOKEN")
+    # work without exporting anything. The model key is checked by build_model,
+    # which is the only thing that knows which vendor this run needs.
+    require_env("JIRA_URL", "JIRA_EMAIL", "JIRA_API_TOKEN")
+    model = build_model(args.provider, args.model)
 
     # Configure the coding agent logger to emit pretty lines
     agent_logger = logging.getLogger("workflow.coding_agent")
@@ -413,10 +500,6 @@ async def main() -> None:
     registry = ToolsetRegistry()
     registry.register(_build_jira_toolset())
 
-    model = AnthropicProvider(
-        model_name="claude-sonnet-5",
-        api_key=os.environ["ANTHROPIC_API_KEY"],
-    )
     agent = WorkflowCodingAgent(
         model=model,
         # 30 turns for the whole job — discovery, repair and review together.

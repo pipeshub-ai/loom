@@ -20,6 +20,7 @@ from loom.agents.tools import tool
 from loom.core.exceptions import (
     GuardrailTripwire,
     ModelBehaviorError,
+    OutputTruncated,
     UsageLimitExceeded,
 )
 from loom.testing.mock import MockModelProvider, mock_response
@@ -211,6 +212,48 @@ class TestBudgetEnforcement:
         )
         with pytest.raises(UsageLimitExceeded, match="max_turns"):
             await agent("take your time")
+
+    @pytest.mark.asyncio
+    async def test_empty_truncation_is_not_a_turn_budget(self) -> None:
+        """A response cut off before it carried anything names its own cause.
+
+        This is what a model producing a long tool call looks like when the
+        ceiling is too low: it spends the whole allowance on one argument,
+        never closes the JSON, and the provider drops the unterminated block —
+        so what arrives has no text and no tool call.
+
+        Continuing is meaningless there, and it used to be what happened: every
+        turn re-truncated identically until the turn budget died, reporting a
+        limit that cannot be raised into a fix. The failure has to name the
+        ceiling instead, because the two diagnoses send you to opposite dials.
+        """
+        provider = MockModelProvider(responses=[
+            mock_response(None, finish_reason=FinishReason.LENGTH),
+            mock_response(None, finish_reason=FinishReason.LENGTH),
+            mock_response(None, finish_reason=FinishReason.LENGTH),
+        ])
+        agent = Agent(name="truncated", model=provider, limits=UsageLimits(max_turns=2))
+
+        with pytest.raises(OutputTruncated, match="output ceiling"):
+            await agent("write me a large file")
+
+    @pytest.mark.asyncio
+    async def test_truncated_prose_is_still_continued(self) -> None:
+        """The other half, which must not regress.
+
+        A response cut off *partway through text* can be continued — the model
+        has something on the wire and picks up from it. Only the empty case is
+        unrecoverable, so keying on the finish reason alone would turn a
+        working retry into a hard failure.
+        """
+        provider = MockModelProvider(responses=[
+            mock_response("half a th", finish_reason=FinishReason.LENGTH),
+            mock_response("done"),
+        ])
+        agent = Agent(name="continues", model=provider, limits=UsageLimits(max_turns=5))
+
+        result = await agent("keep going")
+        assert result.output == "done"
 
 
 # ---------------------------------------------------------------------------

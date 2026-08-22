@@ -105,8 +105,15 @@ class Session:
             return dispatch(edit) or Exit.OK
 
         destination = self._next_filename(text)
+        # `--run` here and nowhere else. A line typed at this prompt is a
+        # *task* — "find my jira tickets" is a question whose answer is the
+        # tickets, and answering it with a Python file and the sentence
+        # `loom run my_jira_tickets` is the last step of the loop failing.
+        # `loom author "spec" > flow.py` keeps writing a file, because that
+        # shape is documented and a run would put its output in the file.
         code = dispatch(
-            f"/author {shlex.quote(text)} -o {shlex.quote(str(destination))}"
+            f"/author {shlex.quote(text)} -o {shlex.quote(str(destination))}",
+            defaults=["--run"],
         )
         if destination.exists():
             # Focus follows what was just written, so the next line is an edit

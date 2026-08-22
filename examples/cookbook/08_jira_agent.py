@@ -7,7 +7,7 @@ You write a query in plain English.  The coding agent:
   4. Executes the generated workflow against your real Jira instance
 
 Requires env vars (add to .env):
-    ANTHROPIC_API_KEY   your Anthropic key
+    a model key         ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY
     JIRA_URL            https://yourorg.atlassian.net
     JIRA_EMAIL          your@email.com
     JIRA_API_TOKEN      your Atlassian API token
@@ -18,6 +18,13 @@ Run:
 
 Query 3 creates a task in your Jira. Use ``--read-only`` to skip it when you
 just want to see the agent work against a real instance.
+
+That is also why the gate runs it read-only: `scripts/run_examples.py` executes
+every example against whatever credentials the machine holds, and an example
+that files a ticket in somebody's tracker each time CI runs is one they turn
+off. The directive keeps that decision next to the example.
+
+run-examples: --read-only
 """
 
 from __future__ import annotations
@@ -30,11 +37,10 @@ from pathlib import Path
 from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from utils import require_env
+from utils import require_env, require_model
 
 from loom.agents.coding_agent import WorkflowCodingAgent
 from loom.agents.interaction import CLIUserInteraction
-from loom.agents.providers.anthropic_provider import AnthropicProvider
 from loom.toolsets.jira import JIRA_MANIFEST
 from loom.toolsets.jira.tools import JIRA_TOOL_DOCS
 from loom.toolsets.registry import register_toolset
@@ -115,12 +121,12 @@ DIVIDER = "=" * 65
 
 
 def check_env() -> bool:
-    """Exit unless the Jira and Anthropic credentials are available.
+    """Exit unless the Jira credentials are available.
 
     ``require_env`` reads ``.env`` at the repo root, so keys already committed
     there work without exporting anything.
     """
-    require_env("ANTHROPIC_API_KEY", "JIRA_URL", "JIRA_EMAIL", "JIRA_API_TOKEN")
+    require_env("JIRA_URL", "JIRA_EMAIL", "JIRA_API_TOKEN")
     return True
 
 
@@ -194,8 +200,7 @@ async def main() -> None:
     if not check_env():
         sys.exit(1)
 
-    api_key = os.environ["ANTHROPIC_API_KEY"]
-    model = AnthropicProvider(model_name="claude-sonnet-5", api_key=api_key)
+    model = require_model()
 
     # Register Jira manifest so the ReAct agent can discover it
     register_toolset(JIRA_MANIFEST)

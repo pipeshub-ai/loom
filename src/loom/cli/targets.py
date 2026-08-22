@@ -136,6 +136,83 @@ def _interaction() -> Any:
     return picker if picker.available() else CLIUserInteraction()
 
 
+def _connect_renderer() -> Any:
+    """Draw a :class:`~loom.connectors.flows.ConnectEvent` on stderr.
+
+    Stderr, because ``loom connect x --json`` must keep JSON on stdout, and
+    because a connection started by the coding agent interleaves with the
+    progress region and the questions, which are written there too.
+
+    Every line goes out with the live region **suspended**. Without that the
+    progress spinner keeps redrawing on the same stderr on its own timer and
+    lands in the middle of what this is printing — the same two-writers-one-
+    terminal fault `ask_user`'s dialog had, one subsystem over.
+    """
+    import sys
+
+    from loom.cli.progress import suspend
+
+    def say(line: str = "") -> None:
+        print(line, file=sys.stderr)
+
+    def draw(event: Any) -> None:
+        with suspend():
+            _draw(event, say)
+
+    return draw
+
+
+def _draw(event: Any, say: Any) -> None:
+    if event.kind == "needs_app":
+        # The redirect URI resolved the way the listener will actually resolve
+        # it — `--redirect-port`, then $LOOM_OAUTH_REDIRECT_PORT, then the
+        # project's .env. Printing a fixed 8931 here told anyone who had set
+        # that variable to register a URI the flow was never going to use.
+        from loom.cli.auth_commands import resolve_redirect_port
+
+        redirect = f"http://127.0.0.1:{resolve_redirect_port(None)}/callback"
+        say()
+        say(f"  {event.detail or 'No OAuth app is registered yet.'}")
+        if event.setup_url:
+            say(f"  Create one at: {event.setup_url}")
+        say(f"  Register this redirect URI on it: {redirect}")
+        say("  Then paste the two values below.")
+        say()
+    elif event.kind == "redirect_ready":
+        say()
+        say(f"  Redirect URI: {event.redirect_uri}")
+        if event.scopes:
+            say("  Requesting scopes: " + " ".join(event.scopes))
+    elif event.kind == "opening_browser":
+        say("  Opening your browser to continue.")
+        say(f"  If it does not open, visit: {event.authorization_url}")
+    elif event.kind == "waiting" and event.verification_uri:
+        say(f"  Go to {event.verification_uri} and enter: {event.user_code}")
+    elif event.kind == "exchanged":
+        say("  Connected.")
+
+
+def _secret_prompt() -> Any:
+    """`ConsoleSecretPrompt`, with the live region held while it asks.
+
+    The suspension belongs here rather than in the prompt itself:
+    `loom.connectors.flows` is library tier and `ProgressRenderer` is the
+    CLI's, so the library asking the CLI to stop drawing would be the import
+    edge `tests/test_layering.py` exists to prevent. The CLI composes both, so
+    the CLI is where they are made to take turns.
+    """
+    from loom.cli.progress import suspend
+    from loom.connectors.flows import ConsoleSecretPrompt
+    from loom.toolsets.manifest import AuthField
+
+    class _Held(ConsoleSecretPrompt):
+        async def read(self, field: AuthField) -> str:
+            with suspend():
+                return await super().read(field)
+
+    return _Held()
+
+
 def resolve(
     target: str | None,
     *,
@@ -251,7 +328,25 @@ def resolve(
     # same as any other answer when the question is a numbered list. It adds a
     # rendering and no rules: everything it cannot draw is handed to
     # `CLIUserInteraction`, which is where the rules already are.
-    backend = LocalFacade(runtime, loaded, user_interaction=_interaction())
+    #
+    # The connect flow and the secret prompt are composed here for the same
+    # reason and in the same place. Both default to `None` on `LocalFacade`, so
+    # a host embedding it gets no browser and no `getpass` unless it asks: "a
+    # library that reads stdin because it was imported is the ambient behaviour
+    # `Runtime` avoids everywhere else — the CLI opts in, a server does not."
+    from loom.connectors.flows import OAuthBrowserFlow
+
+    backend = LocalFacade(
+        runtime,
+        loaded,
+        user_interaction=_interaction(),
+        connect_flow=OAuthBrowserFlow(),
+        secret_prompt=_secret_prompt(),
+        # Without a renderer a connection that stops at "register an app
+        # first" returns in a tenth of a second having printed nothing, which
+        # reads as broken rather than as a step you have not done yet.
+        on_connect_event=_connect_renderer(),
+    )
 
     if explicit_name and explicit_name not in runtime.workflows:
         known = ", ".join(sorted(runtime.workflows)) or "none"

@@ -1,15 +1,16 @@
 """Example 7 — Workflow Coding Agent.
 
 You describe a workflow in plain English.  The coding agent sends your spec
-to Claude, receives a complete Python file using the LOOM SDK, validates it
+to a model, receives a complete Python file using the LOOM SDK, validates it
 with the AST-based CodeValidator, and self-corrects if issues are found.
 The generated file is then executed so you see it run end-to-end.
 
 Requires:
-    ANTHROPIC_API_KEY environment variable
+    one model key — ANTHROPIC_API_KEY, OPENAI_API_KEY, or
+    GEMINI_API_KEY. Whichever is set is the one used.
 
 Run:
-    ANTHROPIC_API_KEY=sk-... python3 examples/cookbook/07_coding_agent.py
+    python3 examples/cookbook/07_coding_agent.py
 """
 
 from __future__ import annotations
@@ -20,11 +21,10 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from utils import header, log, require_env
+from utils import header, log, require_model
 
 from loom.agents.coding_agent import WorkflowCodingAgent
 from loom.agents.interaction import CLIUserInteraction
-from loom.agents.providers.anthropic_provider import AnthropicProvider
 
 SPEC = """\
 Create a workflow called "news_digest" that:
@@ -42,11 +42,7 @@ Include a runnable main() that uses keywords ["python", "AI", "workflow"].
 
 
 async def main() -> None:
-    require_env("ANTHROPIC_API_KEY")
-
-    model = AnthropicProvider(
-        model_name="claude-sonnet-5", api_key=os.environ["ANTHROPIC_API_KEY"]
-    )
+    model = require_model()
     agent = WorkflowCodingAgent(
         model=model,
         max_repair_attempts=2,

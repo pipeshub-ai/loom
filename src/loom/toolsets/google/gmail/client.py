@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from loom.blobs.attachment import Attachment
     from loom.toolsets.google.auth import GoogleAuth
 
-__all__ = ["GmailClient", "build_mime", "flatten_message", "get_default_client"]
+__all__ = ["GmailClient", "build_mime", "flatten_message"]
 
 API_BASE = "https://gmail.googleapis.com/gmail/v1"
 
@@ -880,18 +880,4 @@ def _sent(data: dict[str, Any]) -> SentMessage:
 # Process-wide default
 # ---------------------------------------------------------------------------
 
-_default_client: GmailClient | None = None
 
-
-def get_default_client() -> GmailClient:
-    """Return (or build) the module-level client from environment credentials."""
-    global _default_client
-    if _default_client is None:
-        _default_client = GmailClient()
-    return _default_client
-
-
-def reset_default_client() -> None:
-    """Drop the cached client. For tests, and after a credential change."""
-    global _default_client
-    _default_client = None

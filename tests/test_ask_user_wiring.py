@@ -71,9 +71,20 @@ class TestTheCliWiresIt:
     """The one surface with a person at the other end of stdin."""
 
     def test_resolve_builds_a_facade_that_can_ask(self) -> None:
+        """What the CLI *wires*, which is independent of what it loads.
+
+        ``modules=[]`` and ``store="memory://"`` on purpose. Without them this
+        resolved the repository's own ``pyproject.toml`` and imported whatever
+        ``[tool.loom] modules`` happened to name — so authoring two workflows
+        that share a name, which ``loom author`` makes easy since it names a
+        file from the spec, failed this test with
+        ``a different workflow named '...' is registered``. A wiring test that
+        a developer's own working directory can break reports its own
+        environment, and the failure names neither.
+        """
         from loom.cli import targets
 
-        target = targets.resolve(None)
+        target = targets.resolve(None, modules=[], store="memory://")
 
         assert isinstance(target.backend, LocalFacade)
         assert isinstance(target.backend.user_interaction, CLIUserInteraction)

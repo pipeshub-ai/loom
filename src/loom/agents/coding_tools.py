@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import importlib
 import json
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 from loom.agents.tools import Tool, tool
+from loom.connectors.credentials import credential_store_scope
 
 # ---------------------------------------------------------------------------
 # Tool-docs registry — maps toolset_id to a callable returning docs
@@ -386,7 +387,7 @@ async def observe_target(target: str, hint: str = "", probe: str = "") -> str:
     return json.dumps({"error": "no probes are configured in this environment"})
 
 
-def make_observe_tool(registry: Any) -> Tool:
+def make_observe_tool(registry: Any, seen: list[Any] | None = None) -> Tool:
     """Bind :func:`observe_target` to a probe registry.
 
     Returned only when the registry holds something. A tool that is present and
@@ -394,7 +395,7 @@ def make_observe_tool(registry: Any) -> Tool:
     and teaches the model to distrust the one capability that would have told it
     the truth — the same reason ``ask_user`` is omitted rather than stubbed.
     """
-    from loom.agents.probes.base import ProbeError
+    from loom.agents.probes.base import ObservedPage, ProbeError, control_names
 
     async def bound(target: str, hint: str = "", probe: str = "") -> str:
         available = ", ".join(sorted(p.id for p in registry.all())) or "none"
@@ -422,6 +423,23 @@ def make_observe_tool(registry: Any) -> Tool:
             "summary": observation.summary,
             "detail": observation.detail[:_OBSERVATION_CHARS],
         }
+        landed = getattr(observation, "landed", "")
+        if landed and landed != observation.target:
+            # A structured field as well as the sentence already leading the
+            # summary. The summary is what gets read; this is what a caller can
+            # branch on, and what `ObservedTargetsStage` matches a workflow's
+            # own URL against — neither of which should have to parse prose.
+            payload["landed"] = landed
+        if seen is not None:
+            # Kept whichever probe answered and whether or not a census could be
+            # read from it: `control_names` returns empty for a non-census, and
+            # a check reading this must be able to tell "nothing was observed"
+            # from "nothing was found", which are opposite conclusions.
+            seen.append(ObservedPage(
+                target=observation.target,
+                landed=landed,
+                names=control_names(observation.detail),
+            ))
         if len(observation.detail) > _OBSERVATION_CHARS:
             payload["detail_truncated"] = True
         if observation.evidence:
@@ -479,6 +497,7 @@ async def _call_read_operation(
     *,
     registry: Any | None,
     seen: dict[str, int] | None = None,
+    credentials: Any | None = None,
 ) -> str:
     from loom.toolsets.manifest import EffectClass
 
@@ -561,7 +580,17 @@ async def _call_read_operation(
         fn = getattr(module, spec.function)
         # A @step is callable directly; this is deliberately outside a Runtime,
         # since authoring is not a durable execution.
-        result = await fn(**arguments)
+        #
+        # But a toolset client reads its credential from the store bound to the
+        # *current* run, and `credential_store_scope` was bound at exactly one
+        # site — `runtime/context.py::_attempt_loop`. Authoring never goes
+        # through it, so `loom connect jira` stored a credential the runtime
+        # could use and the authoring agent could not: every lookup fell back
+        # to environment variables and failed with "generate code that resolves
+        # it at runtime instead", which is rung 3 of the resolution ladder
+        # reached by accident rather than by judgement.
+        with credential_store_scope(credentials):
+            result = await fn(**arguments)
     except TypeError as exc:
         # A signature mismatch, not a failure of the operation. The manifest
         # already knows what it accepts, so answer with that rather than with
@@ -590,8 +619,14 @@ async def _call_read_operation(
             }
         )
     except Exception as exc:
-        # Credentials missing at authoring time is normal and not a code
-        # problem: say so plainly rather than looking like a broken operation.
+        # A missing credential is a *state*, not a failure of the operation,
+        # and the two want opposite responses. Reported as an error it read as
+        # "this toolset is broken", and the cheapest repair a model can find
+        # for a broken toolset is to stop using it — which is how a request
+        # comes back having quietly dropped the integration it was about.
+        not_connected = _not_connected(toolset_id, exc, catalog)
+        if not_connected is not None:
+            return not_connected
         return json.dumps(
             {
                 "error": f"{type(exc).__name__}: {exc}",
@@ -683,6 +718,66 @@ async def _call_read_operation(
     )
 
 
+
+#: Exception *names* that mean "nothing authenticated this call".
+#:
+#: Matched by name rather than by class because each toolset raises its own —
+#: `JiraAuthError`, `GraphAuthError`, `SlackAuthError` — and importing twenty
+#: seven client modules to catch them would undo the lazy catalogue this whole
+#: layer exists for. A name that ends in `AuthError` and a `ValueError` naming
+#: the variables the client reads are the two shapes they all take.
+_AUTH_ERRORS = ("AuthError", "AuthExpired", "CredentialNotFound", "Unauthorized")
+
+
+def _not_connected(toolset_id: str, exc: Exception, catalog: Any) -> str | None:
+    """A structured "connect this first", or ``None`` if that is not the problem.
+
+    A payload rather than a raise, and a *state* rather than an error: the
+    model needs to know the code is fine and the machine is not configured.
+    Getting that backwards is how a request comes back having deleted the
+    integration it was about, with every remaining stage green.
+    """
+    from loom.core.exceptions import MissingCredentials
+
+    name = type(exc).__name__
+    text = str(exc)
+    # The typed condition first: `build_client` and `runtime/context.py` both
+    # raise it when a toolset's values are not on this machine, which is exactly
+    # this state and says so without anyone having to recognise a sentence.
+    looks_like_auth = isinstance(exc, MissingCredentials) or (
+        any(marker in name for marker in _AUTH_ERRORS)
+        or (isinstance(exc, ValueError) and "required" in text and "_" in text)
+    )
+    if not looks_like_auth:
+        return None
+
+    manifest = catalog.get(toolset_id)
+    auth = getattr(manifest, "auth", None)
+    payload: dict[str, Any] = {
+        "error": "not_connected",
+        "toolset": toolset_id,
+        "detail": f"{name}: {text}",
+        "note": (
+            "The machine is not configured; the operation and your code are "
+            "fine. Write the workflow you would write anyway and say in the "
+            "plan that this value is resolved at run time. Never drop the "
+            "integration because of this."
+        ),
+    }
+    if auth is not None:
+        payload["needs"] = {
+            "method": auth.kind,
+            "credential": auth.credential,
+            "provider": auth.provider,
+            "variables": list(auth.field_names),
+        }
+        if auth.credential:
+            payload["next"] = f'connect_toolset("{toolset_id}")'
+        if auth.setup_url:
+            payload["setup_url"] = auth.setup_url
+    return json.dumps(payload, indent=2)
+
+
 #: How much of a read a resolution turn may put in front of the model.
 _READ_RESULT_LIMIT = 8000
 
@@ -709,6 +804,271 @@ def _plain(value: Any) -> Any:
     return value
 
 
+
+@tool
+async def sdk_contract(symbol: str) -> str:
+    """Get the exact code to write for a LOOM construct: a decorator, or a ctx.* call.
+
+    Use this for anything belonging to LOOM itself — ``@pure``, ``@effect``,
+    ``@step``, ``ctx.now``, ``ctx.gather``, ``Retry`` — rather than searching
+    the toolset or node catalogues, which hold integrations and nodes and never
+    the SDK. Guessing at a decorator's form produces code that imports cleanly
+    and does the wrong thing: a body written ``def`` where ``async def`` was
+    required is a coroutine nobody awaits.
+
+    Args:
+        symbol: A name LOOM exports (``pure``, ``Retry``), with or without a
+            leading ``@``; or a context method (``ctx.now``, ``ctx.step``).
+
+    Returns:
+        JSON with the ``import`` line, the ``usage`` to type, a one-line
+        ``summary``, and the keyword ``options`` where there are any. Rendered
+        from the object itself, so it cannot disagree with the installed
+        version. An unknown name comes back as an error naming near matches.
+    """
+    from loom.agents.sdk_reference import sdk_contract as _contract
+
+    try:
+        return json.dumps(_contract(symbol).as_dict(), indent=2)
+    except KeyError as exc:
+        # `str(KeyError)` is the repr of its argument, quotes included.
+        return json.dumps({"error": exc.args[0] if exc.args else str(exc)})
+
+
+# ---------------------------------------------------------------------------
+# Driving a page while authoring — see agents/probes/exploration.py
+# ---------------------------------------------------------------------------
+
+
+def make_exploration_tools(session: Any, seen: list[Any] | None = None) -> list[Tool]:
+    """Bind ``open_page``/``interact`` to an exploration *session*.
+
+    Returned only when a session exists, so an environment without one offers
+    neither tool rather than two that always answer "not configured" — the rule
+    ``observe_target`` and ``ask_user`` already follow, and the reason is the
+    same: a capability that is advertised and refuses teaches the model to stop
+    reaching for the one thing that would have told it the truth.
+    """
+    from loom.agents.probes.base import ObservedPage, redirect_note
+    from loom.agents.probes.exploration import ExplorationRefused, click
+
+    def _controls(snapshot: Any) -> list[dict[str, Any]]:
+        return [
+            {"role": c.role, "name": c.name, "disabled": bool(c.disabled)}
+            for c in snapshot.controls()[:60]
+        ]
+
+    def _split_ordinal(name: str) -> tuple[str, int]:
+        """``"Confirm and continue#1"`` -> ``("Confirm and continue", 1)``.
+
+        Explicit syntax rather than a fallback that tries the next match,
+        because two controls with one name is exactly where picking one is a
+        guess — `AmbiguousTarget` refuses for that reason and this must not
+        quietly undo it.
+
+        Only a trailing run of digits counts, and only when something is left
+        in front of it, so a control genuinely called "#1 Best Seller" is
+        untouched. A name that really does end in ``#`` and digits needs
+        ``interact``, which takes the ordinal as its own argument.
+        """
+        head, sep, tail = name.rpartition("#")
+        if sep and head.strip() and tail.isdigit():
+            return head, int(tail)
+        return name, 0
+
+    def _record(requested: str, snapshot: Any) -> None:
+        if seen is None:
+            return
+        seen.append(ObservedPage(
+            target=requested,
+            landed=getattr(snapshot, "url", "") or requested,
+            names=tuple(c.name for c in snapshot.controls() if (c.name or "").strip()),
+        ))
+
+    @tool
+    async def open_page(url: str, click_through: list[str] | None = None) -> str:
+        """Open a page in a real browser to see what it offers. **Cannot type.**
+
+        Use this for a page whose controls you need the real names of, and
+        especially when ``observe_target`` came back describing something other
+        than what you asked for. This is a live browser with no cookies and no
+        signed-in identity, so it sees the page as a first-time visitor does.
+
+        Pass ``click_through`` to get past what stands in front of the page you
+        want — a policy notice, a consent gate, a landing step — in the same
+        call. Each name is clicked in order and every state is reported, so one
+        call answers "what is actually here" instead of several.
+
+        Args:
+            url: The page to open.
+            click_through: Accessible names of buttons to click after opening,
+                in order. For revealing what is behind them, never for
+                confirming, sending, paying, booking or deleting. Where a page
+                repeats a name, append the ordinal — ``"Continue#1"`` — since
+                two matches are refused rather than guessed at.
+
+        Returns:
+            JSON with ``landed`` (where it actually ended up, which may differ
+            from *url*), ``controls`` — role, accessible name and whether each
+            is disabled — and, when clicks were asked for, a ``steps`` list
+            showing what each one revealed. Those names are what
+            ``Target(role=…, name=…)`` resolves against.
+        """
+        try:
+            snapshot = await session.open(url)
+        except Exception as exc:  # a provider may raise anything
+            return json.dumps({"error": f"could not open {url}: {exc}"})
+        _record(url, snapshot)
+        landed = getattr(snapshot, "url", "") or url
+        payload: dict[str, Any] = {
+            "landed": landed,
+            "controls": _controls(snapshot),
+        }
+        note = redirect_note(url, landed)
+        if note:
+            payload["note"] = note
+
+        # Several clicks per call, bounded by the same action budget as one.
+        # Turns and actions are different currencies and only the second was
+        # capped: an agent revealing a form four panels deep spent four model
+        # round trips doing it, and observed runs put ~40% of the whole turn
+        # budget into exploring. Safety is unchanged — every click still goes
+        # through `session.act`, which refuses anything that can type.
+        steps: list[dict[str, Any]] = []
+        for entry in click_through or ():
+            name, ordinal = _split_ordinal(str(entry))
+            try:
+                await session.act(click("button", name, ordinal))
+            except ExplorationRefused as exc:
+                steps.append({"clicked": entry, "refused": str(exc)})
+                break
+            except Exception as exc:
+                steps.append({"clicked": entry, "error": str(exc)})
+                break
+            snapshot = await session.look()
+            _record(getattr(snapshot, "url", "") or name, snapshot)
+            steps.append({
+                "clicked": entry,
+                "landed": getattr(snapshot, "url", ""),
+                "controls": _controls(snapshot),
+            })
+        if steps:
+            payload["steps"] = steps
+            payload["controls"] = steps[-1].get("controls", payload["controls"])
+        return json.dumps(payload, indent=2)
+
+    @tool
+    async def interact(role: str, name: str, ordinal: int = 0) -> str:
+        """Click one control on the open page, and report what appears.
+
+        For revealing controls that do not exist yet: dismissing a notice,
+        opening a party-size panel, opening a date picker, switching a tab.
+
+        **This cannot type, and cannot press a key.** That is deliberate and it
+        is what keeps authoring from changing the system it is writing code
+        about: supplying data is what turns a form into a submission. It is not
+        an absolute guarantee — a badly built page can act on a click alone —
+        so do not click anything that reads as confirming, sending, paying, or
+        deleting. Reveal controls; let the workflow do the rest.
+
+        Args:
+            role: The control's role, e.g. "button".
+            name: Its accessible name, exactly as ``open_page`` reported it.
+            ordinal: Which one, when a page repeats a name. 0 is the first.
+
+        Returns:
+            JSON with the controls now on the page, after the click.
+        """
+        try:
+            await session.act(click(role, name, ordinal))
+        except ExplorationRefused as exc:
+            # Not a defect in the page and not something to work around; the
+            # message says which it is.
+            return json.dumps({"refused": str(exc)})
+        except Exception as exc:
+            return json.dumps({"error": f"could not click {name!r}: {exc}"})
+        try:
+            snapshot = await session.look()
+        except Exception as exc:
+            return json.dumps({"error": f"clicked, but could not read back: {exc}"})
+        landed = getattr(snapshot, "url", "")
+        _record(landed or name, snapshot)
+        return json.dumps(
+            {"landed": landed, "controls": _controls(snapshot)}, indent=2
+        )
+
+    return [open_page, interact]
+
+
+
+@dataclass
+class ConnectGate:
+    """Per-generation budget and phase switch for :func:`make_connect_tool`.
+
+    The shape :class:`~loom.agents.interaction.AskUserGate` already has, and
+    for the same two reasons. A budget, because a model that cannot make a
+    lookup work will try connecting again rather than concluding it cannot
+    resolve the value here — and counted in *attempts*, so a second try at the
+    same toolset costs the same as a first. And `enabled`, flipped off before
+    repair and smoke, so a model cannot deadlock CI by opening a browser
+    nobody is sitting in front of.
+    """
+
+    budget: int = 2
+    used: int = 0
+    enabled: bool = True
+
+
+def make_connect_tool(connect: Any, *, gate: ConnectGate | None = None) -> Tool:
+    """A tool that obtains a credential, bound to whatever can obtain one.
+
+    Offered **only when a surface composed something that can actually
+    connect** — the rule `ask_user` and `observe_target` already follow.
+    A tool that is present and always answers "not configured" costs a turn
+    every time a model reaches for it and teaches it nothing; one that is
+    absent costs nothing at all.
+    """
+
+    @tool
+    async def connect_toolset(toolset_id: str) -> str:
+        """Connect an account so this toolset can actually be called.
+
+        Use it when a lookup came back `not_connected` and you need the real
+        data — an id, a status vocabulary, whether a project exists. It opens a
+        browser on the user's machine and returns when they finish.
+
+        You do **not** need this to *write* code against a toolset. A missing
+        credential means the machine is unconfigured, not that the code is
+        wrong.
+
+        Args:
+            toolset_id: The toolset from the `not_connected` reply, e.g. "jira".
+        """
+        if gate is not None:
+            if not gate.enabled:
+                return json.dumps({
+                    "error": "connecting is off during this phase",
+                    "note": "Write the workflow anyway and resolve at run time.",
+                })
+            if gate.used >= gate.budget:
+                return json.dumps({
+                    "error": f"already tried connecting {gate.used} time(s)",
+                    "note": (
+                        "Stop trying to connect and finish the workflow. Say in "
+                        "the plan that the value is resolved at run time."
+                    ),
+                })
+            gate.used += 1
+        try:
+            return json.dumps(await connect(toolset_id), indent=2, default=str)
+        except Exception as exc:
+            # A payload, never a raise: a raise aborts the model's turn and it
+            # learns nothing about what to do instead.
+            return json.dumps({"error": f"{type(exc).__name__}: {exc}"})
+
+    return connect_toolset
+
+
 def build_coding_tools(
     *,
     registry: Any | None = None,
@@ -719,6 +1079,11 @@ def build_coding_tools(
     budget: int = 5,
     gate: Any | None = None,
     asked: list[Any] | None = None,
+    seen: list[Any] | None = None,
+    exploration: Any | None = None,
+    credentials: Any | None = None,
+    connect: Any | None = None,
+    connect_gate: Any | None = None,
 ) -> list[Tool]:
     """Return the ReAct tools for the workflow coding agent.
 
@@ -778,6 +1143,7 @@ def build_coding_tools(
             show_node,
             node_contract,
             validate_code,
+            sdk_contract,
         ]
     else:
         # Per-instance ledger: the count spans one generation and resets with the
@@ -788,7 +1154,11 @@ def build_coding_tools(
             op_path: str, arguments: dict[str, Any] | str | None = None
         ) -> str:
             return await _call_read_operation(
-                op_path, arguments, registry=registry, seen=seen_lookups
+                op_path,
+                arguments,
+                registry=registry,
+                seen=seen_lookups,
+                credentials=credentials,
             )
 
         async def bound_search(query: str) -> str:
@@ -841,13 +1211,23 @@ def build_coding_tools(
             replace(show_node, fn=bound_show_node),
             replace(node_contract, fn=bound_node_contract),
             replace(validate_code, fn=bound_validate),
+            sdk_contract,
         ]
+
+    # Only when something can actually connect, and independently of probes:
+    # absence omits the tool rather than offering one that answers "not
+    # configured" — the rule `ask_user` and `observe_target` already follow.
+    if connect is not None:
+        tools.append(make_connect_tool(connect, gate=connect_gate))
 
     if probes:
         # Truthiness, not `is not None`: an empty registry means the same thing
         # as no registry, and offering a tool that can never look at anything
         # spends context every turn to say "not configured".
-        tools.append(make_observe_tool(probes))
+        tools.append(make_observe_tool(probes, seen))
+
+    if exploration is not None:
+        tools.extend(make_exploration_tools(exploration, seen))
 
     if interaction is not None:
         tools.append(

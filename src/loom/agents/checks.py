@@ -67,6 +67,23 @@ class CheckContext:
 
     ``None`` when a stage is run outside a pipeline, which is how the tests
     exercise one in isolation."""
+    recording: dict[str, Any] | None = None
+    """Pages an authoring exploration drove, for the smoke run to replay.
+
+    Without it the smoke sandbox answers every browser action as though it
+    worked, which proves the flow is wired and nothing about whether a control
+    exists. With it, the run happens against the pages the agent actually saw —
+    including the ones that only appear after a click, which no census reaches.
+    ``None`` is the behaviour that shipped before, and remains what an
+    unexplored workflow gets."""
+    observed: list[Any] = field(default_factory=list)
+    """Pages the agent actually looked at, as ``ObservedPage`` records.
+
+    Empty means nothing was observed — which is not the same as a page having
+    no controls, and a stage reading this has to keep the two apart. The whole
+    value here is that it is evidence rather than a report: it is what the
+    probe returned, not what the model said about it, the same footing
+    ``resolved_kinds`` stands on."""
     resolved_kinds: set[str] = field(default_factory=set)
     """Entity kinds a resolver was actually *executed* for while authoring.
 

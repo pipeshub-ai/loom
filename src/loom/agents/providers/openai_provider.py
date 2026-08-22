@@ -70,7 +70,7 @@ class OpenAIProvider:
     Parameters
     ----------
     model_name:
-        Any chat-completions model ID, e.g. ``"gpt-5.6-terra"`` or ``"gpt-4.1"``.
+        Any chat-completions model ID, e.g. ``"gpt-5.6-luna"`` or ``"gpt-4.1"``.
     api_key:
         Falls back to ``OPENAI_API_KEY``.
     base_url:
@@ -83,13 +83,13 @@ class OpenAIProvider:
 
     def __init__(
         self,
-        model_name: str = "gpt-5.6-terra",
+        model_name: str = "gpt-5.6-luna",
         *,
         api_key: str | None = None,
         base_url: str | None = None,
         organization: str | None = None,
         project: str | None = None,
-        max_tokens: int = 4096,
+        max_tokens: int = 16384,
     ) -> None:
         import openai
 
@@ -101,6 +101,17 @@ class OpenAIProvider:
             organization=organization,
             project=project,
         )
+
+    @property
+    def max_tokens(self) -> int:
+        """This provider's default output ceiling.
+
+        Public so a caller whose deliverable is large — the coding agent, whose
+        answer is a whole source file — can defer to the model's real limit
+        instead of imposing a flat number that is too low for one model and
+        rejected outright by another.
+        """
+        return self._max_tokens
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         """Send *request* to OpenAI and return a normalised response."""
@@ -219,11 +230,47 @@ def _build_tools(request: ModelRequest) -> list[dict[str, Any]]:
 
 
 def _strictify(schema: dict[str, Any]) -> dict[str, Any]:
-    """Make a JSON Schema satisfy OpenAI's strict-mode rules."""
+    """Make a JSON Schema satisfy OpenAI's strict-mode rules.
+
+    Every object in the schema, not only the root: strict mode requires
+    ``additionalProperties: false`` and a complete ``required`` list on each
+    one, ``$defs`` included. Tightening the root alone is a 400 the moment an
+    output model nests another — and the API reports it as ``In context=()``,
+    which names the root and so points away from the object actually missing
+    it. That is the shape of every structured-output model the coding agent
+    uses, so the whole OpenAI authoring path was unreachable.
+    """
+    if not isinstance(schema, dict):
+        return schema
+
     tightened = dict(schema)
-    properties = tightened.get("properties") or {}
-    tightened["additionalProperties"] = False
-    tightened["required"] = list(properties)
+
+    for keyword in ("$defs", "definitions", "properties"):
+        section = tightened.get(keyword)
+        if isinstance(section, dict):
+            tightened[keyword] = {
+                name: _strictify(value) for name, value in section.items()
+            }
+
+    for keyword in ("items", "additionalItems", "not"):
+        if isinstance(tightened.get(keyword), dict):
+            tightened[keyword] = _strictify(tightened[keyword])
+
+    for keyword in ("anyOf", "oneOf", "allOf", "prefixItems"):
+        branches = tightened.get(keyword)
+        if isinstance(branches, list):
+            tightened[keyword] = [_strictify(branch) for branch in branches]
+
+    # A schema is an object when it says so or when it carries properties;
+    # a bare ``$ref`` node is neither, and adding keywords beside a ref is
+    # itself rejected.
+    properties = tightened.get("properties")
+    if tightened.get("type") == "object" or isinstance(properties, dict):
+        tightened["additionalProperties"] = False
+        # Strict mode has no optional fields: a property with a default is
+        # still required on the wire, and the default is what the model sends.
+        tightened["required"] = list(properties or {})
+
     return tightened
 
 

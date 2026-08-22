@@ -6,7 +6,13 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from loom.toolsets.manifest import EffectClass, OperationSpec, ToolsetManifest
+from loom.toolsets.manifest import (
+    AuthField,
+    AuthSpec,
+    EffectClass,
+    OperationSpec,
+    ToolsetManifest,
+)
 from loom.toolsets.salesforce.models import (
     SalesforceAccount,
     SalesforceContact,
@@ -32,17 +38,33 @@ SALESFORCE_MANIFEST = ToolsetManifest(
         "(instance_url) and access tokens are refreshed by the client."
     ),
     base_url="https://<instance>.my.salesforce.com/services/data",
-    auth={
-        "type": "oauth2",
-        "fields": [
-            "SALESFORCE_INSTANCE_URL",
-            "SALESFORCE_ACCESS_TOKEN",
-            "SALESFORCE_CLIENT_ID",
-            "SALESFORCE_CLIENT_SECRET",
-            "SALESFORCE_REFRESH_TOKEN",
-            "SALESFORCE_LOGIN_URL",
-        ],
-    },
+    auth=AuthSpec(
+        client="loom.toolsets.salesforce.client:SalesforceClient",
+        # This client reads environment variables and no CredentialStore, so
+        # `credential` is empty and no `provider` is declared: an OAuth flow
+        # here would store a token the client never looks up. Adding a store
+        # path is a change to the client, not to this manifest.
+        # The client owns its own refresh exchange, because every org answers on
+        # its own `instance_url` and the login host authenticates without serving
+        # data.
+        kind="oauth2",
+        fields=(
+            AuthField(name="SALESFORCE_INSTANCE_URL", arg="instance_url", label="Instance URL",
+                      secret=False, example="https://acme.my.salesforce.com"),
+            AuthField(name="SALESFORCE_ACCESS_TOKEN", arg="access_token", label="Access token",
+                      mode="token"),
+            AuthField(name="SALESFORCE_CLIENT_ID",
+                      arg="client_id", label="Consumer key", secret=False,
+                      mode="refresh"),
+            AuthField(name="SALESFORCE_CLIENT_SECRET", arg="client_secret", label="Consumer secret",
+                      mode="refresh"),
+            AuthField(name="SALESFORCE_REFRESH_TOKEN", arg="refresh_token", label="Refresh token",
+                      mode="refresh"),
+            AuthField(name="SALESFORCE_LOGIN_URL", arg="login_url", label="Login host (sandbox)",
+                      secret=False, required=False,
+                      example="https://test.salesforce.com"),
+        ),
+    ),
     tools_module="loom.toolsets.salesforce.tools",
     egress_hosts=["*.salesforce.com", "*.force.com"],
     rate_limits={

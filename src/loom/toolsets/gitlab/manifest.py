@@ -13,7 +13,13 @@ from loom.toolsets.gitlab.models import (
     GitLabProject,
     GitLabUser,
 )
-from loom.toolsets.manifest import EffectClass, OperationSpec, ToolsetManifest
+from loom.toolsets.manifest import (
+    AuthField,
+    AuthSpec,
+    EffectClass,
+    OperationSpec,
+    ToolsetManifest,
+)
 
 
 def _array(model: type[BaseModel]) -> dict[str, Any]:
@@ -31,10 +37,23 @@ GITLAB_MANIFEST = ToolsetManifest(
         "paths take the per-project iid, not the global id."
     ),
     base_url="https://gitlab.com/api/v4",
-    auth={
-        "type": "token",
-        "fields": ["GITLAB_TOKEN", "GITLAB_OAUTH_TOKEN", "GITLAB_URL"],
-    },
+    auth=AuthSpec(
+        client="loom.toolsets.gitlab.client:GitLabClient",
+        # This client reads environment variables and no CredentialStore, so
+        # `credential` is empty and no `provider` is declared: an OAuth flow
+        # here would store a token the client never looks up. Adding a store
+        # path is a change to the client, not to this manifest.
+        kind="bearer",
+        fields=(
+            AuthField(name="GITLAB_TOKEN", arg="token", label="Personal access token",
+                      mode="personal"),
+            AuthField(name="GITLAB_OAUTH_TOKEN",
+                      arg="oauth_token", label="OAuth token", mode="oauth"),
+            AuthField(name="GITLAB_URL", arg="base_url", label="Instance URL (self-managed)",
+                      secret=False, required=False,
+                      example="https://gitlab.acme.com"),
+        ),
+    ),
     tools_module="loom.toolsets.gitlab.tools",
     egress_hosts=["gitlab.com", "*.gitlab.com"],
     rate_limits={

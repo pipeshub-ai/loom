@@ -23,7 +23,6 @@ data is missing rather than like it was never requested.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from loom.core.exceptions import NonRetryableError, WorkflowError
@@ -108,7 +107,7 @@ class AsanaClient:
         base_url: str = BASE_URL,
         timeout: float = 30.0,
     ) -> None:
-        self._token = access_token or os.environ.get("ASANA_ACCESS_TOKEN", "")
+        self._token = access_token
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
 
@@ -435,12 +434,3 @@ def _classify(response: Any) -> AsanaError:
     return AsanaError(message, status=status)
 
 
-_default_client: AsanaClient | None = None
-
-
-def get_default_client() -> AsanaClient:
-    """Return (or create) the module-level client from the environment."""
-    global _default_client
-    if _default_client is None:
-        _default_client = AsanaClient()
-    return _default_client

@@ -32,10 +32,14 @@ from loom.events.models import EventRecord, RetentionPolicy
 __all__ = [
     "verify_browser_session",
     "verify_checkpoints",
+    "verify_connect_flow",
+    "verify_credential_provider",
     "verify_effect_profile",
     "verify_event_log",
     "verify_event_source",
+    "verify_exploration_session",
     "verify_probe",
+    "verify_token_auth",
     "verify_vector_store",
 ]
 
@@ -790,6 +794,218 @@ async def verify_probe(
             )
 
 
+async def verify_token_auth(auth: Any, *, expect_scheme: str = "Bearer") -> None:
+    """Assert that *auth* is a conforming ``TokenAuth``.
+
+    Point it at an instance built from a **ready-made token** — one that needs
+    no minting. A refresh or service-account flow reaches a real token endpoint,
+    so verifying one of those tests somebody else's uptime rather than your
+    implementation.
+
+    The property worth checking, and the one a green suite missed: an object
+    can be handed to a client, construct cleanly, and have no ``headers`` at
+    all. That is not a hypothetical — it shipped, because the only test asserted
+    the client was not ``None``, which is true of a client that raises
+    ``AttributeError`` on its first request.
+    """
+    for method in ("headers", "invalidate"):
+        if not callable(getattr(auth, method, None)):
+            raise AssertionError(
+                f"{type(auth).__name__} has no {method}(). Every client taking "
+                "an auth object calls headers() on each request and "
+                "invalidate() when one stops working; an object without them "
+                "builds cleanly and fails on the first call."
+            )
+
+    headers = await auth.headers()
+    if not isinstance(headers, Mapping):
+        raise AssertionError(f"{type(auth).__name__}.headers() must return a mapping")
+
+    authorization = headers.get("Authorization", "")
+    if not authorization:
+        raise AssertionError(
+            f"{type(auth).__name__} produced no Authorization header, so a "
+            "request built from it is unauthenticated"
+        )
+    if expect_scheme and not authorization.startswith(f"{expect_scheme} "):
+        raise AssertionError(
+            f"{type(auth).__name__} produced {authorization.split()[0]!r}, "
+            f"expected {expect_scheme!r}"
+        )
+
+    # Invalidation must be callable and must not raise on an auth that has
+    # nothing cached — a 401 handler calls it without knowing.
+    auth.invalidate()
+    auth.invalidate()
+
+    again = await auth.headers()
+    if not again.get("Authorization"):
+        raise AssertionError(
+            f"{type(auth).__name__} produced nothing after invalidate(), so a "
+            "single 401 would leave the client permanently unable to "
+            "authenticate rather than re-minting"
+        )
+
+
+async def verify_credential_provider(
+    provider: Any, *, spec: Any = None, holds: Mapping[str, str] | None = None
+) -> None:
+    """Assert that *provider* is a conforming ``CredentialProvider``.
+
+    *spec* is an :class:`~loom.toolsets.manifest.AuthSpec` the provider should
+    know something about; one is built for you when omitted. *holds* names the
+    values you expect it to supply, when you want that checked too.
+
+    The property an author will not test, and the one a chain depends on:
+    **not having a value is an absent key, never an exception.** A provider is
+    asked about every toolset and most sources hold values for a few, so "I
+    don't have it" is the ordinary answer. A provider that raises can stop every
+    provider behind it in the chain — the opposite of what a chain is for, and a
+    failure that only appears once somebody puts a second source in front of
+    yours.
+    """
+    from loom.toolsets.manifest import AuthField, AuthSpec
+
+    if not isinstance(getattr(provider, "id", None), str) or not provider.id:
+        raise AssertionError(
+            "a provider needs a non-empty string id: it is what "
+            "ResolvedCredentials.sources records, and 'where did this token "
+            "come from' is unanswerable without it"
+        )
+
+    subject = spec if spec is not None else AuthSpec(
+        kind="bearer",
+        fields=(AuthField(name="CONFORMANCE_TOKEN", arg="token"),),
+    )
+
+    supplied = await provider.supply(subject)
+    if not isinstance(supplied, Mapping):
+        raise AssertionError(f"{provider.id}.supply must return a mapping")
+    for key, value in supplied.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise AssertionError(
+                f"{provider.id} supplied {key!r}->{value!r}; a provider returns "
+                "strings, because what it supplies is passed to a client "
+                "constructor unchanged"
+            )
+
+    declared = {f.name for f in subject.fields}
+    extra = set(supplied) - declared
+    if extra:
+        raise AssertionError(
+            f"{provider.id} supplied {sorted(extra)}, which {subject.kind!r} does "
+            "not declare. A provider filtered to the spec cannot hand one "
+            "toolset's secret to another; one that is not, can."
+        )
+
+    if holds is not None and dict(supplied) != dict(holds):
+        raise AssertionError(f"{provider.id} supplied {dict(supplied)}, expected {dict(holds)}")
+
+    # A toolset it has never heard of. The common case in a real chain, and the
+    # one that must be cheap and quiet.
+    unknown = AuthSpec(
+        kind="api_key",
+        fields=(AuthField(name="NOTHING_SUPPLIES_THIS_XYZZY", arg="key"),),
+    )
+    try:
+        nothing = await provider.supply(unknown)
+    except Exception as exc:
+        raise AssertionError(
+            f"{provider.id} raised {type(exc).__name__} for a toolset it has "
+            "nothing for. Absence is an absent key: raising here stops every "
+            "provider behind this one in the chain."
+        ) from exc
+    if nothing:
+        raise AssertionError(
+            f"{provider.id} supplied {dict(nothing)} for a field nothing should "
+            "have. It is not filtering to the spec it was given."
+        )
+
+
+async def verify_exploration_session(
+    session: Any, *, url: str, methods_seen: Callable[[], Iterable[str]] | None = None
+) -> None:
+    """Assert that *session* is a conforming ``ExplorationSession``.
+
+    *url* is a page you control. Point this at a fixture, never a third party's
+    site — a red test must mean the adapter broke rather than someone else's
+    server did, and this one *acts* on what it opens.
+
+    The property that matters, and the one an author will not write a test for:
+    **it cannot type.** The code obviously does not fill anything in, right up
+    until a convenience overload, a retry that re-dispatches, or a helpfully
+    added "just press Enter" means it does. A session that can type can complete
+    a form, and a form completed while authoring is a booking, a signup, or a
+    message that somebody receives.
+
+    Pass *methods_seen* when the target can report how it was driven — a fake
+    provider recording every plan it performed is the usual shape. That is the
+    only mechanical proof; everything above it is an argument.
+    """
+    from loom.agents.probes.exploration import (
+        EXPLORATORY_METHODS,
+        ExplorationRefused,
+    )
+    from loom.browser.base import ActionMethod, ActionPlan, Target
+
+    if not hasattr(session, "open"):
+        raise AssertionError("an exploration session needs open(url) to start from")
+
+    await session.open(url)
+    snapshot = await session.look()
+    if not hasattr(snapshot, "controls"):
+        raise AssertionError("look() must return a PageSnapshot")
+
+    for forbidden in (ActionMethod.FILL, ActionMethod.PRESS):
+        if forbidden in EXPLORATORY_METHODS:
+            raise AssertionError(
+                f"{forbidden.value} is in EXPLORATORY_METHODS. Supplying data is "
+                "what makes a write possible; an exploration that can do it is "
+                "not read-only however carefully it is called."
+            )
+        try:
+            await session.act(ActionPlan(
+                method=forbidden,
+                target=Target(role="textbox", name="anything", exact=True),
+                value="conformance",
+            ))
+        except ExplorationRefused:
+            continue
+        except Exception as exc:
+            raise AssertionError(
+                f"{forbidden.value} failed with {type(exc).__name__} rather than "
+                "being refused. Failing by accident is not the same guarantee as "
+                "refusing on purpose: the next page, or the next provider, may "
+                "not fail."
+            ) from exc
+        else:
+            raise AssertionError(
+                f"{forbidden.value} was performed. An exploration session must "
+                "refuse it — see EXPLORATORY_METHODS."
+            )
+
+    if not session.trace():
+        # Refusals cost no budget and are not actions, so an empty trace here is
+        # correct. Asserted so that a session which silently recorded the
+        # refused attempts as performed work is caught.
+        pass
+    elif any(p.method in (ActionMethod.FILL, ActionMethod.PRESS) for p in session.trace()):
+        raise AssertionError(
+            "a refused action was recorded in the trace as though it happened"
+        )
+
+    if methods_seen is not None:
+        used = {str(m).upper() for m in methods_seen()}
+        banned = {m for m in used if m in {"FILL", "PRESS"}}
+        if banned:
+            raise AssertionError(
+                f"the provider saw {sorted(banned)}. Whatever the session "
+                "refused, something reached the page anyway."
+            )
+
+    await session.close()
+
+
 async def verify_browser_session(
     provider: Any, *, url: str, known: Any = None, repeated: Any = None
 ) -> None:
@@ -966,3 +1182,80 @@ async def verify_browser_session(
                 "'reattach'. Either honour it or refuse — quietly opening a "
                 "fresh session loses the run's state while appearing to work."
             )
+
+
+async def verify_connect_flow(
+    flow: Any,
+    *,
+    spec: Any,
+    request: Any,
+    target: Any = None,
+) -> None:
+    """Check a :class:`~loom.connectors.flows.ConnectFlow` against the rules.
+
+    The position :func:`verify_event_source` and :func:`verify_browser_session`
+    already take: LOOM ships two OAuth flows and a host with its own identity
+    provider writes a third, so what it needs is a kit rather than an adapter.
+
+    It asserts what an author is least likely to test, because the code
+    obviously behaves — right up until a redirect is replayed or a renderer
+    throws:
+
+    * **an outcome carries no secret.** ``ConnectOutcome`` crosses a facade to
+      a CLI, an MCP client and a model's context. A token belongs in
+      ``credential``, which the caller stores; anything in the outcome's own
+      ``repr`` will eventually be printed.
+    * **a listener cannot fail a connection.** Reporting is not the work: a
+      renderer that raises must not lose a credential already obtained, which
+      is the rule the non-deciding hook families follow.
+    * **nothing is stored by the flow itself.** Storing is the caller's, so a
+      failed exchange cannot leave half a credential behind.
+    * **``supports()`` agrees with what ``connect()`` will do**, so a caller
+      choosing between flows is not choosing at random.
+    """
+    if not flow.supports(spec):
+        raise AssertionError(
+            f"{type(flow).__name__}.supports() refuses the spec this suite was "
+            "given, so nothing below can be checked. Pass a spec it accepts."
+        )
+
+    seen: list[Any] = []
+
+    def listener(event: Any) -> None:
+        seen.append(event)
+        raise RuntimeError("a renderer that throws")
+
+    outcome = await flow.connect(request, spec, target=target, on_event=listener)
+
+    if seen and not hasattr(seen[0], "kind"):
+        raise AssertionError(
+            "a flow must report ConnectEvent objects, not rendered lines — a "
+            "renderer belongs to the surface, not to the flow."
+        )
+
+    rendered = repr(outcome)
+    for attribute in ("token", "refresh_token", "client_secret"):
+        value = getattr(getattr(outcome, "credential", None), attribute, None)
+        revealed = getattr(value, "reveal", None)
+        secret = revealed() if revealed is not None else ""
+        # Long enough to be distinctive. A substring test on a short value is a
+        # coincidence detector: a token of ``"t"`` is inside "connected", and a
+        # check that fails on a *correct* flow is worse than no check at all —
+        # people switch it off. No real credential is eight characters.
+        if len(secret) >= 8 and secret in rendered:
+            raise AssertionError(
+                f"ConnectOutcome's repr contains the {attribute}. It reaches a "
+                "CLI, an MCP client and a model's context — keep the secret on "
+                "the credential and off the outcome."
+            )
+
+    if getattr(outcome, "connected", False) and getattr(outcome, "credential", None) is None:
+        raise AssertionError(
+            "connected=True with no credential: the caller has nothing to "
+            "store, and will report success having obtained nothing."
+        )
+    if not getattr(outcome, "connected", True) and not getattr(outcome, "reason", ""):
+        raise AssertionError(
+            "a refusal must say why. 'It did not work' is what sends somebody "
+            "to re-run the same command."
+        )

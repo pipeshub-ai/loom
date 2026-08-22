@@ -677,7 +677,7 @@ class TestServerRegistration:
             "edit_workflow",
         }
         assert authoring_names <= names
-        assert len(names) == 35
+        assert len(names) == 38
 
     async def test_disabled_drops_the_authoring_tools(self, authoring_facade) -> None:
         from loom.mcp_server import build_server
@@ -687,7 +687,7 @@ class TestServerRegistration:
             authoring_facade, name="off", authoring=AuthoringConfig(enabled=False)
         )
         names = {t.name for t in await server.list_tools()}
-        assert len(names) == 27
+        assert len(names) == 30
         assert "get_tool_contract" not in names
         assert "save_workflow" not in names
         assert "edit_workflow" not in names
@@ -700,7 +700,7 @@ class TestServerRegistration:
         monkeypatch.setenv("LOOM_MCP_AUTHORING", "0")
         server = build_server(authoring_facade, name="off-env")
         names = {t.name for t in await server.list_tools()}
-        assert len(names) == 27
+        assert len(names) == 30
 
     async def test_every_authoring_tool_has_annotations(self, authoring_server) -> None:
         authoring_names = {

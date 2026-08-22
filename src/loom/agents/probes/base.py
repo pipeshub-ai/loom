@@ -19,12 +19,20 @@ later does.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 from loom.blobs.attachment import Attachment
 
-__all__ = ["Observation", "Probe", "ProbeError"]
+__all__ = [
+    "Observation",
+    "ObservedPage",
+    "Probe",
+    "ProbeError",
+    "control_names",
+    "redirect_note",
+]
 
 
 class ProbeError(Exception):
@@ -44,6 +52,25 @@ class Observation:
     target: str
     summary: str
     """One line, written for a model that will act on it."""
+    landed: str = ""
+    """Where the look actually ended up, when that differs from *target*.
+
+    Empty means "the same place", which is what every probe written before this
+    reports and what the overwhelming majority of looks are.
+
+    Carried because a probe otherwise cannot tell a model the one thing that
+    invalidates everything else it says. A redirect produces a perfectly clean
+    census of a page nobody asked about, and there is no signal in a healthy
+    census that separates *"this page is simple"* from *"this is not the page
+    you asked for"*. That is the founding failure of this package — "a workflow
+    that ran, completed, and answered wrongly looked exactly like one that
+    worked" — occurring one level inward, in the instrument built to prevent it.
+
+    Observed: ``/reserve`` redirected to ``/reserve/message``, an interstitial
+    notice. The probe reported five controls and ``5/5 addressable by name``,
+    the sentence that decides whether role-and-name can drive a page at all, and
+    the agent wrote a workflow against a page it had never seen.
+    """
     detail: str = ""
     """The structured body. The caller decides how much of it to spend."""
     evidence: tuple[Attachment, ...] = field(default_factory=tuple)
@@ -55,6 +82,82 @@ class Observation:
     """
     probe: str = ""
     """Which probe produced this, so a surprising answer can be attributed."""
+
+
+@dataclass(frozen=True)
+class ObservedPage:
+    """One page the agent actually looked at, kept for the checks to use.
+
+    The census was already being produced, handed to the model, and then
+    dropped. So nothing downstream could answer the cheapest question there is
+    about a browser workflow — *does the control this code addresses exist on
+    the page the agent saw?* — and the run that motivated this addressed a party
+    size control on a page whose only controls were a nav button and a notice.
+    """
+
+    target: str
+    landed: str
+    names: tuple[str, ...]
+    """Accessible names the census reported, in the order it reported them."""
+
+    @property
+    def redirected(self) -> bool:
+        return bool(self.landed) and self.landed != self.target
+
+
+def control_names(detail: str) -> tuple[str, ...]:
+    """Every name a census names a control by. Empty for anything else.
+
+    Tolerant on purpose: it is handed whatever a probe put in ``detail``, which
+    for an HTTP probe is not a census at all. A check built on this must degrade
+    to saying nothing rather than to a finding, because "I could not read that"
+    and "the control is missing" are opposite conclusions.
+    """
+    try:
+        census = json.loads(detail)
+    except (ValueError, TypeError):
+        return ()
+    if not isinstance(census, dict):
+        return ()
+
+    found: list[str] = []
+    for node in census.get("tree") or ():
+        if isinstance(node, dict) and (node.get("name") or "").strip():
+            found.append(str(node["name"]).strip())
+    for key in ("native_controls", "role_widgets"):
+        for node in census.get(key) or ():
+            if isinstance(node, dict) and (node.get("label") or "").strip():
+                found.append(str(node["label"]).strip())
+    for label in census.get("buttons") or ():
+        if isinstance(label, str) and label.strip():
+            found.append(label.strip())
+
+    seen: dict[str, None] = {}
+    for name in found:
+        seen.setdefault(name, None)
+    return tuple(seen)
+
+
+def redirect_note(target: str, landed: str) -> str:
+    """The sentence that goes *first*, when a look did not stay where it was sent.
+
+    Leading rather than appended, and in the summary rather than only in the
+    structured detail, because the summary is what a model reads before it
+    decides whether it has what it needs. A redirect discovered after the census
+    has already been believed is a redirect discovered too late.
+
+    Compared on the whole URL deliberately. A trailing slash or a query string
+    the server added is still somewhere else, and a probe that quietly decides
+    which differences are unimportant is making exactly the judgement the caller
+    is better placed to make.
+    """
+    if not landed or landed == target:
+        return ""
+    return (
+        f"REDIRECTED — you asked about {target} and this describes {landed}. "
+        "Everything below is that second page. If the controls you expected are "
+        "missing, they are most likely still on the other side of this one."
+    )
 
 
 @runtime_checkable

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from loom.toolsets.airtable.models import AirtableField, AirtableRecord
 from loom.toolsets.manifest import (
+    AuthField,
+    AuthSpec,
     EffectClass,
     OperationSpec,
     ToolsetManifest,
@@ -34,7 +36,20 @@ AIRTABLE_MANIFEST = ToolsetManifest(
         "for thirty seconds — so nothing here fans out internally."
     ),
     base_url="https://api.airtable.com/v0",
-    auth={"type": "bearer", "fields": ["AIRTABLE_TOKEN", "AIRTABLE_BASE_ID"]},
+    auth=AuthSpec(
+        client="loom.toolsets.airtable.client:AirtableClient",
+        # This client reads environment variables and no CredentialStore, so
+        # `credential` is empty and no `provider` is declared: an OAuth flow
+        # here would store a token the client never looks up. Adding a store
+        # path is a change to the client, not to this manifest.
+        kind="bearer",
+        fields=(
+            AuthField(name="AIRTABLE_TOKEN", arg="token", label="Personal access token",
+                      example="pat…"),
+            AuthField(name="AIRTABLE_BASE_ID", arg="base_id", label="Base id", secret=False,
+                      example="app…"),
+        ),
+    ),
     tools_module="loom.toolsets.airtable.tools",
     opaque_ids={
         # A 3-character kind prefix and 14 characters of base62.

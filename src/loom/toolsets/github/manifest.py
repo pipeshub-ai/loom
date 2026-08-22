@@ -13,7 +13,13 @@ from loom.toolsets.github.models import (
     GitHubRepo,
     GitHubUser,
 )
-from loom.toolsets.manifest import EffectClass, OperationSpec, ToolsetManifest
+from loom.toolsets.manifest import (
+    AuthField,
+    AuthSpec,
+    EffectClass,
+    OperationSpec,
+    ToolsetManifest,
+)
 
 
 def _array(model: type[BaseModel]) -> dict[str, Any]:
@@ -31,7 +37,20 @@ GITHUB_MANIFEST = ToolsetManifest(
         "requests by default, because GitHub returns both from that endpoint."
     ),
     base_url="https://api.github.com",
-    auth={"type": "bearer", "fields": ["GITHUB_TOKEN", "GITHUB_API_URL"]},
+    auth=AuthSpec(
+        client="loom.toolsets.github.client:GitHubClient",
+        # This client reads environment variables and no CredentialStore, so
+        # `credential` is empty and no `provider` is declared: an OAuth flow
+        # here would store a token the client never looks up. Adding a store
+        # path is a change to the client, not to this manifest.
+        kind="bearer",
+        fields=(
+            AuthField(name="GITHUB_TOKEN", arg="token", label="Personal access token"),
+            AuthField(name="GITHUB_API_URL", arg="base_url", label="API base URL (Enterprise)",
+                      secret=False, required=False,
+                      example="https://github.acme.com/api/v3"),
+        ),
+    ),
     tools_module="loom.toolsets.github.tools",
     egress_hosts=["api.github.com", "*.githubusercontent.com"],
     rate_limits={

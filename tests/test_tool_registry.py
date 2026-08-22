@@ -304,13 +304,17 @@ class TestCodingAgentToolRegistry:
             model=FakeModel(), tool_registry=registry
         )
         prompt = agent.build_system_prompt()
+
+        # One line: the toolset exists, and how it is reached. `from_steps`
+        # declares no `tools_module`, so this one is callable through
+        # ctx.agent() and not importable — which the line has to say, or
+        # generated code writes an import that does not exist.
         assert "demo" in prompt
-        assert "my_search" in prompt
-        # Parameter detail is fetched on demand with show_toolset, so that the
-        # prompt grows with the number of integrations rather than with every
-        # operation in each of them.
-        # Parameter detail is fetched on demand with show_toolset, so the
-        # prompt grows with the number of integrations rather than with every
-        # operation in each of them.
+        assert "ctx.agent() only" in prompt
+
+        # Operation names and signatures are what make a toolset block grow
+        # with the *size* of an integration rather than its existence, so they
+        # are fetched on demand instead. See
+        # tests/test_toolset_discovery.py::TestThePromptBlock.
         assert "my_search(query" not in prompt, "signatures leaked into the prompt"
-        assert 'show_toolset("demo")' in prompt
+        assert "show_toolset" in prompt, "the prompt must name the way to get detail"

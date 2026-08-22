@@ -80,11 +80,10 @@ def attach_envelope(
 
 @pytest.fixture
 def salesforce(monkeypatch):
-    monkeypatch.setenv("SALESFORCE_INSTANCE_URL", "https://acme.my.salesforce.com")
-    monkeypatch.setenv("SALESFORCE_ACCESS_TOKEN", "tok")
     from loom.toolsets.salesforce.client import SalesforceClient
 
-    return SalesforceClient()
+    return SalesforceClient(instance_url="https://acme.my.salesforce.com",
+                            access_token="tok")
 
 
 class TestSalesforceBuildsSafeSoql:
@@ -197,10 +196,9 @@ class TestSalesforceWrites:
 
 @pytest.fixture
 def hubspot(monkeypatch):
-    monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "pat-x")
     from loom.toolsets.hubspot.client import HubSpotClient
 
-    return HubSpotClient()
+    return HubSpotClient(access_token="pat-x")
 
 
 class TestHubSpotRequests:
@@ -298,10 +296,9 @@ class TestHubSpotRequests:
 
 @pytest.fixture
 def github(monkeypatch):
-    monkeypatch.setenv("GITHUB_TOKEN", "ghp_x")
     from loom.toolsets.github.client import GitHubClient
 
-    return GitHubClient()
+    return GitHubClient(token="ghp_x")
 
 
 class TestGitHubRequests:
@@ -412,11 +409,10 @@ class TestGitHubRequests:
 
 @pytest.fixture
 def gitlab(monkeypatch):
-    monkeypatch.setenv("GITLAB_TOKEN", "glpat-x")
     monkeypatch.delenv("GITLAB_OAUTH_TOKEN", raising=False)
     from loom.toolsets.gitlab.client import GitLabClient
 
-    return GitLabClient()
+    return GitLabClient(token="glpat-x")
 
 
 class TestGitLabRequests:
@@ -507,10 +503,9 @@ class TestGitLabRequests:
 
 @pytest.fixture
 def asana(monkeypatch):
-    monkeypatch.setenv("ASANA_ACCESS_TOKEN", "1/x")
     from loom.toolsets.asana.client import AsanaClient
 
-    return AsanaClient()
+    return AsanaClient(access_token="1/x")
 
 
 class TestAsanaRequests:
@@ -582,11 +577,10 @@ class TestAsanaRequests:
 
 @pytest.fixture
 def clickup(monkeypatch):
-    monkeypatch.setenv("CLICKUP_API_TOKEN", "pk_x")
     monkeypatch.delenv("CLICKUP_OAUTH_TOKEN", raising=False)
     from loom.toolsets.clickup.client import ClickUpClient
 
-    return ClickUpClient()
+    return ClickUpClient(api_token="pk_x")
 
 
 class TestClickUpRequests:
@@ -744,13 +738,13 @@ class TestEveryToolsetCanBeRepointed:
         """Their version lives in the base URL, so overriding that is the whole
         knob — no separate parameter needed, and one would be a second way to
         say the same thing."""
-        monkeypatch.setenv("CLICKUP_API_TOKEN", "x")
-        monkeypatch.setenv("ASANA_ACCESS_TOKEN", "y")
         from loom.toolsets.asana.client import AsanaClient
         from loom.toolsets.clickup.client import ClickUpClient
 
-        assert ClickUpClient(base_url="https://x/api/v3")._base_url.endswith("v3")
-        assert AsanaClient(base_url="https://x/api/2.0")._base_url.endswith("2.0")
+        repointed = ClickUpClient(api_token="x", base_url="https://x/api/v3")
+        assert repointed._base_url.endswith("v3")
+        assert AsanaClient(access_token="y",
+                           base_url="https://x/api/2.0")._base_url.endswith("2.0")
 
     def test_every_client_takes_a_timeout(self, monkeypatch) -> None:
         """A default that cannot be raised is a workflow that cannot talk to a

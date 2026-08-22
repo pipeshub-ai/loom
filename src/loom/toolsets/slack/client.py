@@ -22,7 +22,6 @@ method so no workflow author has to know that.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -49,7 +48,6 @@ __all__ = [
     "flatten_channel",
     "flatten_message",
     "flatten_user",
-    "get_default_client",
 ]
 
 API_BASE = "https://slack.com/api"
@@ -218,7 +216,7 @@ class SlackClient:
 
     @staticmethod
     def _env_token() -> str:
-        return os.environ.get("SLACK_BOT_TOKEN", "") or os.environ.get("SLACK_TOKEN", "")
+        return ""
 
     async def _token(self) -> str:
         """The bot token for this call: explicit, then connected, then env.
@@ -720,18 +718,5 @@ def _retry_after(response: Any) -> float:
 # Process-wide default
 # ---------------------------------------------------------------------------
 
-_default_client: SlackClient | None = None
 
 
-def get_default_client() -> SlackClient:
-    """Return (or build) the module-level client from environment credentials."""
-    global _default_client
-    if _default_client is None:
-        _default_client = SlackClient()
-    return _default_client
-
-
-def reset_default_client() -> None:
-    """Drop the cached client. For tests, and after a credential change."""
-    global _default_client
-    _default_client = None

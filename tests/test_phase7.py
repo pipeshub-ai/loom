@@ -306,6 +306,117 @@ async def w(ctx: Context) -> dict:
         issues = v.validate(code)
         assert any(i.category == "structure" and "requests.get" in i.message for i in issues)
 
+    def test_a_name_in_the_wrong_module_says_which_module(self) -> None:
+        """Observed: ``from loom import After``, and both repairs wasted.
+
+        ``loom.__all__`` is a curated 36 symbols and every trigger sits
+        outside it, so a model told to write ``triggers=[After(minutes=2)]``
+        — with every other symbol in the prompt coming from ``loom`` — writes
+        the import the rest of the prompt taught it. The message was
+        ``'loom' has no attribute 'After'``: true, and nothing the repair loop
+        can act on, so it rewrote the import twice and the job ended.
+        """
+        v = CodeValidator()
+        code = """
+from loom import Context, After, workflow
+
+
+@workflow(name="w")
+async def w(ctx: Context, input_data=None) -> str:
+    return (await ctx.agent("joke")).text()
+"""
+        messages = [i.message for i in v.validate(code) if i.category == "imports"]
+
+        assert len(messages) == 1
+        assert "from loom.triggers import After" in messages[0], messages
+
+    def test_the_corrected_import_is_clean(self) -> None:
+        v = CodeValidator()
+        code = """
+from loom import Context, workflow
+from loom.triggers import After
+
+
+@workflow(name="w", triggers=[After(minutes=2)])
+async def w(ctx: Context, input_data=None) -> str:
+    return (await ctx.agent("joke")).text()
+"""
+        assert not [i for i in v.validate(code) if i.category == "imports"]
+
+    def test_a_misspelling_still_wins_over_a_relocation(self) -> None:
+        """Two different mistakes; the nearer one is the likelier fix."""
+        v = CodeValidator()
+        messages = [
+            i.message
+            for i in v.validate("from loom import Contextt\n")
+            if i.category == "imports"
+        ]
+
+        assert "did you mean 'Context'?" in messages[0], messages
+
+    def test_a_name_that_exists_nowhere_promises_nothing(self) -> None:
+        v = CodeValidator()
+        messages = [
+            i.message
+            for i in v.validate("from loom import CompletelyMadeUpThing\n")
+            if i.category == "imports"
+        ]
+
+        assert messages
+        assert "lives in" not in messages[0], messages
+        assert "did you mean" not in messages[0], messages
+
+    def test_a_body_whose_work_is_an_agent_call_needs_no_step(self) -> None:
+        """The exemption toolset workflows already had, one call shape over.
+
+        ``tell me a joke`` is one ``ctx.agent``. It is a journaled unit
+        already, so there is no @step left to write, and naming one is work
+        that does not exist — the nag the toolset exemption exists to avoid.
+        """
+        v = CodeValidator()
+        code = """
+from loom import Context, workflow
+
+
+@workflow(name="w")
+async def w(ctx: Context, input_data=None) -> str:
+    return (await ctx.agent("tell me a joke")).text()
+"""
+        messages = [i.message for i in v.validate(code) if i.category == "structure"]
+
+        assert not messages, messages
+
+    def test_a_node_call_counts_the_same_way(self) -> None:
+        v = CodeValidator()
+        code = """
+from loom import Context, workflow
+
+
+@workflow(name="w")
+async def w(ctx: Context, url) -> dict:
+    return await ctx.node("io.http_request", {"url": url})
+"""
+        messages = [i.message for i in v.validate(code) if i.category == "structure"]
+
+        assert not messages, messages
+
+    def test_but_raw_io_in_the_body_still_warns(self) -> None:
+        """The exemption must not become a way to skip steps entirely."""
+        v = CodeValidator()
+        code = """
+import requests
+from loom import Context, workflow
+
+
+@workflow(name="w")
+async def w(ctx: Context, url) -> dict:
+    return requests.get(url).json()
+"""
+        messages = [i.message for i in v.validate(code) if i.category == "structure"]
+
+        assert any("requests.get" in m for m in messages)
+        assert any("No @step" in m for m in messages)
+
     def test_nondeterministic_call_detected(self) -> None:
         v = CodeValidator()
         code = '''

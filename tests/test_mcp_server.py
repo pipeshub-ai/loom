@@ -592,7 +592,7 @@ class TestServerRegistration:
         names = {tool.name for tool in await server.list_tools()}
         # The run-management surface, which is everything an operator needs and
         # nothing that spends a model token.
-        assert len(names) == 27
+        assert len(names) == 30
         assert "author_workflow" not in names
         assert "edit_workflow" not in names
         assert "save_workflow" not in names
@@ -639,6 +639,9 @@ class TestServerRegistration:
             # so an MCP client could start a run and never answer the human
             # gate it parked on, or author a workflow and never change it.
             "list_pending",
+        "list_connections",
+        "connect_credential",
+        "disconnect_credential",
             "respond_to_run",
             "pause_run",
             "unpause_run",
@@ -882,7 +885,7 @@ class TestStdioEndToEnd:
             assert "run_workflow" in names
             assert "save_workflow" in names  # authoring tools on by default
             assert "author_workflow" in names  # …including the one-shot one
-            assert len(names) == 35
+            assert len(names) == 38
 
     async def test_workflows_from_the_module_are_visible(self, project: Path) -> None:
         """The gap that made the original server useless: an empty registry."""

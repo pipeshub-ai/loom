@@ -34,6 +34,7 @@ from loom.toolsets.microsoft.models import (
     Permission,
     SharingLink,
 )
+from loom.toolsets.microsoft.onedrive.client import OneDriveClient
 from loom.toolsets.pagination import Results
 
 if TYPE_CHECKING:
@@ -58,9 +59,9 @@ async def onedrive_whoami() -> MicrosoftUser:
         The signed-in user's id, display name, email, and userPrincipalName.
         The last of these is what addresses their drive elsewhere.
     """
-    from loom.toolsets.microsoft.onedrive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().whoami()
+    return await (await client_for("onedrive", OneDriveClient)).whoami()
 
 
 @step(retry=_READ)
@@ -71,9 +72,9 @@ async def onedrive_get_drive() -> Drive:
         Drive with id, name, type, owner, and quota. Check ``quota_state``
         before a bulk upload — ``"exceeded"`` turns every write into a 507.
     """
-    from loom.toolsets.microsoft.onedrive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_drive()
+    return await (await client_for("onedrive", OneDriveClient)).get_drive()
 
 
 # -- browsing and searching --------------------------------------------------
@@ -97,9 +98,9 @@ async def onedrive_list_children(
         Results of DriveItem. ``.complete`` is False when ``limit`` cut the
         listing short — check it before reporting a count.
     """
-    from loom.toolsets.microsoft.onedrive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_children(
+    return await (await client_for("onedrive", OneDriveClient)).list_children(
         item_id, path, limit=limit, order_by=order_by
     )
 
@@ -116,9 +117,9 @@ async def onedrive_get_item(item_id: str = "", path: str = "") -> DriveItem:
         DriveItem with id, name, size, folder flag, web URL, and who last
         changed it.
     """
-    from loom.toolsets.microsoft.onedrive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_item(item_id, path)
+    return await (await client_for("onedrive", OneDriveClient)).get_item(item_id, path)
 
 
 @step(retry=_READ)
@@ -141,9 +142,9 @@ async def onedrive_search_items(
         Results of DriveItem. Each carries ``drive_id``, because a search from
         the drive root can return items shared from other drives.
     """
-    from loom.toolsets.microsoft.onedrive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().search(
+    return await (await client_for("onedrive", OneDriveClient)).search(
         query, item_id=item_id, path=path, limit=limit
     )
 
@@ -159,9 +160,9 @@ async def onedrive_list_recent(limit: int = 50) -> Results[DriveItem]:
         Results of DriveItem, spanning drives — a recently-edited file in a
         SharePoint library appears here too, with its own ``drive_id``.
     """
-    from loom.toolsets.microsoft.onedrive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_recent(limit=limit)
+    return await (await client_for("onedrive", OneDriveClient)).list_recent(limit=limit)
 
 
 @step(retry=_READ)
@@ -176,9 +177,9 @@ async def onedrive_list_shared_with_me(limit: int = 100) -> Results[DriveItem]:
         the ``drive_id`` on the item to address it — this toolset's own drive
         does not contain it.
     """
-    from loom.toolsets.microsoft.onedrive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_shared_with_me(limit=limit)
+    return await (await client_for("onedrive", OneDriveClient)).list_shared_with_me(limit=limit)
 
 
 @step(retry=_READ)
@@ -209,9 +210,9 @@ async def onedrive_list_changes(
         ``deleted=True``, not as an absence), ``delta_link`` to store for next
         time, and ``complete``.
     """
-    from loom.toolsets.microsoft.onedrive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_changes(
+    return await (await client_for("onedrive", OneDriveClient)).list_changes(
         delta_link=delta_link, token=token, limit=limit
     )
 
@@ -231,9 +232,9 @@ async def onedrive_download_file(item_id: str = "", path: str = "") -> Attachmen
         ``ctx.put_artifact``, or ``att.offload(blobs)`` to keep the bytes out
         of the journal.
     """
-    from loom.toolsets.microsoft.onedrive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().download_file(item_id, path)
+    return await (await client_for("onedrive", OneDriveClient)).download_file(item_id, path)
 
 
 # -- writing -----------------------------------------------------------------
@@ -268,9 +269,9 @@ async def onedrive_upload_file(
     Returns:
         The created DriveItem, including its id and web URL.
     """
-    from loom.toolsets.microsoft.onedrive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().upload_file(
+    return await (await client_for("onedrive", OneDriveClient)).upload_file(
         filename,
         content,
         parent_id=parent_id,
@@ -303,9 +304,9 @@ async def onedrive_upload_large_file(
     Returns:
         The completed DriveItem, from the response to the final fragment.
     """
-    from loom.toolsets.microsoft.onedrive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().upload_large_file(
+    return await (await client_for("onedrive", OneDriveClient)).upload_large_file(
         filename,
         content,
         parent_id=parent_id,
@@ -336,9 +337,9 @@ async def onedrive_create_folder(
     Returns:
         The created folder as a DriveItem.
     """
-    from loom.toolsets.microsoft.onedrive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_folder(
+    return await (await client_for("onedrive", OneDriveClient)).create_folder(
         folder_name,
         parent_id=parent_id,
         parent_path=parent_path,
@@ -367,9 +368,9 @@ async def onedrive_move_item(
     Returns:
         The moved DriveItem at its new location.
     """
-    from loom.toolsets.microsoft.onedrive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().move_item(
+    return await (await client_for("onedrive", OneDriveClient)).move_item(
         item_id, path, parent_id=parent_id, new_name=new_name
     )
 
@@ -399,9 +400,9 @@ async def onedrive_copy_item(
         The monitor URL from Graph's ``Location`` header. GET it to see
         progress and, on completion, the new item's id.
     """
-    from loom.toolsets.microsoft.onedrive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().copy_item(
+    return await (await client_for("onedrive", OneDriveClient)).copy_item(
         item_id, path, parent_id=parent_id, new_name=new_name
     )
 
@@ -420,9 +421,9 @@ async def onedrive_delete_item(item_id: str = "", path: str = "") -> bool:
     Returns:
         True when the delete was accepted.
     """
-    from loom.toolsets.microsoft.onedrive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().delete_item(item_id, path)
+    return await (await client_for("onedrive", OneDriveClient)).delete_item(item_id, path)
 
 
 # -- sharing -----------------------------------------------------------------
@@ -444,9 +445,10 @@ async def onedrive_list_permissions(
         an ancestor folder and cannot be revoked on this item — it has to be
         revoked where it was granted.
     """
-    from loom.toolsets.microsoft.onedrive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_permissions(item_id, path, limit=limit)
+    client = await client_for("onedrive", OneDriveClient)
+    return await client.list_permissions(item_id, path, limit=limit)
 
 
 @step(retry=_UNSAFE_WRITE)
@@ -483,9 +485,9 @@ async def onedrive_create_share_link(
     Returns:
         SharingLink with the URL, type, scope, and roles granted.
     """
-    from loom.toolsets.microsoft.onedrive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_share_link(
+    return await (await client_for("onedrive", OneDriveClient)).create_share_link(
         item_id,
         path,
         link_type=link_type,
@@ -525,9 +527,9 @@ async def onedrive_invite(
     Returns:
         The Permission granted to each recipient.
     """
-    from loom.toolsets.microsoft.onedrive.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().invite(
+    return await (await client_for("onedrive", OneDriveClient)).invite(
         emails,
         item_id,
         path,

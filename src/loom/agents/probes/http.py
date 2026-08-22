@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from loom.agents.probes.base import Observation, ProbeError
+from loom.agents.probes.base import Observation, ProbeError, redirect_note
 
 __all__ = ["HttpProbe"]
 
@@ -52,13 +52,18 @@ class HttpProbe:
         body = response.text[: self._max_bytes]
 
         shape = _describe(body, content_type)
+        # `follow_redirects=True` means the status here is the *last* hop's, so
+        # a 200 says nothing about whether this is the URL that was asked for.
+        landed = str(response.url)
+        note = redirect_note(target, landed)
         summary = (
             f"HTTP {response.status_code} {content_type or 'unknown type'}, "
             f"{len(response.content)} bytes. {shape.headline}"
         )
         return Observation(
             target=target,
-            summary=summary,
+            landed=landed,
+            summary=f"{note} {summary}" if note else summary,
             detail=shape.detail,
             probe=self.id,
         )

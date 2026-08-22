@@ -29,6 +29,7 @@ from pydantic import BaseModel
 
 from loom import Retry, step
 from loom.toolsets.pagination import Results
+from loom.toolsets.zoom.client import ZoomClient
 from loom.toolsets.zoom.models import (
     ZoomMeeting,
     ZoomParticipant,
@@ -100,9 +101,9 @@ async def zoom_list_meetings(
         Results[ZoomMeeting] with id, uuid, topic, start_time, join_url.
         Check ``.complete`` before reporting a count.
     """
-    from loom.toolsets.zoom.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_meetings(
+    return await (await client_for("zoom", ZoomClient)).list_meetings(
         user_id, meeting_type=meeting_type, max_results=max_results
     )
 
@@ -118,9 +119,9 @@ async def zoom_get_meeting(meeting_id: int | str) -> ZoomMeeting:
         ZoomMeeting. Send ``join_url`` to attendees; ``start_url`` is a host
         credential and must not be shared.
     """
-    from loom.toolsets.zoom.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_meeting(meeting_id)
+    return await (await client_for("zoom", ZoomClient)).get_meeting(meeting_id)
 
 
 @step(retry=_CREATE)
@@ -157,9 +158,9 @@ async def zoom_create_meeting(
     Returns:
         The created ZoomMeeting, including id, uuid, join_url and start_url.
     """
-    from loom.toolsets.zoom.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_meeting(
+    return await (await client_for("zoom", ZoomClient)).create_meeting(
         topic,
         user_id=user_id,
         start_time=start_time,
@@ -188,9 +189,9 @@ async def zoom_update_meeting(
         else honest to return — read it back with ``zoom_get_meeting`` if the
         updated object is needed.
     """
-    from loom.toolsets.zoom.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return str(await get_default_client().update_meeting(meeting_id, fields))
+    return str(await (await client_for("zoom", ZoomClient)).update_meeting(meeting_id, fields))
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -205,9 +206,10 @@ async def zoom_delete_meeting(meeting_id: int | str, notify: bool = False) -> st
     Returns:
         The cancelled meeting id, so the journal records what was removed.
     """
-    from loom.toolsets.zoom.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return str(await get_default_client().delete_meeting(meeting_id, notify=notify))
+    client = await client_for("zoom", ZoomClient)
+    return str(await client.delete_meeting(meeting_id, notify=notify))
 
 
 # ---------------------------------------------------------------------------
@@ -227,9 +229,9 @@ async def zoom_get_past_meeting(meeting_uuid: str) -> dict[str, Any]:
         Dict with uuid, id, topic, start_time, end_time, participants_count,
         total_minutes.
     """
-    from loom.toolsets.zoom.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().past_meeting(meeting_uuid)
+    return await (await client_for("zoom", ZoomClient)).past_meeting(meeting_uuid)
 
 
 @step(retry=_READ)
@@ -249,9 +251,9 @@ async def zoom_list_participants(
         row per *session*, so someone who dropped and rejoined appears twice —
         group by name or email before counting attendance.
     """
-    from loom.toolsets.zoom.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().participants(
+    return await (await client_for("zoom", ZoomClient)).participants(
         meeting_uuid, max_results=max_results
     )
 
@@ -277,9 +279,9 @@ async def zoom_list_recordings(
         year-long range returns one month and no error — page month by month
         when you need more.
     """
-    from loom.toolsets.zoom.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_recordings(
+    return await (await client_for("zoom", ZoomClient)).list_recordings(
         user_id, start=start, end=end, max_results=max_results
     )
 
@@ -295,9 +297,9 @@ async def zoom_get_recording(meeting_id: int | str) -> ZoomRecording:
         ZoomRecording. Check each file's ``is_ready`` before downloading —
         Zoom lists a file while it is still processing it.
     """
-    from loom.toolsets.zoom.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_recording(meeting_id)
+    return await (await client_for("zoom", ZoomClient)).get_recording(meeting_id)
 
 
 @step(retry=_READ)
@@ -314,9 +316,9 @@ async def zoom_download_recording(download_url: str, filename: str) -> Attachmen
         Attachment. Recordings are large; with ``Runtime(blobs=...)`` the
         payload offloads out of the journal automatically.
     """
-    from loom.toolsets.zoom.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().download_recording(download_url, filename)
+    return await (await client_for("zoom", ZoomClient)).download_recording(download_url, filename)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -332,9 +334,9 @@ async def zoom_delete_recording(meeting_id: int | str) -> str:
     Returns:
         The meeting id, so the journal records what was removed.
     """
-    from loom.toolsets.zoom.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return str(await get_default_client().delete_recording(meeting_id))
+    return str(await (await client_for("zoom", ZoomClient)).delete_recording(meeting_id))
 
 
 # ---------------------------------------------------------------------------
@@ -355,9 +357,9 @@ async def zoom_list_users(
     Returns:
         Results[ZoomUser] with id, email, display_name, type.
     """
-    from loom.toolsets.zoom.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_users(
+    return await (await client_for("zoom", ZoomClient)).list_users(
         status=status, max_results=max_results
     )
 
@@ -373,9 +375,9 @@ async def zoom_get_user(user_id: str = "me") -> ZoomUser:
         ZoomUser. ``type`` is 1 basic / 2 licensed — only a licensed host can
         schedule a meeting longer than 40 minutes.
     """
-    from loom.toolsets.zoom.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_user(user_id)
+    return await (await client_for("zoom", ZoomClient)).get_user(user_id)
 
 
 @step(retry=_READ)
@@ -393,9 +395,9 @@ async def zoom_find_user_by_email(email: str) -> ZoomUser | None:
         The ZoomUser, or None when the address has no Zoom account. None is an
         ordinary answer to branch on — create the user, or report it.
     """
-    from loom.toolsets.zoom.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().find_user_by_email(email)
+    return await (await client_for("zoom", ZoomClient)).find_user_by_email(email)
 
 
 # ---------------------------------------------------------------------------

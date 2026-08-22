@@ -71,6 +71,7 @@ async def collect(args: argparse.Namespace) -> list[Check]:
     checks.append(_optionals())
     if project is not None and project.root is not None:
         checks.append(await _credentials())
+        checks.append(await _connections())
     return checks
 
 
@@ -312,8 +313,69 @@ def _optionals() -> Check:
     )
 
 
+async def _connections() -> Check:
+    """Which integrations are actually usable here, credentials included.
+
+    `_toolsets` counts what this process can *reach* and `_credentials` counts
+    what it has *stored*, and neither could put the two together: "27 toolsets
+    reachable, 1 credential stored" leaves "is Jira usable?" unanswered.
+
+    Never a failure. An unconfigured integration is the normal state for a
+    project that does not use it, and failing on one would make `loom doctor`
+    exit 1 in almost every repository — which is how a checker stops being
+    read. What it reports is the count and where to go next.
+    """
+    try:
+        from loom.cli.auth_commands import credential_store_for
+        from loom.connectors.inspect import ConnectionInspector
+        from loom.toolsets.registry import builtin_catalog
+
+        inspector = ConnectionInspector(builtin_catalog(), credential_store_for(None))
+        statuses = await inspector.all()
+    except Exception as exc:
+        return Check("connections", "warn", f"could not be read: {exc}")
+
+    usable = [s for s in statuses if s.usable and s.state.value != "none"]
+    if not usable:
+        return Check(
+            "connections",
+            "ok",
+            f"none of {len(statuses)} integrations configured",
+            "loom connections — what each one needs",
+        )
+    return Check(
+        "connections",
+        "ok",
+        f"{len(usable)} of {len(statuses)} configured: "
+        + ", ".join(sorted(s.toolset for s in usable)[:6]),
+    )
+
+
+def _key_source() -> str:
+    """Where the credential encryption key comes from, without opening the store.
+
+    Read from the selection rather than from the built provider, because
+    building one is not the expensive part — *using* it is, and on macOS that
+    can be a modal keychain dialog. A diagnostic that blocks on a password
+    prompt is worse than no diagnostic, so this reports the intent and the
+    check below reports whether acting on it worked.
+    """
+    from loom.connectors.encryption import BACKEND_VAR, selected_backend
+
+    try:
+        backend = selected_backend()
+    except Exception as exc:  # an unusable value is itself worth reporting
+        return f"{BACKEND_VAR} invalid: {exc}"
+    if backend != "auto":
+        return f"key from {backend} ({BACKEND_VAR})"
+    if os.environ.get("LOOM_CREDENTIAL_KEY"):
+        return "key from LOOM_CREDENTIAL_KEY"
+    return "key from the OS keyring"
+
+
 async def _credentials() -> Check:
     """What ``loom connect`` has stored, and whether any of it has expired."""
+    source = _key_source()
     try:
         from loom.cli.auth_commands import credential_store_for
 
@@ -321,7 +383,11 @@ async def _credentials() -> Check:
     except Exception:
         # A credential file that cannot be opened is `loom whoami`'s finding to
         # report in detail; here it only needs to not be a failure.
-        return Check("credentials", "warn", "credential store unreadable")
+        return Check("credentials", "warn", f"credential store unreadable ({source})")
     if not names:
-        return Check("credentials", "ok", "none stored")
-    return Check("credentials", "ok", f"{len(names)} stored: {', '.join(sorted(names))}")
+        return Check("credentials", "ok", f"none stored ({source})")
+    return Check(
+        "credentials",
+        "ok",
+        f"{len(names)} stored: {', '.join(sorted(names))} ({source})",
+    )

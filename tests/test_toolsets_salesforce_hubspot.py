@@ -65,24 +65,19 @@ class FakeResponse:
 
 
 class TestSalesforceAuth:
-    def test_an_instance_url_and_token_is_enough(self, monkeypatch) -> None:
-        monkeypatch.setenv("SALESFORCE_INSTANCE_URL", "https://acme.my.salesforce.com")
-        monkeypatch.setenv("SALESFORCE_ACCESS_TOKEN", "tok")
-
-        client = SalesforceClient()
+    def test_an_instance_url_and_token_is_enough(self) -> None:
+        client = SalesforceClient(instance_url="https://acme.my.salesforce.com",
+                                  access_token="tok")
 
         assert client._instance == "https://acme.my.salesforce.com"
 
-    def test_refresh_credentials_alone_are_enough(self, monkeypatch) -> None:
+    def test_refresh_credentials_alone_are_enough(self) -> None:
         """The instance URL arrives with the refreshed token, so a client given
         only refresh credentials learns where its org lives."""
-        for var in ("SALESFORCE_INSTANCE_URL", "SALESFORCE_ACCESS_TOKEN"):
-            monkeypatch.delenv(var, raising=False)
-        monkeypatch.setenv("SALESFORCE_CLIENT_ID", "id")
-        monkeypatch.setenv("SALESFORCE_CLIENT_SECRET", "secret")
-        monkeypatch.setenv("SALESFORCE_REFRESH_TOKEN", "refresh")
+        client = SalesforceClient(client_id="id", client_secret="secret",
+                                  refresh_token="refresh")
 
-        assert SalesforceClient()._can_refresh()
+        assert client._can_refresh()
 
     def test_no_credentials_fails_at_construction(self, monkeypatch) -> None:
         """Not at first request. A per-org base URL that is missing surfaces as
@@ -115,31 +110,25 @@ class TestSalesforceAuth:
             SalesforceClient()
 
     def test_a_trailing_slash_on_the_instance_is_dropped(self, monkeypatch) -> None:
-        monkeypatch.setenv("SALESFORCE_ACCESS_TOKEN", "tok")
 
-        client = SalesforceClient(instance_url="https://acme.my.salesforce.com/")
+        client = SalesforceClient(instance_url="https://acme.my.salesforce.com/",
+                                  access_token="tok")
 
         assert client._instance == "https://acme.my.salesforce.com"
 
 
 class TestHubSpotAuth:
-    def test_a_token_is_all_it_takes(self, monkeypatch) -> None:
-        monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "pat-na1-x")
+    def test_a_token_is_all_it_takes(self) -> None:
+        assert HubSpotClient(access_token="pat-na1-x")._token == "pat-na1-x"
 
-        assert HubSpotClient()._token == "pat-na1-x"
-
-    def test_no_token_fails_at_construction(self, monkeypatch) -> None:
-        monkeypatch.delenv("HUBSPOT_ACCESS_TOKEN", raising=False)
-
+    def test_no_token_fails_at_construction(self) -> None:
         with pytest.raises(HubSpotAuthError, match="HUBSPOT_ACCESS_TOKEN"):
             HubSpotClient()
 
-    def test_the_api_version_is_a_constructor_argument(self, monkeypatch) -> None:
+    def test_the_api_version_is_a_constructor_argument(self) -> None:
         """HubSpot has begun publishing dated versions alongside v3. A host that
         wants one changes a string rather than waiting for a release."""
-        monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "x")
-
-        dated = HubSpotClient(version="2026-03")
+        dated = HubSpotClient(access_token="x", version="2026-03")
 
         assert dated._objects("contacts") == "/crm/2026-03/objects/contacts"
 

@@ -32,6 +32,7 @@ __all__ = [
     "CompileStage",
     "CritiqueStage",
     "LintStage",
+    "ObservedTargetsStage",
     "OutcomeStage",
     "ProjectionStage",
     "ReplayStage",
@@ -299,6 +300,7 @@ class SmokeStage:
             context.workflow_input,
             timeout=context.timeout,
             fakes=context.fakes,
+            recording=context.recording,
         )
         if outcome.ok:
             return CheckResult(self.name, detail=outcome)
@@ -633,10 +635,12 @@ class ReplayStage:
         first, second = await asyncio.gather(
             asyncio.to_thread(
                 smoke_run, code, context.workflow_input,
+                recording=context.recording,
                 timeout=context.timeout, fakes=context.fakes,
             ),
             asyncio.to_thread(
                 smoke_run, code, context.workflow_input,
+                recording=context.recording,
                 timeout=context.timeout, fakes=context.fakes,
             ),
         )
@@ -1026,6 +1030,17 @@ def _fuzzy_operands(
     ]
 
 
+def _body_of(node: ast.AST) -> list[ast.stmt]:
+    """A node's statement list, or empty.
+
+    ``body`` is a list on a module, class and function, and a *single node* on
+    an ``IfExp`` or a lambda — so it is narrowed here rather than assumed at the
+    one call site that reads it.
+    """
+    body = getattr(node, "body", None)
+    return body if isinstance(body, list) else []
+
+
 def _string_literals(code: str) -> list[str]:
     """Every string constant in the source, parsed rather than pattern-matched.
 
@@ -1037,10 +1052,29 @@ def _string_literals(code: str) -> list[str]:
         tree = ast.parse(code)
     except SyntaxError:
         return []
+
+    # A docstring is a string constant like any other to `ast.walk`, and this
+    # function claimed to exclude one while including every one. It read its own
+    # prose as data: a module explaining that a page redirects to
+    # `/reserve/message` was reported as a CSS selector, on correct code, every
+    # time — the failure a stage must never have, because the repair loop acts
+    # on findings and unchanged code is how a model disagrees.
+    # `body` is a list on a module, class and function, and a single node on
+    # an `IfExp` or a lambda — so it is filtered to lists rather than assumed.
+    prose = {
+        id(statement.value)
+        for node in ast.walk(tree)
+        for statement in _body_of(node)
+        if isinstance(statement, ast.Expr)
+        and isinstance(statement.value, ast.Constant)
+        and isinstance(statement.value.value, str)
+    }
     return [
         node.value
         for node in ast.walk(tree)
-        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in prose
     ]
 
 
@@ -1625,6 +1659,8 @@ class JudgementStage:
         "relevant", "attention", "risk", "insight", "analy", "explain",
         "interpret", "review", "triage", "critique", "opinion", "why",
         "generate", "write ", "reply", "respond", "answer",
+        "joke", "poem", "haiku", "limerick", "story", "song", "lyric",
+        "greeting", "caption", "slogan", "tagline", "brainstorm", "idea",
     )
 
     async def run(self, code: str, context: CheckContext) -> CheckResult:
@@ -1646,6 +1682,12 @@ class JudgementStage:
         lines = _model_answers(tree)
         if not lines:
             return CheckResult(self.name)
+
+        if not _holds_data(tree):
+            return CheckResult(
+                self.name,
+                reason="the workflow reads nothing; the model call is the answer",
+            )
 
         where = ", ".join(f"line {line}" for line in lines[:3])
         return CheckResult(
@@ -1813,6 +1855,54 @@ def _assignment(node: ast.AST) -> tuple[list[str], ast.expr]:
     return [t.id for t in targets if isinstance(t, ast.Name)], value
 
 
+def _holds_data(tree: ast.Module) -> bool:
+    """Does the workflow have anything in hand for a model to re-derive?
+
+    This stage's whole claim is that rows the code *already holds* are turned
+    into an answer by a model that did not need to. A workflow that reads
+    nothing holds nothing: ``sleep two minutes, then tell me a joke`` has no
+    other possible source for its answer, so reporting the model call there
+    asks for the one thing the file cannot contain, and the repair loop spends
+    its rounds rewriting correct code into another spelling of itself — the
+    no-passing-state failure ``FuzzyMatch`` was fixed for.
+
+    Two ways data arrives, and nothing else counts:
+
+    * a durable data call in the body — ``ctx.step`` or ``ctx.node``, the same
+      pair ``is_laundered`` recognises, because they are what the prompt tells
+      generated code to fetch through. ``ctx.sleep`` and ``ctx.agent`` are
+      deliberately not among them: one produces no value and the other is the
+      call under suspicion.
+    * a workflow parameter the body actually **references**. A declared but
+      unused ``input_data`` is what a model writes when a spec supplies no
+      input, and counting it would put every such workflow back on this path.
+    """
+    for function in _workflow_bodies(tree):
+        for node in ast.walk(function):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("step", "node")
+            ):
+                return True
+
+        parameters = {
+            argument.arg
+            for argument in [*function.args.posonlyargs, *function.args.args,
+                             *function.args.kwonlyargs]
+        }
+        parameters.discard("ctx")
+        parameters.discard("self")
+        if any(
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and node.id in parameters
+            for node in ast.walk(function)
+        ):
+            return True
+    return False
+
+
 def _workflow_bodies(tree: ast.Module) -> list[ast.AsyncFunctionDef]:
     """The functions the ``@workflow`` decorator marks as workflow bodies.
 
@@ -1838,8 +1928,299 @@ def _workflow_bodies(tree: ast.Module) -> list[ast.AsyncFunctionDef]:
     return found
 
 
+
+@dataclass
+class ObservedTargetsStage:
+    """Do the controls this code addresses exist on the page that was observed?
+
+    The cheapest question there is about a browser workflow, and nothing was
+    asking it. The probe already renders the page, censuses every control, hands
+    the model a summary, and throws the census away — so a workflow addressing
+    a control that was demonstrably not there passed every stage.
+
+    The run this was written for: ``/reserve`` redirected to an interstitial
+    policy notice, the census reported a nav button and two identically-named
+    "Confirm and continue" buttons, and the generated workflow addressed a party
+    size control, a date picker and three contact fields. Not one of them
+    appeared in what the agent had seen. The pipeline was green.
+
+    **A warning, and worded as coverage rather than as a defect**, because the
+    honest reading of an unconfirmed target is *"observation could not reach
+    this"* and not *"this is wrong"*. Observation is single-shot: it navigates
+    and reads, so any control that appears only after an interaction is
+    legitimately absent from the census while the code addressing it is
+    perfectly correct. Reporting that as an error would put the repair loop to
+    work rewriting working code — the failure ``SelectorStage`` and
+    ``BrowserEffectStage`` are both careful to avoid.
+
+    What it *can* say without guessing is the count, and the count is where the
+    signal lives: some targets unconfirmed is ordinary, and **none confirmed**
+    means the code and the observation are describing different pages.
+    """
+
+    name: str = "observed-targets"
+    cost: int = 19
+    blocking: bool = False
+
+    async def run(self, code: str, context: CheckContext) -> CheckResult:
+        if "browser." not in code:
+            return CheckResult(self.name, skipped=True,
+                               reason="not a browser workflow")
+        pages = [p for p in (context.observed or []) if getattr(p, "names", ())]
+        if not pages:
+            # Nothing looked, or nothing readable came back. "I could not check"
+            # is not "I checked and it was fine", and it is certainly not a
+            # finding about the code.
+            return CheckResult(self.name, skipped=True,
+                               reason="no page census was captured while authoring")
+
+        # Reported before, and independently of, target coverage. A workflow
+        # that navigates somewhere the probe was bounced off is looking at a
+        # census of the *destination*, and that stays true however many of its
+        # targets happen to match — including when it dodges literal names
+        # altogether by resolving every control from an intent, which is exactly
+        # what an agent does when it cannot see the page.
+        hops = _redirected_navigations(code, pages)
+        detour = [
+            CodeIssue(
+                "browser-targets",
+                f"This workflow navigates to {hop.target}, which redirected to "
+                f"{hop.landed} when it was observed. The controls reported to "
+                "you are that second page's. If the page you actually want is "
+                "behind it, nothing you were shown describes it.",
+                "warning",
+            )
+            for hop in hops
+        ]
+
+        targeted = _targeted_names(code)
+        if not targeted:
+            return CheckResult(
+                self.name, issues=detour,
+                reason="no role-and-name targets in this workflow",
+                skipped=not detour,
+            )
+
+        seen: set[str] = set()
+        for page in pages:
+            seen.update(name.casefold() for name in page.names)
+
+        confirmed = [n for n in targeted if _matches(n, seen)]
+        missing = [n for n in targeted if not _matches(n, seen)]
+        note = (
+            f"{len(confirmed)}/{len(targeted)} target(s) confirmed on the "
+            f"{len(pages)} page(s) observed"
+        )
+        if not missing:
+            return CheckResult(self.name, issues=detour, reason=note)
+
+        redirected = [p for p in pages if getattr(p, "redirected", False)]
+        detail = (
+            f"Observed: {', '.join(sorted(seen)[:12]) or 'nothing named'}."
+        )
+        if redirected:
+            hop = redirected[0]
+            detail += (
+                f" Note that {hop.target} redirected to {hop.landed}, so the "
+                "census above may describe a page in front of the one you want."
+            )
+
+        if confirmed:
+            message = (
+                f"{len(missing)} browser target(s) were not in the census of any "
+                f"page observed while authoring: "
+                f"{', '.join(repr(n) for n in missing[:6])}. Observation is "
+                "single-shot — it navigates and reads, so a control that only "
+                f"appears after an interaction is legitimately absent. {detail}"
+            )
+        else:
+            message = (
+                "None of this workflow's browser targets appear in the census of "
+                "any page observed while authoring, which usually means the code "
+                "and the observation describe different pages rather than that "
+                f"every control is dynamic. Targets: "
+                f"{', '.join(repr(n) for n in missing[:6])}. {detail}"
+            )
+        return CheckResult(
+            self.name,
+            issues=[*detour, CodeIssue("browser-targets", message, "warning")],
+            reason=note,
+        )
+
+
+def _redirected_navigations(code: str, pages: list[Any]) -> list[Any]:
+    """Observed pages this workflow navigates to that were *not* where the
+    probe ended up.
+
+    Matched on the URL the code navigates to against the URL that was
+    *requested*, never the one that was reached: a workflow going straight to
+    the destination has already accounted for the hop and has nothing to learn
+    from it. One report per distinct hop, since a flow that opens the same page
+    twice has one problem, not two.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+
+    urls = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value.startswith(("http://", "https://"))
+    }
+    hops: dict[str, Any] = {}
+    for page in pages:
+        if getattr(page, "redirected", False) and page.target in urls:
+            hops.setdefault(page.target, page)
+    return list(hops.values())
+
+
+def _matches(name: str, seen: set[str]) -> bool:
+    """Whether *name* names something the census named.
+
+    Substring in both directions, because an accessible name is routinely a
+    superset of what a caller addresses it by ("2 Guests" against "Guests") and
+    routinely a subset of a visible label. Loose on purpose: this stage's error
+    of choice is silence, so a near-match is treated as a match.
+    """
+    folded = name.casefold().strip()
+    if not folded:
+        return True
+    return any(folded == s or folded in s or s in folded for s in seen)
+
+
+def _targeted_names(code: str) -> list[str]:
+    """Every ``name="..."`` passed to a Target/TargetIn constructor.
+
+    Read from the constructor rather than from any string that looks like a
+    label, so prose, comments and unrelated keyword arguments are never mistaken
+    for an address. A dynamic name — an f-string, a variable — is skipped
+    outright: it cannot be checked, and guessing at it is how a stage starts
+    firing on correct code.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        label = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        if label not in ("Target", "TargetIn"):
+            continue
+        for kw in node.keywords:
+            if (
+                kw.arg == "name"
+                and isinstance(kw.value, ast.Constant)
+                and isinstance(kw.value.value, str)
+                and kw.value.value.strip()
+            ):
+                found.append(kw.value.value)
+    seen: dict[str, None] = {}
+    for name in found:
+        seen.setdefault(name, None)
+    return list(seen)
+
+
+class ConnectionStage:
+    """Does this file import a toolset the machine has no credential for?
+
+    Only after `AuthSpec` made the requirement declarable: the credential a
+    client reads was a keyword default inside one file, so nothing outside it
+    could learn the name, let alone check for one.
+
+    **A warning, and never an error.** The repair loop reads `report.errors`
+    and unchanged code ends the repair, so an error here would ask a model to
+    fix a *machine* — and the cheapest fix available to it is to stop importing
+    the toolset, which ships a workflow that passes every remaining stage
+    having removed the integration the spec was about. This repository has hit
+    that shape three times (`AutoRespondChannel`, `FakeBrowserProvider`, the
+    gutted repair) and it is the deliberate opposite of `BrowserEffectStage`'s
+    error case, where the run genuinely cannot reach the write.
+
+    What it is for is the summary: `loom connect jira` printed beside a file
+    that will otherwise fail on its first real call.
+    """
+
+    name: str = "connections"
+    cost: int = 14
+    blocking: bool = False
+
+    def __init__(self, registry: Any = None, credentials: Any = None) -> None:
+        self._registry = registry
+        self._credentials = credentials
+
+    async def run(self, code: str, context: CheckContext) -> CheckResult:
+        if self._registry is None:
+            return CheckResult(self.name)
+        try:
+            from loom.connectors.inspect import ConnectionInspector
+
+            inspector = ConnectionInspector(self._registry, self._credentials)
+            wanted = self._imported_toolsets(code, context)
+            statuses = [await inspector.status(t) for t in sorted(wanted)]
+        except Exception:
+            # A check that cannot run has found nothing, which is not passing —
+            # and is also not this file's defect.
+            return CheckResult(self.name, skipped=True)
+
+        missing = [s for s in statuses if not s.usable]
+        if not missing:
+            return CheckResult(self.name)
+        return CheckResult(
+            self.name,
+            issues=[
+                CodeIssue(
+                    "connections",
+                    f"{status.toolset} is not configured here"
+                    + (f" — {status.how}" if status.how else "")
+                    + (
+                        f" (needs {', '.join(status.missing_fields)})"
+                        if status.missing_fields
+                        else ""
+                    )
+                    + ". The code is fine; the machine is not set up. Do not "
+                    "change the workflow because of this.",
+                    "warning",
+                )
+                for status in missing
+            ],
+        )
+
+    def _imported_toolsets(self, code: str, context: CheckContext) -> set[str]:
+        """Toolset ids this file imports, by their real module paths.
+
+        `toolset_modules` maps id to module, and a module is what an import
+        names — `google_calendar` lives at `loom.toolsets.google.calendar`, so
+        matching on the id would miss every nested toolset and invent matches
+        for none.
+        """
+        modules = context.toolset_modules or {}
+        imported = {
+            node.module
+            for node in ast.walk(ast.parse(code))
+            if isinstance(node, ast.ImportFrom) and node.module
+        }
+        return {
+            toolset_id
+            for toolset_id, module in modules.items()
+            if any(
+                seen == module or seen.startswith(module + ".") for seen in imported
+            )
+        }
+
+
 def default_stages(
-    *, supervisor: Any = None, smoke: bool = True, registry: Any = None
+    *,
+    supervisor: Any = None,
+    smoke: bool = True,
+    registry: Any = None,
+    credentials: Any = None,
 ) -> list[Any]:
     """The standard pipeline, cheapest first.
 
@@ -1850,6 +2231,7 @@ def default_stages(
         CompileStage(),
         StaticStage(),
         GrantStage(registry),
+        ConnectionStage(registry, credentials),
         CoverageStage(registry),
         PlacementStage(),
         ResolutionStage(registry),
@@ -1857,6 +2239,7 @@ def default_stages(
         CataloguePreferenceStage(),
         IdentifierStage(registry),
         SelectorStage(),
+        ObservedTargetsStage(),
         BrowserEffectStage(),
         JudgementStage(),
         LintStage(),
@@ -2072,6 +2455,22 @@ def _payload_value(call: ast.Call, key: str) -> str | None:
     read the value should report the same thing in all three: it does not know.
     """
     payload = call.args[1] if len(call.args) > 1 else None
+
+    # Two shapes, because generated code uses both and only one was read. A
+    # node's payload is written either as a dict literal or as its own input
+    # model — `ActIn(..., effect="read")` — and reading only the dict reported
+    # every model-built call as undeclared. That is the same defect
+    # `_effect_arguments` already carried one layer down, where it made
+    # `effect_by` dead for every node; here it made this stage fire on correct
+    # code, which is worse, since the repair loop acts on what it reports.
+    if isinstance(payload, ast.Call):
+        for kw in payload.keywords:
+            if (kw.arg == key
+                    and isinstance(kw.value, ast.Constant)
+                    and isinstance(kw.value.value, str)):
+                return kw.value.value
+        return None
+
     if not isinstance(payload, ast.Dict):
         return None
     for name, value in zip(payload.keys, payload.values, strict=False):

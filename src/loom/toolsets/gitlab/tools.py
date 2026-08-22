@@ -17,6 +17,7 @@ timeout files a second one.
 from __future__ import annotations
 
 from loom import Retry, step
+from loom.toolsets.gitlab.client import GitLabClient
 from loom.toolsets.gitlab.models import (
     GitLabIssue,
     GitLabMergeRequest,
@@ -38,9 +39,10 @@ async def gitlab_whoami() -> GitLabUser:
     Returns:
         The authenticated user's id, username, name, and profile URL.
     """
-    from loom.toolsets.gitlab.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().whoami()
+
+    return await (await client_for("gitlab", GitLabClient)).whoami()
 
 
 @step(retry=_READ)
@@ -57,9 +59,9 @@ async def gitlab_find_users(query: str, limit: int = 20) -> list[GitLabUser]:
     Returns:
         Users with id, username, name, and profile URL.
     """
-    from loom.toolsets.gitlab.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().find_users(query, limit=limit)
+    return await (await client_for("gitlab", GitLabClient)).find_users(query, limit=limit)
 
 
 @step(retry=_READ)
@@ -83,9 +85,9 @@ async def gitlab_list_projects(
     Returns:
         Paginated projects. Check ``.complete`` before reporting a total.
     """
-    from loom.toolsets.gitlab.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_projects(
+    return await (await client_for("gitlab", GitLabClient)).list_projects(
         search=search, membership=membership, limit=limit, order_by=order_by
     )
 
@@ -102,9 +104,9 @@ async def gitlab_get_project(project: str) -> GitLabProject:
     Returns:
         The project, with default branch, visibility, and counts.
     """
-    from loom.toolsets.gitlab.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_project(project)
+    return await (await client_for("gitlab", GitLabClient)).get_project(project)
 
 
 @step(retry=_READ)
@@ -128,9 +130,9 @@ async def gitlab_list_issues(
     Returns:
         Paginated issues, each with its ``iid``.
     """
-    from loom.toolsets.gitlab.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_issues(
+    return await (await client_for("gitlab", GitLabClient)).list_issues(
         project, state=state, labels=labels, assignee=assignee, limit=limit
     )
 
@@ -146,9 +148,9 @@ async def gitlab_get_issue(project: str, iid: int) -> GitLabIssue:
     Returns:
         The issue.
     """
-    from loom.toolsets.gitlab.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_issue(project, iid)
+    return await (await client_for("gitlab", GitLabClient)).get_issue(project, iid)
 
 
 @step(retry=_UNSAFE_WRITE)
@@ -174,9 +176,9 @@ async def gitlab_create_issue(
     Returns:
         The created issue, including its ``iid`` and URL.
     """
-    from loom.toolsets.gitlab.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_issue(
+    return await (await client_for("gitlab", GitLabClient)).create_issue(
         project,
         title,
         description=description,
@@ -208,9 +210,9 @@ async def gitlab_update_issue(
     Returns:
         The updated issue.
     """
-    from loom.toolsets.gitlab.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().update_issue(
+    return await (await client_for("gitlab", GitLabClient)).update_issue(
         project,
         iid,
         title=title,
@@ -235,9 +237,10 @@ async def gitlab_close_issue(project: str, iid: int) -> GitLabIssue:
     Returns:
         The closed issue.
     """
-    from loom.toolsets.gitlab.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().update_issue(project, iid, state_event="close")
+    client = await client_for("gitlab", GitLabClient)
+    return await client.update_issue(project, iid, state_event="close")
 
 
 @step(retry=_READ)
@@ -258,9 +261,9 @@ async def gitlab_list_issue_notes(
     Returns:
         Paginated notes with body, author, and timestamp.
     """
-    from loom.toolsets.gitlab.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_issue_notes(
+    return await (await client_for("gitlab", GitLabClient)).list_issue_notes(
         project, iid, limit=limit, include_system=include_system
     )
 
@@ -280,9 +283,9 @@ async def gitlab_add_issue_note(project: str, iid: int, body: str) -> GitLabNote
     Returns:
         The created note.
     """
-    from loom.toolsets.gitlab.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().add_issue_note(project, iid, body)
+    return await (await client_for("gitlab", GitLabClient)).add_issue_note(project, iid, body)
 
 
 @step(retry=_READ)
@@ -300,9 +303,9 @@ async def gitlab_list_merge_requests(
     Returns:
         Paginated merge requests with branches, draft flag, and merge status.
     """
-    from loom.toolsets.gitlab.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_merge_requests(
+    return await (await client_for("gitlab", GitLabClient)).list_merge_requests(
         project, state=state, target_branch=target_branch, limit=limit
     )
 
@@ -318,9 +321,9 @@ async def gitlab_get_merge_request(project: str, iid: int) -> GitLabMergeRequest
     Returns:
         The merge request.
     """
-    from loom.toolsets.gitlab.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_merge_request(project, iid)
+    return await (await client_for("gitlab", GitLabClient)).get_merge_request(project, iid)
 
 
 @step(retry=_UNSAFE_WRITE)
@@ -348,9 +351,9 @@ async def gitlab_create_merge_request(
     Returns:
         The created merge request.
     """
-    from loom.toolsets.gitlab.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_merge_request(
+    return await (await client_for("gitlab", GitLabClient)).create_merge_request(
         project,
         title,
         source_branch=source_branch,

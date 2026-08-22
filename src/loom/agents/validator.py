@@ -384,7 +384,18 @@ class CodeValidator:
             and (n.module or "").startswith("loom.toolsets.")
             for n in ast.walk(tree)
         )
-        if not has_step and not uses_toolset_steps:
+        # And the same holds for a body whose durable work *is* a node or an
+        # agent call: both are journaled units already, so there is no step
+        # left to write. "tell me a joke" is one `ctx.agent`, and telling its
+        # author to add a @step names work that does not exist — the nag the
+        # exemption above exists to avoid, one call shape over.
+        uses_durable_units = any(
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr in ("node", "agent")
+            for n in ast.walk(tree)
+        )
+        if not has_step and not uses_toolset_steps and not uses_durable_units:
             issues.append(
                 CodeIssue(
                     "structure",
@@ -711,13 +722,54 @@ def _is_resolvable(module: str) -> bool:
     return root in RESOLVABLE_PREFIXES or root in sys.stdlib_module_names
 
 
+#: Packages LOOM deliberately keeps out of its top-level namespace, in the
+#: order a wrongly-placed name is looked for. ``loom.nodes`` and
+#: ``loom.toolsets`` are excluded from ``loom.__all__`` on purpose — ``Node``
+#: beside the ``@node`` step decorator would put two unrelated things one
+#: autocomplete apart — and triggers were never re-exported either. So "right
+#: name, wrong module" is not a typo here, it is the *designed* shape, and it
+#: is the failure a model hits by writing the import the rest of the prompt
+#: taught it.
+_SIBLING_NAMESPACES = ("loom.triggers", "loom.nodes", "loom.toolsets")
+
+
 def _suggest(module: object, wanted: str) -> str:
-    """Offer the closest public name, so the fix is obvious from the message."""
+    """Say how to fix the import, not merely that it is broken.
+
+    Two different mistakes, and only one of them was covered. A *misspelling*
+    is answered by the closest public name in the same module. A name that is
+    spelled correctly and lives somewhere else was answered with
+    ``'loom' has no attribute 'After'`` and nothing more — true, and unusable:
+    the repair loop reads the message, has no move to make, and spends both its
+    attempts rewriting an import that was one module away from correct.
+
+    The second case is not an edge case here. ``loom.__all__`` is a curated 36
+    symbols and every trigger sits outside it, so a model told to write
+    ``triggers=[After(minutes=2)]`` — with every other symbol in the prompt
+    coming from ``loom`` — writes ``from loom import After`` and is wrong for a
+    reason no message told it.
+    """
     import difflib
+    import importlib
 
     candidates = [name for name in dir(module) if not name.startswith("_")]
     close = difflib.get_close_matches(wanted, candidates, n=1, cutoff=0.7)
-    return f"; did you mean '{close[0]}'?" if close else ""
+    if close:
+        return f"; did you mean '{close[0]}'?"
+
+    name = getattr(module, "__name__", "")
+    if name.split(".")[0] != "loom":
+        return ""
+    for sibling in _SIBLING_NAMESPACES:
+        if sibling == name:
+            continue
+        try:
+            found = importlib.import_module(sibling)
+        except Exception:
+            continue
+        if hasattr(found, wanted):
+            return f"; it lives in {sibling} — from {sibling} import {wanted}"
+    return ""
 
 
 def _is_main_guard(node: ast.stmt) -> bool:

@@ -25,7 +25,6 @@ Credentials resolve from arguments, then the environment:
 from __future__ import annotations
 
 import asyncio
-import os
 from typing import Any
 
 from loom.core.exceptions import NonRetryableError, WorkflowError
@@ -82,7 +81,7 @@ class SalesforceClient:
 
     def __init__(
         self,
-        instance_url: str | None = None,
+        instance_url: str = "",
         access_token: str | None = None,
         *,
         client_id: str | None = None,
@@ -93,18 +92,14 @@ class SalesforceClient:
         timeout: float = 60.0,
     ) -> None:
         self._instance = (
-            instance_url or os.environ.get("SALESFORCE_INSTANCE_URL", "")
+            instance_url
         ).rstrip("/")
-        self._token = access_token or os.environ.get("SALESFORCE_ACCESS_TOKEN", "")
-        self._client_id = client_id or os.environ.get("SALESFORCE_CLIENT_ID", "")
-        self._client_secret = client_secret or os.environ.get(
-            "SALESFORCE_CLIENT_SECRET", ""
-        )
-        self._refresh_token = refresh_token or os.environ.get(
-            "SALESFORCE_REFRESH_TOKEN", ""
-        )
+        self._token = access_token
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._refresh_token = refresh_token
         self._login_url = (
-            login_url or os.environ.get("SALESFORCE_LOGIN_URL", DEFAULT_LOGIN_URL)
+            login_url or DEFAULT_LOGIN_URL
         ).rstrip("/")
         self._version = version
         self._timeout = timeout
@@ -428,15 +423,6 @@ def _classify(response: Any) -> SalesforceError:
     return SalesforceError(message, status=status, code=code)
 
 
-_default_client: SalesforceClient | None = None
-
-
-def get_default_client() -> SalesforceClient:
-    """Return (or create) the module-level client from the environment."""
-    global _default_client
-    if _default_client is None:
-        _default_client = SalesforceClient()
-    return _default_client
 
 
 __all__ = [
@@ -445,5 +431,4 @@ __all__ = [
     "SalesforceError",
     "SalesforcePermanentError",
     "SalesforceRateLimited",
-    "get_default_client",
 ]

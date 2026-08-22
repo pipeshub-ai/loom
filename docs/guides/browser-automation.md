@@ -150,64 +150,85 @@ declare like any other node.
 
 ## Parking on a person
 
-An approval parks the run, and a normal browser session ends when the body
-exits — so the flow must be opened as durable, or the browser will not be there
-when the person answers:
+An approval parks the run, and a browser session ends when the body exits. The
+obvious answer is a session that outlives the park — `scope="durable"` — and it
+is the wrong one to reach for first, because **no provider LOOM ships advertises
+`reattach`**. `LocalBrowserProvider` says so in as many words: this browser dies
+with the process. A flow written that way fails at its first `browser.navigate`.
+
+So the shape that works everywhere is **two step-scoped sessions, either side of
+the approval**: read what you need and close, park, then open a fresh session to
+act.
 
 ```python
 @workflow(name="reserve_with_approval")
 async def reserve_with_approval(ctx: Context, booking: dict) -> str:
+    # Phase one: look, and close. Nothing is held across the park.
     page = await ctx.node("browser.navigate",
-                          {"url": booking["url"], "scope": "durable"})
-    session = page.session
-
-    await ctx.node("browser.act", {
-        "session": session,
-        "method": "fill",
-        "target": {"role": "textbox", "name": "Email"},
-        "value": booking["email"],
-        "effect": "read",
-    })
+                          {"url": booking["url"], "scope": "step"})
+    summary = await ctx.node("browser.extract", {"session": page.session})
+    await ctx.node("browser.close", {"session": page.session})
 
     decision = await ctx.node("human.approval", {
         "subject": "booking",
         "prompt": "Confirm this reservation?",
-        "live_view_url": session.live_view_url if session else "",
+        "context": {"page": summary.text[:400]},
     })
     if not decision.approved:
-        await ctx.node("browser.close", {"session": session})
         return "declined"
 
+    # Phase two: a new session, after the person answered.
+    page = await ctx.node("browser.navigate",
+                          {"url": booking["url"], "scope": "step"})
     await ctx.node("browser.act", {
-        "session": session,
+        "session": page.session,
         "method": "click",
         "target": {"role": "button", "name": "Confirm booking"},
         "effect": "write",
     })
-    await ctx.node("browser.close", {"session": session})
+    await ctx.node("browser.close", {"session": page.session})
     return "booked"
 ```
 
 Three things are doing work there.
 
-**`scope="durable"`** means the session outlives this execution of the body. A
-provider that cannot honour it refuses at open rather than downgrading, because
-a host that believes its two-hour approval will survive and is wrong finds out
-at the worst moment.
+**Two sessions, and the state that matters carried between them as data.** What
+phase one learned — a date, a time, a reference — travels through the journal as
+an ordinary value, which is what makes it survive the park. A browser cannot.
 
-**`session` passed to each call.** The ref comes back from `navigate`, so on
-resume it is served from the journal like any other recorded value — that is how
-the run reattaches to the browser it actually had, instead of a fresh one
-somewhere else on the site. It also makes the dependency visible: code that acts
-on a session it did not navigate reads as wrong.
+**The approval carries what the person needs to decide on.** They cannot see the
+page, so the decision has to be reconstructable from the request itself.
 
-**`live_view_url`** gives the person somewhere to watch, or to finish a 2FA
-prompt themselves. "Approve this" is not a fair question about a page they
-cannot see.
+**`effect` on the act.** Navigating is an open-world read, so it taints the run,
+and the `write` is refused until the approval clears it. That is the ordering the
+whole pattern exists to make possible.
 
-**`browser.close`** ends it. A durable session is deliberately not closed when
-the body exits, so ending it is the workflow's decision — providers also expire
-sessions on their own TTL, so a forgotten close is a cost rather than a leak.
+### When your provider can reattach
+
+A host on Browserbase or Kernel, or any provider whose `supports()` includes
+`reattach`, can hold one session across the park instead:
+
+```python
+@workflow(name="reserve_durable")
+async def reserve_durable(ctx: Context, booking: dict) -> str:
+    page = await ctx.node("browser.navigate",
+                          {"url": booking["url"], "scope": "durable"})
+    session = page.session
+    # ... act, park on an approval, act again — all on this one session ...
+    await ctx.node("browser.close", {"session": session})
+    return "booked"
+```
+
+`session` then goes to every later call. The ref comes back from `navigate`, so
+on resume it is served from the journal like any other recorded value — that is
+how the run reattaches to the browser it actually had rather than a fresh one
+somewhere else on the site. `live_view_url` gives the person somewhere to watch,
+or to finish a 2FA prompt themselves.
+
+A provider that cannot honour `durable` **refuses at open rather than
+downgrading**, because a host that believes its two-hour approval will survive
+and is wrong finds out at the worst possible moment. That refusal is why the
+two-phase shape above is the default and this is the optimisation.
 
 ## Testing without a browser
 

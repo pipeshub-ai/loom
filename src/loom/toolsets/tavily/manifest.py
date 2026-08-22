@@ -12,6 +12,8 @@ the client three ways.
 from __future__ import annotations
 
 from loom.toolsets.manifest import (
+    AuthField,
+    AuthSpec,
     EffectClass,
     OperationSpec,
     ToolsetManifest,
@@ -39,7 +41,17 @@ TAVILY_MANIFEST = ToolsetManifest(
         "go limit) rather than 429, and neither clears by waiting."
     ),
     base_url="https://api.tavily.com",
-    auth={"type": "bearer", "fields": ["TAVILY_API_KEY"]},
+    auth=AuthSpec(
+        client="loom.toolsets.tavily.client:TavilyClient",
+        # This client reads environment variables and no CredentialStore, so
+        # `credential` is empty and no `provider` is declared: an OAuth flow
+        # here would store a token the client never looks up. Adding a store
+        # path is a change to the client, not to this manifest.
+        kind="bearer",
+        fields=(
+            AuthField(name="TAVILY_API_KEY", arg="api_key", label="API key", example="tvly-…"),
+        ),
+    ),
     tools_module="loom.toolsets.tavily.tools",
     egress_hosts=["api.tavily.com"],
     rate_limits={

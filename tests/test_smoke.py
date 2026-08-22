@@ -277,3 +277,34 @@ class TestSmokeDerivesAnInput:
 
         assert result.ok
         assert "EXPLICIT" in (result.output_preview or "")
+
+
+class TestAProviderOutageIsNotTheSpecsFault:
+    """An authoring job killed by a 500 was told to narrow its spec.
+
+    That is advice aimed at the one thing that was not the problem, and it
+    sends somebody to rewrite an input that was working. The whole point of
+    classifying a failure as environmental is to say "nothing here is yours
+    to fix".
+    """
+
+    def test_a_500_is_environmental(self) -> None:
+        from loom.agents.smoke import is_environmental
+
+        assert is_environmental(
+            "Error code: 500 - {'type': 'error', 'error': "
+            "{'type': 'api_error', 'message': 'Internal server error'}}")
+
+    def test_capacity_failures_are_too(self) -> None:
+        from loom.agents.smoke import is_environmental
+
+        assert is_environmental("overloaded_error")
+        assert is_environmental("rate limit exceeded")
+
+    def test_a_code_defect_is_still_repairable(self) -> None:
+        """The line this must not cross: the failures the checks exist to
+        catch stay repairable, or the repair loop stops repairing."""
+        from loom.agents.smoke import is_environmental
+
+        assert not is_environmental("No module named 'requests'")
+        assert not is_environmental("NameError: name 'ctx' is not defined")

@@ -26,7 +26,6 @@ retrying.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from loom.core.exceptions import NonRetryableError, WorkflowError
@@ -105,7 +104,7 @@ class TavilyClient:
         base_url: str = BASE_URL,
         timeout: float = 60.0,
     ) -> None:
-        self._key = api_key or os.environ.get("TAVILY_API_KEY", "")
+        self._key = api_key
         self._base_url = base_url.rstrip("/")
         # Generous, because /extract and /map are crawls rather than lookups
         # and Tavily's own per-request timeout goes to 150s.
@@ -316,12 +315,3 @@ def _classify(response: Any) -> TavilyError:
     return TavilyError(message, status=status)
 
 
-_default_client: TavilyClient | None = None
-
-
-def get_default_client() -> TavilyClient:
-    """Return (or create) the module-level client from the environment."""
-    global _default_client
-    if _default_client is None:
-        _default_client = TavilyClient()
-    return _default_client

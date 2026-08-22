@@ -17,6 +17,7 @@ task twice. Journaling covers replay; it does not cover the attempt.
 from __future__ import annotations
 
 from loom import Retry, step
+from loom.toolsets.asana.client import AsanaClient
 from loom.toolsets.asana.models import (
     AsanaProject,
     AsanaSection,
@@ -44,9 +45,10 @@ async def asana_whoami() -> AsanaUser:
     Returns:
         The authenticated user's gid, name, and email.
     """
-    from loom.toolsets.asana.client import get_default_client
 
-    return await get_default_client().whoami()
+    from loom.toolsets.factory import client_for
+
+    return await (await client_for("asana", AsanaClient)).whoami()
 
 
 @step(retry=_READ)
@@ -59,9 +61,9 @@ async def asana_list_workspaces() -> list[AsanaWorkspace]:
     Returns:
         Workspaces with gid, name, and whether each is an organization.
     """
-    from loom.toolsets.asana.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_workspaces()
+    return await (await client_for("asana", AsanaClient)).list_workspaces()
 
 
 @step(retry=_READ)
@@ -78,9 +80,9 @@ async def asana_list_projects(
     Returns:
         Paginated projects. Check ``.complete`` before reporting a total.
     """
-    from loom.toolsets.asana.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_projects(
+    return await (await client_for("asana", AsanaClient)).list_projects(
         workspace_gid, limit=limit, archived=archived
     )
 
@@ -95,9 +97,9 @@ async def asana_list_sections(project_gid: str) -> list[AsanaSection]:
     Returns:
         Sections with gid and name, in board order.
     """
-    from loom.toolsets.asana.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_sections(project_gid)
+    return await (await client_for("asana", AsanaClient)).list_sections(project_gid)
 
 
 # -- tasks ------------------------------------------------------------------
@@ -120,9 +122,9 @@ async def asana_list_tasks(
     Returns:
         Paginated tasks with assignee, due date, projects, and URL.
     """
-    from loom.toolsets.asana.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_tasks(
+    return await (await client_for("asana", AsanaClient)).list_tasks(
         project_gid, limit=limit, completed_since=completed_since
     )
 
@@ -159,9 +161,9 @@ async def asana_search_tasks(
     Returns:
         Matching tasks, most recently modified first.
     """
-    from loom.toolsets.asana.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().search_tasks(
+    return await (await client_for("asana", AsanaClient)).search_tasks(
         workspace_gid,
         text=text,
         assignee_gid=assignee_gid,
@@ -181,9 +183,9 @@ async def asana_get_task(task_gid: str) -> AsanaTask:
     Returns:
         The task, with assignee, due date, projects, tags, and URL.
     """
-    from loom.toolsets.asana.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_task(task_gid)
+    return await (await client_for("asana", AsanaClient)).get_task(task_gid)
 
 
 @step(retry=_UNSAFE_WRITE)
@@ -216,9 +218,9 @@ async def asana_create_task(
     Returns:
         The created task, including its gid and permalink URL.
     """
-    from loom.toolsets.asana.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_task(
+    return await (await client_for("asana", AsanaClient)).create_task(
         workspace_gid,
         name=title,
         notes=notes,
@@ -251,9 +253,9 @@ async def asana_update_task(
     Returns:
         The updated task.
     """
-    from loom.toolsets.asana.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().update_task(
+    return await (await client_for("asana", AsanaClient)).update_task(
         task_gid,
         name=title,
         notes=notes,
@@ -276,9 +278,9 @@ async def asana_complete_task(task_gid: str) -> AsanaTask:
     Returns:
         The completed task.
     """
-    from loom.toolsets.asana.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().update_task(task_gid, completed=True)
+    return await (await client_for("asana", AsanaClient)).update_task(task_gid, completed=True)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -291,9 +293,9 @@ async def asana_delete_task(task_gid: str) -> bool:
     Returns:
         True once Asana has accepted the deletion.
     """
-    from loom.toolsets.asana.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    await get_default_client().delete_task(task_gid)
+    await (await client_for("asana", AsanaClient)).delete_task(task_gid)
     return True
 
 
@@ -315,9 +317,9 @@ async def asana_list_comments(task_gid: str, limit: int = 50) -> list[AsanaStory
     Returns:
         Comment stories with text, author, and timestamp.
     """
-    from loom.toolsets.asana.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_comments(task_gid, limit=limit)
+    return await (await client_for("asana", AsanaClient)).list_comments(task_gid, limit=limit)
 
 
 @step(retry=_UNSAFE_WRITE)
@@ -334,9 +336,9 @@ async def asana_add_comment(task_gid: str, text: str) -> AsanaStory:
     Returns:
         The created comment.
     """
-    from loom.toolsets.asana.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().add_comment(task_gid, text)
+    return await (await client_for("asana", AsanaClient)).add_comment(task_gid, text)
 
 
 # -- people -----------------------------------------------------------------
@@ -361,6 +363,7 @@ async def asana_find_users(
     Returns:
         Users with gid, name, and email.
     """
-    from loom.toolsets.asana.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().find_users(workspace_gid, query, count=count)
+    client = await client_for("asana", AsanaClient)
+    return await client.find_users(workspace_gid, query, count=count)

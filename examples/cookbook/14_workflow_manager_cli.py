@@ -16,7 +16,13 @@ Usage:
         --command "List all registered workflows"
 
 Requires:
-    ANTHROPIC_API_KEY
+    one model key — ANTHROPIC_API_KEY, OPENAI_API_KEY, or
+    GEMINI_API_KEY. Whichever is set is the one used.
+
+With no ``--command`` this is an interactive prompt, so the gate passes one:
+a REPL reading an empty stdin proves nothing about the agent behind it.
+
+run-examples: --command "List all registered workflows"
 """
 
 from __future__ import annotations
@@ -25,14 +31,12 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from utils import header, log, require_env
+from utils import header, log, require_model
 
 from loom import Context, Runtime, step, workflow
 from loom.agents.coding_agent import WorkflowCodingAgent
 from loom.agents.interaction import CLIUserInteraction
-from loom.agents.providers.anthropic_provider import (
-    AnthropicProvider,
-)
+from loom.agents.models import ModelProvider
 from loom.agents.tool_registry import Toolset, ToolsetRegistry
 from loom.agents.workflow_tools import build_workflow_tools
 from loom.runtime.dispatcher import TriggerDispatcher
@@ -92,7 +96,7 @@ class WorkflowManagerAgent:
     def __init__(
         self,
         runtime: Runtime,
-        model: AnthropicProvider,
+        model: ModelProvider,
         dispatcher: TriggerDispatcher,
         tool_registry: ToolsetRegistry,
         executor: object | None = None,
@@ -216,8 +220,6 @@ async def single_command(
 
 
 async def main() -> None:
-    require_env("ANTHROPIC_API_KEY")
-
     import argparse
 
     parser = argparse.ArgumentParser(
@@ -233,7 +235,7 @@ async def main() -> None:
 
     # Setup runtime with sample workflows
     log("setup", "Creating runtime with sample workflows...")
-    model = AnthropicProvider(model_name="claude-sonnet-5")
+    model = require_model()
     async with Runtime(store=MemoryStore()) as rt:
         # Register sample workflows
         dispatcher = TriggerDispatcher(rt)

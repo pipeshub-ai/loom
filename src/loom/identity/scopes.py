@@ -47,6 +47,13 @@ class Scope(StrEnum):
     spec — neither of which is implied by being allowed to publish code someone
     has already read."""
     SCHEDULES_WRITE = "schedules:write"
+    CREDENTIALS_CONNECT = "credentials:connect"
+    """Minting a credential this deployment will then use.
+
+    Its own scope rather than ``workflows:author``: authoring spends tokens and
+    reaches out, and neither implies being trusted to obtain a credential every
+    later run will act under. Reading connection *status* is not this — that is
+    ``workflows:read``, because it carries names and states and no secret."""
     ADMIN = "admin"
     """Every other scope this vocabulary defines, and every toolset a
     workflow could declare. Reserved for a fully trusted caller (a service

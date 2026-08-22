@@ -36,6 +36,7 @@ from loom.core.exceptions import (
     ContractChanged,
     ControlSignal,
     DataUnavailable,
+    MissingCredentials,
     RetriesExhausted,
     SerializationError,
     StepError,
@@ -445,6 +446,60 @@ class DurableCall(Generic[T]):
     def _clock(self) -> Any:
         return self._ctx._clock
 
+    async def _credential_failure(self, exc: BaseException) -> BaseException:
+        """Re-raise a toolset's auth complaint as one that names the fix.
+
+        `ctx.step(jira_search_issues, …)` with nothing connected failed with
+        ``ValueError: JIRA_URL is required (env var or base_url argument)`` — an
+        environment variable name, raised deep inside the client, naming neither
+        the toolset nor the thing that fixes it.
+
+        **Wrapped after the failure rather than checked before the call**, and
+        that is the whole design decision. A check that runs first cannot see an
+        *injected* client: a host that constructs its own `SlackClient`, or
+        resolves through a `ConnectionBroker`, has a working setup with nothing
+        in the environment and nothing in the store — indistinguishable, from
+        outside, from a deployment that forgot to connect. A preflight was
+        written, and it refused nineteen working calls. Reporting a working
+        thing as broken is the one failure worse than the message this replaces,
+        because it stops a workflow that would have run.
+
+        By the time the call has *already* failed with an auth-shaped error,
+        there is no such doubt: something asked for a credential and did not
+        get one, and the manifest can say which and what would supply it.
+        """
+        if self.kind is not EntryKind.STEP:
+            return exc
+        runtime = self._ctx._runtime
+        if not getattr(runtime, "explain_credentials", True):
+            return exc
+
+        from loom.connectors.inspect import looks_like_missing_credentials, preflight
+
+        if not looks_like_missing_credentials(exc):
+            return exc
+        reason = await preflight(
+            self.name,
+            toolsets=getattr(runtime, "toolsets", None),
+            credentials=self._ctx._credentials,
+        )
+        if not reason:
+            return exc
+        # `CredentialNotFound`, which is already the taxonomy for this, and
+        # `NonRetryableError` with it: a credential does not appear between two
+        # attempts, so a three-attempt policy otherwise prints the same
+        # impossible failure three times and reports `RetriesExhausted`, which
+        # reads as a flaky service.
+        #
+        # Deliberately not `AuthExpired`: that one *parks* the run for
+        # `loom connect` to fix, which is right for a token that died mid-flight
+        # and wrong for a workflow started where nothing was ever going to be
+        # connected — it would turn an exit code of 1 into a run waiting forever
+        # for somebody who is not coming.
+        failure = MissingCredentials(f"{reason} (original: {exc})")
+        failure.__cause__ = exc
+        return failure
+
     async def _attempt_loop(self, entry: JournalEntry, span: Span) -> Any:
         """Run the operation, retrying per its policy, and journal the outcome."""
         ctx = self._ctx
@@ -491,6 +546,9 @@ class DurableCall(Generic[T]):
                 # baked-in failure.
                 raise
             except (TimeoutError, Exception) as exc:
+                # Before the retry decision, so a missing credential is
+                # non-retryable from the first attempt rather than after three.
+                exc = await self._credential_failure(exc)  # type: ignore[assignment]
                 last_error = exc
                 if not self._retry.should_retry(exc, attempt):
                     break

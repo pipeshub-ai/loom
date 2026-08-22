@@ -64,50 +64,49 @@ class FakeResponse:
 
 
 class TestGitHubAuth:
-    def test_a_token_is_all_it_takes(self, monkeypatch) -> None:
-        monkeypatch.setenv("GITHUB_TOKEN", "ghp_x")
+    """Values in, nothing read here.
 
-        assert GitHubClient()._token == "ghp_x"
+    These tests used to set `GITHUB_TOKEN` and construct a bare client, because
+    the client read the environment itself. It no longer does — that is
+    `EnvironmentProvider`'s job now, tested once in
+    `tests/test_toolset_resolution.py` rather than once per toolset. What is
+    left to test here is what this client does with what it is handed.
+    """
 
-    def test_no_token_fails_at_construction(self, monkeypatch) -> None:
-        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    def test_a_token_is_all_it_takes(self) -> None:
+        assert GitHubClient(token="ghp_x")._token == "ghp_x"
 
+    def test_no_token_fails_at_construction(self) -> None:
+        """Still at construction, not at the first request: a client with no
+        credential cannot become one, and failing later names GitHub for a
+        problem that is entirely local."""
         with pytest.raises(GitHubAuthError, match="GITHUB_TOKEN"):
             GitHubClient()
 
-    def test_enterprise_server_changes_only_the_base_url(self, monkeypatch) -> None:
-        monkeypatch.setenv("GITHUB_TOKEN", "x")
-        monkeypatch.setenv("GITHUB_API_URL", "https://ghe.internal/api/v3/")
+    def test_enterprise_server_changes_only_the_base_url(self) -> None:
+        client = GitHubClient(token="x", base_url="https://ghe.internal/api/v3/")
 
-        assert GitHubClient()._base_url == "https://ghe.internal/api/v3"
+        assert client._base_url == "https://ghe.internal/api/v3"
 
 
 class TestGitLabAuth:
-    def test_an_access_token_uses_the_private_token_header(self, monkeypatch) -> None:
+    def test_an_access_token_uses_the_private_token_header(self) -> None:
         """Different header *names*, so a token in the wrong slot fails loudly
         rather than looking almost right."""
-        monkeypatch.setenv("GITLAB_TOKEN", "glpat-x")
-        monkeypatch.delenv("GITLAB_OAUTH_TOKEN", raising=False)
+        assert GitLabClient(token="glpat-x")._headers() == {"PRIVATE-TOKEN": "glpat-x"}
 
-        assert GitLabClient()._headers() == {"PRIVATE-TOKEN": "glpat-x"}
+    def test_an_oauth_token_uses_bearer(self) -> None:
+        client = GitLabClient(oauth_token="oauth-x")
 
-    def test_an_oauth_token_uses_bearer(self, monkeypatch) -> None:
-        monkeypatch.delenv("GITLAB_TOKEN", raising=False)
-        monkeypatch.setenv("GITLAB_OAUTH_TOKEN", "oauth-x")
+        assert client._headers() == {"Authorization": "Bearer oauth-x"}
 
-        assert GitLabClient()._headers() == {"Authorization": "Bearer oauth-x"}
+    def test_the_instance_defaults_to_gitlab_com(self) -> None:
+        assert GitLabClient(token="x")._base_url == "https://gitlab.com"
 
-    def test_the_instance_defaults_to_gitlab_com(self, monkeypatch) -> None:
-        monkeypatch.setenv("GITLAB_TOKEN", "x")
-        monkeypatch.delenv("GITLAB_URL", raising=False)
+    def test_a_self_managed_instance_is_configuration(self) -> None:
+        client = GitLabClient(token="x", base_url="https://git.internal/")
 
-        assert GitLabClient()._base_url == "https://gitlab.com"
-
-    def test_a_self_managed_instance_is_configuration(self, monkeypatch) -> None:
-        monkeypatch.setenv("GITLAB_TOKEN", "x")
-        monkeypatch.setenv("GITLAB_URL", "https://git.internal/")
-
-        assert GitLabClient()._base_url == "https://git.internal"
+        assert client._base_url == "https://git.internal"
 
     def test_no_token_fails_at_construction(self, monkeypatch) -> None:
         monkeypatch.delenv("GITLAB_TOKEN", raising=False)
@@ -121,12 +120,12 @@ class TestGitLabAuth:
         which reads as a missing project rather than a missing ``%2F``."""
         monkeypatch.setenv("GITLAB_TOKEN", "x")
 
-        assert GitLabClient()._project("group/app") == "group%2Fapp"
+        assert GitLabClient(token="x")._project("group/app") == "group%2Fapp"
 
     def test_a_numeric_id_is_left_alone(self, monkeypatch) -> None:
         monkeypatch.setenv("GITLAB_TOKEN", "x")
 
-        assert GitLabClient()._project("12345") == "12345"
+        assert GitLabClient(token="x")._project("12345") == "12345"
 
 
 # -- header paging ----------------------------------------------------------
@@ -440,7 +439,7 @@ class TestTheIssueListingFiltersPullRequests:
 
     def _client(self, monkeypatch, rows):
         monkeypatch.setenv("GITHUB_TOKEN", "x")
-        client = GitHubClient()
+        client = GitHubClient(token="x")
 
         async def envelope(method, path, *, params=None, json=None):
             return {"items": rows, "headers": {}}
@@ -501,7 +500,7 @@ class TestTheIssueListingFiltersPullRequests:
 class TestGitLabNotesFilterSystemRecords:
     async def test_system_notes_are_left_out_by_default(self, monkeypatch) -> None:
         monkeypatch.setenv("GITLAB_TOKEN", "x")
-        client = GitLabClient()
+        client = GitLabClient(token="x")
 
         async def envelope(method, path, *, params=None, json=None):
             return {

@@ -22,7 +22,8 @@ from __future__ import annotations
 from typing import Any
 
 from loom import Retry, step
-from loom.toolsets.google.sheets.client import RAW, get_default_client
+from loom.toolsets.factory import client_for
+from loom.toolsets.google.sheets.client import RAW, SheetsClient
 from loom.toolsets.google.sheets.models import (
     SheetRange,
     SheetTab,
@@ -46,7 +47,7 @@ async def sheets_get_spreadsheet(spreadsheet_id: str) -> Spreadsheet:
     Args:
         spreadsheet_id: The long id out of the sheet's URL.
     """
-    return await get_default_client().get_spreadsheet(spreadsheet_id)
+    return await (await client_for("google_sheets", SheetsClient)).get_spreadsheet(spreadsheet_id)
 
 
 @step(retry=_READ)
@@ -64,7 +65,7 @@ async def sheets_find_tab(spreadsheet_id: str, title: str) -> SheetTab | None:
         spreadsheet_id: The long id out of the sheet's URL.
         title: The tab's exact name.
     """
-    return await get_default_client().find_tab(spreadsheet_id, title)
+    return await (await client_for("google_sheets", SheetsClient)).find_tab(spreadsheet_id, title)
 
 
 @step(retry=_READ)
@@ -83,7 +84,7 @@ async def sheets_read_range(
         range_a1: e.g. ``Log!A1:D100``, or ``Log!A:D`` for whole columns.
         major_dimension: ``ROWS`` (default) or ``COLUMNS``.
     """
-    return await get_default_client().read_range(
+    return await (await client_for("google_sheets", SheetsClient)).read_range(
         spreadsheet_id, range_a1, major_dimension=major_dimension
     )
 
@@ -118,7 +119,7 @@ async def sheets_append_rows(
         rows: One list of cell values per row.
         value_input: ``RAW`` or ``USER_ENTERED``.
     """
-    return await get_default_client().append_rows(
+    return await (await client_for("google_sheets", SheetsClient)).append_rows(
         spreadsheet_id, range_a1, rows, value_input=value_input
     )
 
@@ -141,7 +142,7 @@ async def sheets_update_range(
         rows: One list of cell values per row.
         value_input: ``RAW`` or ``USER_ENTERED`` — see ``sheets_append_rows``.
     """
-    return await get_default_client().update_range(
+    return await (await client_for("google_sheets", SheetsClient)).update_range(
         spreadsheet_id, range_a1, rows, value_input=value_input
     )
 
@@ -157,4 +158,5 @@ async def sheets_clear_range(spreadsheet_id: str, range_a1: str) -> str:
         spreadsheet_id: The long id out of the sheet's URL.
         range_a1: e.g. ``Log!A2:D``.
     """
-    return await get_default_client().clear_range(spreadsheet_id, range_a1)
+    client = await client_for("google_sheets", SheetsClient)
+    return await client.clear_range(spreadsheet_id, range_a1)

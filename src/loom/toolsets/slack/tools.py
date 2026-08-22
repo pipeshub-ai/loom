@@ -24,6 +24,7 @@ from pydantic import BaseModel
 
 from loom import Retry, step
 from loom.toolsets.pagination import Results
+from loom.toolsets.slack.client import SlackClient
 from loom.toolsets.slack.models import (
     PostedMessage,
     SlackChannel,
@@ -105,9 +106,10 @@ async def slack_list_channels(
         Results[SlackChannel] with id, name, is_member, num_members. Check
         ``.complete`` — a large workspace returns a page.
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_channels(
+
+    return await (await client_for("slack", SlackClient)).list_channels(
         types=types, max_results=max_results, exclude_archived=exclude_archived
     )
 
@@ -133,9 +135,9 @@ async def slack_find_channel(channel_name: str) -> SlackChannel | None:
         Check ``.is_member``: posting to a public channel this app has not
         joined fails, and ``slack_join_channel`` is the fix.
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().find_channel(channel_name)
+    return await (await client_for("slack", SlackClient)).find_channel(channel_name)
 
 
 @step(retry=_READ)
@@ -148,9 +150,9 @@ async def slack_get_channel(channel: str) -> SlackChannel:
     Returns:
         SlackChannel.
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_channel(channel)
+    return await (await client_for("slack", SlackClient)).get_channel(channel)
 
 
 @step(retry=_READ)
@@ -177,9 +179,9 @@ async def slack_read_channel(
         Results[SlackMessage] with ts, user, text, thread_ts, reply_count.
         ``ts`` is the message id that update, delete, and reply all take.
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().history(
+    return await (await client_for("slack", SlackClient)).history(
         channel,
         max_results=max_results,
         oldest=oldest,
@@ -202,9 +204,9 @@ async def slack_get_thread(
     Returns:
         Results[SlackMessage].
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().replies(
+    return await (await client_for("slack", SlackClient)).replies(
         channel, thread_ts, max_results=max_results
     )
 
@@ -223,9 +225,9 @@ async def slack_list_channel_members(
         Results[str] of user ids. Hydrate with ``slack_get_user`` — this
         endpoint returns ids only.
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().members(channel, max_results=max_results)
+    return await (await client_for("slack", SlackClient)).members(channel, max_results=max_results)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -242,9 +244,9 @@ async def slack_join_channel(channel: str) -> SlackChannel:
     Returns:
         The SlackChannel, now with ``is_member`` True.
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().join_channel(channel)
+    return await (await client_for("slack", SlackClient)).join_channel(channel)
 
 
 @step(retry=_POST)
@@ -264,9 +266,9 @@ async def slack_create_channel(
     Returns:
         The created SlackChannel.
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_channel(
+    return await (await client_for("slack", SlackClient)).create_channel(
         channel_name, is_private=is_private
     )
 
@@ -283,9 +285,9 @@ async def slack_invite_to_channel(channel: str, users: list[str]) -> SlackChanne
     Returns:
         The updated SlackChannel.
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().invite(channel, users)
+    return await (await client_for("slack", SlackClient)).invite(channel, users)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -299,9 +301,9 @@ async def slack_set_channel_topic(channel: str, topic: str) -> SlackChannel:
     Returns:
         The updated SlackChannel.
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().set_topic(channel, topic)
+    return await (await client_for("slack", SlackClient)).set_topic(channel, topic)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -317,9 +319,9 @@ async def slack_archive_channel(channel: str) -> str:
     Returns:
         The archived channel id.
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().archive_channel(channel)
+    return await (await client_for("slack", SlackClient)).archive_channel(channel)
 
 
 # ---------------------------------------------------------------------------
@@ -348,9 +350,9 @@ async def slack_post_message(
     Returns:
         PostedMessage with ts — the id that update, delete, and reply take.
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().post_message(
+    return await (await client_for("slack", SlackClient)).post_message(
         channel, text, blocks=blocks, unfurl_links=unfurl_links
     )
 
@@ -370,9 +372,9 @@ async def slack_reply_in_thread(
     Returns:
         PostedMessage.
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().post_message(
+    return await (await client_for("slack", SlackClient)).post_message(
         channel, text, thread_ts=thread_ts, reply_broadcast=also_send_to_channel
     )
 
@@ -392,9 +394,9 @@ async def slack_post_ephemeral(channel: str, user: str, text: str) -> str:
     Returns:
         The message_ts. Not a durable id — an ephemeral message has none.
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().post_ephemeral(channel, user, text)
+    return await (await client_for("slack", SlackClient)).post_ephemeral(channel, user, text)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -412,9 +414,9 @@ async def slack_update_message(
     Returns:
         PostedMessage.
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().update_message(
+    return await (await client_for("slack", SlackClient)).update_message(
         channel, ts, text, blocks=blocks
     )
 
@@ -430,9 +432,9 @@ async def slack_delete_message(channel: str, ts: str) -> str:
     Returns:
         The deleted ``ts``, so the journal records what was removed.
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().delete_message(channel, ts)
+    return await (await client_for("slack", SlackClient)).delete_message(channel, ts)
 
 
 @step(retry=_POST)
@@ -452,9 +454,9 @@ async def slack_schedule_message(
         PostedMessage with scheduled_message_id — *not* a ``ts``. A scheduled
         message has no ``ts`` until it is actually sent.
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().schedule_message(
+    return await (await client_for("slack", SlackClient)).schedule_message(
         channel, text, post_at, thread_ts=thread_ts
     )
 
@@ -471,9 +473,9 @@ async def slack_add_reaction(channel: str, ts: str, emoji: str) -> str:
     Returns:
         The emoji name.
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().add_reaction(channel, ts, emoji)
+    return await (await client_for("slack", SlackClient)).add_reaction(channel, ts, emoji)
 
 
 @step(retry=_READ)
@@ -487,9 +489,9 @@ async def slack_get_permalink(channel: str, ts: str) -> str:
     Returns:
         The permalink URL.
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().permalink(channel, ts)
+    return await (await client_for("slack", SlackClient)).permalink(channel, ts)
 
 
 # ---------------------------------------------------------------------------
@@ -507,9 +509,9 @@ async def slack_list_users(max_results: int = 200) -> Results[SlackUser]:
     Returns:
         Results[SlackUser]. Includes deactivated accounts — check ``.deleted``.
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_users(max_results=max_results)
+    return await (await client_for("slack", SlackClient)).list_users(max_results=max_results)
 
 
 @step(retry=_READ)
@@ -523,9 +525,9 @@ async def slack_get_user(user: str) -> SlackUser:
         SlackUser. ``email`` is empty unless the app holds the
         ``users:read.email`` scope, which is separate from ``users:read``.
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_user(user)
+    return await (await client_for("slack", SlackClient)).get_user(user)
 
 
 @step(retry=_READ)
@@ -546,9 +548,9 @@ async def slack_find_user_by_email(email: str) -> SlackUser | None:
         *deactivated* account the same way, so None does not prove the person
         never existed.
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().find_user_by_email(email)
+    return await (await client_for("slack", SlackClient)).find_user_by_email(email)
 
 
 # ---------------------------------------------------------------------------
@@ -578,9 +580,9 @@ async def slack_upload_file(
     Returns:
         SlackFileRef with id, permalink, url_private.
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().upload_file(
+    return await (await client_for("slack", SlackClient)).upload_file(
         channel,
         content,
         filename,
@@ -603,9 +605,9 @@ async def slack_download_file(url_private: str, filename: str) -> Attachment:
     Returns:
         Attachment with filename, mime, size, and the content.
     """
-    from loom.toolsets.slack.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().download_file(url_private, filename)
+    return await (await client_for("slack", SlackClient)).download_file(url_private, filename)
 
 
 # ---------------------------------------------------------------------------

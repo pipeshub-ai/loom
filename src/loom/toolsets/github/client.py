@@ -27,7 +27,6 @@ GitHub's words, more results might have been found — or might not.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from loom.core.exceptions import NonRetryableError, WorkflowError
@@ -110,10 +109,10 @@ class GitHubClient:
         api_version: str = DEFAULT_API_VERSION,
         timeout: float = 30.0,
     ) -> None:
-        self._token = token or os.environ.get("GITHUB_TOKEN", "")
+        self._token = token
         self._api_version = api_version
         self._base_url = (
-            base_url or os.environ.get("GITHUB_API_URL", BASE_URL)
+            base_url or BASE_URL
         ).rstrip("/")
         self._timeout = timeout
 
@@ -465,12 +464,3 @@ def _classify(response: Any) -> GitHubError:
     return GitHubError(message, status=status)
 
 
-_default_client: GitHubClient | None = None
-
-
-def get_default_client() -> GitHubClient:
-    """Return (or create) the module-level client from the environment."""
-    global _default_client
-    if _default_client is None:
-        _default_client = GitHubClient()
-    return _default_client

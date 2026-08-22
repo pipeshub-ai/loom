@@ -187,6 +187,83 @@ class Interval(TriggerSpec):
 
 
 @dataclass(frozen=True, slots=True)
+class After(TriggerSpec):
+    """Fire **once**, a fixed delay after the trigger is first registered.
+
+    The gap ``Schedule`` and ``Interval`` leave between them: one is a grid the
+    workflow sits on forever, the other a cycle that never stops, and *"tell me
+    a joke in two minutes"* is neither. Expressed with ``ctx.sleep`` instead, a
+    one-off delay parks the run and waits for something to wake it — which is
+    right inside a flow that is already under way, and wrong for a delay the
+    request states up front, because there is nothing for the body to do until
+    the clock says so.
+
+    **Relative to registration, not to each boot.** ``TriggerDispatcher``
+    keeps a known trigger's ``next_fire_at`` rather than recomputing it, so the
+    two minutes are counted from when the dispatcher first learned of this
+    trigger. Restarting the process does not push the joke into the future
+    forever — the same property that stops a pod restarting more often than its
+    cron from never firing at all.
+
+    **One shot is a property of the record, not a counter.**
+    ``_next_fire_from_record`` reads ``cron`` and ``seconds`` out of a stored
+    spec and answers ``None`` for anything else, and the dispatcher already
+    retires a trigger whose next fire is ``None``. So the delay is published as
+    ``after_seconds`` deliberately: naming it ``seconds`` would make every
+    stored one-shot indistinguishable from an ``Interval`` and it would repeat
+    for ever, which is the one behaviour this spec exists to rule out.
+    """
+
+    seconds: Duration = 0
+    minutes: Duration = 0
+    hours: Duration = 0
+    days: Duration = 0
+    kind: TriggerKind = field(default=TriggerKind.SCHEDULE, init=False)
+
+    def __post_init__(self) -> None:
+        if self.delay <= 0:
+            raise ValueError(
+                "After(...) needs a delay greater than zero; a workflow meant "
+                "to start straight away declares Manual() (or no trigger at "
+                "all) instead."
+            )
+
+    @property
+    def delay(self) -> float:
+        """The whole delay in seconds."""
+        return (
+            to_seconds(self.seconds)
+            + to_seconds(self.minutes) * 60
+            + to_seconds(self.hours) * 3600
+            + to_seconds(self.days) * 86400
+        )
+
+    @property
+    def name(self) -> str:
+        return f"after:{self.delay:g}s"
+
+    def next_fire(self, after: datetime | None = None) -> datetime:
+        """*after* plus the delay.
+
+        Consulted once, at registration. Every later call goes through the
+        stored record, which cannot reproduce this and answers ``None`` — that
+        is what makes it fire once.
+        """
+        from datetime import timedelta
+
+        base = after or datetime.now(UTC)
+        return base + timedelta(seconds=self.delay)
+
+    def describe(self) -> JSONDict:
+        return {
+            "kind": self.kind.value,
+            "name": self.name,
+            "after_seconds": self.delay,
+            "once": True,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class Poll(TriggerSpec):
     """Poll a source that has no webhook, carrying a cursor between invocations.
 

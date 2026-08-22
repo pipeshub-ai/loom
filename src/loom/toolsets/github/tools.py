@@ -13,6 +13,7 @@ once: setting the same state twice reaches the same end state.
 from __future__ import annotations
 
 from loom import Retry, step
+from loom.toolsets.github.client import GitHubClient
 from loom.toolsets.github.models import (
     GitHubComment,
     GitHubIssue,
@@ -34,9 +35,10 @@ async def github_whoami() -> GitHubUser:
     Returns:
         The authenticated user's login, id, name, and profile URL.
     """
-    from loom.toolsets.github.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().whoami()
+
+    return await (await client_for("github", GitHubClient)).whoami()
 
 
 @step(retry=_READ)
@@ -54,9 +56,9 @@ async def github_find_users(query: str, limit: int = 20) -> list[GitHubUser]:
     Returns:
         Users with login, id, name, and profile URL.
     """
-    from loom.toolsets.github.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().find_users(query, limit=limit)
+    return await (await client_for("github", GitHubClient)).find_users(query, limit=limit)
 
 
 @step(retry=_READ)
@@ -73,9 +75,10 @@ async def github_list_repos(
     Returns:
         Paginated repositories. Check ``.complete`` before reporting a total.
     """
-    from loom.toolsets.github.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_repos(owner, limit=limit, sort=sort)
+    client = await client_for("github", GitHubClient)
+    return await client.list_repos(owner, limit=limit, sort=sort)
 
 
 @step(retry=_READ)
@@ -88,9 +91,9 @@ async def github_get_repo(repo: str) -> GitHubRepo:
     Returns:
         The repository, with default branch, language, stars, and counts.
     """
-    from loom.toolsets.github.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_repo(repo)
+    return await (await client_for("github", GitHubClient)).get_repo(repo)
 
 
 @step(retry=_READ)
@@ -122,9 +125,9 @@ async def github_list_issues(
     Returns:
         Paginated issues, each carrying ``is_pull_request``.
     """
-    from loom.toolsets.github.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_issues(
+    return await (await client_for("github", GitHubClient)).list_issues(
         repo,
         state=state,
         labels=labels,
@@ -146,9 +149,9 @@ async def github_get_issue(repo: str, number: int) -> GitHubIssue:
     Returns:
         The issue.
     """
-    from loom.toolsets.github.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_issue(repo, number)
+    return await (await client_for("github", GitHubClient)).get_issue(repo, number)
 
 
 @step(retry=_UNSAFE_WRITE)
@@ -174,9 +177,9 @@ async def github_create_issue(
     Returns:
         The created issue, including its number and URL.
     """
-    from loom.toolsets.github.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_issue(
+    return await (await client_for("github", GitHubClient)).create_issue(
         repo, title, body=body, labels=labels, assignees=assignees
     )
 
@@ -205,9 +208,9 @@ async def github_update_issue(
     Returns:
         The updated issue.
     """
-    from loom.toolsets.github.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().update_issue(
+    return await (await client_for("github", GitHubClient)).update_issue(
         repo,
         number,
         title=title,
@@ -232,9 +235,9 @@ async def github_list_comments(
     Returns:
         Paginated comments with body, author, and timestamp.
     """
-    from loom.toolsets.github.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_comments(repo, number, limit=limit)
+    return await (await client_for("github", GitHubClient)).list_comments(repo, number, limit=limit)
 
 
 @step(retry=_UNSAFE_WRITE)
@@ -253,9 +256,9 @@ async def github_add_comment(repo: str, number: int, body: str) -> GitHubComment
     Returns:
         The created comment.
     """
-    from loom.toolsets.github.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().add_comment(repo, number, body)
+    return await (await client_for("github", GitHubClient)).add_comment(repo, number, body)
 
 
 @step(retry=_READ)
@@ -277,9 +280,9 @@ async def github_list_pull_requests(
     Returns:
         Paginated pull requests with head, base, draft, and merge state.
     """
-    from loom.toolsets.github.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_pull_requests(
+    return await (await client_for("github", GitHubClient)).list_pull_requests(
         repo, state=state, base=base, limit=limit
     )
 
@@ -295,9 +298,9 @@ async def github_get_pull_request(repo: str, number: int) -> GitHubPullRequest:
     Returns:
         The pull request, with branches, draft flag, and merge state.
     """
-    from loom.toolsets.github.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_pull_request(repo, number)
+    return await (await client_for("github", GitHubClient)).get_pull_request(repo, number)
 
 
 @step(retry=_UNSAFE_WRITE)
@@ -325,9 +328,9 @@ async def github_create_pull_request(
     Returns:
         The created pull request.
     """
-    from loom.toolsets.github.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_pull_request(
+    return await (await client_for("github", GitHubClient)).create_pull_request(
         repo, title, head=head, base=base, body=body, draft=draft
     )
 
@@ -350,9 +353,9 @@ async def github_search_issues(query: str, limit: int = 30) -> Results[GitHubIss
     Returns:
         Paginated matching issues and pull requests.
     """
-    from loom.toolsets.github.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().search_issues(query, limit=limit)
+    return await (await client_for("github", GitHubClient)).search_issues(query, limit=limit)
 
 
 @step(retry=_READ)
@@ -369,6 +372,6 @@ async def github_search_repos(query: str, limit: int = 30) -> Results[GitHubRepo
     Returns:
         Paginated matching repositories.
     """
-    from loom.toolsets.github.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().search_repos(query, limit=limit)
+    return await (await client_for("github", GitHubClient)).search_repos(query, limit=limit)

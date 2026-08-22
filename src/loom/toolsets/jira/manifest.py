@@ -22,6 +22,8 @@ from loom.toolsets.jira.models import (
     UserLookup,
 )
 from loom.toolsets.manifest import (
+    AuthField,
+    AuthSpec,
     EffectClass,
     OperationSpec,
     ToolsetManifest,
@@ -43,10 +45,27 @@ JIRA_MANIFEST = ToolsetManifest(
         "and get the authenticated user."
     ),
     base_url="https://<org>.atlassian.net",
-    auth={
-        "type": "basic",
-        "fields": ["JIRA_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"],
-    },
+    auth=AuthSpec(
+        # `atlassian`, not `jira`: the provider serves both Jira and
+        # Confluence, and `loom connect jira` refused outright until this
+        # said so. `offline_access` is requested by the flow and implied by
+        # no single operation, which is why it is here and the rest are on
+        # the operations.
+        kind="oauth2",
+        credential="jira",
+        provider="atlassian",
+        scopes=("offline_access",),
+        fields=(
+            AuthField(name="JIRA_URL", label="Site URL", secret=False,
+                      example="https://acme.atlassian.net", arg="base_url"),
+            AuthField(name="JIRA_EMAIL", label="Atlassian account email",
+                      secret=False, arg="email"),
+            AuthField(name="JIRA_API_TOKEN", label="API token", arg="api_token"),
+        ),
+        client="loom.toolsets.jira.client:JiraClient",
+        setup_url="https://developer.atlassian.com/console/myapps/",
+        docs_url="https://developer.atlassian.com/cloud/jira/platform/oauth-2-3lo-apps/",
+    ),
     tools_module="loom.toolsets.jira.tools",
     opaque_ids={
         # The number differs per site and nobody knows it from memory.
@@ -72,6 +91,7 @@ JIRA_MANIFEST = ToolsetManifest(
                 function="jira_search_issues",
                 summary="Search issues with a JQL query.",
                 effect=EffectClass.READ,
+                scopes=["read:jira-work"],
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -111,6 +131,7 @@ JIRA_MANIFEST = ToolsetManifest(
                     "across projects. Check the match count before filtering."
                 ),
                 effect=EffectClass.READ,
+                scopes=["read:jira-work"],
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -133,6 +154,7 @@ JIRA_MANIFEST = ToolsetManifest(
                 function="jira_get_issue",
                 summary="Fetch a single issue by key.",
                 effect=EffectClass.READ,
+                scopes=["read:jira-work"],
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -230,6 +252,7 @@ JIRA_MANIFEST = ToolsetManifest(
                 function="jira_get_transitions",
                 summary="List available status transitions.",
                 effect=EffectClass.READ,
+                scopes=["read:jira-work"],
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -283,6 +306,7 @@ JIRA_MANIFEST = ToolsetManifest(
                 function="jira_get_comments",
                 summary="Read an issue's comments.",
                 effect=EffectClass.READ,
+                scopes=["read:jira-work"],
                 pagination=True,
                 input_schema={
                     "type": "object",
@@ -327,6 +351,7 @@ JIRA_MANIFEST = ToolsetManifest(
                     "not exist returns zero issues and no error."
                 ),
                 effect=EffectClass.READ,
+                scopes=["read:jira-work"],
                 input_schema={
                     "type": "object",
                     "properties": {"project_name": {"type": "string"}},
@@ -340,6 +365,7 @@ JIRA_MANIFEST = ToolsetManifest(
                 function="jira_list_projects",
                 summary="List all accessible projects.",
                 effect=EffectClass.READ,
+                scopes=["read:jira-work"],
                 output_schema={
                     "type": "array",
                     "items": JiraProject.model_json_schema(),
@@ -351,6 +377,7 @@ JIRA_MANIFEST = ToolsetManifest(
                 function="jira_get_project",
                 summary="Get one project's details.",
                 effect=EffectClass.READ,
+                scopes=["read:jira-work"],
                 input_schema={
                     "type": "object",
                     "properties": {"project_key": {"type": "string"}},
@@ -369,6 +396,7 @@ JIRA_MANIFEST = ToolsetManifest(
                     "not have returns zero rows with no error."
                 ),
                 effect=EffectClass.READ,
+                scopes=["read:jira-work"],
                 input_schema={
                     "type": "object",
                     "properties": {"project_key": {"type": "string"}},
@@ -391,6 +419,7 @@ JIRA_MANIFEST = ToolsetManifest(
                     "accepts) — they are not interchangeable."
                 ),
                 effect=EffectClass.READ,
+                scopes=["read:jira-work"],
                 pagination=True,
                 input_schema={
                     "type": "object",
@@ -419,6 +448,7 @@ JIRA_MANIFEST = ToolsetManifest(
                     "on instances that have both."
                 ),
                 effect=EffectClass.READ,
+                scopes=["read:jira-work"],
                 input_schema={
                     "type": "object",
                     "properties": {"field_name": {"type": "string"}},
@@ -440,6 +470,7 @@ JIRA_MANIFEST = ToolsetManifest(
                     "nothing rather than failing."
                 ),
                 effect=EffectClass.READ,
+                scopes=["read:jira-work"],
                 pagination=True,
                 input_schema={
                     "type": "object",
@@ -467,6 +498,7 @@ JIRA_MANIFEST = ToolsetManifest(
                     "`exact` before acting on a write."
                 ),
                 effect=EffectClass.READ,
+                scopes=["read:jira-work"],
                 input_schema={
                     "type": "object",
                     "properties": {"name": {"type": "string"}},
@@ -480,6 +512,7 @@ JIRA_MANIFEST = ToolsetManifest(
                 function="jira_get_myself",
                 summary="Get the authenticated user's profile.",
                 effect=EffectClass.READ,
+                scopes=["read:jira-work"],
                 output_schema=JiraUser.model_json_schema(),
                 idempotent=True,
             ),

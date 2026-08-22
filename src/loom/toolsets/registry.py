@@ -7,8 +7,10 @@ toolsets manually or via pip entry points (``loom_toolset`` group).
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
+from loom.toolsets.catalog import ToolsetCatalog
 from loom.toolsets.manifest import ToolsetManifest
 
 if TYPE_CHECKING:
@@ -136,6 +138,31 @@ def _lazy_toolset(manifest: Any, tools_module: str) -> Toolset:
     return Toolset(manifest=manifest, _resolver=resolve)
 
 
+def builtin_manifests() -> Iterator[tuple[ToolsetManifest, str]]:
+    """Every shipped ``(manifest, tools module)`` this process can import.
+
+    One loader for both halves of the built-in tier — :func:`builtin_toolset`
+    resolves one by name, :class:`BuiltinToolsetCatalog` reads them all — so
+    the two cannot disagree about which toolsets LOOM ships or about what a
+    failed import means.
+
+    Manifests only: a ``manifest`` module imports Pydantic models, never
+    ``httpx``, never a vendor SDK, and never the ``tools`` module it names.
+    A toolset whose manifest will not import is simply absent, exactly as it
+    was before this existed.
+    """
+    import importlib
+
+    for manifest_path, tools_module in BUILTIN_TOOLSETS:
+        module_path, attribute = manifest_path.rsplit(".", 1)
+        try:
+            manifest = getattr(importlib.import_module(module_path), attribute)
+        except Exception:
+            logger.debug("builtin toolset %s failed to import", manifest_path, exc_info=True)
+            continue
+        yield manifest, tools_module
+
+
 def builtin_toolset(toolset_id: str) -> Toolset | None:
     """A toolset LOOM ships, by id, or ``None``.
 
@@ -151,19 +178,82 @@ def builtin_toolset(toolset_id: str) -> Toolset | None:
     actually broken: a generated workflow saying ``toolsets=["jira"]``, run by
     a process that registered nothing.
     """
-    import importlib
-
-    for manifest_path, tools_module in BUILTIN_TOOLSETS:
-        module_path, attribute = manifest_path.rsplit(".", 1)
-        try:
-            manifest = getattr(importlib.import_module(module_path), attribute)
-        except Exception:
-            # A toolset whose module will not import is simply absent, exactly
-            # as it was before this existed.
-            continue
+    for manifest, tools_module in builtin_manifests():
         if manifest.id == toolset_id:
             return _lazy_toolset(manifest, tools_module)
     return None
+
+
+class BuiltinToolsetCatalog(ToolsetCatalog):
+    """The toolsets LOOM ships, as a **discovery** tier. Manifests only.
+
+    The other half of :func:`builtin_toolset`, and the same distinction it
+    already draws one layer down: *asking for one by name gets it; asking for
+    "everything" does not*. That rule was applied to resolution
+    (``ToolsetRegistry.get_toolset``) and never to discovery, so
+    ``search_toolsets("jira")`` on a ``loom author`` run answered nothing while
+    ``toolsets=["jira"]`` in the generated file resolved perfectly.
+
+    Deliberately **not** the process-global registry. Registering these there
+    would put them in ``list_toolsets()`` and so in ``resolve_tools()``'s no-ids
+    sweep — which is how a prompt-only ``ctx.agent("summarise this")`` acquires
+    ``jira_delete_issue``. This tier answers "what may be named"; it never
+    answers "what may be swept".
+
+    Read-only, and **loaded on first read** rather than on construction — see
+    :attr:`_manifests`. A ``ToolsetRegistry`` holds one of these permanently,
+    so a Runtime that never browses a catalogue never imports the 27 manifest
+    modules.
+    """
+
+    def __init__(self) -> None:
+        self._store: dict[str, ToolsetManifest] = {}
+        self._loaded = False
+        # Assigns `self._manifests = {}`, which the setter below absorbs.
+        super().__init__()
+
+    @property
+    def _manifests(self) -> dict[str, ToolsetManifest]:
+        """The shipped manifests, imported on the first read of any kind.
+
+        A property rather than an ``_ensure()`` call at the top of each read,
+        because the reads are inherited: every method ``ToolsetCatalog`` has
+        now — and every one it grows later — goes through this dict, so laziness
+        cannot be forgotten in the way parent-chaining repeatedly was.
+        """
+        if not self._loaded:
+            # Set first: the loader touches no attribute of self, but a partial
+            # load must not re-enter and duplicate work if that ever changes.
+            self._loaded = True
+            for manifest, _tools_module in builtin_manifests():
+                self._store[manifest.id] = manifest
+        return self._store
+
+    @_manifests.setter
+    def _manifests(self, value: dict[str, ToolsetManifest]) -> None:
+        # Only ``ToolsetCatalog.__init__`` assigns this, and only ``{}``.
+        if value:
+            raise TypeError("the built-in toolset tier is read-only")
+
+    def register(self, manifest: ToolsetManifest, /) -> None:
+        raise TypeError(
+            "the built-in toolset tier is read-only — register with "
+            "register_toolset() (process-global) or rt.toolsets.register() (local)"
+        )
+
+    def unregister(self, toolset_id: str) -> None:
+        raise TypeError("the built-in toolset tier is read-only")
+
+
+_builtin_catalog: BuiltinToolsetCatalog | None = None
+
+
+def builtin_catalog() -> BuiltinToolsetCatalog:
+    """The process-wide built-in discovery tier. Cheap; loads on first read."""
+    global _builtin_catalog
+    if _builtin_catalog is None:
+        _builtin_catalog = BuiltinToolsetCatalog()
+    return _builtin_catalog
 
 
 def get_catalog() -> ToolsetRegistry:
@@ -210,17 +300,14 @@ def register_available_toolsets() -> list[str]:
     put ``jira_delete_issue`` on every unscoped ``ctx.agent()``. MCP is an
     integration surface; that default is the other way around.
     """
-    import importlib
-
     catalog = get_catalog()
-    for manifest_path, tools_module in BUILTIN_TOOLSETS:
-        module_path, attribute = manifest_path.rsplit(".", 1)
-        try:
-            manifest = getattr(importlib.import_module(module_path), attribute)
-        except Exception:
-            logger.debug("builtin toolset %s failed to import", manifest_path, exc_info=True)
-            continue
-        if catalog.get(manifest.id) is None:
+    # `list_toolsets()` is the *registered* set, and that is the question here.
+    # Neither `get()` nor `get_toolset()` answers it any more: both reach the
+    # built-in tier, where every one of these already resolves — so asking
+    # either one registers nothing at all.
+    registered = set(catalog.list_toolsets())
+    for manifest, tools_module in builtin_manifests():
+        if manifest.id not in registered:
             register_toolset(_lazy_toolset(manifest, tools_module))
     discover_entry_points()
     return sorted(catalog.list_toolsets())

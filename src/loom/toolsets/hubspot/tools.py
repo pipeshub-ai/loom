@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 from loom import Retry, step
+from loom.toolsets.hubspot.client import HubSpotClient
 from loom.toolsets.hubspot.models import (
     HubSpotAccount,
     HubSpotCompany,
@@ -49,9 +50,10 @@ async def hubspot_list_objects(
     Returns:
         Paginated records. Check ``.complete`` before reporting a total.
     """
-    from loom.toolsets.hubspot.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_objects(
+
+    return await (await client_for("hubspot", HubSpotClient)).list_objects(
         object_type, limit=limit, properties=properties, archived=archived
     )
 
@@ -86,9 +88,9 @@ async def hubspot_search_objects(
     Returns:
         Paginated matching records.
     """
-    from loom.toolsets.hubspot.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().search_objects(
+    return await (await client_for("hubspot", HubSpotClient)).search_objects(
         object_type,
         query=query,
         filters=filters,
@@ -117,9 +119,9 @@ async def hubspot_get_object(
     Returns:
         The record.
     """
-    from loom.toolsets.hubspot.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_object(
+    return await (await client_for("hubspot", HubSpotClient)).get_object(
         object_type, object_id, properties=properties, id_property=id_property
     )
 
@@ -140,9 +142,9 @@ async def hubspot_create_object(
     Returns:
         The created record, including its id.
     """
-    from loom.toolsets.hubspot.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_object(object_type, properties)
+    return await (await client_for("hubspot", HubSpotClient)).create_object(object_type, properties)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -159,9 +161,9 @@ async def hubspot_update_object(
     Returns:
         The updated record.
     """
-    from loom.toolsets.hubspot.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().update_object(
+    return await (await client_for("hubspot", HubSpotClient)).update_object(
         object_type, object_id, properties
     )
 
@@ -177,9 +179,9 @@ async def hubspot_archive_object(object_type: str, object_id: str) -> bool:
     Returns:
         True once HubSpot has accepted it.
     """
-    from loom.toolsets.hubspot.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().archive_object(object_type, object_id)
+    return await (await client_for("hubspot", HubSpotClient)).archive_object(object_type, object_id)
 
 
 @step(retry=_READ)
@@ -197,9 +199,9 @@ async def hubspot_find_contacts(query: str = "", limit: int = 20) -> Results[Hub
     Returns:
         Contacts with email, name, company, phone, and lifecycle stage.
     """
-    from loom.toolsets.hubspot.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().find_contacts(query, limit=limit)
+    return await (await client_for("hubspot", HubSpotClient)).find_contacts(query, limit=limit)
 
 
 @step(retry=_READ)
@@ -215,9 +217,9 @@ async def hubspot_get_contact_by_email(email: str) -> HubSpotContact:
     Returns:
         The contact.
     """
-    from loom.toolsets.hubspot.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_contact_by_email(email)
+    return await (await client_for("hubspot", HubSpotClient)).get_contact_by_email(email)
 
 
 @step(retry=_UNSAFE_WRITE)
@@ -232,9 +234,9 @@ async def hubspot_create_contact(properties: dict[str, Any]) -> HubSpotContact:
     Returns:
         The created contact.
     """
-    from loom.toolsets.hubspot.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_contact(properties)
+    return await (await client_for("hubspot", HubSpotClient)).create_contact(properties)
 
 
 @step(retry=_READ)
@@ -250,9 +252,9 @@ async def hubspot_find_companies(
     Returns:
         Companies with name, domain, industry, and location.
     """
-    from loom.toolsets.hubspot.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().find_companies(query, limit=limit)
+    return await (await client_for("hubspot", HubSpotClient)).find_companies(query, limit=limit)
 
 
 @step(retry=_READ)
@@ -266,9 +268,9 @@ async def hubspot_find_deals(query: str = "", limit: int = 20) -> Results[HubSpo
     Returns:
         Deals with stage, pipeline, amount, and close date.
     """
-    from loom.toolsets.hubspot.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().find_deals(query, limit=limit)
+    return await (await client_for("hubspot", HubSpotClient)).find_deals(query, limit=limit)
 
 
 @step(retry=_UNSAFE_WRITE)
@@ -284,9 +286,9 @@ async def hubspot_create_deal(properties: dict[str, Any]) -> HubSpotDeal:
     Returns:
         The created deal.
     """
-    from loom.toolsets.hubspot.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_deal(properties)
+    return await (await client_for("hubspot", HubSpotClient)).create_deal(properties)
 
 
 @step(retry=_READ)
@@ -306,9 +308,9 @@ async def hubspot_get_associations(
     Returns:
         Associated record ids. Fetch each with ``hubspot_get_object``.
     """
-    from loom.toolsets.hubspot.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_associations(
+    return await (await client_for("hubspot", HubSpotClient)).get_associations(
         object_type, object_id, to_object_type
     )
 
@@ -327,9 +329,9 @@ async def hubspot_list_owners(email: str = "", limit: int = 100) -> list[HubSpot
     Returns:
         Owners with id, email, and name.
     """
-    from loom.toolsets.hubspot.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_owners(email=email, limit=limit)
+    return await (await client_for("hubspot", HubSpotClient)).list_owners(email=email, limit=limit)
 
 
 @step(retry=_READ)
@@ -343,6 +345,6 @@ async def hubspot_account_info() -> HubSpotAccount:
     Returns:
         The account's portal id, type, time zone, currency, and data region.
     """
-    from loom.toolsets.hubspot.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().account_info()
+    return await (await client_for("hubspot", HubSpotClient)).account_info()

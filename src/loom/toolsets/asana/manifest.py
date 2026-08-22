@@ -23,6 +23,8 @@ from loom.toolsets.asana.models import (
     AsanaWorkspace,
 )
 from loom.toolsets.manifest import (
+    AuthField,
+    AuthSpec,
     EffectClass,
     OperationSpec,
     ToolsetManifest,
@@ -43,7 +45,17 @@ ASANA_MANIFEST = ToolsetManifest(
         "and resolve a person's name to the gid every assignment requires."
     ),
     base_url="https://app.asana.com/api/1.0",
-    auth={"type": "bearer", "fields": ["ASANA_ACCESS_TOKEN"]},
+    auth=AuthSpec(
+        client="loom.toolsets.asana.client:AsanaClient",
+        # This client reads environment variables and no CredentialStore, so
+        # `credential` is empty and no `provider` is declared: an OAuth flow
+        # here would store a token the client never looks up. Adding a store
+        # path is a change to the client, not to this manifest.
+        kind="bearer",
+        fields=(
+            AuthField(name="ASANA_ACCESS_TOKEN", arg="access_token", label="Personal access token"),
+        ),
+    ),
     tools_module="loom.toolsets.asana.tools",
     egress_hosts=["app.asana.com"],
     rate_limits={

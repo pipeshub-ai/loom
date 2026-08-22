@@ -17,6 +17,7 @@ reviewed, and the next write should want a human.
 from __future__ import annotations
 
 from loom import Retry, step
+from loom.toolsets.exa.client import ExaClient
 from loom.toolsets.exa.models import ExaAnswer, ExaContents, ExaResult
 
 #: Reads, so retrying is free. The delay is generous because Exa's 429 is the
@@ -67,9 +68,10 @@ async def exa_search(
         Matching pages, most relevant first. A plain list, not ``Results``:
         Exa has no cursor, so there is no page to follow.
     """
-    from loom.toolsets.exa.client import get_default_client
 
-    return await get_default_client().search(
+    from loom.toolsets.factory import client_for
+
+    return await (await client_for("exa", ExaClient)).search(
         query,
         num_results=num_results,
         search_type=search_type,
@@ -115,9 +117,9 @@ async def exa_find_similar(
     Returns:
         Similar pages, most similar first.
     """
-    from loom.toolsets.exa.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().find_similar(
+    return await (await client_for("exa", ExaClient)).find_similar(
         url,
         num_results=num_results,
         exclude_source_domain=exclude_source_domain,
@@ -157,9 +159,9 @@ async def exa_get_contents(
         request — this endpoint returns 200 when some URLs could not be
         crawled.
     """
-    from loom.toolsets.exa.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_contents(
+    return await (await client_for("exa", ExaClient)).get_contents(
         urls,
         include_text=include_text,
         include_highlights=include_highlights,
@@ -184,6 +186,6 @@ async def exa_answer(query: str, include_text: bool = False) -> ExaAnswer:
         The answer and the pages it came from. The citations are the point —
         an answer without them cannot be checked.
     """
-    from loom.toolsets.exa.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().answer(query, include_text=include_text)
+    return await (await client_for("exa", ExaClient)).answer(query, include_text=include_text)

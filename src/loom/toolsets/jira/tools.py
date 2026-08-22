@@ -24,6 +24,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from loom import Retry, step
+from loom.toolsets.jira.client import JiraClient
 from loom.toolsets.jira.models import (
     Comment,
     CreatedIssue,
@@ -67,9 +68,10 @@ async def jira_search_issues(
         priority, issue_type, project, labels, created, updated, url,
         custom_fields.
     """
-    from loom.toolsets.jira.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().search_issues(
+
+    return await (await client_for("jira", JiraClient)).search_issues(
         jql, max_results, custom_fields=custom_fields
     )
 
@@ -91,9 +93,9 @@ async def jira_get_issue(
     Returns:
         A JiraIssue.
     """
-    from loom.toolsets.jira.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_issue(issue_key, custom_fields)
+    return await (await client_for("jira", JiraClient)).get_issue(issue_key, custom_fields)
 
 
 # No idempotency key: a retry after a timeout the service accepted files
@@ -130,9 +132,9 @@ async def jira_create_issue(
     Returns:
         CreatedIssue with key, id, and browse url.
     """
-    from loom.toolsets.jira.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_issue(
+    return await (await client_for("jira", JiraClient)).create_issue(
         project_key,
         summary,
         description,
@@ -171,9 +173,9 @@ async def jira_update_issue(
     Returns:
         Updated JiraIssue.
     """
-    from loom.toolsets.jira.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().update_issue(issue_key, fields)
+    return await (await client_for("jira", JiraClient)).update_issue(issue_key, fields)
 
 
 # No idempotency key: a retry after a timeout the service accepted files
@@ -191,9 +193,9 @@ async def jira_add_comment(
     Returns:
         Comment with id, author, and created timestamp.
     """
-    from loom.toolsets.jira.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().add_comment(issue_key, comment)
+    return await (await client_for("jira", JiraClient)).add_comment(issue_key, comment)
 
 
 @step(retry=Retry(max_attempts=3, initial_delay=1.0))
@@ -208,9 +210,9 @@ async def jira_get_transitions(
     Returns:
         List of Transition models with id and name.
     """
-    from loom.toolsets.jira.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_transitions(issue_key)
+    return await (await client_for("jira", JiraClient)).get_transitions(issue_key)
 
 
 @step(retry=Retry(max_attempts=2, initial_delay=1.0))
@@ -230,9 +232,9 @@ async def jira_transition_issue(
     Returns:
         Updated JiraIssue after the transition.
     """
-    from loom.toolsets.jira.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    client = get_default_client()
+    client = (await client_for("jira", JiraClient))
     transitions = await client.get_transitions(issue_key)
     match = next(
         (t for t in transitions if t.name.lower() == transition_name.lower()),
@@ -255,9 +257,9 @@ async def jira_list_projects() -> list[JiraProject]:
     Returns:
         List of JiraProject models with key, name, and id.
     """
-    from loom.toolsets.jira.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_projects()
+    return await (await client_for("jira", JiraClient)).list_projects()
 
 
 @step(retry=Retry(max_attempts=3, initial_delay=1.0))
@@ -280,9 +282,9 @@ async def jira_search_users(
         Empty when nobody matches — which is worth distinguishing from
         "the person exists but has no matching issues".
     """
-    from loom.toolsets.jira.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().search_users(query, max_results)
+    return await (await client_for("jira", JiraClient)).search_users(query, max_results)
 
 
 @step(retry=Retry(max_attempts=3, initial_delay=1.0))
@@ -292,9 +294,9 @@ async def jira_get_myself() -> JiraUser:
     Returns:
         JiraUser with account_id, display_name, and email.
     """
-    from loom.toolsets.jira.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_myself()
+    return await (await client_for("jira", JiraClient)).get_myself()
 
 
 @step(retry=Retry(max_attempts=3, initial_delay=1.0))
@@ -313,9 +315,9 @@ async def jira_resolve_user(name: str) -> UserLookup:
         and note. Check ``exact`` before acting on a write: resolving a typo to
         the nearest human is fine for a read and reckless for an assignment.
     """
-    from loom.toolsets.jira.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().resolve_user(name)
+    return await (await client_for("jira", JiraClient)).resolve_user(name)
 
 
 @step(retry=Retry(max_attempts=3, initial_delay=1.0))
@@ -335,9 +337,9 @@ async def jira_resolve_project(project_name: str) -> ProjectLookup:
         ProjectLookup with matches, exact, and note. More than one match means
         ambiguous, not "take the first".
     """
-    from loom.toolsets.jira.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().resolve_project(project_name)
+    return await (await client_for("jira", JiraClient)).resolve_project(project_name)
 
 
 @step(retry=Retry(max_attempts=3, initial_delay=1.0))
@@ -365,9 +367,9 @@ async def jira_resolve_epic(epic_name: str, project: str = "") -> EpicLookup:
         ``matches[0].key`` only when exactly one matched; hand several to a
         ctx.agent() step to choose between.
     """
-    from loom.toolsets.jira.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().resolve_epic(epic_name, project)
+    return await (await client_for("jira", JiraClient)).resolve_epic(epic_name, project)
 
 
 @step(retry=Retry(max_attempts=3, initial_delay=1.0))
@@ -390,9 +392,9 @@ async def jira_list_fields(
         200" is not the same as "does not exist". Each carries ``id`` (what a
         REST payload uses) and ``clause_names`` (what JQL accepts).
     """
-    from loom.toolsets.jira.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_fields(query, max_results)
+    return await (await client_for("jira", JiraClient)).list_fields(query, max_results)
 
 
 @step(retry=Retry(max_attempts=3, initial_delay=1.0))
@@ -412,9 +414,9 @@ async def jira_resolve_field(field_name: str) -> FieldLookup:
         FieldLookup with ``matches``, ``exact``, and ``note``. ``exact=False``
         is a suggestion, not a fact — confirm it before writing to the field.
     """
-    from loom.toolsets.jira.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().resolve_field(field_name)
+    return await (await client_for("jira", JiraClient)).resolve_field(field_name)
 
 
 @step(retry=Retry(max_attempts=3, initial_delay=1.0))
@@ -432,9 +434,9 @@ async def jira_get_project_metadata(project_key: str) -> ProjectMetadata:
     Returns:
         ProjectMetadata with statuses, priorities, and issue_types.
     """
-    from loom.toolsets.jira.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_metadata(project_key)
+    return await (await client_for("jira", JiraClient)).get_metadata(project_key)
 
 
 @step(retry=Retry(max_attempts=3, initial_delay=1.0))
@@ -447,9 +449,9 @@ async def jira_get_project(project_key: str) -> JiraProjectDetail:
     Returns:
         JiraProjectDetail with key, name, id, description, lead.
     """
-    from loom.toolsets.jira.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_project(project_key)
+    return await (await client_for("jira", JiraClient)).get_project(project_key)
 
 
 @step(retry=Retry(max_attempts=3, initial_delay=1.0))
@@ -463,9 +465,9 @@ async def jira_get_comments(issue_key: str, max_results: int = 20) -> Results[Co
     Returns:
         List of Comment with id, author, created, and body as plain text.
     """
-    from loom.toolsets.jira.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_comments(issue_key, max_results)
+    return await (await client_for("jira", JiraClient)).get_comments(issue_key, max_results)
 
 
 @step(retry=Retry(max_attempts=2, initial_delay=1.0))
@@ -480,9 +482,9 @@ async def jira_assign_issue(issue_key: str, account_id: str | None) -> JiraIssue
     Returns:
         The updated JiraIssue.
     """
-    from loom.toolsets.jira.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().assign_issue(issue_key, account_id)
+    return await (await client_for("jira", JiraClient)).assign_issue(issue_key, account_id)
 
 
 @step(retry=Retry(max_attempts=1))
@@ -497,9 +499,9 @@ async def jira_delete_issue(issue_key: str, delete_subtasks: bool = False) -> st
     Returns:
         The key that was deleted, so the journal records what went.
     """
-    from loom.toolsets.jira.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().delete_issue(issue_key, delete_subtasks)
+    return await (await client_for("jira", JiraClient)).delete_issue(issue_key, delete_subtasks)
 
 
 # ---------------------------------------------------------------------------

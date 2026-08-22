@@ -7,6 +7,8 @@ what the tools return.
 from __future__ import annotations
 
 from loom.toolsets.manifest import (
+    AuthField,
+    AuthSpec,
     EffectClass,
     OperationSpec,
     ToolsetManifest,
@@ -40,7 +42,20 @@ STRIPE_MANIFEST = ToolsetManifest(
         "and the decline `code` is the actionable part."
     ),
     base_url="https://api.stripe.com/v1",
-    auth={"type": "bearer", "fields": ["STRIPE_API_KEY"]},
+    auth=AuthSpec(
+        client="loom.toolsets.stripe.client:StripeClient",
+        # This client reads environment variables and no CredentialStore, so
+        # `credential` is empty and no `provider` is declared: an OAuth flow
+        # here would store a token the client never looks up. Adding a store
+        # path is a change to the client, not to this manifest.
+        kind="bearer",
+        fields=(
+            AuthField(name="STRIPE_API_KEY", arg="api_key", label="Secret API key",
+                      example="sk_live_…"),
+            AuthField(name="STRIPE_ACCOUNT", arg="account", label="Connected account id",
+                      secret=False, required=False, example="acct_…"),
+        ),
+    ),
     tools_module="loom.toolsets.stripe.tools",
     opaque_ids={r"\bcus_[A-Za-z0-9]{10,}\b": "customer"},
     egress_hosts=["api.stripe.com"],

@@ -20,6 +20,8 @@ from loom.toolsets.clickup.models import (
     ClickUpWorkspace,
 )
 from loom.toolsets.manifest import (
+    AuthField,
+    AuthSpec,
     EffectClass,
     OperationSpec,
     ToolsetManifest,
@@ -41,12 +43,22 @@ CLICKUP_MANIFEST = ToolsetManifest(
         "write requires."
     ),
     base_url="https://api.clickup.com/api/v2",
-    auth={
-        # Two shapes, sent differently: a personal token goes in Authorization
-        # raw, an OAuth token takes a Bearer prefix.
-        "type": "token",
-        "fields": ["CLICKUP_API_TOKEN", "CLICKUP_OAUTH_TOKEN"],
-    },
+    auth=AuthSpec(
+        client="loom.toolsets.clickup.client:ClickUpClient",
+        # This client reads environment variables and no CredentialStore, so
+        # `credential` is empty and no `provider` is declared: an OAuth flow
+        # here would store a token the client never looks up. Adding a store
+        # path is a change to the client, not to this manifest.
+        kind="bearer",
+        fields=(
+            # Either, and they are sent differently — a personal token raw, an
+            # OAuth one with the `Bearer` prefix. See toolsets/CLAUDE.md.
+            AuthField(name="CLICKUP_API_TOKEN", arg="api_token", label="Personal API token",
+                      example="pk_…", mode="personal"),
+            AuthField(name="CLICKUP_OAUTH_TOKEN",
+                      arg="oauth_token", label="OAuth token", mode="oauth"),
+        ),
+    ),
     tools_module="loom.toolsets.clickup.tools",
     egress_hosts=["api.clickup.com"],
     rate_limits={

@@ -50,6 +50,7 @@ class TestTheAnswerComesOutOfAModel:
     async def test_an_f_string_around_the_model_output_counts(self) -> None:
         """Wrapping the answer in a heading does not make the answer the code's."""
         code = workflow(
+            '    rows = await ctx.step(search, "q")\n'
             '    verdict = await ctx.agent("write it up")\n'
             '    return f"## Report\\n{verdict.text()}"\n'
         )
@@ -57,13 +58,18 @@ class TestTheAnswerComesOutOfAModel:
         assert (await check(code)).issues
 
     async def test_the_inline_form_counts(self) -> None:
-        code = workflow('    return (await ctx.agent("do it")).text()\n')
+        code = workflow(
+            '    rows = await ctx.step(search, "q")\n'
+            '    return (await ctx.agent("do it")).text()\n'
+        )
 
         assert (await check(code)).issues
 
     async def test_it_names_the_line_and_the_way_out(self) -> None:
         code = workflow(
-            '    answer = await ctx.agent("go")\n    return answer.text()\n'
+            '    rows = await ctx.step(search, "q")\n'
+            '    answer = await ctx.agent("go")\n'
+            '    return answer.text()\n'
         )
 
         result = await check(code)
@@ -72,6 +78,64 @@ class TestTheAnswerComesOutOfAModel:
         message = result.issues[0].message
         assert "@step" in message, "say what to write instead"
         assert "return the code unchanged" in message, "and how to decline"
+
+
+class TestNothingInHandToReDerive:
+    """The observed failure: ``tell me a joke after 2 minutes``.
+
+    A workflow that reads nothing has no other source for its answer, so
+    reporting the model call asks for the one thing the file cannot contain —
+    and the repair loop then rewrites correct code round after round, the
+    no-passing-state failure ``FuzzyMatch`` was fixed for.
+    """
+
+    NO_JUDGEMENT_WORDS = "a fun fact about octopuses after two minutes"
+
+    async def test_the_workflow_that_prompted_it(self) -> None:
+        code = (
+            "from datetime import timedelta\n"
+            "from loom import Context, workflow\n\n\n"
+            '@workflow(name="w")\n'
+            "async def w(ctx: Context, input_data) -> str:\n"
+            "    await ctx.sleep(timedelta(minutes=2))\n"
+            '    result = await ctx.agent("tell a joke")\n'
+            '    return f"Here is your joke:\\n{result.text()}"\n'
+        )
+
+        result = await check(code, self.NO_JUDGEMENT_WORDS)
+
+        assert not result.issues, result.reason
+        assert not result.skipped, "it ran and found nothing, which is not a skip"
+
+    async def test_a_declared_but_unused_input_holds_nothing(self) -> None:
+        """What a model writes when the spec supplies no input."""
+        code = workflow('    return (await ctx.agent("go")).text()\n')
+
+        assert not (await check(code, self.NO_JUDGEMENT_WORDS)).issues
+
+    async def test_an_input_the_body_reads_is_data_in_hand(self) -> None:
+        code = workflow(
+            '    return (await ctx.agent(f"tabulate {data}")).text()\n'
+        )
+
+        assert (await check(code, self.NO_JUDGEMENT_WORDS)).issues
+
+    async def test_a_step_is_data_in_hand(self) -> None:
+        code = workflow(
+            '    rows = await ctx.step(search, "q")\n'
+            '    return (await ctx.agent("tabulate them")).text()\n'
+        )
+
+        assert (await check(code, self.NO_JUDGEMENT_WORDS)).issues
+
+    async def test_asking_for_a_joke_is_asking_for_judgement(self) -> None:
+        """The vocabulary, independent of the structural rule above it."""
+        code = workflow(
+            '    rows = await ctx.step(search, "q")\n'
+            '    return (await ctx.agent("joke about them")).text()\n'
+        )
+
+        assert not (await check(code, "tell me a joke about my tickets")).issues
 
 
 class TestWhatItMustNotFlag:

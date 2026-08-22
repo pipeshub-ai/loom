@@ -28,6 +28,8 @@ from loom.toolsets.duckduckgo.models import (
     DuckDuckGoResult,
 )
 from loom.toolsets.manifest import (
+    AuthField,
+    AuthSpec,
     EffectClass,
     OperationSpec,
     ToolsetManifest,
@@ -58,7 +60,20 @@ DUCKDUCKGO_MANIFEST = ToolsetManifest(
         "ambiguous between 'that is everything' and 'it stopped early'."
     ),
     base_url="https://duckduckgo.com",
-    auth={"type": "none", "fields": []},
+    auth=AuthSpec(
+        client="loom.toolsets.duckduckgo.client:DuckDuckGoClient",
+        # No API and no key — `ddgs` parses result pages.
+        kind="none",
+        # Not a credential, and declared anyway: the client reads it, so it has
+        # to reach the constructor through the same path everything else does.
+        # A value that is only obtainable from the ambient environment is the
+        # thing this whole change removes, whether or not it is secret.
+        fields=(
+            AuthField(name="DDGS_PROXY", label="Outbound proxy", arg="proxy",
+                      secret=False, required=False,
+                      example="socks5://127.0.0.1:1080"),
+        ),
+    ),
     tools_module="loom.toolsets.duckduckgo.tools",
     egress_hosts=["duckduckgo.com", "html.duckduckgo.com", "lite.duckduckgo.com"],
     rate_limits={

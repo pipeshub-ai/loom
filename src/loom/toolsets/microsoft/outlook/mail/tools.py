@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 from loom import Retry, step
 from loom.toolsets.microsoft.models import MicrosoftUser
+from loom.toolsets.microsoft.outlook.mail.client import OutlookMailClient
 from loom.toolsets.microsoft.outlook.models import MailFolder, OutlookMessage
 from loom.toolsets.pagination import Results
 
@@ -50,9 +51,9 @@ async def outlook_whoami() -> MicrosoftUser:
     Returns:
         The signed-in user's id, display name, email, and userPrincipalName.
     """
-    from loom.toolsets.microsoft.outlook.mail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().whoami()
+    return await (await client_for("outlook_mail", OutlookMailClient)).whoami()
 
 
 @step(retry=_READ)
@@ -70,9 +71,9 @@ async def outlook_list_folders(limit: int = 100) -> Results[MailFolder]:
     Returns:
         Results of MailFolder with item and unread counts.
     """
-    from loom.toolsets.microsoft.outlook.mail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_folders(limit=limit)
+    return await (await client_for("outlook_mail", OutlookMailClient)).list_folders(limit=limit)
 
 
 @step(retry=_READ)
@@ -103,9 +104,9 @@ async def outlook_list_messages(
         the page small; use ``outlook_get_message`` for one message's body, or
         read ``body_preview``, which is always present.
     """
-    from loom.toolsets.microsoft.outlook.mail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_messages(
+    return await (await client_for("outlook_mail", OutlookMailClient)).list_messages(
         folder_id=folder_id,
         limit=limit,
         filter_query=filter_query,
@@ -132,9 +133,9 @@ async def outlook_search_messages(
     Returns:
         Results of OutlookMessage, ranked by relevance.
     """
-    from loom.toolsets.microsoft.outlook.mail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().search_messages(
+    return await (await client_for("outlook_mail", OutlookMailClient)).search_messages(
         query, limit=limit, body_as_html=body_as_html
     )
 
@@ -154,9 +155,9 @@ async def outlook_get_message(
         groups by conversation, so acting on one message of a thread can look
         like nothing happened.
     """
-    from loom.toolsets.microsoft.outlook.mail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_message(
+    return await (await client_for("outlook_mail", OutlookMailClient)).get_message(
         message_id, body_as_html=body_as_html
     )
 
@@ -175,9 +176,9 @@ async def outlook_list_attachments(message_id: str) -> list[dict[str, Any]]:
         A list of dicts with ``id``, ``name``, ``content_type``, ``size``, and
         ``is_inline``. Inline attachments are embedded images, not documents.
     """
-    from loom.toolsets.microsoft.outlook.mail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_attachments(message_id)
+    return await (await client_for("outlook_mail", OutlookMailClient)).list_attachments(message_id)
 
 
 @step(retry=_READ)
@@ -196,9 +197,10 @@ async def outlook_get_attachment(message_id: str, attachment_id: str) -> Attachm
         ``ctx.put_artifact``, or ``att.offload(blobs)`` to keep the bytes out
         of the journal.
     """
-    from loom.toolsets.microsoft.outlook.mail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_attachment(message_id, attachment_id)
+    client = await client_for("outlook_mail", OutlookMailClient)
+    return await client.get_attachment(message_id, attachment_id)
 
 
 @step(retry=_UNSAFE_WRITE)
@@ -230,9 +232,9 @@ async def outlook_send_message(
         delivery confirmation — Graph's own note is that acceptance "doesn't
         indicate that the request processing has completed".
     """
-    from loom.toolsets.microsoft.outlook.mail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().send_message(
+    return await (await client_for("outlook_mail", OutlookMailClient)).send_message(
         to,
         subject,
         body,
@@ -259,9 +261,10 @@ async def outlook_reply_to_message(
     Returns:
         True when Graph accepted the reply.
     """
-    from loom.toolsets.microsoft.outlook.mail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().reply(message_id, comment, reply_all=reply_all)
+    client = await client_for("outlook_mail", OutlookMailClient)
+    return await client.reply(message_id, comment, reply_all=reply_all)
 
 
 @step(retry=_UNSAFE_WRITE)
@@ -280,9 +283,10 @@ async def outlook_forward_message(
     Returns:
         True when Graph accepted the forward.
     """
-    from loom.toolsets.microsoft.outlook.mail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().forward(message_id, to, comment=comment)
+    client = await client_for("outlook_mail", OutlookMailClient)
+    return await client.forward(message_id, to, comment=comment)
 
 
 @step(retry=_UNSAFE_WRITE)
@@ -313,9 +317,9 @@ async def outlook_create_draft(
         The created draft as an OutlookMessage, with a ``web_link`` a person
         can open.
     """
-    from loom.toolsets.microsoft.outlook.mail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_draft(
+    return await (await client_for("outlook_mail", OutlookMailClient)).create_draft(
         to, subject, body, cc=cc, bcc=bcc, body_type=body_type
     )
 
@@ -337,9 +341,9 @@ async def outlook_send_draft(message_id: str) -> bool:
         True meaning Graph **accepted** the send. As with
         ``outlook_send_message``, acceptance is not a delivery confirmation.
     """
-    from loom.toolsets.microsoft.outlook.mail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().send_draft(message_id)
+    return await (await client_for("outlook_mail", OutlookMailClient)).send_draft(message_id)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -362,9 +366,9 @@ async def outlook_update_message(
     Returns:
         The updated OutlookMessage.
     """
-    from loom.toolsets.microsoft.outlook.mail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().update_message(
+    return await (await client_for("outlook_mail", OutlookMailClient)).update_message(
         message_id, is_read=is_read, categories=categories, importance=importance
     )
 
@@ -385,9 +389,10 @@ async def outlook_move_message(message_id: str, folder_id: str) -> OutlookMessag
         The moved message. **Its id changes** — Outlook reissues an id on move,
         so a caller holding the old one must use the returned message.
     """
-    from loom.toolsets.microsoft.outlook.mail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().move_message(message_id, folder_id)
+    client = await client_for("outlook_mail", OutlookMailClient)
+    return await client.move_message(message_id, folder_id)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -405,6 +410,6 @@ async def outlook_delete_message(message_id: str) -> bool:
     Returns:
         True when the delete was accepted.
     """
-    from loom.toolsets.microsoft.outlook.mail.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().delete_message(message_id)
+    return await (await client_for("outlook_mail", OutlookMailClient)).delete_message(message_id)

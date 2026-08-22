@@ -441,6 +441,62 @@ async def search_nodes(
     return _json(await facade.nodes(query, category=category))
 
 
+async def connect_credential(
+    facade: RuntimeFacade,
+    credential: str,
+    client_id: str = "",
+    client_secret: str = "",
+    device: bool = False,
+) -> str:
+    """Obtain a credential so this deployment's toolsets can be called.
+
+    Opens a browser on the machine running this server and waits for the person
+    to authorise. Use it when `list_connections` reports "missing" and you need
+    real data — an id, a status vocabulary, whether a project exists.
+
+    You do **not** need this to write a workflow against a toolset. A missing
+    credential means the machine is unconfigured, not that the code is wrong.
+
+    Returns whether it connected, the scopes granted, and what is still
+    missing. Never a token.
+    """
+    try:
+        return _json(await facade.connect(
+            credential,
+            client_id=client_id,
+            client_secret=client_secret,
+            device=device,
+        ))
+    except Exception as exc:
+        return _json({"error": str(exc), "credential": credential})
+
+
+async def disconnect_credential(facade: RuntimeFacade, credential: str) -> str:
+    """Forget a stored credential. A name that is not stored is not an error."""
+    try:
+        return _json(await facade.disconnect(credential))
+    except Exception as exc:
+        return _json({"error": str(exc), "credential": credential})
+
+
+async def list_connections(facade: RuntimeFacade, toolset: str = "") -> str:
+    """Which integrations are configured here, and what the rest are short of.
+
+    Check this before writing a workflow against a toolset, and before
+    reporting that a lookup failed: a `state` of "missing" means the code is
+    fine and the machine is not configured, which is not a reason to change
+    the workflow.
+
+    Each entry carries `state` (connected | due | expired | env | missing |
+    none), the environment variables still needed, and `how` — the one command
+    that changes it. No token or secret value is returned.
+    """
+    try:
+        return _json(await facade.connections(toolset))
+    except Exception as exc:
+        return _json({"error": str(exc), "toolset": toolset})
+
+
 async def show_node(facade: RuntimeFacade, node_id: str) -> str:
     """One node's contract: **the code to write** to call it.
 

@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 from loom import Retry, step
 from loom.toolsets.microsoft.models import Drive, DriveItem, SharingLink
+from loom.toolsets.microsoft.sharepoint.client import SharePointClient
 from loom.toolsets.microsoft.sharepoint.models import (
     ListColumn,
     ListItem,
@@ -68,9 +69,9 @@ async def sharepoint_get_site(site: str = "") -> Site:
     Returns:
         Site with its compound id, display name, web URL, hostname, and path.
     """
-    from loom.toolsets.microsoft.sharepoint.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_site(site)
+    return await (await client_for("sharepoint", SharePointClient)).get_site(site)
 
 
 @step(retry=_READ)
@@ -90,9 +91,9 @@ async def sharepoint_search_sites(query: str, limit: int = 50) -> Results[Site]:
     Returns:
         Results of Site.
     """
-    from loom.toolsets.microsoft.sharepoint.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().search_sites(query, limit=limit)
+    return await (await client_for("sharepoint", SharePointClient)).search_sites(query, limit=limit)
 
 
 @step(retry=_READ)
@@ -106,9 +107,9 @@ async def sharepoint_list_subsites(site: str = "", limit: int = 100) -> Results[
     Returns:
         Results of Site.
     """
-    from loom.toolsets.microsoft.sharepoint.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_subsites(site, limit=limit)
+    return await (await client_for("sharepoint", SharePointClient)).list_subsites(site, limit=limit)
 
 
 # -- document libraries ------------------------------------------------------
@@ -129,9 +130,9 @@ async def sharepoint_list_drives(site: str = "", limit: int = 100) -> Results[Dr
     Returns:
         Results of Drive, each with its id, name, and quota.
     """
-    from loom.toolsets.microsoft.sharepoint.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_drives(site, limit=limit)
+    return await (await client_for("sharepoint", SharePointClient)).list_drives(site, limit=limit)
 
 
 @step(retry=_READ)
@@ -156,9 +157,9 @@ async def sharepoint_list_drive_items(
     Returns:
         Results of DriveItem. Check ``.complete`` before reporting a count.
     """
-    from loom.toolsets.microsoft.sharepoint.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_drive_items(
+    return await (await client_for("sharepoint", SharePointClient)).list_drive_items(
         site=site, drive_id=drive_id, item_id=item_id, path=path, limit=limit
     )
 
@@ -178,9 +179,9 @@ async def sharepoint_search_drive_items(
     Returns:
         Results of DriveItem.
     """
-    from loom.toolsets.microsoft.sharepoint.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().search_drive_items(
+    return await (await client_for("sharepoint", SharePointClient)).search_drive_items(
         query, site=site, drive_id=drive_id, limit=limit
     )
 
@@ -204,9 +205,9 @@ async def sharepoint_download_file(
         ``ctx.put_artifact``, or ``att.offload(blobs)`` to keep the bytes out
         of the journal.
     """
-    from loom.toolsets.microsoft.sharepoint.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().download_file(
+    return await (await client_for("sharepoint", SharePointClient)).download_file(
         site=site, drive_id=drive_id, item_id=item_id, path=path
     )
 
@@ -238,9 +239,9 @@ async def sharepoint_upload_file(
     Returns:
         The created DriveItem, including its id and web URL.
     """
-    from loom.toolsets.microsoft.sharepoint.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().upload_file(
+    return await (await client_for("sharepoint", SharePointClient)).upload_file(
         filename,
         content,
         site=site,
@@ -277,9 +278,9 @@ async def sharepoint_create_folder(
     Returns:
         The created folder as a DriveItem.
     """
-    from loom.toolsets.microsoft.sharepoint.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_folder(
+    return await (await client_for("sharepoint", SharePointClient)).create_folder(
         folder_name,
         site=site,
         drive_id=drive_id,
@@ -310,9 +311,9 @@ async def sharepoint_delete_file(
     Returns:
         True when the delete was accepted.
     """
-    from loom.toolsets.microsoft.sharepoint.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().delete_item(
+    return await (await client_for("sharepoint", SharePointClient)).delete_item(
         site=site, drive_id=drive_id, item_id=item_id, path=path
     )
 
@@ -345,9 +346,9 @@ async def sharepoint_create_share_link(
     Returns:
         SharingLink with the URL, type, scope, and roles granted.
     """
-    from loom.toolsets.microsoft.sharepoint.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_share_link(
+    return await (await client_for("sharepoint", SharePointClient)).create_share_link(
         site=site,
         drive_id=drive_id,
         item_id=item_id,
@@ -380,9 +381,9 @@ async def sharepoint_list_lists(
         ``"documentLibrary"`` is better reached through the file tools than
         the list-item ones.
     """
-    from loom.toolsets.microsoft.sharepoint.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_lists(
+    return await (await client_for("sharepoint", SharePointClient)).list_lists(
         site, limit=limit, include_hidden=include_hidden
     )
 
@@ -398,9 +399,9 @@ async def sharepoint_get_list(list_id: str, site: str = "") -> SharePointList:
     Returns:
         SharePointList with id, display name, template, and web URL.
     """
-    from loom.toolsets.microsoft.sharepoint.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_list(list_id, site)
+    return await (await client_for("sharepoint", SharePointClient)).get_list(list_id, site)
 
 
 @step(retry=_READ)
@@ -425,9 +426,10 @@ async def sharepoint_list_columns(
         ``display_name``, ``type``, ``required``, ``read_only``, and for a
         choice column the accepted ``choices``.
     """
-    from loom.toolsets.microsoft.sharepoint.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_columns(list_id, site, limit=limit)
+    client = await client_for("sharepoint", SharePointClient)
+    return await client.list_columns(list_id, site, limit=limit)
 
 
 @step(retry=_READ)
@@ -456,9 +458,9 @@ async def sharepoint_list_items(
         Results of ListItem, each with a ``fields`` dict keyed by internal
         column name.
     """
-    from loom.toolsets.microsoft.sharepoint.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_items(
+    return await (await client_for("sharepoint", SharePointClient)).list_items(
         list_id, site, limit=limit, filter_query=filter_query, order_by=order_by
     )
 
@@ -477,9 +479,10 @@ async def sharepoint_get_list_item(
     Returns:
         ListItem with a ``fields`` dict keyed by internal column name.
     """
-    from loom.toolsets.microsoft.sharepoint.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_list_item(list_id, item_id, site)
+    client = await client_for("sharepoint", SharePointClient)
+    return await client.get_list_item(list_id, item_id, site)
 
 
 @step(retry=_UNSAFE_WRITE)
@@ -500,9 +503,10 @@ async def sharepoint_create_list_item(
     Returns:
         The created ListItem.
     """
-    from loom.toolsets.microsoft.sharepoint.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_list_item(list_id, fields, site)
+    client = await client_for("sharepoint", SharePointClient)
+    return await client.create_list_item(list_id, fields, site)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -524,9 +528,9 @@ async def sharepoint_update_list_item(
     Returns:
         The updated ListItem.
     """
-    from loom.toolsets.microsoft.sharepoint.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().update_list_item(
+    return await (await client_for("sharepoint", SharePointClient)).update_list_item(
         list_id, item_id, fields, site
     )
 
@@ -548,6 +552,7 @@ async def sharepoint_delete_list_item(
     Returns:
         True when the delete was accepted.
     """
-    from loom.toolsets.microsoft.sharepoint.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().delete_list_item(list_id, item_id, site)
+    client = await client_for("sharepoint", SharePointClient)
+    return await client.delete_list_item(list_id, item_id, site)

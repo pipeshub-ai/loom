@@ -73,6 +73,31 @@ def require_env(*names: str) -> None:
         sys.exit(1)
 
 
+def require_model(preferred: str = "") -> Any:
+    """A model provider from whichever vendor key this machine has.
+
+    Every example that names one vendor outright is an example that cannot run
+    for a reader who has a key from another — and the failure is opaque, since
+    a vendor SDK raises about a missing key at *request* time rather than at
+    construction, so it surfaces several layers inside the agent loop.
+
+    ``from_env`` is the one place that maps a key to a provider, so this is a
+    wrapper over it and not a second copy of the ordering. *preferred* names a
+    model to use when its own vendor is reachable — an example that deliberately
+    picks a cheap model keeps doing so — and falls back to whatever key is set.
+    """
+    load_dotenv()
+
+    from loom.agents.providers import env_keys, from_env
+
+    model = (from_env(preferred) if preferred else None) or from_env()
+    if model is None:
+        print(f"Error: no model key set. Set one of: {', '.join(env_keys())}")
+        print("In the environment, or in .env at the repo root.")
+        sys.exit(1)
+    return model
+
+
 def require_any_env(*alternatives: tuple[str, ...]) -> None:
     """Exit unless one whole group of env vars is present, after reading ``.env``.
 

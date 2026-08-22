@@ -100,3 +100,4 @@ temp/
 # Running `loom` in this repo now creates a project store beside
 # pyproject.toml. Derived state, the same standing as .pytest_cache.
 .loom/
+.flows

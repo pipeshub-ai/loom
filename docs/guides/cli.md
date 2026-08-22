@@ -262,8 +262,11 @@ credentials.
 ## Credentials
 
 ```bash
+loom connections                     # which integrations are usable, and what the rest need
+loom connections jira                # one of them
+loom connections --missing           # only what is not usable
 loom providers                       # OAuth providers with endpoints built in
-loom connect gmail
+loom connect jira                    # the credential name, not the provider
 loom whoami                          # what is stored, and whether it is ok/due/expired
 loom refresh                         # every stored credential; exit 1 if any failed
 loom disconnect gmail
@@ -271,6 +274,17 @@ loom disconnect gmail
 
 What `loom connect` stores is what a workflow's toolsets read, so a credential
 you connect here is one your runs can use.
+
+`loom connections` is the one that answers *"is Jira usable here?"* —
+`loom toolsets` says what this process can reach and `loom whoami` says what it
+has stored, and neither could put the two together. It names the credential a
+toolset's client actually reads, the OAuth provider that issues it (Jira's is
+`atlassian`, and thirteen of the seventeen do not share their provider's name),
+and the environment variables still missing. It always exits 0: an unconfigured
+integration is normal for a project that does not use one, and `loom doctor` is
+the command that fails a build.
+
+The full walkthrough is `docs/guides/connections.md`.
 
 ## The session
 

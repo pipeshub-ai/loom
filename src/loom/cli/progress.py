@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import contextlib
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -121,6 +122,40 @@ class _Spend:
         return f"turn {self.turns} · {tokens} tok{money}"
 
 
+#: Renderers currently drawing a live region on this process's stderr.
+#:
+#: A registry rather than an argument threaded from `cmd_author` to the
+#: interaction: the two are composed in different places — the renderer by the
+#: command, the interaction by `targets.resolve()` — and neither holds a
+#: reference to the other. What they share is the terminal, so that is what is
+#: registered. A list rather than a set because `ProgressRenderer` is a
+#: `@dataclass` and so unhashable, and because nothing forbids two: `suspend()`
+#: must stop all of them, or the one it missed keeps painting over the dialog.
+_ACTIVE: list[Any] = []
+
+
+def _forget(renderer: Any) -> None:
+    """Identity, not equality: two renderers with the same counters are two."""
+    for index, active in enumerate(_ACTIVE):
+        if active is renderer:
+            del _ACTIVE[index]
+            return
+
+
+@contextlib.contextmanager
+def suspend() -> Iterator[None]:
+    """Stop every live region for the duration of the block.
+
+    What anything taking over the terminal calls — today, `ask_user`'s
+    full-screen dialog. A no-op when nothing is drawing, which is the common
+    case: `loom author --json`, a pipe, and every non-authoring command.
+    """
+    with contextlib.ExitStack() as stack:
+        for renderer in list(_ACTIVE):
+            stack.enter_context(renderer.paused())
+        yield
+
+
 class _Ticking:
     """A renderable that recomputes every time ``Live`` draws it.
 
@@ -206,10 +241,34 @@ class ProgressRenderer:
 
     def close(self) -> None:
         """Tear the live region down. Safe to call more than once."""
+        _forget(self)
         live, self._live = self._live, None
         if live is not None:
             with contextlib.suppress(Exception):
                 live.stop()
+
+    @contextlib.contextmanager
+    def paused(self) -> Iterator[None]:
+        """Stop drawing for the duration of the block, then resume.
+
+        Something else needs the terminal. `ask_user` renders a full-screen
+        `prompt_toolkit` dialog on the same stderr this live region redraws on
+        its own timer, from a different thread — so both painted at once and
+        the result was a dialog with scrollback bleeding through it and the
+        question printed twice.
+
+        Only the *drawing* stops; the counters keep accruing, so the region
+        that comes back is current rather than rewound.
+        """
+        live, self._live = self._live, None
+        if live is not None:
+            with contextlib.suppress(Exception):
+                live.stop()
+        try:
+            yield
+        finally:
+            if live is not None:
+                self._begin(self._label)
 
     # -- agent events --------------------------------------------------------
 
@@ -335,6 +394,8 @@ class ProgressRenderer:
                 transient=True,
             )
             self._live.start()
+            _forget(self)
+            _ACTIVE.append(self)
         except Exception:
             self._live = None
 

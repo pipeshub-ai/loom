@@ -27,7 +27,6 @@ one changes a string rather than waiting for a release.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from loom.core.exceptions import NonRetryableError, WorkflowError
@@ -122,7 +121,7 @@ class HubSpotClient:
         version: str = DEFAULT_VERSION,
         timeout: float = 30.0,
     ) -> None:
-        self._token = access_token or os.environ.get("HUBSPOT_ACCESS_TOKEN", "")
+        self._token = access_token
         self._base_url = base_url.rstrip("/")
         self._version = version
         self._timeout = timeout
@@ -441,12 +440,3 @@ def _classify(response: Any) -> HubSpotError:
     return HubSpotError(message, status=status, category=category)
 
 
-_default_client: HubSpotClient | None = None
-
-
-def get_default_client() -> HubSpotClient:
-    """Return (or create) the module-level client from the environment."""
-    global _default_client
-    if _default_client is None:
-        _default_client = HubSpotClient()
-    return _default_client

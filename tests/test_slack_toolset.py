@@ -20,6 +20,7 @@ import pytest
 from loom import Context, Runtime, workflow
 from loom.core.retry import PERMANENT_ERRORS
 from loom.stores.memory import MemoryStore
+from loom.toolsets.factory import use_clients
 from loom.toolsets.slack.client import (
     SlackClient,
     flatten_channel,
@@ -606,7 +607,6 @@ class TestUpload:
 
 class TestThroughAWorkflow:
     async def test_a_paged_read_keeps_its_coverage_across_the_journal(self) -> None:
-        from loom.toolsets.slack import client as slack_client
         from loom.toolsets.slack.tools import slack_read_channel
 
         recorder = Recorder(
@@ -618,9 +618,7 @@ class TestThroughAWorkflow:
                 }
             }
         )
-        slack_client._default_client = SlackClient(
-            "xoxb-test", transport=recorder.transport()
-        )
+        client = SlackClient("xoxb-test", transport=recorder.transport())
 
         @workflow(name="slack-coverage")
         async def flow(ctx: Context, _input: Any) -> dict[str, Any]:
@@ -628,7 +626,7 @@ class TestThroughAWorkflow:
             return {"count": len(found), "complete": found.complete,
                     "summary": found.summary(), "first": found[0].text}
 
-        try:
+        with use_clients(slack=client):
             runtime = Runtime(store=MemoryStore())
             runtime.register(flow)
             result = await runtime.run(flow, {})
@@ -642,13 +640,10 @@ class TestThroughAWorkflow:
             replayed = await runtime.replay(result.run_id)
             assert replayed.output == result.output
             assert len(recorder.requests) == calls, "replay re-called the API"
-        finally:
-            slack_client._default_client = None
 
     async def test_posting_is_not_retried(self) -> None:
         """A retry posts the message twice, visibly, to everyone in the
         channel — so a transient failure surfaces instead."""
-        from loom.toolsets.slack import client as slack_client
         from loom.toolsets.slack.tools import slack_post_message
 
         attempts: list[int] = []
@@ -657,16 +652,14 @@ class TestThroughAWorkflow:
             attempts.append(1)
             return httpx.Response(200, json={"ok": False, "error": "internal_error"})
 
-        slack_client._default_client = SlackClient(
-            "xoxb-test", transport=httpx.MockTransport(handler)
-        )
+        client = SlackClient("xoxb-test", transport=httpx.MockTransport(handler))
 
         @workflow(name="slack-post")
         async def flow(ctx: Context, _input: Any) -> str:
             posted = await ctx.step(slack_post_message, "C1", "hello")
             return posted.ts
 
-        try:
+        with use_clients(slack=client):
             runtime = Runtime(store=MemoryStore())
             runtime.register(flow)
             result = await runtime.run(flow, {})
@@ -674,11 +667,8 @@ class TestThroughAWorkflow:
             # internal_error is retryable in general; this step opts out
             # because the duplicate it would create is not recallable.
             assert len(attempts) == 1
-        finally:
-            slack_client._default_client = None
 
     async def test_a_permanent_failure_fails_fast(self) -> None:
-        from loom.toolsets.slack import client as slack_client
         from loom.toolsets.slack.tools import slack_read_channel
 
         attempts: list[int] = []
@@ -689,31 +679,24 @@ class TestThroughAWorkflow:
                 200, json={"ok": False, "error": "channel_not_found"}
             )
 
-        slack_client._default_client = SlackClient(
-            "xoxb-test", transport=httpx.MockTransport(handler)
-        )
+        client = SlackClient("xoxb-test", transport=httpx.MockTransport(handler))
 
         @workflow(name="slack-permanent")
         async def flow(ctx: Context, _input: Any) -> int:
             return len(await ctx.step(slack_read_channel, "C000"))
 
-        try:
+        with use_clients(slack=client):
             runtime = Runtime(store=MemoryStore())
             runtime.register(flow)
             result = await runtime.run(flow, {})
             assert result.status.value == "failed"
             assert len(attempts) == 1, "a 200-with-ok:false must not be retried"
-        finally:
-            slack_client._default_client = None
 
     async def test_typed_models_survive_the_journal(self) -> None:
-        from loom.toolsets.slack import client as slack_client
         from loom.toolsets.slack.tools import slack_get_channel
 
         recorder = Recorder({"conversations.info": {"ok": True, "channel": CHANNEL}})
-        slack_client._default_client = SlackClient(
-            "xoxb-test", transport=recorder.transport()
-        )
+        client = SlackClient("xoxb-test", transport=recorder.transport())
 
         @workflow(name="slack-models")
         async def flow(ctx: Context, _input: Any) -> dict[str, Any]:
@@ -722,15 +705,13 @@ class TestThroughAWorkflow:
             return {"topic": again.topic, "member": again.is_member,
                     "same": first.id == again.id}
 
-        try:
+        with use_clients(slack=client):
             runtime = Runtime(store=MemoryStore())
             runtime.register(flow)
             result = await runtime.run(flow, {})
             assert result.output == {
                 "topic": "Production incidents", "member": True, "same": True,
             }
-        finally:
-            slack_client._default_client = None
 
 
 # ---------------------------------------------------------------------------
@@ -774,15 +755,15 @@ class TestCredentials:
 
         assert recorder.last.headers["authorization"] == "Bearer xoxb-connected"
 
-    async def test_the_environment_is_the_fallback(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-from-env")
+    async def test_the_token_it_was_given_reaches_the_wire(self) -> None:
+        """Where the token came from is `ChainProvider`'s question now — this
+        client reads no environment, so there is nothing here to fall back to.
+        What it still owns is sending what it was handed, correctly prefixed."""
         recorder = Recorder({"conversations.list": {"ok": True, "channels": []}})
 
-        await SlackClient(transport=recorder.transport()).list_channels()
+        await SlackClient("xoxb-given", transport=recorder.transport()).list_channels()
 
-        assert recorder.last.headers["authorization"] == "Bearer xoxb-from-env"
+        assert recorder.last.headers["authorization"] == "Bearer xoxb-given"
 
 
 # ---------------------------------------------------------------------------

@@ -112,6 +112,9 @@ EXPOSED_AS: dict[str, str] = {
     "reports": "get_run_progress",
     "workflows": "list_workflows",
     "nodes": "search_nodes",
+    "connections": "list_connections",
+    "connect": "connect_credential",
+    "disconnect": "disconnect_credential",
     "node": "show_node",
     "pending": "list_pending",
     "respond": "respond_to_run",
@@ -135,6 +138,10 @@ NOT_EXPOSED_OVER_MCP: dict[str, str] = {
     "schedules": "a listing an operator reads, not something a model acts on",
     "unschedule": "removing a trigger is an operational act with no undo, and "
     "`loom` is where it belongs",
+    "wire_triggers": "registering what a *file* declares belongs to whatever "
+    "imported the file; a model gets schedule_workflow",
+    "tick_schedules": "one turn of a loop somebody has to stay for, and a "
+    "model's turn ends — `loom serve` and `loom run --follow` are the hosts",
     "read_artifact": "get_artifact_url instead — bytes through a model's "
     "context is what ResultBounds exists to prevent",
     "upload_url": "presigned-upload plumbing a client drives over HTTP",
@@ -384,6 +391,25 @@ class TestSchedulingIsOnThePort:
         ):
             with pytest.raises(ConfigurationError, match="drop --server"):
                 await call
+
+
+def test_the_port_declares_no_private_members() -> None:
+    """A `_name` on the Protocol silently breaks every structural check.
+
+    `RuntimeFacade` is `runtime_checkable`, so `isinstance` verifies that the
+    object has *every* member the Protocol declares — private ones included.
+    A helper accidentally defined inside the Protocol body rather than on
+    `LocalFacade` therefore made `isinstance(LocalFacade(...), RuntimeFacade)`
+    answer False, and `build_workflow_tools` responded by wrapping the facade
+    in a second `LocalFacade`. `self.runtime` became a facade, `.workflows`
+    became a bound method, and the failure surfaced as
+    "'function' object has no attribute 'values'" three layers away.
+    """
+    private = sorted(m for m in RuntimeFacade.__protocol_attrs__ if m.startswith("_"))
+    assert not private, (
+        f"RuntimeFacade declares {private}. Every adapter must now implement "
+        "them or fail isinstance — put helpers on the adapter instead."
+    )
 
 
 class TestWorkflowManagerAgent:

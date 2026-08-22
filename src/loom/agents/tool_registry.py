@@ -340,13 +340,109 @@ class ToolsetRegistry(ToolsetCatalog):
         super().unregister(toolset_id)
         self._toolsets.pop(toolset_id, None)
 
+    # -- the two scopes -------------------------------------------------------
+    #
+    # Discovery and execution are different questions, and the difference is
+    # the whole of why `search_toolsets("jira")` answered nothing on a
+    # `loom author` run while `toolsets=["jira"]` in the file it wrote resolved
+    # perfectly. `get_toolset` below has drawn this line since the built-in
+    # fallback was added — *asking for one by name gets it; asking for
+    # "everything" does not* — and nothing ever drew it for the catalogue.
+    #
+    #   execution scope   what a no-ids sweep may reach: what somebody registered
+    #   catalogue scope   what may be *named*: registrations, then the built-ins
+    #
+    # `resolve_tools(None)` reads the first and is unchanged. Everything a model
+    # browses reads the second.
+
+    def _execution_tiers(self) -> tuple[Any, ...]:
+        """Tiers a no-ids sweep may reach. Tier 0 is this registry's own.
+
+        ``super()`` rather than ``self``: these tiers are what the reads below
+        consult, so tier 0 must be the *inherited* implementation or every
+        lookup would re-enter itself.
+        """
+        tiers: list[Any] = [super()]
+        if self._parent is not None:
+            tiers.append(self._parent)
+        return tuple(tiers)
+
+    def _catalogue_tiers(self) -> tuple[Any, ...]:
+        """Execution tiers, then the toolsets LOOM ships.
+
+        The built-in tier is **last**, so a host registering its own ``jira``
+        shadows it, and it is constructed unloaded — a Runtime that never
+        browses a catalogue never imports the 27 manifest modules.
+        """
+        tiers = list(self._execution_tiers())
+        if self._allow_builtin_fallback:
+            from loom.toolsets.registry import builtin_catalog
+
+            tiers.append(builtin_catalog())
+        return tuple(tiers)
+
+    # -- chaining -------------------------------------------------------------
+    #
+    # Three helpers, because the alternative is an override per method — and an
+    # override per method is exactly how `search_operations` and `profile_of`
+    # came to stop at tier 0. Both were added to `ToolsetCatalog` after these
+    # overrides were written and neither got one. `profile_of` is read on every
+    # `ctx.step` (`runtime/context.py::_declared_effect`), so a toolset
+    # registered on the process-global catalogue dispatched with no effect
+    # class at all and reached the broker as an unclassified write — defeating,
+    # one layer up, the lookup that exists to prevent exactly that. A method
+    # added to the base class from here on chains by construction.
+
+    def _first(self, method: str, *args: Any, **kwargs: Any) -> Any:
+        """The first catalogue tier with a non-``None`` answer."""
+        for tier in self._catalogue_tiers():
+            found = getattr(tier, method)(*args, **kwargs)
+            if found is not None:
+                return found
+        return None
+
+    def _owner(self, toolset_id: str) -> Any:
+        """The first catalogue tier holding *toolset_id*, else the last tier.
+
+        Reads that raise resolve the *toolset* first and then ask that tier,
+        rather than trying each in turn: falling through on a missing operation
+        would answer ``jira.issues.delete`` out of LOOM's Jira after a host had
+        deliberately registered a narrower one under the same id. Shadowing has
+        to be total to mean anything. Falling back to the last tier keeps the
+        "not found" error identical to the one a lone catalogue raises.
+        """
+        tiers = self._catalogue_tiers()
+        for tier in tiers:
+            if tier.get(toolset_id) is not None:
+                return tier
+        return tiers[-1]
+
+    def _merged(
+        self, method: str, identity: Callable[[Any], Any], limit: int, *args: Any, **kwargs: Any
+    ) -> list[Any]:
+        """Every tier's matches, nearest tier first, de-duplicated by *identity*.
+
+        Tier order rather than a merged ranking, because scores from two tiers
+        are not comparable and because a locally registered toolset should win
+        over the one LOOM ships under the same id. This is what the old
+        two-tier ``search`` did; it is now what every merging read does.
+        """
+        out: list[Any] = []
+        seen: set[Any] = set()
+        for tier in self._catalogue_tiers():
+            for item in getattr(tier, method)(*args, limit=limit, **kwargs):
+                key = identity(item)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(item)
+        return out[:limit]
+
     # -- lookup ---------------------------------------------------------------
 
     def get(self, toolset_id: str) -> ToolsetManifest | None:
-        found = super().get(toolset_id)
-        if found is None and self._parent is not None:
-            return self._parent.get(toolset_id)
-        return found
+        manifest: ToolsetManifest | None = self._first("get", toolset_id)
+        return manifest
 
     def effect_of(self, function: str) -> EffectClass | None:
         """As :meth:`ToolsetCatalog.effect_of`, continuing into the parent.
@@ -354,10 +450,49 @@ class ToolsetRegistry(ToolsetCatalog):
         Without the chain a step from an entry-point toolset — the ordinary way
         a first-party integration arrives — would resolve to nothing here, and
         its reads would go on reaching the broker classified as writes.
+
+        **Execution scope, deliberately, where every read above is catalogue
+        scope.** This one is the broker's per-dispatch lookup and its answer
+        decides what a run is *allowed to do*, so widening it to the built-in
+        tier would reclassify steps in deployments that registered no toolset
+        at all. That is a policy change rather than a discovery one, and it
+        belongs in its own change with its own tests.
         """
-        found = super().effect_of(function)
-        if found is None and self._parent is not None:
-            return self._parent.effect_of(function)
+        for tier in self._execution_tiers():
+            found = tier.effect_of(function)
+            if found is not None:
+                effect: EffectClass = found
+                return effect
+        return None
+
+    def profile_of(self, function: str) -> Any:
+        """As :meth:`ToolsetCatalog.profile_of`, continuing into the parent.
+
+        Execution scope, for the reason :meth:`effect_of` gives — and this is
+        the one that was actually being read. ``_declared_effect`` prefers
+        ``profile_of`` and falls back to ``effect_of`` only when the attribute
+        is *absent*, which it never is: so the chained ``effect_of`` above was
+        unreachable from a Runtime, and every globally-registered toolset
+        dispatched with no classification whatever.
+        """
+        for tier in self._execution_tiers():
+            found = tier.profile_of(function)
+            if found is not None:
+                return found
+        return None
+
+    def manifest_of(self, function: str) -> ToolsetManifest | None:
+        """Which toolset declares this ``@step``, across every catalogue tier.
+
+        **Catalogue** scope, unlike :meth:`effect_of` beside it, and the
+        difference is what each answer is *for*. That one is the broker's
+        per-dispatch classification and decides what a run is allowed to do, so
+        widening it changes policy. This one only decides what a *message* says
+        when a call is about to fail anyway — so a bare Runtime running a
+        generated workflow gets "jira is not connected" instead of "JIRA_URL is
+        required", which is the case that produced the complaint.
+        """
+        found: ToolsetManifest | None = self._first("manifest_of", function)
         return found
 
     def get_toolset(self, toolset_id: str) -> Toolset | None:
@@ -393,10 +528,36 @@ class ToolsetRegistry(ToolsetCatalog):
         return builtin_toolset(toolset_id)
 
     def list_toolsets(self) -> list[str]:
-        """Every discoverable toolset id, this registry's and its parent's."""
+        """Every **registered** toolset id, this registry's and its parent's.
+
+        Execution scope: this is what :meth:`resolve_tools` sweeps when given
+        no ids, so a toolset appearing here is one an unscoped
+        ``ctx.agent("summarise this")`` acquires. The toolsets LOOM ships are
+        deliberately absent — :meth:`catalogue_ids` is the other question.
+        """
         ids = list(self._manifests)
         if self._parent is not None:
             ids += [i for i in self._parent.toolset_ids if i not in self._manifests]
+        return ids
+
+    def catalogue_ids(self) -> list[str]:
+        """Every toolset that may be *named*: registered first, then built-in.
+
+        What generated code may import, what the coding agent may browse, and
+        what ``CodeValidator`` should accept. None of those is the same question
+        as what a no-ids sweep acquires, and answering them with
+        ``list_toolsets()`` is what made a bare ``Runtime`` reject
+        ``from loom.toolsets.jira.tools import ...`` as an integration this
+        environment does not have.
+        """
+        ids: list[str] = []
+        seen: set[str] = set()
+        for tier in self._catalogue_tiers():
+            for toolset_id in tier.toolset_ids:
+                if toolset_id in seen:
+                    continue
+                seen.add(toolset_id)
+                ids.append(toolset_id)
         return ids
 
     @property
@@ -404,28 +565,32 @@ class ToolsetRegistry(ToolsetCatalog):
         return self.list_toolsets()
 
     def search(self, query: str, *, limit: int = 10) -> list[Any]:
-        """Search this registry and its parent, nearest match first."""
-        cards = super().search(query, limit=limit)
-        if self._parent is not None:
-            seen = {c.toolset_id for c in cards}
-            cards += [
-                c
-                for c in self._parent.search(query, limit=limit)
-                if c.toolset_id not in seen
-            ]
-        return cards[:limit]
+        """Search every catalogue tier, nearest tier first."""
+        return self._merged("search", lambda card: card.toolset_id, limit, query)
+
+    def search_operations(
+        self, query: str, *, limit: int = 10, toolset_id: str | None = None
+    ) -> list[Any]:
+        """Search operations across every catalogue tier, nearest tier first."""
+        return self._merged(
+            "search_operations",
+            lambda match: (match.toolset_id, match.op_id),
+            limit,
+            query,
+            toolset_id=toolset_id,
+        )
 
     def show(self, toolset_id: str, group: str | None = None) -> Any:
-        if toolset_id not in self._manifests and self._parent is not None:
-            return self._parent.show(toolset_id, group)
-        return super().show(toolset_id, group)
+        return self._owner(toolset_id).show(toolset_id, group)
 
     def stub(self, op_path: str) -> Any:
         dot = op_path.find(".")
-        head = op_path[:dot] if dot != -1 else op_path
-        if head not in self._manifests and self._parent is not None:
-            return self._parent.stub(op_path)
-        return super().stub(op_path)
+        if dot == -1:
+            # A malformed path is the catalogue's own ValueError, and asking
+            # every tier for it would replace a precise complaint with the last
+            # tier's identical one.
+            return super().stub(op_path)
+        return self._owner(op_path[:dot]).stub(op_path)
 
     # -- materialization ------------------------------------------------------
 
@@ -503,6 +668,84 @@ class ToolsetRegistry(ToolsetCatalog):
 
     # -- documentation --------------------------------------------------------
 
+    def prompt_block(self) -> str:
+        """What a coding agent's system prompt should say exists. **One line
+        per toolset**, over the whole catalogue.
+
+        The counterpart of ``NodeRegistry.prompt_block()``, and separate from
+        :meth:`describe` for two reasons that agree. Scope: this reads
+        :meth:`catalogue_ids`, because a model may write against any toolset it
+        can *name*, while ``describe()`` documents what is registered. And
+        cost: an index card names every operation id — ~1,700 characters per
+        toolset — so the 27 LOOM ships render to ~8,400 tokens against ~1,000
+        for a roster. The difference that matters is the growth rate, ~430
+        tokens per integration installed against ~20, paid on every turn of
+        every job, to say something ``search_operations`` answers on demand and
+        more precisely.
+
+        Never empty, unlike ``describe()``: ``DEFAULT_SYSTEM_PROMPT`` goes on
+        to say *"Only the toolsets listed above exist"*, and with nothing above
+        it that sentence pointed at nothing at all — which is how a model asked
+        for a Jira workflow spent thirty turns searching for a list it had been
+        told was there. "None" is an answer; silence is not.
+        """
+        manifests = [m for tid in self.catalogue_ids() if (m := self.get(tid)) is not None]
+        if not manifests:
+            return (
+                "## Available toolsets\n\n"
+                "None. This process has no integrations registered, so there is "
+                "nothing to import from loom.toolsets. Say what the task needs "
+                "and that it is not available here, rather than writing code "
+                "against an integration that does not exist."
+            )
+        return "\n".join(self._roster(manifests))
+
+    def _roster(self, manifests: list[ToolsetManifest]) -> list[str]:
+        """One line per toolset: what it is, and whether code can call it.
+
+        **Exactly one line each**, so the block's cost is the number of
+        integrations installed and nothing else.
+        ``tests/test_toolset_discovery.py::TestThePromptBlock`` asserts that as
+        line-count equality rather than a character budget — a budget is a
+        ceiling somebody raises, and a count is a property. Same discipline
+        ``NodeRegistry.prompt_block`` is pinned with.
+        """
+        lines = [
+            "## Available toolsets",
+            "",
+            f"{len(manifests)} integrations are installed:",
+            "",
+        ]
+        for m in manifests:
+            # The module, because it is the one thing a model cannot derive and
+            # will otherwise build out of the id: `google_calendar` lives at
+            # `loom.toolsets.google.calendar`, and an import assembled from the
+            # id resolves as a plausible path and fails at run time. Operation
+            # *names* are deliberately not here — those are what show_toolset
+            # and get_tool_contract are for, and they are what makes an index
+            # card grow with the size of an integration rather than its
+            # existence.
+            #
+            # A toolset with no module is reachable only through ctx.agent().
+            # Saying which costs a few characters and is the difference between
+            # generated code that imports and code that does not exist.
+            module = m.tools_module or ""
+            reach = f"  [{module}]" if module else "  [ctx.agent() only — not importable]"
+            lines.append(f"  {m.id:<18}{m.summary}{reach}")
+        lines += [
+            "",
+            "The name in brackets is the module to import from — use it exactly;",
+            "one built from the toolset id resolves and then fails at run time.",
+            "",
+            "search_toolsets(query) and search_operations(query) find the right",
+            "one. show_toolset(id) lists its operations; get_tool_contract(",
+            'id + "." + op_id) gives the exact call to write, and get_tool_docs(id)',
+            "has worked examples where they exist.",
+            "",
+            *PAGING_HOWTO,
+        ]
+        return lines
+
     def describe(
         self, toolset_ids: list[str] | None = None, *, detail: str = "full"
     ) -> str:
@@ -519,6 +762,11 @@ class ToolsetRegistry(ToolsetCatalog):
         carrying every operation of every registered integration costs tens of
         thousands of tokens before the model has read the spec, and grows with
         each integration installed rather than with the task at hand.
+
+        **Execution scope**, and deliberately not the catalogue: this documents
+        the toolsets somebody registered, which is what a host asking for its
+        own docs means. What the *system prompt* should say exists is a
+        different question with a different answer — see :meth:`prompt_block`.
         """
         ids = toolset_ids if toolset_ids is not None else self.list_toolsets()
         manifests = [m for tid in ids if (m := self.get(tid)) is not None]

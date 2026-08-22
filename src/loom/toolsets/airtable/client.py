@@ -29,7 +29,6 @@ slow here is to be greedy.
 
 from __future__ import annotations
 
-import os
 from typing import Any, TypedDict
 from urllib.parse import quote
 
@@ -159,8 +158,8 @@ class AirtableClient:
         base_url: str = BASE_URL,
         timeout: float = 30.0,
     ) -> None:
-        self._token = token or os.environ.get("AIRTABLE_TOKEN", "")
-        self._base_id = base_id or os.environ.get("AIRTABLE_BASE_ID", "")
+        self._token = token
+        self._base_id = base_id
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
 
@@ -388,18 +387,5 @@ class AirtableClient:
         return deleted
 
 
-_default_client: AirtableClient | None = None
 
 
-def get_default_client() -> AirtableClient:
-    """Return (or create) the module-level client from the environment."""
-    global _default_client
-    if _default_client is None:
-        _default_client = AirtableClient()
-    return _default_client
-
-
-def reset_default_client() -> None:
-    """Drop the cached client. For tests that swap the environment."""
-    global _default_client
-    _default_client = None

@@ -36,7 +36,6 @@ from typing import Any, ClassVar
 import pytest
 
 from loom.core.exceptions import ConfigurationError, NonRetryableError
-from loom.toolsets.duckduckgo import client as ddg_client
 from loom.toolsets.duckduckgo.client import (
     DDG_MAX_PAGES,
     DDG_PAGE_SIZE,
@@ -923,10 +922,16 @@ class TestTheManifestsAreHonest:
         [(EXA_MANIFEST, "EXA_API_KEY"), (TAVILY_MANIFEST, "TAVILY_API_KEY")],
     )
     def test_the_credential_is_named(self, manifest, variable) -> None:
-        assert manifest.auth["fields"] == [variable]
+        assert manifest.auth.field_names == (variable,)
 
     def test_duckduckgo_declares_no_credential(self) -> None:
-        assert DUCKDUCKGO_MANIFEST.auth["type"] == "none"
+        assert DUCKDUCKGO_MANIFEST.auth.kind == "none"
+        # No *secret* field, rather than no field at all: `DDGS_PROXY` is
+        # configuration for the scraper and carries nothing to authenticate
+        # with, so declaring it there is right and does not make this toolset
+        # one that needs connecting.
+        assert DUCKDUCKGO_MANIFEST.auth.secret_fields == ()
+        assert not [f for f in DUCKDUCKGO_MANIFEST.auth.fields if f.required]
 
     @pytest.mark.parametrize(
         ("manifest", "host"),
@@ -974,10 +979,31 @@ class TestNoToolTakesAnArgumentCtxStepClaims:
             assert not taken, f"{name} declares {taken}"
 
 
-class TestTheDefaultClientIsCachedPerModule:
-    def test_it_is_built_once(self, monkeypatch) -> None:
-        monkeypatch.setattr(ddg_client, "_default_client", None)
+class TestTheClientIsBuiltPerCallNotCachedPerProcess:
+    """The inverse of what this asserted, and deliberately so.
 
-        first = ddg_client.get_default_client()
+    A module-level singleton made a credential a property of the *process*: one
+    set, fixed at whatever the first call saw, so connecting or refreshing one
+    afterwards changed nothing and two tenants could not share a process. Every
+    toolset had one; all fifteen are gone.
+    """
 
-        assert ddg_client.get_default_client() is first
+    async def test_two_calls_are_two_clients(self) -> None:
+        from loom.toolsets.factory import client_for
+
+        first = await client_for("duckduckgo")
+        second = await client_for("duckduckgo")
+
+        assert first is not second
+
+    async def test_each_reflects_the_session_it_was_built_from(self) -> None:
+        """What the singleton made impossible."""
+        from loom.toolsets.factory import client_for
+        from loom.toolsets.resolution import StaticProvider, ToolsetSession
+
+        direct = await client_for("duckduckgo", session=ToolsetSession(providers=()))
+        proxied = await client_for("duckduckgo", session=ToolsetSession(
+            providers=(StaticProvider({"DDGS_PROXY": "socks5://127.0.0.1:1080"}),)))
+
+        assert direct._proxy is None
+        assert proxied._proxy == "socks5://127.0.0.1:1080"

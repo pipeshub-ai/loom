@@ -16,6 +16,7 @@ from typing import Any
 
 from loom import Retry, step
 from loom.toolsets.pagination import Results
+from loom.toolsets.salesforce.client import SalesforceClient
 from loom.toolsets.salesforce.models import (
     SalesforceAccount,
     SalesforceContact,
@@ -45,9 +46,10 @@ async def salesforce_query(soql: str, limit: int = 200) -> Results[SalesforceRec
     Returns:
         Paginated records. Check ``.complete`` before reporting a total.
     """
-    from loom.toolsets.salesforce.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().query(soql, limit=limit)
+
+    return await (await client_for("salesforce", SalesforceClient)).query(soql, limit=limit)
 
 
 @step(retry=_READ)
@@ -60,9 +62,9 @@ async def salesforce_describe_object(sobject: str) -> dict[str, Any]:
     Returns:
         The object's name, label, and its list of fields.
     """
-    from loom.toolsets.salesforce.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().describe_object(sobject)
+    return await (await client_for("salesforce", SalesforceClient)).describe_object(sobject)
 
 
 @step(retry=_READ)
@@ -79,9 +81,10 @@ async def salesforce_get_record(
     Returns:
         The record, with its id, type, REST path, and fields.
     """
-    from loom.toolsets.salesforce.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_record(sobject, record_id, fields=fields)
+    client = await client_for("salesforce", SalesforceClient)
+    return await client.get_record(sobject, record_id, fields=fields)
 
 
 @step(retry=_UNSAFE_WRITE)
@@ -100,9 +103,9 @@ async def salesforce_create_record(
     Returns:
         The new record's id, and whether Salesforce accepted it.
     """
-    from loom.toolsets.salesforce.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_record(sobject, values)
+    return await (await client_for("salesforce", SalesforceClient)).create_record(sobject, values)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -120,9 +123,10 @@ async def salesforce_update_record(
         The record id and success flag. Salesforce returns no body here, so
         success is reported rather than echoed.
     """
-    from loom.toolsets.salesforce.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().update_record(sobject, record_id, values)
+    client = await client_for("salesforce", SalesforceClient)
+    return await client.update_record(sobject, record_id, values)
 
 
 @step(retry=_IDEMPOTENT_WRITE)
@@ -138,9 +142,10 @@ async def salesforce_delete_record(
     Returns:
         The record id and success flag.
     """
-    from loom.toolsets.salesforce.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().delete_record(sobject, record_id)
+    client = await client_for("salesforce", SalesforceClient)
+    return await client.delete_record(sobject, record_id)
 
 
 @step(retry=_READ)
@@ -160,9 +165,10 @@ async def salesforce_find_accounts(
     Returns:
         Accounts with id, name, industry, website, phone, and owner.
     """
-    from loom.toolsets.salesforce.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().find_accounts(query, limit=limit)
+    client = await client_for("salesforce", SalesforceClient)
+    return await client.find_accounts(query, limit=limit)
 
 
 @step(retry=_READ)
@@ -179,9 +185,9 @@ async def salesforce_find_contacts(
     Returns:
         Contacts with id, name, email, phone, title, and account.
     """
-    from loom.toolsets.salesforce.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().find_contacts(
+    return await (await client_for("salesforce", SalesforceClient)).find_contacts(
         query, account_id=account_id, limit=limit
     )
 
@@ -206,9 +212,9 @@ async def salesforce_find_opportunities(
     Returns:
         Opportunities with stage, amount, close date, account, and owner.
     """
-    from loom.toolsets.salesforce.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().find_opportunities(
+    return await (await client_for("salesforce", SalesforceClient)).find_opportunities(
         query, account_id=account_id, stage=stage, open_only=open_only, limit=limit
     )
 
@@ -227,9 +233,9 @@ async def salesforce_find_users(query: str = "", limit: int = 20) -> Results[Sal
     Returns:
         Users with id, name, email, username, and active flag.
     """
-    from loom.toolsets.salesforce.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().find_users(query, limit=limit)
+    return await (await client_for("salesforce", SalesforceClient)).find_users(query, limit=limit)
 
 
 @step(retry=_READ)
@@ -239,6 +245,6 @@ async def salesforce_whoami() -> SalesforceUser:
     Returns:
         The authenticated user's id, name, email, and username.
     """
-    from loom.toolsets.salesforce.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().whoami()
+    return await (await client_for("salesforce", SalesforceClient)).whoami()

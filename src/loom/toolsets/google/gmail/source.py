@@ -304,12 +304,20 @@ class GmailReconciler:
         # that this shape makes easiest to write by accident.
         self._types = history_types or ["messageAdded"]
 
-    def _resolve(self) -> Any:
+    async def _resolve(self) -> Any:
+        """The client this source reads history with.
+
+        Async because building one is: it resolves credentials through the
+        run's `ToolsetSession` rather than reading a process-wide singleton
+        that was built from whatever environment the first caller saw. Its one
+        caller is already inside `expand`, so nothing else changes shape.
+        """
         if self._client is not None:
             return self._client
-        from loom.toolsets.google.gmail.client import get_default_client
+        from loom.toolsets.factory import client_for
+        from loom.toolsets.google.gmail.client import GmailClient
 
-        return get_default_client()
+        return await client_for("gmail", GmailClient)
 
     async def expand(self, pointer: dict[str, Any], cursor: str) -> Expansion:
         from loom.toolsets.google.errors import GmailHistoryExpired
@@ -329,7 +337,7 @@ class GmailReconciler:
             )
             return Expansion(cursor=position)
 
-        client = self._resolve()
+        client = await self._resolve()
         try:
             history = await client.list_history(
                 cursor, max_results=self._max, history_types=self._types

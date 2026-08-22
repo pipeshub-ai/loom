@@ -47,6 +47,7 @@ from loom.core.exceptions import (
     GuardrailTripwire,
     ModelBehaviorError,
     ModelRetry,
+    OutputTruncated,
     UsageLimitExceeded,
 )
 from loom.core.models import Usage
@@ -715,6 +716,32 @@ class BuiltInAgentRuntime:
 
             # Length / content filter — retry or bail
             if response.finish_reason is FinishReason.LENGTH:
+                # A truncated response that carried *something* can be
+                # continued: the model has prose on the wire and picks up where
+                # it stopped. One that carried nothing cannot, and the two used
+                # to be handled identically.
+                #
+                # The empty case is what a model producing a long tool call
+                # looks like from here. It spends the whole ceiling emitting one
+                # argument, never closes the JSON, and the provider drops the
+                # unterminated block — so `_parse_response` finds no text and no
+                # tool calls. "Please continue" then restarts a generation that
+                # truncates in the same place, forever, at one turn each. From
+                # outside it reads as an agent that would not converge, and it
+                # exhausts the turn budget without ever producing a token of
+                # output: the reported failure names the one dial that cannot
+                # fix it.
+                if not response.message.text().strip() and not response.message.has_tool_calls:
+                    raise OutputTruncated(
+                        "the model hit its output ceiling before producing "
+                        "anything usable — no text and no tool call. This is "
+                        "one response being too small, not a turn budget: "
+                        "raise the model's max_tokens (ModelSettings("
+                        "max_tokens=…) or the provider's own default). It is "
+                        "what a long tool-call argument, such as a whole "
+                        "source file, looks like when it does not fit.",
+                        max_tokens=model_settings.max_tokens,
+                    )
                 messages.append(user("Your response was cut off. Please continue."))
                 continue
 

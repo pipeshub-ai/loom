@@ -27,8 +27,9 @@ from __future__ import annotations
 from typing import Any
 
 from loom import Retry, step
-from loom.toolsets.airtable.client import get_default_client
+from loom.toolsets.airtable.client import AirtableClient
 from loom.toolsets.airtable.models import AirtableField, AirtableRecord
+from loom.toolsets.factory import client_for
 from loom.toolsets.pagination import Results
 
 #: Reads. A 429 is retryable but expensive — Airtable locks the base for 30
@@ -70,7 +71,7 @@ async def airtable_list_records(
         base_id: Override the default base.
         limit: Most rows to return, following pages as needed.
     """
-    return await get_default_client().list_records(
+    return await (await client_for("airtable", AirtableClient)).list_records(
         table,
         base_id=base_id,
         formula=formula,
@@ -93,7 +94,8 @@ async def airtable_get_record(
         record_id: A ``rec…`` id.
         base_id: Override the default base.
     """
-    return await get_default_client().get_record(table, record_id, base_id=base_id)
+    client = await client_for("airtable", AirtableClient)
+    return await client.get_record(table, record_id, base_id=base_id)
 
 
 @step(retry=_READ)
@@ -113,7 +115,7 @@ async def airtable_find_records(
         base_id: Override the default base.
         limit: Most rows to return.
     """
-    return await get_default_client().find_records(
+    return await (await client_for("airtable", AirtableClient)).find_records(
         table, field, value, base_id=base_id, limit=limit
     )
 
@@ -130,7 +132,7 @@ async def airtable_list_fields(table: str, base_id: str = "") -> list[AirtableFi
         table: Table name or ``tbl…`` id.
         base_id: Override the default base.
     """
-    return await get_default_client().list_fields(table, base_id=base_id)
+    return await (await client_for("airtable", AirtableClient)).list_fields(table, base_id=base_id)
 
 
 @step(retry=_NO_RETRY)
@@ -159,7 +161,7 @@ async def airtable_create_records(
             error.
         base_id: Override the default base.
     """
-    return await get_default_client().create_records(
+    return await (await client_for("airtable", AirtableClient)).create_records(
         table, rows, base_id=base_id, typecast=typecast
     )
 
@@ -182,7 +184,7 @@ async def airtable_update_records(
         typecast: Let Airtable coerce values. See ``airtable_create_records``.
         base_id: Override the default base.
     """
-    return await get_default_client().update_records(
+    return await (await client_for("airtable", AirtableClient)).update_records(
         table, updates, base_id=base_id, typecast=typecast
     )
 
@@ -198,6 +200,6 @@ async def airtable_delete_records(
         record_ids: ``rec…`` ids.
         base_id: Override the default base.
     """
-    return await get_default_client().delete_records(
+    return await (await client_for("airtable", AirtableClient)).delete_records(
         table, record_ids, base_id=base_id
     )

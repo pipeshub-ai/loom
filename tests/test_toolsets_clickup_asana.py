@@ -60,27 +60,22 @@ class TestClickUpAuth:
         A personal token goes in Authorization raw. Sending it as
         ``Bearer pk_…`` returns 401 with no hint as to why.
         """
-        monkeypatch.setenv("CLICKUP_API_TOKEN", "pk_123")
-        monkeypatch.delenv("CLICKUP_OAUTH_TOKEN", raising=False)
-
-        header = ClickUpClient()._headers()["Authorization"]
+        header = ClickUpClient(api_token="pk_123")._headers()["Authorization"]
 
         assert header == "pk_123"
 
     def test_an_oauth_token_takes_the_bearer_prefix(self, monkeypatch) -> None:
-        monkeypatch.delenv("CLICKUP_API_TOKEN", raising=False)
-        monkeypatch.setenv("CLICKUP_OAUTH_TOKEN", "oauth_abc")
+        client = ClickUpClient(oauth_token="oauth_abc")
 
-        header = ClickUpClient()._headers()["Authorization"]
+        header = client._headers()["Authorization"]
 
         assert header == "Bearer oauth_abc"
 
     def test_oauth_wins_when_both_are_present(self, monkeypatch) -> None:
         """An app that completed an OAuth flow meant to act as that user."""
-        monkeypatch.setenv("CLICKUP_API_TOKEN", "pk_123")
-        monkeypatch.setenv("CLICKUP_OAUTH_TOKEN", "oauth_abc")
+        client = ClickUpClient(api_token="pk_123", oauth_token="oauth_abc")
 
-        assert ClickUpClient()._headers()["Authorization"] == "Bearer oauth_abc"
+        assert client._headers()["Authorization"] == "Bearer oauth_abc"
 
     def test_no_credentials_fails_at_construction_naming_the_variable(
         self, monkeypatch
@@ -92,17 +87,16 @@ class TestClickUpAuth:
         with pytest.raises(ClickUpAuthError, match="CLICKUP_API_TOKEN"):
             ClickUpClient()
 
-    def test_an_explicit_argument_beats_the_environment(self, monkeypatch) -> None:
-        monkeypatch.setenv("CLICKUP_API_TOKEN", "pk_env")
-
+    def test_the_argument_is_the_only_way_in(self) -> None:
+        """There is no longer an environment to beat: the client reads none.
+        Which source wins is `ChainProvider`'s question now, and is tested
+        once in `tests/test_toolset_resolution.py` rather than per toolset."""
         assert ClickUpClient(api_token="pk_arg")._headers()["Authorization"] == "pk_arg"
 
 
 class TestAsanaAuth:
     def test_the_token_is_a_bearer(self, monkeypatch) -> None:
-        monkeypatch.setenv("ASANA_ACCESS_TOKEN", "1/abc")
-
-        client = AsanaClient()
+        client = AsanaClient(access_token="1/abc")
 
         assert client._token == "1/abc"
 

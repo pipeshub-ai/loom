@@ -22,6 +22,7 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from loom import Retry, step
+from loom.toolsets.confluence.client import ConfluenceClient
 from loom.toolsets.confluence.models import (
     ConfluenceComment,
     ConfluencePage,
@@ -49,9 +50,10 @@ async def confluence_search_pages(
         List of SearchResult with content_id, title, type, space_key,
         excerpt, url, last_modified.
     """
-    from loom.toolsets.confluence.client import get_default_client
 
-    return await get_default_client().search_pages(cql, limit)
+    from loom.toolsets.factory import client_for
+
+    return await (await client_for("confluence", ConfluenceClient)).search_pages(cql, limit)
 
 
 @step(retry=Retry(max_attempts=3, initial_delay=1.0))
@@ -64,9 +66,9 @@ async def confluence_get_page(page_id: str) -> ConfluencePage:
     Returns:
         ConfluencePage with id, title, status, space_id, version, url.
     """
-    from loom.toolsets.confluence.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_page(page_id)
+    return await (await client_for("confluence", ConfluenceClient)).get_page(page_id)
 
 
 # No idempotency key: a retry after a timeout the service accepted files
@@ -89,9 +91,9 @@ async def confluence_create_page(
     Returns:
         CreatedPage with id, title, version, url.
     """
-    from loom.toolsets.confluence.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_page(
+    return await (await client_for("confluence", ConfluenceClient)).create_page(
         space_id, title, body, parent_id=parent_id
     )
 
@@ -114,9 +116,9 @@ async def confluence_update_page(
     Returns:
         CreatedPage with updated id, title, version, url.
     """
-    from loom.toolsets.confluence.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().update_page(
+    return await (await client_for("confluence", ConfluenceClient)).update_page(
         page_id, title, body, version=version
     )
 
@@ -131,9 +133,9 @@ async def confluence_delete_page(page_id: str) -> str:
     Returns:
         Confirmation string.
     """
-    from loom.toolsets.confluence.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    await get_default_client().delete_page(page_id)
+    await (await client_for("confluence", ConfluenceClient)).delete_page(page_id)
     return f"Deleted page {page_id}"
 
 
@@ -147,9 +149,9 @@ async def confluence_get_page_body(page_id: str) -> PageBody:
     Returns:
         PageBody with page_id, title, body (HTML storage format).
     """
-    from loom.toolsets.confluence.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_page_body(page_id)
+    return await (await client_for("confluence", ConfluenceClient)).get_page_body(page_id)
 
 
 @step(retry=Retry(max_attempts=3, initial_delay=1.0))
@@ -166,9 +168,10 @@ async def confluence_get_page_comments(
     Returns:
         List of ConfluenceComment with id, body, author_id, created_at.
     """
-    from loom.toolsets.confluence.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_page_comments(page_id, limit)
+    client = await client_for("confluence", ConfluenceClient)
+    return await client.get_page_comments(page_id, limit)
 
 
 # No idempotency key: a retry after a timeout the service accepted files
@@ -187,9 +190,9 @@ async def confluence_add_comment(
     Returns:
         ConfluenceComment with id, body, author_id, created_at.
     """
-    from loom.toolsets.confluence.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().add_comment(page_id, comment)
+    return await (await client_for("confluence", ConfluenceClient)).add_comment(page_id, comment)
 
 
 @step(retry=Retry(max_attempts=3, initial_delay=1.0))
@@ -204,9 +207,9 @@ async def confluence_list_spaces(
     Returns:
         List of ConfluenceSpace with id, key, name, type, status.
     """
-    from loom.toolsets.confluence.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_spaces(limit)
+    return await (await client_for("confluence", ConfluenceClient)).list_spaces(limit)
 
 
 @step(retry=Retry(max_attempts=3, initial_delay=1.0))
@@ -219,9 +222,9 @@ async def confluence_get_space(space_id: str) -> ConfluenceSpace:
     Returns:
         ConfluenceSpace with id, key, name, type, status, description.
     """
-    from loom.toolsets.confluence.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_space(space_id)
+    return await (await client_for("confluence", ConfluenceClient)).get_space(space_id)
 
 
 @step(retry=Retry(max_attempts=3, initial_delay=1.0))
@@ -231,9 +234,9 @@ async def confluence_get_myself() -> ConfluenceUser:
     Returns:
         ConfluenceUser with account_id, display_name, email.
     """
-    from loom.toolsets.confluence.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_myself()
+    return await (await client_for("confluence", ConfluenceClient)).get_myself()
 
 
 # ---------------------------------------------------------------------------

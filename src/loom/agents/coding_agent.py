@@ -37,6 +37,7 @@ from loom.agents.stages import ADVISORY_STAGES, default_stages
 from loom.agents.supervisor import CodeSupervisor, SupervisorVerdict
 from loom.agents.tidy import tidy
 from loom.agents.validator import CodeIssue, CodeValidator
+from loom.core.exceptions import OutputTruncated
 
 if TYPE_CHECKING:
     # Imported for annotation only. `object` was used here to keep the
@@ -101,16 +102,31 @@ DEFAULT_SYSTEM_PROMPT = textwrap.dedent("""\
     - Toolset tools ARE steps: call them with ctx.step(tool, ...) from the
       workflow body. Awaiting one inside another @step skips the journal, its
       retry policy, and the grant check
+    - @pure when it only transforms its arguments. It is read, not
+      decoration: an unclassified call counts as an effect. No catalogue
+      holds LOOM's own API — `sdk_contract("pure")` for the form
 
     ### Workflow function
     - Decorate with @workflow(name="<descriptive_name>")
+    - Say when it runs, from the spec's own words. A question ("what are my
+      open tickets") declares nothing: it runs once, now, and its answer is the
+      return value. Otherwise add triggers=[...] (from loom.triggers, not loom):
+          Schedule(cron="0 9 * * 1-5", timezone=<the zone above>)
+          Interval(seconds=300)      # "every N minutes"
+          After(minutes=2)           # "in 2 minutes", once and never again
+          OnAppEvent("app.<x>.<y>")  # "when a message arrives"
+      A cron with no timezone fires at whatever UTC happens to be. Never invent
+      a schedule the spec did not ask for — a workflow that runs hourly because
+      it sounded periodic is one nobody asked to run at all
     - Signature: async def my_workflow(ctx: Context, input_data) -> ReturnType
       where input_data is whatever the caller passes to rt.run()
     - NEVER use ctx.input — the input arrives as the second parameter
     - Call steps via: result = await ctx.step(step_fn, arg1, arg2)
     - For parallel steps: results = await ctx.gather(
           ctx.step(a, x), ctx.step(b, y))
-    - For durable sleep: await ctx.sleep(timedelta(minutes=5))
+    - For a wait that arrives mid-flow: await ctx.sleep(timedelta(minutes=5)).
+      A delay the spec states up front is After(...) instead — sleeping at
+      the top of a body parks the run before it has done anything
     - For files: an Attachment carries bytes plus filename and mime.
       Stage then commit so a run can accumulate files before publishing:
 
@@ -275,9 +291,10 @@ DEFAULT_SYSTEM_PROMPT = textwrap.dedent("""\
 
     `effect` is `read` to fill or move, `write` to submit, `destructive` to
     delete; it cannot be inferred from the target. Reading a page means a
-    `write` needs `ctx.node("human.approval", ...)` first — and an approval
-    parks the run, so open with `scope="durable"`, pass `session` to every
-    later call, and finish with `browser.close`.
+    `write` needs `ctx.node("human.approval", ...)` first. An approval parks
+    the run and no provider survives a park, so use two `scope="step"`
+    sessions: read and close, park, then reopen to act. Pass `session` to
+    every later call and finish with `browser.close`.
 
     ## Only the toolsets listed above exist
 
@@ -641,6 +658,40 @@ def _session_id_for(store: Any, resume: Any) -> str:
 #: which half of that date belongs in the code — the same split the resolution
 #: ladder already makes between an id resolved once at authoring time and a
 #: value that arrives with each run.
+#: Output ceiling for an authoring call, in tokens.
+#:
+#: The providers default to 4096, which is a reasonable size for a *reply* and
+#: the wrong size for a deliverable that is a source file. The agent returns
+#: code through the ``final_output`` tool, so a whole workflow has to fit in one
+#: JSON string argument, alongside ``explanation`` and ``plan`` in the same
+#: call — and JSON-escaping Python roughly doubles its length in characters.
+#: A nine-thousand-character workflow therefore does not fit in 4096 tokens,
+#: and what that looks like is not an error: the model spends the ceiling
+#: emitting the argument, never closes the JSON, and the provider drops the
+#: unterminated block. The turn produces nothing, the loop retries, and the run
+#: dies of turn exhaustion having never written a line.
+#:
+#: A **floor**, used only for a provider that declares no ceiling of its own.
+#: Where one does, the provider wins — it knows the model's real limit, and this
+#: number is right for neither end of the range: too low for a current model
+#: (which truncates a whole workflow, silently, as an empty response) and too
+#: high for an older one (which rejects the request outright).
+AUTHORING_MAX_TOKENS = 16_384
+
+
+def authoring_max_tokens(model: Any) -> int:
+    """The output ceiling for one authoring call.
+
+    The provider's own value when it has one, because only it knows what the
+    model will accept; the floor otherwise, so a provider written before any of
+    this still gets enough room for a source file rather than a chat reply.
+    """
+    declared = getattr(model, "max_tokens", None)
+    if isinstance(declared, int) and declared > 0:
+        return declared
+    return AUTHORING_MAX_TOKENS
+
+
 AUTHORING_TIME_NOTE = (
     "This is when the workflow is being *written*, not when it will run. Use it"
     " to reason about what exists and what has already happened, and to resolve"
@@ -708,6 +759,9 @@ class WorkflowCodingAgent:
         executor: Any = None,
         user_interaction: Any | None = None,
         probes: Any | None = None,
+        credentials: Any | None = None,
+        connect: Any | None = None,
+        browser: Any | None = None,
         max_total_tokens: int | None = None,
         max_cost_usd: float | None = None,
         hooks: Any | None = None,
@@ -791,6 +845,27 @@ class WorkflowCodingAgent:
         )
         self._tool_docs = tool_docs or []
         self._tool_registry = tool_registry
+        #: The `CredentialStore` an authoring-time read may use.
+        #:
+        #: `credential_store_scope` is bound at exactly one site — the engine's
+        #: step attempt loop — and authoring never goes through it, so
+        #: `loom connect jira` stored a credential the runtime could use and
+        #: the agent could not. Every lookup fell back to environment variables
+        #: and reported "generate code that resolves it at runtime instead",
+        #: which is rung 3 of the resolution ladder reached by accident.
+        #: `None` is exactly the behaviour that shipped before.
+        self._credentials = credentials
+        #: How the agent obtains a credential it finds missing, or `None`.
+        #:
+        #: A capability, not a timeout: given one, `connect_toolset` is offered
+        #: and a `not_connected` lookup has a move behind it. Given none, the
+        #: tool is omitted entirely rather than offered and always answering
+        #: "not configured" — the rule `ask_user` and `observe_target` follow,
+        #: and what keeps `--no-ask` and CI bit-for-bit what they were.
+        self._connect = connect
+        from loom.agents.coding_tools import ConnectGate
+
+        self._connect_gate = ConnectGate(enabled=connect is not None)
         if node_registry is None:
             from loom.nodes.registry import (
                 get_node_catalog,
@@ -801,6 +876,10 @@ class WorkflowCodingAgent:
             node_registry = get_node_catalog()
         self._node_registry = node_registry
         self._probes = probes
+        # A BrowserProvider, or None. Absent, no exploration tool is offered
+        # and the agent is exactly the one that shipped before them.
+        self._browser = browser
+        self._exploring: Any = None
         """The node catalog the agent browses. Pass ``rt.nodes`` so it finds
         exactly the nodes the generated workflow can call; the process-global
         catalog is the default and can be a superset."""
@@ -817,7 +896,10 @@ class WorkflowCodingAgent:
             stages
             if stages is not None
             else default_stages(
-                supervisor=None, smoke=smoke_test, registry=self._tool_registry
+                supervisor=None,
+                smoke=smoke_test,
+                registry=self._tool_registry,
+                credentials=self._credentials,
             )
         )
         """Verification stages, cheapest first. Passing ``stages=`` replaces the
@@ -834,6 +916,47 @@ class WorkflowCodingAgent:
             from loom.agents.interaction import AskUserGate
 
             self._ask_gate = AskUserGate()
+
+    def _open_exploration(self) -> Any:
+        """The exploration session for this job, or ``None``.
+
+        One per generation rather than one per call, because the whole point is
+        that state survives between looks: a panel opened by one action has to
+        still be open for the next. Closed in :meth:`generate`'s ``finally``,
+        which is also what discards the anonymous profile.
+        """
+        if self._browser is None:
+            return None
+        from loom.agents.probes.exploration import BrowserExploration
+
+        self._exploring = BrowserExploration(self._browser)
+        return self._exploring
+
+    def _recording(self) -> dict[str, Any] | None:
+        """What exploration saw, for the smoke run. ``None`` when it saw nothing.
+
+        Read at check time rather than accumulated, so a job that explored
+        after its first repair round still hands the later rounds what it
+        learned.
+        """
+        session = self._exploring
+        if session is None:
+            return None
+        recorded = session.recording()
+        return recorded.as_dict() if recorded else None
+
+    async def _close_exploration(self) -> None:
+        session, self._exploring = self._exploring, None
+        if session is None:
+            return
+        try:
+            await session.close()
+        except Exception:
+            # A browser that will not close must never fail a generation that
+            # succeeded: the code is written, and this is a resource nobody is
+            # waiting on. Failing open, the rule the non-deciding hook families
+            # already follow.
+            logger.debug("exploration session did not close cleanly", exc_info=True)
 
     def build_system_prompt(self) -> str:
         """Compose the full system prompt.
@@ -866,11 +989,20 @@ class WorkflowCodingAgent:
                 "Do NOT import anything else — validate_code will reject it."
             )
 
-        # Index cards only. The operations are one tool call away, and pasting
-        # every one of them here would make the prompt grow with the number of
-        # integrations installed rather than with the task being asked for.
+        # A roster: one line per toolset, and nothing else, over the whole
+        # catalogue rather than what happens to be registered. The operations are
+        # one tool call away, and an index card names every one of them — 1,700
+        # characters per integration against ~90 for a roster line. With the 27
+        # LOOM ships that is 8,400 tokens versus 1,000, paid on every turn of
+        # every job, to tell a model something `search_operations` answers on
+        # demand and more precisely.
+        #
+        # It is never omitted now, even when nothing is registered: `describe`
+        # answers "None" rather than "", because the prompt goes on to say
+        # "Only the toolsets listed above exist" and with nothing above that
+        # sentence pointed at nothing at all.
         if self._tool_registry is not None:
-            desc = self._tool_registry.describe(detail="index")
+            desc = self._tool_registry.prompt_block()
             if desc:
                 parts.append(desc)
 
@@ -897,6 +1029,14 @@ class WorkflowCodingAgent:
 
         if self._extra_instructions:
             parts.append(self._extra_instructions)
+
+        # Only when a browser is actually wired. Describing a capability the
+        # environment does not have is how a model spends turns reaching for a
+        # tool that is not in its list.
+        if self._browser is not None:
+            from loom.agents.probes.exploration import EXPLORATION_INSTRUCTIONS
+
+            parts.append(EXPLORATION_INSTRUCTIONS)
 
         if self._user_interaction is not None:
             parts.append(ASK_USER_INSTRUCTIONS)
@@ -1109,7 +1249,16 @@ class WorkflowCodingAgent:
         fakes: list[tuple[str, str]] = []
         if self._tool_registry is not None:
             try:
-                toolsets = set(self._tool_registry.list_toolsets())
+                # Catalogue scope: this becomes `CodeValidator.available_toolsets`,
+                # which answers "may generated code import this", not "does an
+                # unscoped ctx.agent() sweep it up". Read from `list_toolsets()`
+                # it was an **empty set** on a bare Runtime — and an empty set
+                # enables the check against nothing, where `None` disables it —
+                # so a correct `from loom.toolsets.jira.tools import ...` was
+                # rejected as an integration this environment does not have, at
+                # error severity, on a blocking stage, with `_is_unrepairable`
+                # then ending the job rather than repairing it.
+                toolsets = set(_catalogue(self._tool_registry))
                 for toolset_id in sorted(toolsets):
                     manifest = self._tool_registry.get(toolset_id)
                     module = getattr(manifest, "tools_module", "")
@@ -1125,6 +1274,8 @@ class WorkflowCodingAgent:
             toolset_modules=_toolset_modules(self._tool_registry),
             fakes=[f for f in fakes if f[1]],
             spec=spec,
+            recording=self._recording(),
+            observed=list(getattr(self, "_observed", [])),
             resolved_kinds=self._resolved_kinds(tool_calls),
         )
 
@@ -1233,12 +1384,17 @@ class WorkflowCodingAgent:
             model=self._model,
             tools=build_coding_tools(
                 registry=self._tool_registry,
+                credentials=self._credentials,
+                connect=self._connect,
+                connect_gate=self._connect_gate,
                 validator=self._validator,
                 node_registry=self._node_registry,
                 probes=self._probes,
             ),
             output_type=CodingOutput,
-            model_settings=ModelSettings(temperature=0.2),
+            model_settings=ModelSettings(
+                temperature=0.2, max_tokens=authoring_max_tokens(self._model)
+            ),
             executor=self._executor,
         )
         session = CodingSession(
@@ -1321,6 +1477,19 @@ class WorkflowCodingAgent:
     async def generate(self, spec: str) -> CodingResult:
         """Generate a workflow from a natural-language *spec*.
 
+        A thin wrapper so the exploration session is closed however this
+        returns — including the paths that hand back a ``CodingResult``
+        describing a failure, which are the ones that would otherwise leave a
+        browser running. The anonymous profile is discarded with it.
+        """
+        try:
+            return await self._generate(spec)
+        finally:
+            await self._close_exploration()
+
+    async def _generate(self, spec: str) -> CodingResult:
+        """Generate a workflow from a natural-language *spec*.
+
         Constructs an ``Agent`` with ReAct tools and runs it via
         ``BuiltInAgentRuntime``. The agent discovers toolsets,
         generates code, validates it, and returns via structured output.
@@ -1347,6 +1516,7 @@ class WorkflowCodingAgent:
         # Per generation, not per agent: a reused agent must not report a
         # previous run's answers as this one's provenance.
         self._asked = []
+        self._observed: list[Any] = []
 
         # One budget for the job. Repair and review rounds draw on the same
         # allowance the discovery phase drew on, which is what the old comment
@@ -1370,15 +1540,22 @@ class WorkflowCodingAgent:
             model=self._model,
             tools=build_coding_tools(
                 registry=self._tool_registry,
+                credentials=self._credentials,
+                connect=self._connect,
+                connect_gate=self._connect_gate,
                 validator=self._validator,
                 node_registry=self._node_registry,
                 interaction=self._user_interaction,
                 probes=self._probes,
                 gate=self._ask_gate,
                 asked=self._asked,
+                seen=self._observed,
+                exploration=self._open_exploration(),
             ),
             output_type=CodingOutput,
-            model_settings=ModelSettings(temperature=0.2),
+            model_settings=ModelSettings(
+                temperature=0.2, max_tokens=authoring_max_tokens(self._model)
+            ),
             executor=self._executor,
         )
         session = CodingSession(
@@ -1416,6 +1593,23 @@ class WorkflowCodingAgent:
                     "credential, service, or network. Set the provider's API "
                     "key (ANTHROPIC_API_KEY, OPENAI_API_KEY, …); a shell does "
                     "not read .env the way the cookbooks do."
+                )
+            elif isinstance(exc, OutputTruncated):
+                # Named before the turn branch below it, because this failure
+                # *presented* as turn exhaustion for as long as it had no name
+                # — and the advice that branch gives is the one thing that
+                # cannot help. Raising the turn budget buys more identical
+                # truncations; narrowing the spec shortens code that was never
+                # the reason it did not fit.
+                ceiling = f" (it was {exc.max_tokens})" if exc.max_tokens else ""
+                remedy = (
+                    "This is one response being too small, not a turn budget"
+                    f"{ceiling}. The workflow it tried to return did not fit "
+                    "in a single reply, so nothing came back at all. Raise the "
+                    "model's max_tokens — AUTHORING_MAX_TOKENS is what an "
+                    "authoring call uses. Neither --turns nor --max-tokens "
+                    "helps: the first buys more identical truncations, and the "
+                    "second is the job's total budget, not one reply's ceiling."
                 )
             elif "turns" in reason and "budget" in reason:
                 remedy = (
@@ -1496,6 +1690,7 @@ class WorkflowCodingAgent:
         # before either re-invokes the same agent object.
         if self._ask_gate is not None:
             self._ask_gate.enabled = False
+        self._connect_gate.enabled = False
 
         # No code is a refusal, not a broken generation — most often because the
         # task needs an integration this environment does not have. Reporting it
@@ -1738,13 +1933,30 @@ def _settle_advisories(issues: list[CodeIssue], *, declined: bool) -> list[CodeI
     return settled
 
 
+def _catalogue(registry: Any) -> list[str]:
+    """Every toolset that may be *named*, from a registry that knows the word.
+
+    ``catalogue_ids()`` is the discovery scope; ``list_toolsets()`` is what an
+    unscoped ``ctx.agent()`` sweeps. A host may pass any object with a toolset
+    registry's shape, and one written before the split has only the latter — so
+    fall back rather than refuse, which is the behaviour that shipped.
+    """
+    ids = getattr(registry, "catalogue_ids", None)
+    return list(ids() if callable(ids) else registry.list_toolsets())
+
+
 def _toolset_modules(registry: Any | None) -> dict[str, str]:
-    """Toolset id to the module it is really imported from."""
+    """Toolset id to the module it is really imported from.
+
+    Catalogue scope, for the reason `_check_context` gives: this is the map
+    `CodeValidator` checks an import path against, and a toolset absent from it
+    has its correct import reported as a module that does not exist.
+    """
     if registry is None:
         return {}
     try:
         modules = {}
-        for toolset_id in registry.list_toolsets():
+        for toolset_id in _catalogue(registry):
             manifest = registry.get(toolset_id)
             module = getattr(manifest, "tools_module", "")
             if module:

@@ -186,18 +186,4 @@ class SheetsClient:
         return str((body or {}).get("clearedRange") or "")
 
 
-_default_client: SheetsClient | None = None
 
-
-def get_default_client() -> SheetsClient:
-    """Return (or create) the module-level client."""
-    global _default_client
-    if _default_client is None:
-        _default_client = SheetsClient()
-    return _default_client
-
-
-def reset_default_client() -> None:
-    """Drop the cached client. For tests that swap the environment."""
-    global _default_client
-    _default_client = None

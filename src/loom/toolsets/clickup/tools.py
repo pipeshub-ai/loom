@@ -18,6 +18,7 @@ the attempt.
 from __future__ import annotations
 
 from loom import Retry, step
+from loom.toolsets.clickup.client import ClickUpClient
 from loom.toolsets.clickup.models import (
     ClickUpComment,
     ClickUpContainer,
@@ -48,9 +49,10 @@ async def clickup_list_workspaces() -> list[ClickUpWorkspace]:
     Returns:
         Workspaces, each with id and name.
     """
-    from loom.toolsets.clickup.client import get_default_client
 
-    return await get_default_client().list_workspaces()
+    from loom.toolsets.factory import client_for
+
+    return await (await client_for("clickup", ClickUpClient)).list_workspaces()
 
 
 @step(retry=_READ)
@@ -66,9 +68,10 @@ async def clickup_list_spaces(
     Returns:
         Containers with kind="space".
     """
-    from loom.toolsets.clickup.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_spaces(workspace_id, archived=archived)
+    client = await client_for("clickup", ClickUpClient)
+    return await client.list_spaces(workspace_id, archived=archived)
 
 
 @step(retry=_READ)
@@ -84,9 +87,10 @@ async def clickup_list_folders(
     Returns:
         Containers with kind="folder".
     """
-    from loom.toolsets.clickup.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_folders(space_id, archived=archived)
+    client = await client_for("clickup", ClickUpClient)
+    return await client.list_folders(space_id, archived=archived)
 
 
 @step(retry=_READ)
@@ -106,9 +110,9 @@ async def clickup_list_lists(
     Returns:
         Containers with kind="list".
     """
-    from loom.toolsets.clickup.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_lists(
+    return await (await client_for("clickup", ClickUpClient)).list_lists(
         space_id=space_id, folder_id=folder_id, archived=archived
     )
 
@@ -138,9 +142,9 @@ async def clickup_list_tasks(
     Returns:
         Paginated tasks. Check ``.complete`` before reporting a total.
     """
-    from loom.toolsets.clickup.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_tasks(
+    return await (await client_for("clickup", ClickUpClient)).list_tasks(
         list_id,
         limit=limit,
         include_closed=include_closed,
@@ -179,9 +183,9 @@ async def clickup_search_tasks(
     Returns:
         Paginated tasks.
     """
-    from loom.toolsets.clickup.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().search_tasks(
+    return await (await client_for("clickup", ClickUpClient)).search_tasks(
         workspace_id,
         limit=limit,
         space_ids=space_ids,
@@ -202,9 +206,9 @@ async def clickup_get_task(task_id: str) -> ClickUpTask:
     Returns:
         The task, with status, assignees, dates, tags, and URL.
     """
-    from loom.toolsets.clickup.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().get_task(task_id)
+    return await (await client_for("clickup", ClickUpClient)).get_task(task_id)
 
 
 @step(retry=_UNSAFE_WRITE)
@@ -238,9 +242,9 @@ async def clickup_create_task(
     Returns:
         The created task, including its id and URL.
     """
-    from loom.toolsets.clickup.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_task(
+    return await (await client_for("clickup", ClickUpClient)).create_task(
         list_id,
         title,
         description=description,
@@ -277,9 +281,9 @@ async def clickup_update_task(
     Returns:
         The updated task.
     """
-    from loom.toolsets.clickup.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().update_task(
+    return await (await client_for("clickup", ClickUpClient)).update_task(
         task_id,
         name=title,
         description=description,
@@ -300,9 +304,9 @@ async def clickup_delete_task(task_id: str) -> bool:
     Returns:
         True once ClickUp has accepted the deletion.
     """
-    from loom.toolsets.clickup.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    await get_default_client().delete_task(task_id)
+    await (await client_for("clickup", ClickUpClient)).delete_task(task_id)
     return True
 
 
@@ -319,9 +323,9 @@ async def clickup_list_comments(task_id: str) -> list[ClickUpComment]:
     Returns:
         Comments with text, author, date, and resolved flag.
     """
-    from loom.toolsets.clickup.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().list_comments(task_id)
+    return await (await client_for("clickup", ClickUpClient)).list_comments(task_id)
 
 
 @step(retry=_UNSAFE_WRITE)
@@ -342,9 +346,9 @@ async def clickup_create_comment(
     Returns:
         The created comment.
     """
-    from loom.toolsets.clickup.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().create_comment(
+    return await (await client_for("clickup", ClickUpClient)).create_comment(
         task_id, text, assignee=assignee, notify_all=notify_all
     )
 
@@ -367,9 +371,9 @@ async def clickup_find_members(workspace_id: str, query: str = "") -> list[Click
     Returns:
         Users with id, username, and email.
     """
-    from loom.toolsets.clickup.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().find_members(workspace_id, query)
+    return await (await client_for("clickup", ClickUpClient)).find_members(workspace_id, query)
 
 
 @step(retry=_READ)
@@ -379,6 +383,6 @@ async def clickup_whoami() -> ClickUpUser:
     Returns:
         The authenticated user's id, username, and email.
     """
-    from loom.toolsets.clickup.client import get_default_client
+    from loom.toolsets.factory import client_for
 
-    return await get_default_client().whoami()
+    return await (await client_for("clickup", ClickUpClient)).whoami()

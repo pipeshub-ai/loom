@@ -168,12 +168,28 @@ class TestCookbookConventions:
 
     @pytest.mark.parametrize("name", NEEDS_CREDENTIALS)
     def test_uses_the_shared_env_check(self, name: str) -> None:
-        """One consistent message, and one place that reads .env."""
+        """One consistent message, and one place that reads .env.
+
+        Three helpers satisfy that, not two. `require_model` is the check for
+        an example whose only requirement is *a model*: it calls `load_dotenv`,
+        prints the missing-key message built from `env_keys()`, and exits 1 —
+        the whole convention. It is also the better answer for that case than
+        the alternatives, because the vendor list stays in
+        `loom.agents.providers` instead of being written out in each example
+        that would then have to be found again when a vendor is added.
+
+        Asserting on the literal string is a proxy for the property, and it
+        rejected three examples that had it. Naming all three helpers keeps the
+        proxy cheap without failing the code it exists to protect.
+        """
         source = (COOKBOOK / name).read_text()
-        assert "require_env" in source or "require_any_env" in source, (
-            f"{name} should use utils.require_env — or require_any_env when the "
-            "credentials come in alternative shapes — so .env is honoured and "
-            "the missing-credentials message matches the other examples"
+        checks = ("require_env", "require_any_env", "require_model")
+        assert any(check in source for check in checks), (
+            f"{name} should use one of utils.{', utils.'.join(checks)} — "
+            "require_env for a fixed set, require_any_env when the credentials "
+            "come in alternative shapes, require_model when all it needs is a "
+            "model — so .env is honoured and the missing-credentials message "
+            "matches the other examples"
         )
 
     def test_dotenv_is_loaded_from_the_repo_root(self, tmp_path: Path) -> None:

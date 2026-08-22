@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
     from loom.toolsets.google.auth import GoogleAuth
 
-__all__ = ["CalendarClient", "flatten_event", "get_default_client"]
+__all__ = ["CalendarClient", "flatten_event"]
 
 API_BASE = "https://www.googleapis.com/calendar/v3"
 SCOPES = [
@@ -600,18 +600,4 @@ def _quote(calendar_id: str) -> str:
 # Process-wide default
 # ---------------------------------------------------------------------------
 
-_default_client: CalendarClient | None = None
 
-
-def get_default_client() -> CalendarClient:
-    """Return (or build) the module-level client from environment credentials."""
-    global _default_client
-    if _default_client is None:
-        _default_client = CalendarClient()
-    return _default_client
-
-
-def reset_default_client() -> None:
-    """Drop the cached client. For tests, and after a credential change."""
-    global _default_client
-    _default_client = None

@@ -36,7 +36,6 @@ search does not block the event loop for the seconds it spends in HTTP.
 from __future__ import annotations
 
 import asyncio
-import os
 from typing import Any
 
 from loom.core.exceptions import ConfigurationError, NonRetryableError, WorkflowError
@@ -98,7 +97,7 @@ class DuckDuckGoClient:
         proxy: str | None = None,
         request_timeout: int = 20,
     ) -> None:
-        self._proxy = proxy or os.environ.get("DDGS_PROXY") or None
+        self._proxy = proxy
         self._request_timeout = request_timeout
 
     def _ddgs(self) -> Any:
@@ -291,12 +290,3 @@ def _classify(exc: BaseException) -> DuckDuckGoError:
     return DuckDuckGoError(message)
 
 
-_default_client: DuckDuckGoClient | None = None
-
-
-def get_default_client() -> DuckDuckGoClient:
-    """Return (or create) the module-level client from the environment."""
-    global _default_client
-    if _default_client is None:
-        _default_client = DuckDuckGoClient()
-    return _default_client

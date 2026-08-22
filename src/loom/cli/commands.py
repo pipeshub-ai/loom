@@ -434,6 +434,301 @@ def _save_answers(args: argparse.Namespace, result: dict[str, object]) -> None:
     path.write_text(json.dumps(asked, indent=2) + "\n", encoding="utf-8")
 
 
+#: Triggers that mean "not now, later" — something else has to be running for
+#: them to fire, and saying which is the difference between a workflow that is
+#: scheduled and one that merely says it is.
+_WIRED_BY = {
+    "Schedule": "loom serve  (or rt.start_scheduler())",
+    "After": "loom serve  (or rt.start_scheduler())",
+    "Interval": "loom serve  (or rt.start_scheduler())",
+    "Poll": "loom serve  (or rt.start_scheduler())",
+    "OnAppEvent": "loom serve  (an EventDispatcher must be draining the topic)",
+    "OnEvent": "loom serve  (a QueueConsumer must be draining the queue)",
+    "Webhook": "loom serve  (the endpoint is published by the HTTP surface)",
+    "EmailInbox": "loom serve",
+    "Chat": "loom serve",
+}
+
+
+async def _act_on(
+    out: Printer, target: Target, result: dict[str, Any], args: Any
+) -> int:
+    """Do the thing that was asked for, rather than describing where it lives.
+
+    `loom author` wrote a file, registered it, printed a summary and stopped —
+    so "find my jira tickets", which is a *task*, produced Python and the
+    sentence `loom run my_jira_tickets`. The task was the query and the answer
+    is the tickets.
+
+    Two independent decisions, and keeping them apart is what makes this
+    predictable:
+
+    * **what gets wired** comes from the triggers the workflow declares. A
+      question declares none and runs once, now; "every weekday at 9" declares
+      a `Schedule` and is registered.
+    * **whether the immediate run needs asking** comes from the effect classes
+      its manifests declare — never from the model's account of its own code.
+      Every call a declared read, and it runs; anything that writes, deletes,
+      or is unclassified is named and asked about first.
+
+    A declared schedule does not suppress the first run: seeing it work once is
+    most of the reason to have asked for it, and a workflow whose first
+    execution is at 9am tomorrow is one nobody has tested.
+    """
+    triggers = result.get("triggers") or []
+    # A one-off delay this command is about to sit through needs no advice
+    # about `loom serve`: `_run_when_due` says what it is doing, and telling
+    # somebody to start a server for a trigger that is about to fire in front
+    # of them is the advice-with-no-move-behind-it failure again.
+    waiting = _one_shot_delay(triggers) is not None and bool(getattr(args, "run", False))
+    for trigger in triggers:
+        kind = str(trigger.get("kind", ""))
+        detail = _trigger_detail(trigger)
+        out.line(f"  [dim]trigger[/dim] {esc(kind)}{esc(detail)}")
+        needs = _WIRED_BY.get(kind)
+        if needs and not (waiting and kind == "After"):
+            out.line(f"    [dim]fires while {esc(needs)} is running[/dim]")
+
+    name = _authored_name(result)
+    if name is None:
+        return Exit.OK
+
+    decision = await _may_run(out, result, args)
+    if decision is not True:
+        if decision is False:
+            out.line(f"  [dim]not run. loom run {esc(name)}[/dim]")
+        return Exit.OK
+
+    # A one-off delay is the one trigger an immediate run does not rehearse.
+    # A cron's first run is a preview of something that happens again, so
+    # running it now is worth a duplicate; `After(minutes=2)` fires exactly
+    # once, and running it now is that one firing, at the wrong time — which
+    # is precisely what the request asked not to happen.
+    delay = _one_shot_delay(triggers)
+    if delay is not None:
+        return await _run_when_due(out, args, name, delay)
+    return await _run_now(out, args, name)
+
+
+def _one_shot_delay(triggers: list[dict[str, Any]]) -> float | None:
+    """The delay of a declared one-shot trigger, if there is one.
+
+    Read from ``after_seconds`` rather than from the class name, so a spec that
+    renders differently is still recognised by the field that decides when it
+    fires — the same allowlist ``_trigger_id`` hashes.
+    """
+    for trigger in triggers:
+        fields = {**(trigger.get("fields") or {})}
+        if str(trigger.get("kind", "")) != "After":
+            continue
+        seconds = fields.get("seconds", 0) or 0
+        minutes = fields.get("minutes", 0) or 0
+        hours = fields.get("hours", 0) or 0
+        days = fields.get("days", 0) or 0
+        total = (
+            float(seconds) + float(minutes) * 60
+            + float(hours) * 3600 + float(days) * 86400
+        )
+        if total > 0:
+            return total
+    return None
+
+
+def _trigger_detail(trigger: dict[str, Any]) -> str:
+    fields = {**(trigger.get("fields") or {})}
+    positional = trigger.get("args") or []
+    parts = [str(value) for value in positional]
+    parts += [f"{key}={value}" for key, value in fields.items()]
+    return f" ({', '.join(parts)})" if parts else ""
+
+
+def _authored_name(result: dict[str, Any]) -> str | None:
+    """The workflow to run, read from the source rather than from an import.
+
+    Deciding what to do with a freshly written file happens before anything has
+    imported it, and importing model-written code to find out whether it is
+    safe to run has the order backwards.
+    """
+    from loom.graph.extractor import flow_names
+
+    try:
+        found = flow_names(result.get("code") or "")
+    except Exception:
+        return None
+    return found[0] if found else None
+
+
+async def _may_run(out: Printer, result: dict[str, Any], args: Any) -> bool | None:
+    """True to run, False to decline, None when running was never asked for."""
+    if not getattr(args, "run", False):
+        return None
+    if not result.get("clean"):
+        # Unresolved findings are a review, not a failure — but they are also
+        # not a reason to reach a real API on somebody's behalf.
+        out.line("  [dim]not run: the verification pipeline still has findings[/dim]")
+        return False
+
+    writes = result.get("writes") or []
+    if result.get("impact") == "read_only" and not writes:
+        return True
+
+    out.line()
+    out.line("  [yellow]This does more than read:[/yellow]")
+    for call in writes:
+        effect = str(call.get("effect", "")) or "unclassified"
+        out.line(f"    [yellow]{esc(effect):<13}[/yellow] {esc(str(call.get('target')))}")
+    if getattr(args, "yes", False):
+        return True
+
+    import sys
+
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        # The rule `before` hooks and `propose` already follow: a gate that
+        # could not run has not passed. `--yes` is the override, and saying so
+        # beats a CI job that silently did nothing.
+        out.line("  [dim]not run: nothing here can answer. Pass --yes to run it.[/dim]")
+        return False
+    out.line()
+    out.line("  [bold]Run it?[/bold] [dim](y/N)[/dim]")
+    try:
+        # A thread, because this is inside the command's own event loop:
+        # `input()` on the loop blocks every timer and heartbeat the Runtime
+        # has running behind it. `CLIUserInteraction` reads stdin the same way.
+        answer = (await asyncio.to_thread(input, "  > ")).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        out.line()
+        return False
+    return answer in ("y", "yes")
+
+
+#: Longest one-off delay this command will sit through. Beyond it the trigger
+#: is wired and reported, because a terminal held open for a week is not a
+#: scheduler — `loom serve` is, and it survives the laptop closing.
+_MAX_WAIT_SECONDS = 15 * 60
+
+
+def _duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:g}s"
+    minutes, rest = divmod(int(seconds), 60)
+    if minutes < 60:
+        return f"{minutes}m{rest:02d}s" if rest else f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m"
+
+
+async def _run_when_due(out: Printer, args: Any, name: str, delay: float) -> int:
+    """Wire the one-shot trigger, and stay until it fires.
+
+    The half that was missing. A declared trigger is a statement, and until
+    something drives a dispatcher it is a statement nobody has heard — so
+    ``loom run`` on a workflow whose whole point was "in two minutes" reported
+    a scheduled trigger and then nothing ever happened, which reads exactly
+    like a broken schedule.
+
+    Driven through the port rather than by sleeping and then calling
+    ``_run_now``: waiting out the delay and running it by hand would produce
+    the right joke at the right time while leaving the trigger untested, so
+    the one thing this exists to prove would be the one thing unproven.
+    ``tick_schedules`` is one turn of the loop ``rt.start_scheduler()`` runs,
+    and it advances the engine's own timers on the way through — so a body
+    that also parks on ``ctx.sleep`` gets woken here too.
+
+    A trigger outlives the command. Ctrl+C, or a delay too long to sit
+    through, leaves it wired and says which command picks it up: the record is
+    in the store, and its fire time was fixed when it was registered rather
+    than being pushed forward by the next process to look at it.
+    """
+    fresh = with_backend(args, name)
+    out.line()
+    try:
+        try:
+            wired = await fresh.backend.wire_triggers(name)
+        except Exception as exc:  # pragma: no cover - remote or storeless
+            out.line(f"  [dim]not scheduled: {esc(str(exc))}[/dim]")
+            return Exit.OK
+
+        when = next(
+            (t.get("next_fire_at") for t in wired if t.get("next_fire_at")), None
+        )
+        out.line(f"  [dim]scheduled[/dim] {esc(name)} fires in {_duration(delay)}")
+
+        if delay > _MAX_WAIT_SECONDS:
+            out.line(f"  [dim]too far out to wait here: {esc(str(when))}[/dim]")
+            out.hint("loom serve")
+            return Exit.OK
+
+        out.line("  [dim]waiting — Ctrl+C leaves it scheduled[/dim]")
+        started = await _tick_until_fired(fresh, delay)
+        if not started:
+            out.line("  [dim]nothing fired; still scheduled[/dim]")
+            out.hint("loom serve")
+            return Exit.OK
+
+        run_id = started[0]["run_id"]
+        record, settled = await follow(fresh.backend, run_id, out)
+        out.json(record)
+        out.status(record)
+        if record.get("output") is not None:
+            out.value("output", record["output"])
+        return int(exit_for(record, settled=settled))
+    finally:
+        await fresh.backend.close()
+
+
+async def _tick_until_fired(target: Target, delay: float) -> list[dict[str, Any]]:
+    """Turn the scheduler's loop until the trigger fires, or the window shuts.
+
+    Polled rather than slept-through-once, because the fire time belongs to the
+    record and not to this command: a trigger registered by an earlier
+    invocation is already part-way through its delay, and one whose clock is a
+    ``ManualClock`` is not on this loop's timeline at all.
+    """
+    import asyncio
+
+    # A grace period past the delay, since a tick lands on the poll boundary
+    # rather than on the fire time.
+    deadline = delay + _POLL_SECONDS * 2
+    waited = 0.0
+    while waited <= deadline:
+        started = await target.backend.tick_schedules()
+        if started:
+            return started
+        await asyncio.sleep(_POLL_SECONDS)
+        waited += _POLL_SECONDS
+    return []
+
+
+#: How often the wait above turns the loop. Short enough that a two-minute
+#: delay is not reported half a minute late, long enough not to hammer a store.
+_POLL_SECONDS = 1.0
+
+
+async def _run_now(out: Printer, args: Any, name: str) -> int:
+    """Start it and show what it answered.
+
+    Awaited rather than driven: this is already inside the event loop
+    ``run_async`` opened for ``cmd_author``, so opening a second one raised
+    ``asyncio.run() cannot be called from a running event loop`` — after the
+    file had been written and the summary printed, which is the worst place for
+    it. Awaiting here also keeps the run inside the same ``guarded`` scope, so
+    Ctrl+C settles its lease exactly as it does for ``loom run``.
+    """
+    out.line()
+    # Re-resolved, because the file was written after this command's Runtime
+    # imported its modules — the registry does not have the new workflow yet.
+    fresh = with_backend(args, name)
+    try:
+        record = await fresh.backend.start(name, None, wait=True)
+    finally:
+        await fresh.backend.close()
+    out.json(record)
+    out.status(record)
+    if record.get("output") is not None:
+        out.value("output", record["output"])
+    return int(exit_for(record, settled=True))
+
+
 def cmd_author(args: argparse.Namespace) -> int:
     """Write a workflow from a description.
 
@@ -510,6 +805,8 @@ def cmd_author(args: argparse.Namespace) -> int:
             out.verbatim(result["code"])
 
         _report_authoring(out, result, args)
+        if args.output and result["code"]:
+            return await _act_on(out, target, result, args)
         # Not clean is not a crash: the code is on disk and the issues say what
         # is unresolved, which is a review, not a failure to produce anything.
         return Exit.OK if result["code"] else Exit.FAILED
@@ -1428,6 +1725,59 @@ def _answer_from(args: argparse.Namespace) -> dict[str, Any]:
     return answer
 
 
+def cmd_connections(args: argparse.Namespace) -> int:
+    """Which integrations are configured here, and what the rest are short of.
+
+    `loom toolsets` says what this process can *reach*; `loom whoami` says what
+    it has *stored*. Neither could put the two together, so "is Jira usable
+    here?" had no answer — the credential name a client reads was a default
+    argument inside one file, and nothing outside it could learn the name, let
+    alone check for it.
+
+    Reads manifests, peeks at the credential store, and looks at the
+    environment. No toolset is imported, nothing is minted, and no token is
+    printed.
+    """
+    out = printer_for(args)
+
+    async def body() -> int:
+        target = with_backend(args)
+        try:
+            rows = await target.backend.connections(args.toolset or "")
+        finally:
+            await target.backend.close()
+
+        if getattr(args, "missing", False):
+            rows = [r for r in rows if r["state"] in ("missing", "expired")]
+
+        out.json(rows)
+        if not rows:
+            out.line("Nothing to report.")
+            return int(Exit.OK)
+
+        out.table(
+            ["toolset", "state", "auth", "needs", "how"],
+            [
+                [
+                    row["toolset"],
+                    row["state"],
+                    row["method"],
+                    ", ".join(row["missing_fields"])[:38] or "-",
+                    row["how"] or "-",
+                ]
+                for row in rows
+            ],
+            status_column=1,
+        )
+        # Never non-zero. `loom doctor` is the command that fails a build, and
+        # an unconfigured integration is a normal state for a project that does
+        # not use it — exiting 1 here would make `loom connections` unusable in
+        # every script that runs it to find out.
+        return int(Exit.OK)
+
+    return run_async(body(), debug=getattr(args, "debug", False), drives_runs=False)
+
+
 def cmd_toolsets(args: argparse.Namespace) -> int:
     """List the integrations a workflow (or an agent) can call.
 
@@ -1469,7 +1819,7 @@ def cmd_toolsets(args: argparse.Namespace) -> int:
                 "operations": len(operations),
                 "groups": groups,
                 "summary": manifest.summary,
-                "auth": sorted((manifest.auth or {}).get("fields", [])),
+                "auth": sorted(manifest.auth.field_names),
             }
         )
         table.append(
@@ -1533,15 +1883,25 @@ def cmd_toolset(args: argparse.Namespace) -> int:
             "summary": manifest.summary,
             "description": manifest.description,
             "base_url": manifest.base_url,
-            "auth": manifest.auth,
+            "auth": manifest.auth.model_dump(mode="json"),
             "import_line": manifest.import_line(),
             "operations": operations,
         }
     )
     out.line(f"{esc(manifest.id)} v{esc(manifest.version)} — {esc(manifest.summary)}")
-    if manifest.auth:
-        fields = ", ".join((manifest.auth or {}).get("fields", []))
-        out.line(f"  auth: {esc(manifest.auth.get('type', ''))} ({esc(fields)})")
+    auth = manifest.auth
+    if auth.kind != "none":
+        fields = ", ".join(auth.field_names)
+        out.line(f"  auth: {esc(auth.kind)} ({esc(fields)})")
+        # The two facts `loom connect` needs and nothing could previously
+        # answer: which provider serves this toolset, and which credential name
+        # its client reads.
+        if auth.credential:
+            connect = f"loom connect {auth.credential}"
+            via = f" via the '{auth.provider}' provider" if auth.provider else ""
+            out.line(f"  connect: {esc(connect)}{esc(via)}")
+        if auth.setup_url:
+            out.line(f"  create an app: {esc(auth.setup_url)}")
     # The one line that stops a generated import being invented.
     if manifest.import_line():
         out.line(f"  {esc(manifest.import_line())}")
